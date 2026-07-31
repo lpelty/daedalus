@@ -17,6 +17,12 @@ log() {
 }
 
 # cfg <top.key> | <key> — print a scalar value from the config.
+# A key that is present but has no value (e.g. "repo:" with nothing after
+# the colon) is treated as missing — returns 1, prints nothing — because
+# callers use cfg's success/failure to mean "I have a usable value," not
+# merely "the key exists." A legitimately falsy-but-present value like
+# "budget: 0" still has characters after trimming, so it still succeeds;
+# only true emptiness (no characters) is treated as missing.
 cfg() {
   local dotted="$1" top subkey
   [ -f "$DAEDALUS_CONFIG" ] || die "no config at $DAEDALUS_CONFIG (copy config.example.yaml)"
@@ -31,6 +37,8 @@ cfg() {
           line=$0
           sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
           gsub(/^["\x27]|["\x27]$/, "", line)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+          if (line == "") exit 1
           print line
           found=1
           exit
@@ -43,6 +51,8 @@ cfg() {
         $1 == k":" {
           line=$0
           sub(/^[^:]+:[[:space:]]*/, "", line)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+          if (line == "") exit 1
           print line; found=1; exit
         }
         END { exit(found ? 0 : 1) }

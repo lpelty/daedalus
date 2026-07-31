@@ -35,22 +35,28 @@ fi
 # skipping checks instead of naming them as MISSING like everything else.
 if [ "$target_repo_ok" -eq 1 ]; then
   target="$(target_path 2>/dev/null || true)"
-  if [ -n "$target" ] && [ -d "$target" ]; then
-    log "OK       target checkout: $target"
-  else
+  if [ -z "$target" ] || [ ! -d "$target" ]; then
     note_problem "target checkout — run core/sync-target.sh"
+  elif [ ! -d "$target/.git" ]; then
+    note_problem "target checkout is not a git repo: $target — run core/sync-target.sh"
+  else
+    log "OK       target checkout: $target"
   fi
 else
   note_problem "target checkout — cannot determine path without config: target.repo"
 fi
 
-for d in infrastructure specs plans proposals pitfalls; do
-  if [ -d "$DAEDALUS_HOME/vault/$d" ]; then
-    log "OK       vault/$d"
-  else
-    note_problem "vault/$d — run core/sync-vault.sh"
-  fi
-done
+if [ ! -d "$DAEDALUS_HOME/vault/.git" ]; then
+  note_problem "vault is not a git repo: $DAEDALUS_HOME/vault — run core/sync-vault.sh"
+else
+  for d in infrastructure specs plans proposals pitfalls; do
+    if [ -d "$DAEDALUS_HOME/vault/$d" ]; then
+      log "OK       vault/$d"
+    else
+      note_problem "vault/$d — run core/sync-vault.sh"
+    fi
+  done
+fi
 
 if [ "$problems" -ne 0 ]; then
   die "$problems problem(s) found"
