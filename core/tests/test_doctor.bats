@@ -112,7 +112,7 @@ EOF
   [[ "$output" == *"MISSING"*"not a git repo"* ]]
 }
 
-@test "doctor accepts proposals.budget: 0 as present (empty is not the same as falsy)" {
+@test "cfg accepts proposals.budget: 0 as present (empty is not the same as falsy)" {
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
   repo: https://example.com/thing.git
@@ -124,12 +124,39 @@ gates:
 proposals:
   budget: 0
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
-  mkdir -p "$DAEDALUS_HOME/vault/.git"
-  for d in infrastructure specs plans proposals pitfalls; do
-    mkdir -p "$DAEDALUS_HOME/vault/$d"
-  done
-  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  run bash -c "export DAEDALUS_HOME='$DAEDALUS_HOME' DAEDALUS_CONFIG='$DAEDALUS_HOME/config.yaml'; source '$DAEDALUS_HOME/core/lib.sh'; cfg proposals.budget"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"OK"*"proposals.budget"* ]]
+  [ "$output" = "0" ]
+}
+
+@test "doctor reports the YAML null spellings (null, ~) as missing" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: null
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING"*"target.repo"* ]]
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: ~
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING"*"target.repo"* ]]
 }

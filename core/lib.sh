@@ -23,6 +23,13 @@ log() {
 # merely "the key exists." A legitimately falsy-but-present value like
 # "budget: 0" still has characters after trimming, so it still succeeds;
 # only true emptiness (no characters) is treated as missing.
+#
+# `cfg` implements the narrow YAML SHAPE this product uses, not YAML itself.
+# Rejecting the null spellings (~, null) is safe here only because every
+# scalar in config.example.yaml is a URL, a branch name, or an integer —
+# none of which can legitimately BE null. Do not extend this into a general
+# rejection list; if the config surface ever needs richer values, replace the
+# parser rather than adding spellings.
 cfg() {
   local dotted="$1" top subkey
   [ -f "$DAEDALUS_CONFIG" ] || die "no config at $DAEDALUS_CONFIG (copy config.example.yaml)"
@@ -38,7 +45,7 @@ cfg() {
           sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
           gsub(/^["\x27]|["\x27]$/, "", line)
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-          if (line == "") exit 1
+          if (line == "" || line == "~" || tolower(line) == "null") exit 1
           print line
           found=1
           exit
@@ -52,7 +59,7 @@ cfg() {
           line=$0
           sub(/^[^:]+:[[:space:]]*/, "", line)
           gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-          if (line == "") exit 1
+          if (line == "" || line == "~" || tolower(line) == "null") exit 1
           print line; found=1; exit
         }
         END { exit(found ? 0 : 1) }
