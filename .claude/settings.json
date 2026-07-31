@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "deny": [
+      "Write(./core/**)",
+      "Edit(./core/**)",
+      "Write(./CLAUDE.md)",
+      "Edit(./CLAUDE.md)",
+      "Write(./SOUL.md)",
+      "Edit(./SOUL.md)",
+      "Write(./.claude/**)",
+      "Edit(./.claude/**)",
+      "Write(./config.example.yaml)",
+      "Edit(./config.example.yaml)",
+      "Write(./README.md)",
+      "Edit(./README.md)"
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+# Pulled checkouts — carry other repos' histories. Committing these would
+# put harness code and KB content into the product repo (PRD §5).
+target/
+vault/
+
+# Per-deployment config. The contract lives in config.example.yaml.
+config.yaml
+
+.DS_Store
