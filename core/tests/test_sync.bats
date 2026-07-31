@@ -53,3 +53,58 @@ EOF
   run target_path
   [ "$output" = "$DAEDALUS_HOME/target/upstream-harness" ]
 }
+
+@test "sync-target clones a nested repo into its declared path" {
+  NESTED="$BATS_TEST_TMPDIR/upstream-identity"
+  mkdir -p "$NESTED"
+  cd "$NESTED"
+  git init -q -b main
+  echo "identity content" > IDENTITY.md
+  git add IDENTITY.md
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: agents/one=$NESTED
+EOF
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/target/upstream-harness/agents/one/IDENTITY.md" ]
+}
+
+@test "a nested clone leaves the ship checkout clean" {
+  cd "$BATS_TEST_TMPDIR/upstream-harness"
+  echo "agents/" > .gitignore
+  git add .gitignore
+  git -c user.email=t@t -c user.name=t commit -q -m "gitignore nested paths"
+
+  NESTED="$BATS_TEST_TMPDIR/upstream-identity2"
+  mkdir -p "$NESTED"
+  cd "$NESTED"
+  git init -q -b main
+  echo x > f.txt
+  git add f.txt
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: agents/two=$NESTED
+EOF
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  run git -C "$DAEDALUS_HOME/target/upstream-harness" status --porcelain
+  [ -z "$output" ]
+}
+
+@test "sync-target succeeds when no nested key is configured" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+EOF
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+}

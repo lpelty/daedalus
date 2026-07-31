@@ -19,4 +19,25 @@ else
   mkdir -p "$(dirname "$dest")"
   git clone --quiet --branch "$branch" "$url" "$dest"
 fi
+
+# Nested repos live at fixed paths INSIDE the ship checkout, mirroring the
+# operator's real tree exactly. Absent `nested` key means a single-repo target.
+if cfg target.nested >/dev/null 2>&1; then
+  cfg_pairs target.nested > "$dest/.daedalus-nested" || die "config: target.nested is malformed"
+  while IFS="$(printf '\t')" read -r rel url; do
+    [ -n "$rel" ] || continue
+    ndest="$dest/$rel"
+    if [ -d "$ndest/.git" ]; then
+      log "updating nested $rel"
+      git -C "$ndest" fetch --quiet origin
+      git -C "$ndest" merge --ff-only --quiet "@{u}"
+    else
+      log "cloning nested $rel"
+      mkdir -p "$(dirname "$ndest")"
+      git clone --quiet "$url" "$ndest"
+    fi
+  done < "$dest/.daedalus-nested"
+  rm -f "$dest/.daedalus-nested"
+fi
+
 log "target ready: $dest"
