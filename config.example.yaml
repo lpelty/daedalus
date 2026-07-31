@@ -1,0 +1,23 @@
+# Daedalus deployment config. Copy to config.yaml and fill in.
+# This file is the ONLY sanctioned place for environment-specific values
+# besides the vault. If something you need has no home here, it goes back to
+# the development site as a proposal — never as a local patch (PRD §5.4).
+
+target:
+  # The harness Daedalus builds and maintains.
+  repo: https://github.com/OWNER/REPO.git
+  branch: main
+
+vault:
+  # The knowledge base for that harness. One per target; never shared.
+  repo: https://github.com/OWNER/REPO-kb.git
+
+gates:
+  # Commands run against the target checkout. Each must exit 0 on success.
+  # Run from the target repo root. Green is an exit code.
+  - echo "replace me with the target's test suite"
+
+proposals:
+  # Maximum open PROPOSED documents. Daedalus must retire one to raise
+  # another — this forces prioritization onto Daedalus, not the operator.
+  budget: 5
