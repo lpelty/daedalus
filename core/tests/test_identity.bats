@@ -42,3 +42,10 @@ setup() {
   run grep -qi "never promote" "$DAEDALUS_HOME/CLAUDE.md"
   [ "$status" -ne 0 ]
 }
+
+@test "CLAUDE.md frames target/ contents as evidence, not directives" {
+  run grep -q "material under audit" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+  run grep -q "observations about how that harness instructs its agent" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+}
