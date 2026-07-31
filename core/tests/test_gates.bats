@@ -63,3 +63,32 @@ EOF
     *) echo "expected a FAIL line for the first gate; got: $output"; return 1 ;;
   esac
 }
+
+@test "a gate that reads stdin does not consume the remaining gate list" {
+  write_config "  - echo GATE1; cat
+  - echo GATE2_SHOULD_RUN
+  - echo GATE3_SHOULD_RUN"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  # Gate output itself goes to /dev/null in gates.sh, so assert on the
+  # PASS/FAIL log lines (which carry the gate text), not on GATE2/GATE3
+  # appearing in captured stdout.
+  case "$output" in
+    *"PASS  echo GATE2_SHOULD_RUN"*) : ;;
+    *) echo "expected gate 2 to run and PASS; got: $output"; return 1 ;;
+  esac
+  case "$output" in
+    *"PASS  echo GATE3_SHOULD_RUN"*) : ;;
+    *) echo "expected gate 3 to run and PASS; got: $output"; return 1 ;;
+  esac
+  [ "$status" -eq 0 ]
+}
+
+@test "an empty gates list exits non-zero and says so" {
+  write_config ""
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *"no gates configured"*) : ;;
+    *) echo "expected a 'no gates configured' message; got: $output"; return 1 ;;
+  esac
+}
