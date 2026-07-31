@@ -66,3 +66,18 @@ cfg_list() {
     }
   ' "$DAEDALUS_CONFIG"
 }
+
+# repo_name <url> — basename of a git URL, without .git
+repo_name() {
+  local url="$1" base
+  base="${url##*/}"
+  printf '%s\n' "${base%.git}"
+}
+
+# target_path — absolute path to the target checkout.
+target_path() {
+  local url name
+  url="$(cfg target.repo)" || die "config: target.repo is required"
+  name="$(repo_name "$url")"
+  printf '%s\n' "$DAEDALUS_HOME/target/$name"
+}
