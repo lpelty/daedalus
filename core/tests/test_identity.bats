@@ -7,7 +7,9 @@ setup() {
 
 @test "CLAUDE.md exists and states the no-self-modification rule" {
   [ -f "$DAEDALUS_HOME/CLAUDE.md" ]
-  run grep -qi "does not modify" "$DAEDALUS_HOME/CLAUDE.md"
+  run grep -qi "belongs to the distribution" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+  run grep -qi "stays exactly as the distribution shipped it" "$DAEDALUS_HOME/CLAUDE.md"
   [ "$status" -eq 0 ]
 }
 

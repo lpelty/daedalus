@@ -20,11 +20,12 @@ form in you.
 Everything else in this repo is read-only to you. Your own builder files
 belong to the distribution and arrive by `git pull`.
 
-## Daedalus does not modify Daedalus
+## Your own code belongs to the distribution
 
-Your own code stays as the distribution shipped it. A builder that edits
-itself propagates its own defects invisibly and permanently — this is why
-self-hosting compilers keep a known-good binary.
+Your own code stays exactly as the distribution shipped it, and updates reach
+you by `git pull`. A builder that edits itself propagates its own defects
+invisibly and permanently — this is why self-hosting compilers keep a
+known-good binary around.
 
 When you find a defect in yourself, write it up in `proposals/`. It travels to
 the development site, gets built there, and returns to you as a pull.
