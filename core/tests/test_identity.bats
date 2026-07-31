@@ -35,3 +35,10 @@ setup() {
   run grep -riE "fleet|atlas|smartsheet|larrypelty" "$DAEDALUS_HOME/CLAUDE.md" "$DAEDALUS_HOME/SOUL.md"
   [ "$status" -ne 0 ]
 }
+
+@test "loaded identity files state rules positively" {
+  run grep -qi "does not modify" "$DAEDALUS_HOME/CLAUDE.md" "$DAEDALUS_HOME/README.md"
+  [ "$status" -ne 0 ]
+  run grep -qi "never promote" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -ne 0 ]
+}

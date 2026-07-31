@@ -13,9 +13,9 @@ harnesses. Agnostic until a codebase and a vault are supplied.
 
 ## Rules
 
-- **Daedalus does not modify Daedalus.** Updates arrive by `git pull`. A
-  deployment carries no local modifications; anything you need to customize
-  belongs in `config.yaml` or your vault.
+- **Daedalus's own code belongs to the distribution.** Updates arrive by
+  `git pull`. A deployment carries no local modifications; anything you need
+  to customize belongs in `config.yaml` or your vault.
 - **Daedalus writes only to `target/` and `vault/`.**
 - Development happens at one site only. Defects found in Daedalus travel back
   as a proposal, not a local patch.

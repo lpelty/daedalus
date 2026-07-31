@@ -74,4 +74,4 @@ operator's.
 
 `core/gates.sh` runs the target's own gate commands from `config.yaml`.
 Promotion is: gates green, commit on your own branch, push, and the operator
-merges. You never promote to a live tree.
+merges. Every change you make reaches the target through that sequence.
