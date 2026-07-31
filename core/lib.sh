@@ -85,7 +85,13 @@ cfg_list() {
 }
 
 # cfg_pairs <dotted.key> — read a flat "a=1, b=2" mapping, print "a<TAB>1" per
-# line. Returns 1 when the key is absent or any entry lacks an equals sign.
+# line. Returns 1 when the key is absent, or any entry lacks a path, lacks a
+# value, or lacks the "=" separator between them. `*=?*`/`*?=*` check for a
+# character on each side, not merely for the separator's presence — `a=*`
+# alone would accept "a=" (empty value) since it only tests that an "="
+# exists somewhere in the string. An empty path or empty URL is as unusable
+# to Task 2's git-clone step as a missing "=" is, so all three are rejected
+# the same way, with the same exit behavior.
 #
 # Flat on purpose: `cfg` parses the narrow YAML SHAPE this product uses, not
 # YAML itself, and has no nested-map support. A block of maps would mean
@@ -111,8 +117,8 @@ cfg_pairs() {
     entry="$(printf '%s' "$entry" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     [ -n "$entry" ] || continue
     case "$entry" in
-      *=*) : ;;
-      *) printf 'daedalus: config %s: entry %s needs the form path=url\n' "$key" "$entry" >&2; return 1 ;;
+      ?*=?*) : ;;
+      *) printf 'daedalus: config %s: entry %s needs a non-empty path and a non-empty url, as path=url\n' "$key" "$entry" >&2; return 1 ;;
     esac
     path="${entry%%=*}"
     url="${entry#*=}"

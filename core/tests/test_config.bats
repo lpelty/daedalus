@@ -94,3 +94,31 @@ EOF
   DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
   [ "$status" -ne 0 ]
 }
+
+@test "cfg_pairs rejects an entry with an empty url" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  nested: agents/bill=
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -ne 0 ]
+}
+
+@test "cfg_pairs rejects an entry with an empty path" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  nested: =https://example.com/x.git
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -ne 0 ]
+}
+
+@test "cfg_pairs accepts a single-character path and url" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  nested: a=b
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "a	b" ]
+}
