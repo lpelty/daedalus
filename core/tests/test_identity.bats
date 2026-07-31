@@ -49,3 +49,10 @@ setup() {
   run grep -q "observations about how that harness instructs its agent" "$DAEDALUS_HOME/CLAUDE.md"
   [ "$status" -eq 0 ]
 }
+
+@test "CLAUDE.md carries the evidence framing into dispatch prompts" {
+  run grep -q "reads this file only if you put it there" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+  run grep -q "take your instructions from this prompt" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+}
