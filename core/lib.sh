@@ -84,6 +84,44 @@ cfg_list() {
   ' "$DAEDALUS_CONFIG"
 }
 
+# cfg_pairs <dotted.key> — read a flat "a=1, b=2" mapping, print "a<TAB>1" per
+# line. Returns 1 when the key is absent or any entry lacks an equals sign.
+#
+# Flat on purpose: `cfg` parses the narrow YAML SHAPE this product uses, not
+# YAML itself, and has no nested-map support. A block of maps would mean
+# extending that parser — the same parser whose awk-builtin collision and
+# multi-line truncation were v1's two config defects. A flat mapping needs
+# no parser change at all.
+#
+# The split-and-validate loop runs via a here-string, not a pipe. Piping into
+# `while` runs the loop in a subshell; here that subshell happens to be the
+# pipeline's last stage, so under this file's `set -o pipefail` its exit
+# status does reach the caller (verified empirically before choosing this
+# form) — but that correctness is borrowed from pipefail plus the loop
+# staying last in the pipe, not guaranteed by the loop itself. Any caller
+# that ever wraps this in `$(...)` or adds a stage after the loop loses it
+# silently. A here-string keeps the loop in the current shell function, so
+# `return 1` reaches the caller unconditionally, with no dependency on
+# shell options or pipeline position.
+cfg_pairs() {
+  local key="$1" raw entry path url
+  raw="$(cfg "$key")" || return 1
+  [ -n "$raw" ] || return 1
+  while IFS= read -r entry; do
+    entry="$(printf '%s' "$entry" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *=*) : ;;
+      *) printf 'daedalus: config %s: entry %s needs the form path=url\n' "$key" "$entry" >&2; return 1 ;;
+    esac
+    path="${entry%%=*}"
+    url="${entry#*=}"
+    printf '%s\t%s\n' "$path" "$url"
+  done <<EOF
+$(printf '%s\n' "$raw" | tr ',' '\n')
+EOF
+}
+
 # repo_name <url> — basename of a git URL, without .git
 repo_name() {
   local url="$1" base

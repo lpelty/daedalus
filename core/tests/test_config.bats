@@ -55,3 +55,42 @@ EOF
     *) echo "expected 'boom' in output; got: $output"; return 1 ;;
   esac
 }
+
+@test "cfg_pairs splits a single path=url mapping" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  nested: agents/bill=https://example.com/id.git
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "agents/bill	https://example.com/id.git" ]
+}
+
+@test "cfg_pairs splits several mappings and trims spaces" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  nested: agents/bill=https://example.com/id.git, vaults/bill=https://example.com/v.git
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "agents/bill	https://example.com/id.git" ]
+  [ "${lines[1]}" = "vaults/bill	https://example.com/v.git" ]
+}
+
+@test "cfg_pairs fails when the key is absent" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  repo: https://example.com/ship.git
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -ne 0 ]
+}
+
+@test "cfg_pairs rejects a mapping with no equals sign" {
+  cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
+target:
+  nested: agents/bill
+EOF
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
+  [ "$status" -ne 0 ]
+}

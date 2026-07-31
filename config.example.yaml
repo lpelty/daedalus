@@ -8,6 +8,21 @@ target:
   repo: https://github.com/OWNER/REPO.git
   branch: main
 
+  # Repos cloned INTO the ship checkout, at the exact paths they occupy in the
+  # operator's real tree. Layout fidelity is a correctness requirement: a
+  # target whose shape differs from the original turns every relative path
+  # into a false finding, and a "fix" for a link that is not broken becomes a
+  # real change to a working harness.
+  # Form: path=url, comma separated. Omit the key when the target is one repo.
+  nested: agents/AGENT=https://github.com/OWNER/IDENTITY.git
+
+  # A repo whose DIRECTORY NAMES are recreated empty inside the ship checkout.
+  # Contents are never downloaded. Use this where a target harness expects a
+  # directory tree to exist — scripts write into it — but its contents are the
+  # operator's private material rather than part of the harness.
+  # Form: path=url, comma separated. Omit the key when nothing needs scaffolding.
+  scaffold: vaults/AGENT=https://github.com/OWNER/VAULT.git
+
 vault:
   # The knowledge base for that harness. One per target; never shared.
   repo: https://github.com/OWNER/REPO-kb.git
