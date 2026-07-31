@@ -25,8 +25,21 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-@test "settings.json denies writes outside target/ and vault/" {
+@test "every builder path is denied for both Write and Edit" {
   cd "$DAEDALUS_HOME"
-  run grep -c 'Write(./core/\*\*)' .claude/settings.json
-  [ "$status" -eq 0 ]
+  for path in './core/**' './CLAUDE.md' './SOUL.md' './.claude/**' './config.example.yaml' './README.md'; do
+    for verb in Write Edit; do
+      run grep -qF "\"$verb($path)\"" .claude/settings.json
+      [ "$status" -eq 0 ] || {
+        echo "missing deny rule: $verb($path)"
+        return 1
+      }
+    done
+  done
+}
+
+@test "the deny list is exactly the 12 expected rules — no more, no fewer" {
+  cd "$DAEDALUS_HOME"
+  run bash -c "grep -cE '\"(Write|Edit)\\(' .claude/settings.json"
+  [ "$output" = "12" ]
 }
