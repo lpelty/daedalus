@@ -24,7 +24,10 @@ EOF
   - true"
   run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"PASS"* ]]
+  case "$output" in
+    *PASS*) : ;;
+    *) echo "expected a PASS line; got: $output"; return 1 ;;
+  esac
 }
 
 @test "any gate failing exits non-zero" {
@@ -32,7 +35,10 @@ EOF
   - false"
   run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"FAIL"* ]]
+  case "$output" in
+    *FAIL*) : ;;
+    *) echo "expected a FAIL line; got: $output"; return 1 ;;
+  esac
 }
 
 @test "gates run from the target checkout root" {
@@ -46,6 +52,14 @@ EOF
   - true"
   run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"PASS"* ]]
-  [[ "$output" == *"FAIL"* ]]
+  # POSIX [ ] with an explicit case match: unlike a non-final [[ ]], this is
+  # enforced regardless of errexit state in the test body.
+  case "$output" in
+    *PASS*) : ;;
+    *) echo "expected a PASS line for the second gate; got: $output"; return 1 ;;
+  esac
+  case "$output" in
+    *FAIL*) : ;;
+    *) echo "expected a FAIL line for the first gate; got: $output"; return 1 ;;
+  esac
 }

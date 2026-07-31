@@ -50,5 +50,8 @@ EOF
 @test "die exits 1 with the message on stderr" {
   run bash -c "source '$DAEDALUS_HOME/core/lib.sh'; die 'boom' 2>&1"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"boom"* ]]
+  case "$output" in
+    *boom*) : ;;
+    *) echo "expected 'boom' in output; got: $output"; return 1 ;;
+  esac
 }
