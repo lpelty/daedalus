@@ -25,14 +25,18 @@ fi
 #
 # Write-boundary enforcement lives here, not just in .claude/settings.json's
 # deny rules. Those rules gate tool calls; a `git clone` inside this shell
-# script never goes through a tool call, so a `../` (or an absolute path) in
-# a config value would walk straight past them and write outside target/ —
-# exactly the class of bug this product exists to prevent. Two checks:
-# reject the obvious forms (`..`, leading `/`) before touching git at all, so
-# the error names the real problem; then, after mkdir -p creates the parent,
-# resolve it with `cd ... && pwd -P` (no realpath on base macOS, bash-3.2-safe)
-# and confirm it still sits under $dest — catching anything the glob misses
-# (symlinks, odd encodings).
+# script never goes through a tool call, so a `../` (or an absolute path, or
+# a symlinked ancestor) in a config value would walk straight past them and
+# write outside target/ — exactly the class of bug this product exists to
+# prevent. Two checks, both BEFORE any directory gets created: reject the
+# obvious string forms (`..`, leading `/`) up front, so the error names the
+# real problem; then resolve the deepest already-existing ancestor of the
+# nested path with `cd ... && pwd -P` (no realpath on base macOS, bash-3.2-
+# safe) and confirm it sits under $dest — this is the check that catches a
+# symlink, which the string-form check cannot see through. Validating an
+# ancestor that already exists, rather than mkdir -p'ing first and checking
+# after, means a hostile config value never gets so much as an empty
+# directory created outside the checkout before the guard fires.
 if cfg target.nested >/dev/null 2>&1; then
   resolved_dest="$(cd "$dest" && pwd -P)"
   nested_list="$dest/.daedalus-nested"
@@ -51,6 +55,26 @@ if cfg target.nested >/dev/null 2>&1; then
     esac
     ndest="$dest/$rel"
     nparent="$(dirname "$ndest")"
+    # Validate BEFORE creating anything. mkdir -p on an unvalidated path
+    # would create a real directory outside the checkout before the check
+    # ever ran (a symlinked ancestor resolves outside $dest even though the
+    # string form of $rel looks fine — the early case-based check above
+    # can't see through a symlink, only this resolved-path check can). So
+    # walk up from $nparent to the deepest ANCESTOR THAT ALREADY EXISTS,
+    # resolve only that (mkdir -p hasn't run yet, so deeper components may
+    # not exist to resolve), and confirm it sits under $resolved_dest before
+    # creating anything.
+    walk="$nparent"
+    while [ ! -d "$walk" ]; do
+      walk="$(dirname "$walk")"
+    done
+    resolved_walk="$(cd "$walk" && pwd -P)"
+    case "$resolved_walk" in
+      "$resolved_dest"|"$resolved_dest"/*) : ;;
+      *)
+        die "config target.nested: path $rel resolves outside the target checkout"
+        ;;
+    esac
     mkdir -p "$nparent"
     resolved_parent="$(cd "$nparent" && pwd -P)"
     case "$resolved_parent" in

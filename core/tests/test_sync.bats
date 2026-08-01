@@ -150,6 +150,51 @@ EOF
   [ ! -e "/tmp/daedalus-abs-escape" ]
 }
 
+@test "sync-target rejects a nested path whose ancestor is a symlink escaping the checkout" {
+  # The early string-form check (case */*..*) cannot see through a symlink:
+  # "pwn/escaped" contains neither ".." nor a leading "/", so only the
+  # resolved-path (pwd -P) check can catch this. This test exists to pin
+  # that check in place — deleting it must turn this test red.
+  OUTSIDE="$BATS_TEST_TMPDIR/outside-the-checkout"
+  mkdir -p "$OUTSIDE"
+
+  # Pre-clone the ship fixture ourselves. If sync-target.sh created
+  # target/upstream-harness itself first, "pwn" wouldn't exist yet either
+  # way — but planting the symlink AFTER a real clone, and BEFORE the run
+  # that processes "nested", is what proves the guard checks the live
+  # filesystem rather than something baked in at clone time.
+  git clone -q "$BATS_TEST_TMPDIR/upstream-harness" "$DAEDALUS_HOME/target/upstream-harness"
+  ln -s "$OUTSIDE" "$DAEDALUS_HOME/target/upstream-harness/pwn"
+
+  # Ship fixture gitignores "pwn" so the symlink itself doesn't dirty the
+  # checkout independent of the escape attempt this test is checking.
+  cd "$DAEDALUS_HOME/target/upstream-harness"
+  echo "pwn" > .gitignore
+  git add .gitignore
+  git -c user.email=t@t -c user.name=t commit -q -m "gitignore the symlink foothold"
+
+  NESTED="$BATS_TEST_TMPDIR/upstream-pwn-payload"
+  mkdir -p "$NESTED"
+  cd "$NESTED"
+  git init -q -b main
+  echo "payload" > PAYLOAD.md
+  git add PAYLOAD.md
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: pwn/escaped=$NESTED
+EOF
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  # The assertion that matters: nothing landed outside the checkout. An
+  # exit-code-only check would still pass a guard that rejects AFTER
+  # cloning into the symlink target.
+  [ -z "$(ls -A "$OUTSIDE")" ]
+}
+
 @test "sync-target still clones a legitimate nested subdirectory path" {
   NESTED="$BATS_TEST_TMPDIR/upstream-deep"
   mkdir -p "$NESTED"
