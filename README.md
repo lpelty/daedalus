@@ -15,6 +15,26 @@ real tree, recreates the directory shape of any scaffold repo, and finishes by
 running the doctor. Rerun it any time — every phase is idempotent, and
 rerunning is how a scaffold picks up new directories.
 
+### Protecting your live harness
+
+Daedalus reads your live harness as ground truth when auditing (the target
+checkout is a mirror). The tracked `.claude/settings.json` only protects
+Daedalus's own files, so your deployment SHOULD add a
+`.claude/settings.local.json` (gitignored — see `.gitignore`) with deny rules
+covering any path outside this repo Daedalus must never write, especially
+your live harness:
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Write(/path/to/your/harness/**)",
+      "Edit(/path/to/your/harness/**)"
+    ]
+  }
+}
+```
+
 ## Rules
 
 - **Daedalus's own code belongs to the distribution.** Updates arrive by

@@ -6,4 +6,10 @@ vault/
 # Per-deployment config. The contract lives in config.example.yaml.
 config.yaml
 
+# A deployment's local deny rules (e.g. protecting the operator's live
+# harness, read as audit ground truth) name absolute paths on that specific
+# machine. Committing this file would leak that operator's layout and fail
+# the identity-leakage test (core/tests/test_identity.bats).
+.claude/settings.local.json
+
 .DS_Store

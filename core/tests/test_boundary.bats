@@ -43,3 +43,13 @@ setup() {
   run bash -c "grep -cE '\"(Write|Edit)\\(' .claude/settings.json"
   [ "$output" = "12" ]
 }
+
+@test ".claude/settings.local.json is gitignored by the repo's own rules" {
+  cd "$DAEDALUS_HOME"
+  # Override core.excludesfile to neutralize any operator's global gitignore
+  # (e.g. ~/.gitignore_global) so this only exercises the repo's own
+  # .gitignore. Without this override the test could pass for the wrong
+  # reason on a machine whose global config happens to cover this path.
+  run git -c core.excludesfile=/dev/null check-ignore -q .claude/settings.local.json
+  [ "$status" -eq 0 ]
+}
