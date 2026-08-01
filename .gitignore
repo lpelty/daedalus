@@ -13,3 +13,11 @@ config.yaml
 .claude/settings.local.json
 
 .DS_Store
+
+# Runtime state written by the SessionEnd capture hook (e.g. transcript byte
+# offsets). Per-deployment, not product content — committing it would leak
+# one operator's runtime state into a public repo.
+state/
+
+# The capture hook's log target. Same reasoning as state/ above.
+.capture.log

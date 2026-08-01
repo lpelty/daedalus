@@ -53,3 +53,13 @@ setup() {
   run git -c core.excludesfile=/dev/null check-ignore -q .claude/settings.local.json
   [ "$status" -eq 0 ]
 }
+
+@test "state/ and .capture.log are gitignored by the repo's own rules" {
+  cd "$DAEDALUS_HOME"
+  # Override core.excludesfile to neutralize any operator's global gitignore
+  # so this only exercises the repo's own .gitignore.
+  run git -c core.excludesfile=/dev/null check-ignore -q state/hindsight/offsets.json
+  [ "$status" -eq 0 ]
+  run git -c core.excludesfile=/dev/null check-ignore -q .capture.log
+  [ "$status" -eq 0 ]
+}
