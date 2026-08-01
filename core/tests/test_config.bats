@@ -59,22 +59,22 @@ EOF
 @test "cfg_pairs splits a single path=url mapping" {
   cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
 target:
-  nested: agents/bill=https://example.com/id.git
+  nested: agents/one=https://example.com/id.git
 EOF
   DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "agents/bill	https://example.com/id.git" ]
+  [ "${lines[0]}" = "agents/one	https://example.com/id.git" ]
 }
 
 @test "cfg_pairs splits several mappings and trims spaces" {
   cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
 target:
-  nested: agents/bill=https://example.com/id.git, vaults/bill=https://example.com/v.git
+  nested: agents/one=https://example.com/id.git, vaults/one=https://example.com/v.git
 EOF
   DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "agents/bill	https://example.com/id.git" ]
-  [ "${lines[1]}" = "vaults/bill	https://example.com/v.git" ]
+  [ "${lines[0]}" = "agents/one	https://example.com/id.git" ]
+  [ "${lines[1]}" = "vaults/one	https://example.com/v.git" ]
 }
 
 @test "cfg_pairs fails when the key is absent" {
@@ -89,7 +89,7 @@ EOF
 @test "cfg_pairs rejects a mapping with no equals sign" {
   cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
 target:
-  nested: agents/bill
+  nested: agents/one
 EOF
   DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
   [ "$status" -ne 0 ]
@@ -98,7 +98,7 @@ EOF
 @test "cfg_pairs rejects an entry with an empty url" {
   cat > "$BATS_TEST_TMPDIR/c.yaml" <<'EOF'
 target:
-  nested: agents/bill=
+  nested: agents/one=
 EOF
   DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c.yaml" run cfg_pairs target.nested
   [ "$status" -ne 0 ]

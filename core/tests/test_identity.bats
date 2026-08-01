@@ -36,6 +36,47 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
+# The test above only ever looked at CLAUDE.md and SOUL.md. That narrow scope
+# is exactly how a personal-identity fixture leak (agents/bill, vaults/bill
+# in core/tests/test_config.bats) survived seven prior reviews — the guard
+# never looked at core/, README.md, or config.example.yaml. This test scans
+# every tracked file instead of a hardcoded list, so it keeps covering
+# whatever the repo actually ships as files are added or renamed.
+#
+# The two tests are kept separate rather than folded together: this one
+# pins the two identity files specifically (the highest-stakes leak surface,
+# since their content is injected as instructions) and fails with a precise
+# "CLAUDE.md/SOUL.md" signal; the wide scan below fails with "somewhere in
+# the tree," which is the right granularity for a repo-wide sweep but the
+# wrong granularity for the two files most likely to matter.
+@test "no tracked file leaks personal-identity or environment facts" {
+  cd "$DAEDALUS_HOME"
+  self="core/tests/test_identity.bats"
+  offenders=""
+
+  # Token list: the general set from the narrow test above (fleet, atlas,
+  # smartsheet, larrypelty), plus larry/lpelty/an absolute-home-path prefix
+  # since those are equally personal and not covered by "larrypelty" alone.
+  # "bill" — the agent's own name — is included separately below with a
+  # word-boundary match: as a bare regex alternative it would also match
+  # "billing", "billion", and "William", none of which are identity leaks,
+  # so it can't share the unbounded pattern the other tokens use safely.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ "$f" = "$self" ] && continue
+    if grep -qiE "larry|lpelty|/Users/|fleet|atlas|smartsheet" "$f"; then
+      offenders="$offenders $f(token)"
+    fi
+    if grep -qwiE "bill" "$f"; then
+      offenders="$offenders $f(bill)"
+    fi
+  done <<EOF
+$(git ls-files)
+EOF
+
+  [ -z "$offenders" ] || { echo "personal-identity leak in:$offenders"; return 1; }
+}
+
 @test "loaded identity files state rules positively" {
   run grep -qi "does not modify" "$DAEDALUS_HOME/CLAUDE.md" "$DAEDALUS_HOME/README.md"
   [ "$status" -ne 0 ]
