@@ -111,3 +111,104 @@ setup() {
   # But drift must be visible, not silent.
   printf '%s\n' "$output" | grep -qF "00_inbox"
 }
+
+@test "setup fails loudly when config.yaml is absent" {
+  cp "$(cd "$BATS_TEST_DIRNAME/.." && pwd)/setup.sh" "$DAEDALUS_HOME/core/"
+  run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *config*) : ;;
+    *) echo "expected the failure to name config; got: $output"; return 1 ;;
+  esac
+}
+
+@test "setup reports each phase it runs" {
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  cp "$SRC/setup.sh" "$SRC/sync-target.sh" "$SRC/sync-vault.sh" "$SRC/doctor.sh" "$DAEDALUS_HOME/core/"
+
+  SHIP="$BATS_TEST_TMPDIR/ship"
+  mkdir -p "$SHIP"
+  cd "$SHIP"
+  git init -q -b main
+  printf 'vaults/\n' > .gitignore
+  echo code > file.txt
+  git add -A
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  KB="$BATS_TEST_TMPDIR/kb"
+  mkdir -p "$KB"
+  cd "$KB"
+  git init -q -b main
+  echo kb > README.md
+  git add -A
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $SHIP
+  branch: main
+  scaffold: vaults/a=$SHAPEREPO
+vault:
+  repo: $KB
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in
+    *scaffold*) : ;;
+    *) echo "expected setup to report the scaffold phase; got: $output"; return 1 ;;
+  esac
+  [ -d "$DAEDALUS_HOME/target/ship/vaults/a/00_inbox" ]
+}
+
+@test "setup rejects a scaffold path that escapes the target checkout via .." {
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  cp "$SRC/setup.sh" "$SRC/sync-target.sh" "$SRC/sync-vault.sh" "$SRC/doctor.sh" "$DAEDALUS_HOME/core/"
+
+  SHIP="$BATS_TEST_TMPDIR/ship"
+  mkdir -p "$SHIP"
+  cd "$SHIP"
+  git init -q -b main
+  printf 'vaults/\n' > .gitignore
+  echo code > file.txt
+  git add -A
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  KB="$BATS_TEST_TMPDIR/kb"
+  mkdir -p "$KB"
+  cd "$KB"
+  git init -q -b main
+  echo kb > README.md
+  git add -A
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $SHIP
+  branch: main
+  scaffold: ../../escaped=$SHAPEREPO
+vault:
+  repo: $KB
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *"must stay inside"*) : ;;
+    *) echo "expected the failure to name the traversal; got: $output"; return 1 ;;
+  esac
+  # The guard must fire before scaffold_repo ever runs mkdir -p on the
+  # unvalidated path — an exit-code check alone would still pass if the
+  # directory were created first and the failure came from something else
+  # afterward. Nothing named "escaped" may exist anywhere under BATS_TEST_TMPDIR,
+  # inside DAEDALUS_HOME or out (e.g. at DAEDALUS_HOME/../../escaped).
+  run find "$BATS_TEST_TMPDIR" -depth -name escaped
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}

@@ -6,10 +6,14 @@ harnesses. Agnostic until a codebase and a vault are supplied.
 ## Deploying
 
 1. Clone this repo.
-2. `cp config.example.yaml config.yaml` and fill in your target repo, KB repo,
-   and gate commands.
-3. `./core/sync-target.sh && ./core/sync-vault.sh`
-4. `./core/doctor.sh` — verifies the deployment is correctly wired.
+2. `cp config.example.yaml config.yaml` and fill in your target repo, its
+   nested and scaffold repos, your knowledge-base repo, and your gate commands.
+3. `./core/setup.sh`
+
+Setup clones the target and its nested repos at the paths they occupy in your
+real tree, recreates the directory shape of any scaffold repo, and finishes by
+running the doctor. Rerun it any time — every phase is idempotent, and
+rerunning is how a scaffold picks up new directories.
 
 ## Rules
 
