@@ -212,3 +212,68 @@ EOF
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+# The scaffold phase's target.repo precondition guard is unreachable through
+# setup.sh as it exists today, and not for the reason first assumed. Phase 1
+# (sync-target.sh) does die loudly on a missing target.repo before phase 3
+# runs — but that's not even the operative protection. `setup.sh` sources
+# lib.sh, and lib.sh's own `set -euo pipefail` silently promotes -e for the
+# rest of setup.sh's execution too, overriding setup.sh's stated `-uo
+# pipefail` (no -e). Under that leaked -e, a die() inside ANY command
+# substitution aborts the whole script immediately — the exact trap this
+# guard exists to prevent literally cannot fire anywhere in this codebase
+# right now, because every caller of target_path() also sources lib.sh.
+#
+# Proven directly: with the guard line removed, `bash core/setup.sh` (and an
+# isolated extraction of just the scaffold-phase block) both still exit
+# non-zero with the right message — not because a check catches it, but
+# because the leaked -e catches the underlying die(). A test built against
+# real conditions cannot distinguish "guard present" from "guard absent" —
+# it would pass vacuously either way, which is exactly the failure mode this
+# project has shipped before.
+#
+# So this test constructs the hypothetical the guard actually defends
+# against: `set +e` right after sourcing lib.sh, undoing the accidental
+# promotion, to reproduce the -uo-pipefail-without-e conditions setup.sh's
+# header claims for itself. Only under that reproduced condition does the
+# call-site guard (not the leak) do the work. This is deliberately a
+# precaution against a future fix to the -e leak (or any -e-free caller) as
+# much as it's a test against today's behavior — that's the honest framing,
+# not a claim that today's setup.sh is reachable in this exact broken shape.
+@test "setup's scaffold phase reports a clear error (not an empty target, not exit 0) when target.repo is absent, even without the leaked -e from lib.sh" {
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  scaffold: vaults/a=$SHAPEREPO
+vault:
+  repo: $BATS_TEST_TMPDIR/kb
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+
+  cat > "$BATS_TEST_TMPDIR/scaffold-phase.sh" <<SCRIPT
+#!/usr/bin/env bash
+set -uo pipefail
+source "$DAEDALUS_HOME/core/lib.sh"
+set +e   # undo lib.sh's leaked -e: reproduce setup.sh's OWN stated -uo-pipefail-without-e
+$(sed -n '/^log "phase 3\/4: scaffold"/,/^fi$/p' "$SRC/setup.sh" | tail -n +2)
+SCRIPT
+
+  run bash "$BATS_TEST_TMPDIR/scaffold-phase.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *"target.repo is required"*) : ;;
+    *) echo "expected the failure to name target.repo; got: $output"; return 1 ;;
+  esac
+  # The false-green this guards against: target_path()'s internal die fires
+  # inside a command substitution, which (without -e) only exits that
+  # subshell — the parent would otherwise continue with target='' and
+  # reach scaffold_repo with a garbage destination. Assert directly against
+  # that: nothing gets scaffolded under an empty-string target path.
+  run find "$DAEDALUS_HOME" -depth -name a -path "*vaults*"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
