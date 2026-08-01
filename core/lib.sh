@@ -161,8 +161,16 @@ target_path() {
 # path=url pair without judging it. The caller (setup.sh, Task 4) owns
 # rejecting a traversal-shaped destination before calling here — mirroring
 # how sync-target.sh, not lib.sh, owns the target.nested boundary guard.
+#
+# DAEDALUS_SCAFFOLD_KEEP_TMP=1 skips the temp-dir cleanup and prints its path
+# on stdout as `KEPT_TMP=<path>` (test-only escape hatch). This exists so a
+# test can inspect the clone for blob content directly, rather than trusting
+# code inspection that --filter=blob:none --no-checkout is actually in
+# effect — a future edit could drop those flags and every existing test
+# would still pass, because they only ever look at $dest, never at $tmp,
+# and $tmp is gone by the time an assertion runs.
 scaffold_repo() {
-  local url="$1" dest="$2" tmp d
+  local url="$1" dest="$2" tmp d existing
   [ -n "$url" ] || die "scaffold_repo: url is required"
   [ -n "$dest" ] || die "scaffold_repo: dest is required"
 
@@ -187,12 +195,35 @@ scaffold_repo() {
     mkdir -p "$dest/$d"
   done < "$tmp/dirs"
 
+  # Drift visibility: a destination directory with no counterpart in the
+  # source's current top-level shape is logged, never deleted. Deleting on a
+  # caller-supplied destination is a bigger hazard than a stale empty
+  # directory — this product has already shipped one path-traversal escape
+  # from a delete-adjacent operation (Task 2). Silence here would mean the
+  # destination can drift from the source indefinitely with no signal.
+  if [ -d "$dest" ]; then
+    for existing in "$dest"/*/; do
+      [ -d "$existing" ] || continue
+      d="$(basename "$existing")"
+      case "$d" in
+        .*) continue ;;
+      esac
+      if ! grep -qxF "$d" "$tmp/dirs"; then
+        log "scaffold: $d exists at destination but not in $url's current shape (left in place)"
+      fi
+    done
+  fi
+
   if [ -f "$dest/hot.md" ]; then
     :
   else
     printf '%s\n' "Placeholder — this file exists so scripts that write rolling state have a target. It carries no state." > "$dest/hot.md"
   fi
 
-  rm -rf "$tmp"
+  if [ "${DAEDALUS_SCAFFOLD_KEEP_TMP:-}" = "1" ]; then
+    printf 'KEPT_TMP=%s\n' "$tmp"
+  else
+    rm -rf "$tmp"
+  fi
   log "scaffolded $(basename "$dest") from $url"
 }

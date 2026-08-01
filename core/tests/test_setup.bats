@@ -69,3 +69,45 @@ setup() {
   run scaffold_repo "$BATS_TEST_TMPDIR/does-not-exist" "$DAEDALUS_HOME/target/h/vaults/b"
   [ "$status" -ne 0 ]
 }
+
+@test "scaffold_repo's clone never has blob content on disk (pins --filter=blob:none --no-checkout)" {
+  source "$DAEDALUS_HOME/core/lib.sh"
+  DAEDALUS_SCAFFOLD_KEEP_TMP=1 run scaffold_repo "$SHAPEREPO" "$DAEDALUS_HOME/target/h/vaults/a"
+  [ "$status" -eq 0 ]
+  kept_tmp="$(printf '%s\n' "$output" | sed -n 's/^KEPT_TMP=//p')"
+  [ -n "$kept_tmp" ]
+  [ -d "$kept_tmp/shape" ]
+  # A full checkout would put private.md, item.md, and README.md's actual
+  # bytes on disk inside the clone. blob:none + no-checkout must mean none
+  # of that content — not even as a working-tree file, not as a loose
+  # object blob that was ever written to a worktree — ever lands here.
+  run find "$kept_tmp/shape" -type f -not -path '*/.git/*'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "scaffold_repo excludes dotfile directories such as .obsidian (app config, not vault taxonomy)" {
+  mkdir -p "$SHAPEREPO/.obsidian"
+  echo "app config" > "$SHAPEREPO/.obsidian/workspace.json"
+  ( cd "$SHAPEREPO" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m "add dotfile dir" )
+
+  source "$DAEDALUS_HOME/core/lib.sh"
+  scaffold_repo "$SHAPEREPO" "$DAEDALUS_HOME/target/h/vaults/a"
+  [ ! -d "$DAEDALUS_HOME/target/h/vaults/a/.obsidian" ]
+}
+
+@test "scaffold_repo logs (does not delete) a destination directory the source no longer has" {
+  source "$DAEDALUS_HOME/core/lib.sh"
+  scaffold_repo "$SHAPEREPO" "$DAEDALUS_HOME/target/h/vaults/a"
+  # Source shrinks: 00_inbox is removed from the tracked tree.
+  ( cd "$SHAPEREPO" && git rm -rq 00_inbox/item.md && git -c user.email=t@t -c user.name=t commit -q -m "drop inbox" )
+
+  run scaffold_repo "$SHAPEREPO" "$DAEDALUS_HOME/target/h/vaults/a"
+  [ "$status" -eq 0 ]
+  # Not deleted — a delete pass on a caller-supplied destination is a bigger
+  # hazard than a stale empty directory (this product has already shipped
+  # one path-traversal escape from a delete-adjacent operation).
+  [ -d "$DAEDALUS_HOME/target/h/vaults/a/00_inbox" ]
+  # But drift must be visible, not silent.
+  printf '%s\n' "$output" | grep -qF "00_inbox"
+}
