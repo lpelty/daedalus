@@ -142,3 +142,57 @@ target_path() {
   name="$(repo_name "$url")"
   printf '%s\n' "$DAEDALUS_HOME/target/$name"
 }
+
+# scaffold_repo <url> <dest> — recreate a repo's TOP-LEVEL DIRECTORY NAMES at
+# <dest>, empty, plus a placeholder hot.md. File contents are never
+# downloaded.
+#
+# A target harness's vault holds the operator's private material, which has no
+# bearing on whether the harness works — but scripts write into those paths, so
+# verification needs the directories to exist. --filter=blob:none --no-checkout
+# fetches the tree alone; no file content reaches disk.
+#
+# Top-level only, deliberately: inventing nested structure to satisfy a guess
+# manufactures the confusion it means to prevent. A script that fails on a
+# missing nested path is a finding with evidence behind it.
+#
+# Destination-path validation is NOT this function's job. It runs `mkdir -p`
+# on whatever `dest` it is given, the same way `cfg_pairs` returns a raw
+# path=url pair without judging it. The caller (setup.sh, Task 4) owns
+# rejecting a traversal-shaped destination before calling here — mirroring
+# how sync-target.sh, not lib.sh, owns the target.nested boundary guard.
+scaffold_repo() {
+  local url="$1" dest="$2" tmp d
+  [ -n "$url" ] || die "scaffold_repo: url is required"
+  [ -n "$dest" ] || die "scaffold_repo: dest is required"
+
+  tmp="$(mktemp -d)" || die "scaffold_repo: could not create a temp dir"
+  if git clone --quiet --depth 1 --filter=blob:none --no-checkout "$url" "$tmp/shape" 2>/dev/null; then
+    :
+  else
+    rm -rf "$tmp"
+    die "scaffold_repo: could not read $url"
+  fi
+
+  mkdir -p "$dest"
+  git -C "$tmp/shape" ls-tree -d --name-only HEAD > "$tmp/dirs" || {
+    rm -rf "$tmp"
+    die "scaffold_repo: could not list the tree of $url"
+  }
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case "$d" in
+      .*) continue ;;   # app config such as .obsidian is not vault taxonomy
+    esac
+    mkdir -p "$dest/$d"
+  done < "$tmp/dirs"
+
+  if [ -f "$dest/hot.md" ]; then
+    :
+  else
+    printf '%s\n' "Placeholder — this file exists so scripts that write rolling state have a target. It carries no state." > "$dest/hot.md"
+  fi
+
+  rm -rf "$tmp"
+  log "scaffolded $(basename "$dest") from $url"
+}
