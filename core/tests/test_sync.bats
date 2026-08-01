@@ -108,3 +108,64 @@ EOF
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -eq 0 ]
 }
+
+@test "sync-target rejects a nested path that escapes the checkout via .." {
+  NESTED="$BATS_TEST_TMPDIR/upstream-escape"
+  mkdir -p "$NESTED"
+  cd "$NESTED"
+  git init -q -b main
+  echo x > marker.txt
+  git add marker.txt
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: ../escaped=$NESTED
+EOF
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$DAEDALUS_HOME/escaped" ]
+  [ ! -e "$DAEDALUS_HOME/target/escaped" ]
+}
+
+@test "sync-target rejects an absolute nested path" {
+  NESTED="$BATS_TEST_TMPDIR/upstream-abs"
+  mkdir -p "$NESTED"
+  cd "$NESTED"
+  git init -q -b main
+  echo x > marker.txt
+  git add marker.txt
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: /tmp/daedalus-abs-escape=$NESTED
+EOF
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "/tmp/daedalus-abs-escape" ]
+}
+
+@test "sync-target still clones a legitimate nested subdirectory path" {
+  NESTED="$BATS_TEST_TMPDIR/upstream-deep"
+  mkdir -p "$NESTED"
+  cd "$NESTED"
+  git init -q -b main
+  echo "deep content" > DEEP.md
+  git add DEEP.md
+  git -c user.email=t@t -c user.name=t commit -q -m init
+
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: a/b/c=$NESTED
+EOF
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/target/upstream-harness/a/b/c/DEEP.md" ]
+}
