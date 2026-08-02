@@ -51,6 +51,31 @@ PY
   [ "$(stored_offset)" = "0" ]
 }
 
+@test "a failed write exits non-zero" {
+  # The exit code is the only signal a caller can act on. capture.py used
+  # to print "retain FAILED" and exit 0, so core/close.sh reported success
+  # for a session that was never recorded.
+  run python3 "$CAPTURE" capture
+  [ "$status" -ne 0 ]
+}
+
+@test "a successful write exits zero" {
+  start_stub
+  run python3 "$CAPTURE" capture
+  stop_stub
+  [ "$status" -eq 0 ]
+}
+
+@test "a run with nothing new exits zero" {
+  # Idempotence is success, not failure — the SessionEnd hook and an
+  # explicit close both run capture, and the second must not report an error.
+  start_stub
+  run python3 "$CAPTURE" capture
+  run python3 "$CAPTURE" capture
+  stop_stub
+  [ "$status" -eq 0 ]
+}
+
 @test "a failed write says so on stdout" {
   run python3 "$CAPTURE" capture
   run grep -qF "retain FAILED" <<< "$output"
