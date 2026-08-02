@@ -118,3 +118,15 @@ EOF
   run grep -q "verification pass moves .verified-against-live." "$DAEDALUS_HOME/CLAUDE.md"
   [ "$status" -eq 0 ]
 }
+
+# Regression guard for the capture.py credential incident: a deployment ran
+# for hours on a 401 because the wrong bearer token was used and the
+# fallback .env path does not resolve in Daedalus's layout. Two distinct
+# assertions so a partial deletion (e.g. keeping the env var name but
+# dropping the explicit-setup sentence) still fails this test.
+@test "README documents the capture.py credential requirement" {
+  run grep -qF "HINDSIGHT_API_TENANT_API_KEY" "$DAEDALUS_HOME/README.md"
+  [ "$status" -eq 0 ]
+  run grep -q "Set .HINDSIGHT_API_TENANT_API_KEY. explicitly on the hook command" "$DAEDALUS_HOME/README.md"
+  [ "$status" -eq 0 ]
+}
