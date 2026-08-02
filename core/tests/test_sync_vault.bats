@@ -92,3 +92,49 @@ CFG
   run grep -q "messages/\*.md" "$DAEDALUS_HOME/vault/exchange/README.md"
   [ "$status" -eq 0 ]
 }
+
+@test "the scaffolded vault contains sessions/" {
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [ -d "$DAEDALUS_HOME/vault/sessions" ]
+}
+
+@test "the scaffolded vault contains hot.md carrying the intent-only rule" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ -f "$DAEDALUS_HOME/vault/hot.md" ]
+  run grep -qF "records intent" "$DAEDALUS_HOME/vault/hot.md"
+  [ "$status" -eq 0 ]
+  run grep -qF "can this change without anyone editing a file" "$DAEDALUS_HOME/vault/hot.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "the session template ships and carries the Context section" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ -f "$DAEDALUS_HOME/vault/sessions/_template.md" ]
+  run grep -qF "why did this session need to happen" "$DAEDALUS_HOME/vault/sessions/_template.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "the session template tells its reader that entries stand alone" {
+  # The shape rule is the point of the template. Without it the file is a
+  # set of empty headings and a writer fills them with report prose.
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  run grep -qF "stand alone" "$DAEDALUS_HOME/vault/sessions/_template.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "a rerun leaves an edited hot.md alone" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  printf 'operator edit\n' >> "$DAEDALUS_HOME/vault/hot.md"
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  run grep -qF "operator edit" "$DAEDALUS_HOME/vault/hot.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "a rerun leaves an edited session template alone" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  printf 'operator edit\n' >> "$DAEDALUS_HOME/vault/sessions/_template.md"
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  run grep -qF "operator edit" "$DAEDALUS_HOME/vault/sessions/_template.md"
+  [ "$status" -eq 0 ]
+}

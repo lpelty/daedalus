@@ -200,7 +200,7 @@ def _capture_path(transcript: str, cfg: dict):
     size = Path(transcript).stat().st_size
     if size <= offset:
         print(f"capture: nothing new ({transcript}, offset={offset}, size={size})")
-        return
+        return True
 
     with open(transcript, "r", encoding="utf-8", errors="replace") as f:
         f.seek(offset)
@@ -211,7 +211,7 @@ def _capture_path(transcript: str, cfg: dict):
         state["offsets"][transcript] = size
         _save_state(tenant_home, state)
         print("capture: new bytes but no conversational text; offset advanced.")
-        return
+        return True
 
     sid = Path(transcript).stem
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -226,11 +226,15 @@ def _capture_path(transcript: str, cfg: dict):
                api=cfg["api"])
     if res.get("_error"):
         print(f"capture: retain FAILED — {res['_error']} {res.get('_body','')}")
-        return  # do not advance offset; retry next time
+        # Do not advance the offset; retry next time. Report failure to the
+        # caller so an explicit close (core/close.sh) can refuse to claim the
+        # session was recorded when it was not.
+        return False
     state["offsets"][transcript] = size
     _save_state(tenant_home, state)
     print(f"capture: queued {len(convo)} chars from {sid} in {len(items)} "
           f"item(s) (offset {offset}->{size}). {res}")
+    return True
 
 
 def cmd_capture(args: list[str], cfg: dict):
@@ -250,8 +254,8 @@ def cmd_capture(args: list[str], cfg: dict):
         transcript = str(t) if t else None
     if not transcript or not Path(transcript).exists():
         print(f"capture: no transcript ({transcript})")
-        return
-    _capture_path(transcript, cfg)
+        return True
+    return _capture_path(transcript, cfg)
 
 
 def cmd_recall(args: list[str], cfg: dict):
@@ -323,7 +327,12 @@ def main(argv: list[str]):
         print(__doc__)
         return
     cfg = _require_env()
-    COMMANDS[argv[0]](argv[1:], cfg)
+    ok = COMMANDS[argv[0]](argv[1:], cfg)
+    # A command that returns False failed. Commands that report through
+    # stdout alone return None, which stays exit 0 — only an explicit
+    # False is an error.
+    if ok is False:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
