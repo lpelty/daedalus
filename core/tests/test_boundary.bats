@@ -38,10 +38,10 @@ setup() {
   done
 }
 
-@test "the deny list is exactly the 12 expected rules — no more, no fewer" {
+@test "the deny list is exactly the 14 expected rules — no more, no fewer" {
   cd "$DAEDALUS_HOME"
   run bash -c "grep -cE '\"(Write|Edit)\\(' .claude/settings.json"
-  [ "$output" = "12" ]
+  [ "$output" = "14" ]
 }
 
 @test "the deny list does not block .claude/skills/**" {
@@ -68,4 +68,22 @@ setup() {
   [ "$status" -eq 0 ]
   run git -c core.excludesfile=/dev/null check-ignore -q .capture.log
   [ "$status" -eq 0 ]
+}
+
+@test "both settings files are protected, local included" {
+  cd "$DAEDALUS_HOME"
+  # settings.local.json holds a deployment's own deny rules. An agent able to
+  # rewrite its own permission surface can lift every other restriction, so it
+  # is protected alongside the tracked settings file. The broad ./.claude/**
+  # rule used to cover it incidentally; narrowing that rule to unblock skills
+  # removed the coverage, and this test pins it back.
+  for f in settings.json settings.local.json; do
+    for verb in Write Edit; do
+      run grep -qF "\"$verb(./.claude/$f)\"" .claude/settings.json
+      [ "$status" -eq 0 ] || {
+        echo "missing deny rule: $verb(./.claude/$f)"
+        return 1
+      }
+    done
+  done
 }

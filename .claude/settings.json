@@ -9,6 +9,8 @@
       "Edit(./SOUL.md)",
       "Write(./.claude/settings.json)",
       "Edit(./.claude/settings.json)",
+      "Write(./.claude/settings.local.json)",
+      "Edit(./.claude/settings.local.json)",
       "Write(./config.example.yaml)",
       "Edit(./config.example.yaml)",
       "Write(./README.md)",
