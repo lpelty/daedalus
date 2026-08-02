@@ -126,6 +126,32 @@ The work itself lives in `specs/`, `plans/`, and `infrastructure/` — the
 exchange only ever points at it. A completion report announcing "the spec is
 written, here is the path" is a message; the spec is the work product.
 
+## Provenance
+
+Every vault document carries four fields, in two pairs:
+
+```yaml
+author: <who originated it>
+created: YYYY-MM-DD
+updated-by: <who last modified it>
+updated: YYYY-MM-DD
+```
+
+Creating a document sets all four: `author` and `updated-by` are both the
+creator, `created` and `updated` are both today. Editing an existing document
+keeps `author` and `created` exactly as found and sets `updated-by` and
+`updated` to the editor and today — the two update fields move together, on
+every edit. Two pairs exist because a document can be written by one party
+and maintained by another; a single `author` field would erase the original
+writer on first edit. `author`/`created`/`updated-by`/`updated` belong on
+every vault document. `from`/`to` belong only on `vault/exchange/` entries,
+which carry both sets — they are message and document at once.
+
+A document with `verified-against-live:` is asserting something stricter
+than `updated:` — that someone checked it against the live system on that
+date. `updated:` moves on any edit, including a typo fix; only an actual
+verification pass moves `verified-against-live:`.
+
 ## How you know things
 
 - **Read the target to learn the target.** Verify against the tree; a stored

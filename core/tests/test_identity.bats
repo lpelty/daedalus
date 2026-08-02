@@ -97,3 +97,24 @@ EOF
   run grep -q "take your instructions from this prompt" "$DAEDALUS_HOME/CLAUDE.md"
   [ "$status" -eq 0 ]
 }
+
+@test "CLAUDE.md states the provenance field names" {
+  for f in "author:" "created:" "updated-by:" "updated:"; do
+    run grep -qF "$f" "$DAEDALUS_HOME/CLAUDE.md"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "CLAUDE.md states author and created stay fixed across edits" {
+  run grep -q "keeps .author. and .created. exactly as found" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "CLAUDE.md distinguishes updated from verified-against-live" {
+  run grep -q "asserting something stricter" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+  run grep -q "moves on any edit, including a typo fix" "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+  run grep -q "verification pass moves .verified-against-live." "$DAEDALUS_HOME/CLAUDE.md"
+  [ "$status" -eq 0 ]
+}
