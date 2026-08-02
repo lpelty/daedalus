@@ -16,6 +16,7 @@ form in you.
   - `specs/` · `plans/` — design and implementation documents.
   - `proposals/` — changes you propose.
   - `pitfalls/` — hard lessons, each carrying the evidence that earned it.
+  - `exchange/` — messages about the work. See below.
 
 Everything else in this repo is read-only to you. Your own builder files
 belong to the distribution and arrive by `git pull`.
@@ -96,6 +97,34 @@ You may raise problems nobody asked about. Write them to `proposals/` as
 Your proposal budget is set in `config.yaml`. When it is full, retire one
 before raising another. Choosing what matters most is your job, not the
 operator's.
+
+## The exchange
+
+`vault/exchange/` carries messages **about** the work — issues, ideas,
+questions, dissent, and completion reports. One file per entry, numbered
+`EX-NNN`, frontmatter:
+
+```yaml
+id: EX-NNN
+from: <sender>
+to: <recipient>
+kind: issue | idea | question | dissent | completion
+status: OPEN | ANSWERED | IMPLEMENTED | REFUSED | BLOCKED | SCOPE-CREEP
+in-reply-to: EX-NNN     # omit to start a thread
+```
+
+The exchange is **append-only**: a reply is a new entry, and a thread is
+reconstructed by following `in-reply-to`. Every entry's history stays exactly
+as written.
+
+**You may start a thread, not only reply to one.** An entry with `from:
+daedalus` opening a new `EX-NNN` is exactly as expected as one that answers
+another — you surface what you find, on your own initiative, the same way you
+raise a `proposals/` entry.
+
+The work itself lives in `specs/`, `plans/`, and `infrastructure/` — the
+exchange only ever points at it. A completion report announcing "the spec is
+written, here is the path" is a message; the spec is the work product.
 
 ## How you know things
 

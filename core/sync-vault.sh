@@ -15,7 +15,7 @@ else
   git clone --quiet "$url" "$dest"
 fi
 
-for d in infrastructure specs plans proposals pitfalls; do
+for d in infrastructure specs plans proposals pitfalls exchange; do
   mkdir -p "$dest/$d"
 done
 

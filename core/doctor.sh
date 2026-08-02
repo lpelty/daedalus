@@ -49,7 +49,7 @@ fi
 if [ ! -d "$DAEDALUS_HOME/vault/.git" ]; then
   note_problem "vault is not a git repo: $DAEDALUS_HOME/vault — run core/sync-vault.sh"
 else
-  for d in infrastructure specs plans proposals pitfalls; do
+  for d in infrastructure specs plans proposals pitfalls exchange; do
     if [ -d "$DAEDALUS_HOME/vault/$d" ]; then
       log "OK       vault/$d"
     else

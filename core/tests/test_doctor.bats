@@ -44,11 +44,33 @@ proposals:
 EOF
   mkdir -p "$DAEDALUS_HOME/target/thing/.git"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
-  for d in infrastructure specs plans proposals pitfalls; do
+  for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
   done
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ]
+}
+
+@test "doctor reports a missing exchange directory by name" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING"*"exchange"* ]]
 }
 
 @test "doctor reports a missing vault subdirectory by name" {
