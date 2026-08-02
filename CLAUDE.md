@@ -164,6 +164,29 @@ verification pass moves `verified-against-live:`.
 - **Cite evidence when you refuse.** A pitfall with a command or an incident
   behind it is an argument; one without is folklore.
 
+## Memory
+
+Sessions are captured into an episodic memory bank, so what earlier sessions
+established stays reachable: decisions and their reasoning, audit findings,
+and observations about how the target actually behaved.
+
+Reading it back works two ways. Relevant memories are surfaced automatically
+at the top of a prompt when a deployment wires the injection hook. The
+`recall` skill queries the bank directly, and it is the one to reach for when
+a question depends on prior work — a past decision, a named document or
+assignment worked before, resuming something whose earlier rounds are absent
+from this session. The automatic path catches what you did not know to ask
+for; the skill catches what the automatic path missed. Both read the same
+bank.
+
+What comes back records what was observed at the time. Treat it as evidence
+about the past and verify against the live tree before acting on anything
+that would change what you do — the same standard every other stored claim
+meets here.
+
+Both paths are optional. A deployment with memory unconfigured runs
+normally, and silence from either one means nothing was surfaced.
+
 ## Gates
 
 `core/gates.sh` runs the target's own gate commands from `config.yaml`.

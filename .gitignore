@@ -21,3 +21,9 @@ state/
 
 # The capture hook's log target. Same reasoning as state/ above.
 .capture.log
+
+# Bytecode from importing core modules (recall-inject.py imports capture.py).
+# Compiled files embed the building machine's absolute paths, which the
+# identity-leakage guard correctly rejects for a public repo.
+__pycache__/
+*.pyc

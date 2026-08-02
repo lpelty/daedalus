@@ -85,6 +85,45 @@ Worked example, `.claude/settings.local.json`:
 }
 ```
 
+### Reading memory back (optional)
+
+Capture writes; two mechanisms read.
+
+**The `recall` skill** ships at `.claude/skills/recall/SKILL.md` and needs no
+wiring. It documents the query command, which is `core/capture.py recall`.
+
+**Automatic injection** is a `UserPromptSubmit` hook. `core/recall-inject.py`
+queries the bank with the prompt and returns matches as `additionalContext`,
+so continuity survives a session boundary without anyone asking for it. It
+shares the credentials above, and it is optional — a deployment without it
+works, and the skill still does.
+
+Add alongside the `SessionEnd` block in `.claude/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HINDSIGHT_API_TENANT_API_KEY=YOUR_KEY TENANT_HOME=/path/to/daedalus TENANT_BANK=daedalus TRANSCRIPT_DIR=/path/to/daedalus/transcripts python3 /path/to/daedalus/core/recall-inject.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The injector fails silent on every path — unreachable backend, absent
+configuration, malformed input, empty result. It emits nothing and exits 0,
+so a session runs normally whether or not memory is reachable. Its gates are
+deliberately conservative: prompts shorter than four words are skipped, and
+at most five memories are surfaced. Those numbers are a starting position,
+and a recorded miss is what argues for loosening them.
+
 ## Rules
 
 - **Daedalus's own code belongs to the distribution.** Updates arrive by
