@@ -16,6 +16,12 @@ setup() {
   mkdir -p "$TENANT_HOME" "$TRANSCRIPT_DIR"
 }
 
+# Runs even when a test fails, so a failing assertion cannot orphan the
+# stub server and hold the whole run open.
+teardown() {
+  stop_stub
+}
+
 inject() {
   printf '%s' "$1" | python3 "$INJECT"
 }
@@ -65,12 +71,17 @@ PY
 }
 
 stop_stub() {
+  # An unset STUB_PID makes `wait` block on EVERY child instead of one, so
+  # a teardown for a test that never started a stub would hang the run.
+  # Guard on the variable, and clear it so a second call is a no-op.
+  [ -n "${STUB_PID:-}" ] || return 0
   # Disown before killing so the shell's job-control notice for the
   # expected SIGTERM stays out of the test output — a real failure should
   # be the only unexpected text on the stream.
   disown "$STUB_PID" 2>/dev/null || true
   kill "$STUB_PID" 2>/dev/null || true
   wait "$STUB_PID" 2>/dev/null || true
+  STUB_PID=""
 }
 
 @test "the injector exists and is executable" {
