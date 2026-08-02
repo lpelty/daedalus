@@ -6,6 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 url="$(cfg vault.repo)" || die "config: vault.repo is required"
 dest="$DAEDALUS_HOME/vault"
+tpl_dir="$(dirname "${BASH_SOURCE[0]}")/templates"
 
 if [ -d "$dest/.git" ]; then
   log "updating vault"
@@ -18,5 +19,12 @@ fi
 for d in infrastructure specs plans proposals pitfalls exchange; do
   mkdir -p "$dest/$d"
 done
+
+if [ -f "$dest/exchange/README.md" ]; then
+  :
+else
+  cp "$tpl_dir/exchange-README.md" "$dest/exchange/README.md"
+  log "wrote exchange/README.md"
+fi
 
 log "vault ready: $dest"

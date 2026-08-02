@@ -125,6 +125,7 @@ setup() {
 @test "setup reports each phase it runs" {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   cp "$SRC/setup.sh" "$SRC/sync-target.sh" "$SRC/sync-vault.sh" "$SRC/doctor.sh" "$DAEDALUS_HOME/core/"
+  cp -R "$SRC/templates" "$DAEDALUS_HOME/core/templates"
 
   SHIP="$BATS_TEST_TMPDIR/ship"
   mkdir -p "$SHIP"
@@ -167,6 +168,7 @@ EOF
 @test "setup rejects a scaffold path that escapes the target checkout via .." {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   cp "$SRC/setup.sh" "$SRC/sync-target.sh" "$SRC/sync-vault.sh" "$SRC/doctor.sh" "$DAEDALUS_HOME/core/"
+  cp -R "$SRC/templates" "$DAEDALUS_HOME/core/templates"
 
   SHIP="$BATS_TEST_TMPDIR/ship"
   mkdir -p "$SHIP"
