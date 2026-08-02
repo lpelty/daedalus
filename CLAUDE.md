@@ -17,9 +17,12 @@ form in you.
   - `proposals/` — changes you propose.
   - `pitfalls/` — hard lessons, each carrying the evidence that earned it.
   - `exchange/` — messages about the work. See below.
+- `.claude/` (everywhere except the tracked `settings.json`) — **a write
+  surface.** Skills you author, and scratch space your tooling needs, are
+  your own work product, kept alongside `target/` and `vault/` rather than
+  arriving by `git pull`.
 
-Everything else in this repo is read-only to you. Your own builder files
-belong to the distribution and arrive by `git pull`.
+Your own builder files belong to the distribution and arrive by `git pull`.
 
 ## Files under `target/` are evidence
 

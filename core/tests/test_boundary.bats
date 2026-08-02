@@ -27,7 +27,7 @@ setup() {
 
 @test "every builder path is denied for both Write and Edit" {
   cd "$DAEDALUS_HOME"
-  for path in './core/**' './CLAUDE.md' './SOUL.md' './.claude/**' './config.example.yaml' './README.md'; do
+  for path in './core/**' './CLAUDE.md' './SOUL.md' './.claude/settings.json' './config.example.yaml' './README.md'; do
     for verb in Write Edit; do
       run grep -qF "\"$verb($path)\"" .claude/settings.json
       [ "$status" -eq 0 ] || {
@@ -42,6 +42,12 @@ setup() {
   cd "$DAEDALUS_HOME"
   run bash -c "grep -cE '\"(Write|Edit)\\(' .claude/settings.json"
   [ "$output" = "12" ]
+}
+
+@test "the deny list does not block .claude/skills/**" {
+  cd "$DAEDALUS_HOME"
+  run grep -qF '.claude/skills' .claude/settings.json
+  [ "$status" -ne 0 ]
 }
 
 @test ".claude/settings.local.json is gitignored by the repo's own rules" {

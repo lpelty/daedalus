@@ -90,6 +90,8 @@ Worked example, `.claude/settings.local.json`:
 - **Daedalus's own code belongs to the distribution.** Updates arrive by
   `git pull`. A deployment carries no local modifications; anything you need
   to customize belongs in `config.yaml` or your vault.
-- **Daedalus writes only to `target/` and `vault/`.**
+- **Daedalus's write surfaces are `target/`, `vault/`, and `.claude/` (aside
+  from the tracked `settings.json`).** Skills it authors and scratch space
+  its tooling needs are its own work product, not distribution.
 - Development happens at one site only. Defects found in Daedalus travel back
   as a proposal, not a local patch.
