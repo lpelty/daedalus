@@ -6,9 +6,23 @@ Messages **about** the work. The work itself lives in `specs/`, `plans/`,
 A completion report saying "the spec is written, here is the path" is a
 message. The spec is a work product.
 
+## Layout
+
+```
+exchange/
+  README.md        this contract
+  Exchange.base     Obsidian views over the entries
+  messages/         the entries themselves
+```
+
+Entries live in `exchange/messages/`, one file per entry. Keeping entries in
+their own subfolder is what lets `exchange/` read cleanly in Obsidian —
+`Exchange.base` renders `messages/` as a table or board instead of mixing
+view files with entries.
+
 ## One file per entry
 
-Named `EX-NNN-short-slug.md`, numbered in order.
+Named `messages/EX-NNN-short-slug.md`, numbered in order.
 
 ```yaml
 ---
@@ -56,5 +70,5 @@ An entry with `status: OPEN` and `to:` naming you is waiting on you. That is
 the whole queue mechanism: grep for it.
 
 ```sh
-grep -l "^status: OPEN" *.md | xargs grep -l "^to: <you>"
+grep -l "^status: OPEN" messages/*.md | xargs grep -l "^to: <you>"
 ```

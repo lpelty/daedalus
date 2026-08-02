@@ -60,3 +60,35 @@ CFG
   run grep -q "operator-added-note" "$DAEDALUS_HOME/vault/exchange/README.md"
   [ "$status" -eq 0 ]
 }
+
+@test "sync-vault scaffolds the exchange/messages subfolder" {
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [ -d "$DAEDALUS_HOME/vault/exchange/messages" ]
+}
+
+@test "sync-vault ships the Exchange.base view file" {
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/vault/exchange/Exchange.base" ]
+}
+
+@test "sync-vault preserves an operator's edits to Exchange.base on rerun" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  printf '%s\n' "    - operator-added-view" >> "$DAEDALUS_HOME/vault/exchange/Exchange.base"
+
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  run grep -q "operator-added-view" "$DAEDALUS_HOME/vault/exchange/Exchange.base"
+  [ "$status" -eq 0 ]
+}
+
+@test "the shipped exchange README documents the nested layout" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  run grep -q "exchange/messages" "$DAEDALUS_HOME/vault/exchange/README.md"
+  [ "$status" -eq 0 ]
+  run grep -q "Exchange.base" "$DAEDALUS_HOME/vault/exchange/README.md"
+  [ "$status" -eq 0 ]
+  run grep -q "messages/\*.md" "$DAEDALUS_HOME/vault/exchange/README.md"
+  [ "$status" -eq 0 ]
+}

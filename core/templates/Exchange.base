@@ -1,0 +1,40 @@
+filters:
+  and:
+    - file.inFolder("exchange/messages")
+views:
+  - type: table
+    name: All
+    order:
+      - id
+      - kind
+      - status
+      - from
+      - to
+      - updated
+      - in-reply-to
+    columnSize:
+      note.id: 90
+      note.kind: 100
+      note.status: 120
+  - type: cards
+    name: Board
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - id
+      - kind
+      - from
+      - to
+      - updated
+  - type: table
+    name: Open
+    filters:
+      and:
+        - status == "OPEN"
+    order:
+      - id
+      - kind
+      - from
+      - to
+      - created

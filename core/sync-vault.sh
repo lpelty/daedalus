@@ -16,7 +16,7 @@ else
   git clone --quiet "$url" "$dest"
 fi
 
-for d in infrastructure specs plans proposals pitfalls exchange; do
+for d in infrastructure specs plans proposals pitfalls exchange exchange/messages; do
   mkdir -p "$dest/$d"
 done
 
@@ -25,6 +25,13 @@ if [ -f "$dest/exchange/README.md" ]; then
 else
   cp "$tpl_dir/exchange-README.md" "$dest/exchange/README.md"
   log "wrote exchange/README.md"
+fi
+
+if [ -f "$dest/exchange/Exchange.base" ]; then
+  :
+else
+  cp "$tpl_dir/Exchange.base" "$dest/exchange/Exchange.base"
+  log "wrote exchange/Exchange.base"
 fi
 
 log "vault ready: $dest"
