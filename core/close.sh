@@ -18,12 +18,6 @@ for v in TENANT_HOME TENANT_BANK TRANSCRIPT_DIR; do
 done
 
 log "phase 1/1: episodic capture"
-# PROP-002: verify extraction, do not just queue it. The server returns 202 on
-# acceptance and extracts afterwards; without this, a failed extraction left
-# the offset advanced past the lost span and this script still printed
-# "close complete". Waiting costs a few seconds and is the only thing that
-# makes the header comment above true rather than aspirational.
-CAPTURE_VERIFY_EXTRACTION=1 \
 python3 "$DAEDALUS_HOME/core/capture.py" capture \
   || die "capture failed — the session is unrecorded"
 log "close complete"

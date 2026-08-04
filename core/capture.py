@@ -28,19 +28,12 @@ import sys
 import os
 import json
 import glob
-import time
 import urllib.request
 import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
 REQUIRED_ENV = ("TENANT_HOME", "TENANT_BANK", "TRANSCRIPT_DIR")
-
-# PROP-002 extraction verification. Observed extractions took 8-22s; the
-# default ceiling leaves headroom for a slow one without letting an explicit
-# close hang indefinitely. Both are overridable via env for slow deployments.
-VERIFY_TIMEOUT_SEC = 120
-VERIFY_POLL_SEC = 2
 
 
 def _require_env() -> dict:
@@ -55,13 +48,6 @@ def _require_env() -> dict:
         "transcript_dir": Path(os.environ["TRANSCRIPT_DIR"]),
         "user_label": os.environ.get("TENANT_USER_LABEL", "User"),
         "assistant_label": os.environ.get("TENANT_ASSISTANT_LABEL", "Assistant"),
-        # PROP-002: wait for the server to confirm extraction before advancing
-        # the offset. OFF by default so the SessionEnd hook still returns fast
-        # -- core/close.sh turns it on, because an explicit close is the path
-        # that promises "the session was recorded" and must not lie about it.
-        "verify_extraction": os.environ.get("CAPTURE_VERIFY_EXTRACTION") == "1",
-        "verify_timeout": int(os.environ.get("CAPTURE_VERIFY_TIMEOUT_SEC",
-                                             VERIFY_TIMEOUT_SEC)),
     }
 
 
@@ -200,44 +186,6 @@ def _split_convo(convo: str, max_chars: int = MAX_ITEM_CHARS) -> list[str]:
     return chunks
 
 
-def _await_extraction(op_id: str, bank: str, cfg: dict) -> tuple[bool, str]:
-    """Poll an async retain operation until it reaches a terminal state.
-
-    Returns (ok, detail). `ok` is True only when the operation completed AND
-    reported no extraction errors -- "the server accepted the batch" is not the
-    same claim as "the memory was stored", and conflating them is what PROP-002
-    documented (an accepted batch whose extraction died with four distinct
-    JSONDecodeErrors, offset already advanced past it).
-
-    A timeout returns False. That is deliberate: an unknown outcome is treated
-    as failure so the offset stays put and the span is re-pushed next time.
-    Re-pushing a span the server *did* eventually store is cheap (a duplicate
-    document); losing one is permanent.
-    """
-    deadline = time.time() + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC)
-    last = "no response"
-    while time.time() < deadline:
-        op = _req("GET", _bank(bank, f"/operations/{op_id}"), timeout=15, api=cfg["api"])
-        if op.get("_error"):
-            last = f"operation query failed: {op['_error']}"
-            time.sleep(VERIFY_POLL_SEC)
-            continue
-        status = (op.get("status") or "").lower()
-        # `extraction_errors_count` is absent on some operation types, so treat
-        # a missing value as zero rather than as a failure.
-        errs = op.get("extraction_errors_count") or 0
-        if status in ("completed", "succeeded", "success"):
-            if errs:
-                return False, f"status={status} but extraction_errors_count={errs}"
-            return True, f"status={status}, operation {op_id}"
-        if status in ("failed", "error", "cancelled", "canceled"):
-            return False, (f"status={status}, retry_count={op.get('retry_count')}, "
-                           f"error={op.get('error')!r}, operation {op_id}")
-        last = f"status={status or 'unknown'}"
-        time.sleep(VERIFY_POLL_SEC)
-    return False, f"timed out after {cfg.get('verify_timeout', VERIFY_TIMEOUT_SEC)}s ({last})"
-
-
 # --- commands ----------------------------------------------------------------
 def _capture_path(transcript: str, cfg: dict):
     """Push transcript bytes past the stored offset. Each push gets
@@ -272,11 +220,7 @@ def _capture_path(transcript: str, cfg: dict):
               "context": f"session {sid} ({stamp}) part {i + 1}/{len(chunks)}",
               "document_id": f"{sid}-o{offset}-p{i:02d}"}
              for i, chunk in enumerate(chunks)]
-    # async=true -> server queues extraction and returns 202 on ACCEPTANCE.
-    # Acceptance is not storage: extraction happens later and can fail on its
-    # own (PROP-002 observed a terminal failure with four distinct
-    # JSONDecodeErrors on identical input). Whether we wait for that verdict
-    # is the caller's choice -- see the offset discipline below.
+    # async=true -> server queues extraction; the SessionEnd hook returns fast.
     res = _req("POST", _bank(bank, "/memories"),
                {"items": items, "async": True, "document_tags": [stamp]},
                api=cfg["api"])
@@ -286,37 +230,9 @@ def _capture_path(transcript: str, cfg: dict):
         # caller so an explicit close (core/close.sh) can refuse to claim the
         # session was recorded when it was not.
         return False
-
-    # PROP-002: the offset is the only record of what has been captured, so it
-    # must not advance past a span the server never stored. Advancing on
-    # acceptance made every extraction failure silent AND permanent -- the next
-    # capture starts after the lost span, and close.sh exited 0 reporting a
-    # session that went unrecorded.
-    #
-    # When verification is on, the offset advances only after the operation
-    # reaches a terminal success. When it is off (the fast SessionEnd path),
-    # behaviour is unchanged and the span is at risk -- that is a deliberate
-    # trade, not an oversight: the hook must not block session exit.
-    if cfg.get("verify_extraction"):
-        op_id = res.get("operation_id") or res.get("id")
-        if not op_id:
-            # Nothing to poll. Do not advance -- an unverifiable push is
-            # indistinguishable from a failed one, and the offset is the thing
-            # we cannot get back.
-            print("capture: retain accepted but returned no operation id; "
-                  "offset NOT advanced (cannot verify extraction)")
-            return False
-        ok, detail = _await_extraction(op_id, bank, cfg)
-        if not ok:
-            print(f"capture: extraction FAILED — {detail}. Offset NOT advanced "
-                  f"(offset stays {offset}); the span will be retried.")
-            return False
-        print(f"capture: extraction confirmed ({detail})")
-
     state["offsets"][transcript] = size
     _save_state(tenant_home, state)
-    verb = "captured" if cfg.get("verify_extraction") else "queued"
-    print(f"capture: {verb} {len(convo)} chars from {sid} in {len(items)} "
+    print(f"capture: queued {len(convo)} chars from {sid} in {len(items)} "
           f"item(s) (offset {offset}->{size}). {res}")
     return True
 
