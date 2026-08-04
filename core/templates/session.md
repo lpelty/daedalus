@@ -1,5 +1,6 @@
 ---
 type: session
+session: NNN
 author: <who wrote this>
 created: YYYY-MM-DD
 updated-by: <who last modified this>
@@ -10,7 +11,12 @@ findings: 0
 status: IMPLEMENTED
 ---
 
-# Session YYYY-MM-DD
+<!-- File: vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md — NNN is a global running
+     count (not per-day), and the log files are the sole authority for it:
+     highest NNN across all logs, plus one. YYYY/MM is the month the session
+     OPENED. See the session-logs section of CLAUDE.md. -->
+
+# Session YYYY-MM-DD-NNN — <what this session was about>
 
 <!-- The reader of this log is you, retrieving. Retrieval surfaces one
      fragment without its neighbours, so every entry must stand alone: name

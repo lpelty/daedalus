@@ -1,5 +1,6 @@
 ---
 type: rolling-state
+session: NNN        # mirrors the last session log written; never sets it
 author: <who wrote this>
 created: YYYY-MM-DD
 updated-by: <who last modified this>

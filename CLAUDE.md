@@ -164,6 +164,36 @@ verification pass moves `verified-against-live:`.
 - **Cite evidence when you refuse.** A pitfall with a command or an incident
   behind it is an argument; one without is folklore.
 
+## Session logs
+
+One log per working session, in the vault:
+
+```
+vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md
+```
+
+`NNN` is a **global running count**, zero-padded to three digits — not a
+per-day or per-month counter. `YYYY/MM` is keyed to the date the session
+**opened**, so a session that runs past midnight stays in the month it began.
+
+**The log files are the sole authority for the next number.** Take the highest
+`NNN` across every existing log and add one:
+
+```
+ls vault/sessions/**/*.md    # highest -NNN.md, increment
+```
+
+`hot.md` mirrors that number after the log is written; it never sets it. If the
+two disagree, the log wins and `hot.md` is corrected down to match. A gap that
+already exists stays — history is append-only and is never renumbered.
+
+A descriptive slug in the filename looks helpful and costs retrieval: it makes
+ordering lexical instead of sequential, and it invites a summary in the one
+place that cannot hold one. The title inside the file carries the description.
+
+Template: `vault/sessions/_template.md`. Never overwrite a past log — a
+correction goes in the current session's log, not into history.
+
 ## Memory
 
 Sessions are captured into an episodic memory bank, so what earlier sessions
