@@ -42,6 +42,14 @@ REQUIRED_ENV = ("TENANT_HOME", "TENANT_BANK", "TRANSCRIPT_DIR")
 VERIFY_TIMEOUT_SEC = 120
 VERIFY_POLL_SEC = 2
 
+# PROP-007 deferred verification. Each unconfirmed span carries the items it
+# pushed (up to MAX_ITEM_CHARS each) so a retry can reuse their document_ids,
+# so the ledger is bounded: a backend that stays unreachable would otherwise
+# grow it without limit and make every later run slower. Overflow is reported
+# loudly rather than dropped quietly -- an abandoned span is exactly the thing
+# this whole mechanism exists to make visible.
+MAX_PENDING_SPANS = 50
+
 
 def _require_env() -> dict:
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
@@ -122,10 +130,29 @@ def _offsets_path(tenant_home: Path) -> Path:
 
 
 def _load_state(tenant_home: Path) -> dict:
+    """Read the cursor state, tolerating a file written by an older build.
+
+    A deployment that pulls this code has an existing offsets.json with only
+    an "offsets" key. Missing keys are filled in rather than assumed, so the
+    first run after an upgrade reconciles an empty ledger instead of crashing
+    on its own state.
+    """
     p = _offsets_path(tenant_home)
+    state = {"offsets": {}, "pending": []}
     if p.exists():
-        return json.loads(p.read_text())
-    return {"offsets": {}}
+        try:
+            stored = json.loads(p.read_text() or "{}")
+        except json.JSONDecodeError:
+            # A truncated write is recoverable; a crash here is not. Start
+            # clean rather than wedging every future capture.
+            print("capture: offsets.json is unreadable; starting from empty state",
+                  file=sys.stderr)
+            stored = {}
+        if isinstance(stored.get("offsets"), dict):
+            state["offsets"] = stored["offsets"]
+        if isinstance(stored.get("pending"), list):
+            state["pending"] = stored["pending"]
+    return state
 
 
 def _save_state(tenant_home: Path, state: dict):
@@ -238,6 +265,132 @@ def _await_extraction(op_id: str, bank: str, cfg: dict) -> tuple[bool, str]:
     return False, f"timed out after {cfg.get('verify_timeout', VERIFY_TIMEOUT_SEC)}s ({last})"
 
 
+def _check_operation(op_id: str, bank: str, cfg: dict) -> tuple[str, str]:
+    """Ask once for an operation's state. Returns (verdict, detail) where
+    verdict is 'ok', 'failed', or 'unknown'.
+
+    This is _await_extraction's single-poll sibling: no sleeping, no deadline.
+    It exists because the SessionEnd hook cannot wait -- but a LATER run can
+    ask what happened, and one HTTP round trip is affordable on any path.
+    'unknown' covers both "still running" and "could not reach the server",
+    which are the same thing to a caller that must not throw the span away.
+    """
+    op = _req("GET", _bank(bank, f"/operations/{op_id}"), timeout=15, api=cfg["api"])
+    if op.get("_error"):
+        return "unknown", f"operation query failed: {op['_error']}"
+    status = (op.get("status") or "").lower()
+    errs = op.get("extraction_errors_count") or 0
+    if status in ("completed", "succeeded", "success"):
+        if errs:
+            return "failed", f"status={status} but extraction_errors_count={errs}"
+        return "ok", f"status={status}"
+    if status in ("failed", "error", "cancelled", "canceled"):
+        return "failed", (f"status={status}, retry_count={op.get('retry_count')}, "
+                          f"error={op.get('error')!r}")
+    return "unknown", f"status={status or 'unknown'}"
+
+
+def _push_items(items: list[dict], stamp: str, bank: str, cfg: dict) -> dict:
+    """POST a batch of items for async extraction. Returns the raw response."""
+    return _req("POST", _bank(bank, "/memories"),
+                {"items": items, "async": True, "document_tags": [stamp]},
+                api=cfg["api"])
+
+
+def _reconcile_pending(cfg: dict, state: dict) -> None:
+    """Settle the fate of spans pushed by an earlier run that could not wait.
+
+    The fast SessionEnd path advances the offset on acceptance because the
+    hook must not block session exit -- but acceptance is not storage, and
+    the process that would learn the verdict is already gone. So each push
+    records what it pushed, and the NEXT run (any run: the next capture, or
+    close.sh) asks the server how it turned out.
+
+    A span whose extraction failed is re-pushed with the SAME document_ids it
+    was pushed with the first time. That is not incidental: hindsight-api
+    treats a repeated document_id as a re-ingest that DELETES that document's
+    prior memories, so re-pushing under the original ids REPLACES the failed
+    attempt. Re-deriving ids from a fresh offset would duplicate the content
+    instead (2026-07-09 incident, and GC-6).
+
+    Mutates `state["pending"]` in place; the caller persists it. An entry is
+    only ever dropped on a confirmed verdict -- never on an unreachable
+    server, and never merely because it is old.
+    """
+    pending = state.get("pending") or []
+    if not pending:
+        return
+    bank = cfg["bank"]
+    still_pending = []
+    for entry in pending:
+        op_id = entry.get("operation_id")
+        items = entry.get("items") or []
+        span = (f"{entry.get('transcript','?')} "
+                f"[{entry.get('offset_from')}->{entry.get('offset_to')}]")
+        if not op_id or not items:
+            # Nothing actionable: no id to poll and/or no content to re-push.
+            # Keep it visible rather than dropping it silently.
+            print(f"capture: pending entry for {span} is unusable "
+                  f"(operation_id={op_id!r}, {len(items)} item(s)); keeping it "
+                  f"in the ledger for an operator to see")
+            still_pending.append(entry)
+            continue
+        verdict, detail = _check_operation(op_id, bank, cfg)
+        if verdict == "ok":
+            print(f"capture: pending span confirmed stored — {span} ({detail})")
+            continue
+        if verdict == "unknown":
+            print(f"capture: pending span still unresolved — {span} ({detail}); "
+                  f"will re-check next run")
+            still_pending.append(entry)
+            continue
+        # Terminal failure. Re-push the identical items under their original
+        # document_ids, which replaces the failed document rather than
+        # duplicating it.
+        print(f"capture: pending span FAILED extraction — {span} ({detail}); "
+              f"re-pushing {len(items)} item(s) under their original document_ids")
+        res = _push_items(items, entry.get("stamp") or
+                          datetime.now(timezone.utc).strftime("%Y-%m-%d"), bank, cfg)
+        if res.get("_error"):
+            print(f"capture: re-push FAILED — {res['_error']} "
+                  f"{res.get('_body','')}; span stays in the ledger")
+            still_pending.append(entry)
+            continue
+        new_op = res.get("operation_id") or res.get("id")
+        if not new_op:
+            print("capture: re-push accepted but returned no operation id; "
+                  "span stays in the ledger (cannot verify)")
+            still_pending.append(entry)
+            continue
+        # The retry is itself unverified until someone checks it. Carry the
+        # entry forward under the new operation id so the next run settles it.
+        retried = dict(entry)
+        retried["operation_id"] = new_op
+        retried["retried_at"] = datetime.now(timezone.utc).isoformat()
+        retried["retries"] = int(entry.get("retries") or 0) + 1
+        still_pending.append(retried)
+
+    # Bound the ledger. Each entry carries the pushed content, so an
+    # indefinitely unreachable backend would grow this file without limit and
+    # tax every later run. Drop the OLDEST first -- and say so at full volume,
+    # naming each span, because a span leaving this ledger unconfirmed is the
+    # exact loss the ledger exists to prevent.
+    if len(still_pending) > MAX_PENDING_SPANS:
+        overflow = still_pending[:len(still_pending) - MAX_PENDING_SPANS]
+        still_pending = still_pending[len(still_pending) - MAX_PENDING_SPANS:]
+        print(f"capture: WARNING — {len(overflow)} unconfirmed span(s) exceeded "
+              f"the retry ledger's capacity and are being ABANDONED. These were "
+              f"pushed but never confirmed stored; if the backend did not "
+              f"extract them, they are lost:", file=sys.stderr)
+        for e in overflow:
+            print(f"capture:   LOST? {e.get('transcript','?')} "
+                  f"[{e.get('offset_from')}->{e.get('offset_to')}] "
+                  f"operation={e.get('operation_id')} pushed={e.get('pushed_at')}",
+                  file=sys.stderr)
+
+    state["pending"] = still_pending
+
+
 # --- commands ----------------------------------------------------------------
 def _capture_path(transcript: str, cfg: dict):
     """Push transcript bytes past the stored offset. Each push gets
@@ -248,6 +401,13 @@ def _capture_path(transcript: str, cfg: dict):
     tenant_home = cfg["tenant_home"]
     bank = cfg["bank"]
     state = _load_state(tenant_home)
+
+    # Settle earlier pushes BEFORE doing anything else. A run that has nothing
+    # new to send is still the run that can learn what happened to the last
+    # one, so this must not sit behind the size check below.
+    _reconcile_pending(cfg, state)
+    _save_state(tenant_home, state)
+
     offset = state["offsets"].get(transcript, 0)
     size = Path(transcript).stat().st_size
     if size <= offset:
@@ -277,9 +437,7 @@ def _capture_path(transcript: str, cfg: dict):
     # own (PROP-002 observed a terminal failure with four distinct
     # JSONDecodeErrors on identical input). Whether we wait for that verdict
     # is the caller's choice -- see the offset discipline below.
-    res = _req("POST", _bank(bank, "/memories"),
-               {"items": items, "async": True, "document_tags": [stamp]},
-               api=cfg["api"])
+    res = _push_items(items, stamp, bank, cfg)
     if res.get("_error"):
         print(f"capture: retain FAILED — {res['_error']} {res.get('_body','')}")
         # Do not advance the offset; retry next time. Report failure to the
@@ -287,18 +445,18 @@ def _capture_path(transcript: str, cfg: dict):
         # session was recorded when it was not.
         return False
 
+    op_id = res.get("operation_id") or res.get("id")
+
     # PROP-002: the offset is the only record of what has been captured, so it
     # must not advance past a span the server never stored. Advancing on
     # acceptance made every extraction failure silent AND permanent -- the next
     # capture starts after the lost span, and close.sh exited 0 reporting a
     # session that went unrecorded.
     #
-    # When verification is on, the offset advances only after the operation
-    # reaches a terminal success. When it is off (the fast SessionEnd path),
-    # behaviour is unchanged and the span is at risk -- that is a deliberate
-    # trade, not an oversight: the hook must not block session exit.
+    # When verification is on (core/close.sh), the offset advances only after
+    # the operation reaches a terminal success -- an explicit close can afford
+    # to wait, and it promises the session was recorded.
     if cfg.get("verify_extraction"):
-        op_id = res.get("operation_id") or res.get("id")
         if not op_id:
             # Nothing to poll. Do not advance -- an unverifiable push is
             # indistinguishable from a failed one, and the offset is the thing
@@ -312,6 +470,42 @@ def _capture_path(transcript: str, cfg: dict):
                   f"(offset stays {offset}); the span will be retried.")
             return False
         print(f"capture: extraction confirmed ({detail})")
+    else:
+        # The fast SessionEnd path. It cannot wait for the verdict: hooks share
+        # a ~1.5s budget and extraction takes 8-22s, so blocking here is not
+        # slow, it is structurally impossible.
+        #
+        # So the offset advances -- but the span is NOT abandoned. It is
+        # recorded as pending, with the exact items and document_ids it was
+        # pushed under, and the next run settles it (_reconcile_pending above).
+        #
+        # Advancing rather than holding is deliberate. Holding the offset would
+        # make the next run re-read from the same start against a transcript
+        # that has since GROWN, deriving document_ids from a different offset
+        # for content already ingested -- duplication, not replacement. Keeping
+        # the pushed items verbatim is what makes the retry a same-id re-ingest,
+        # which is the one form of retry hindsight-api treats as a replacement
+        # (GC-6, 2026-07-09 incident).
+        entry = {
+            "operation_id": op_id,
+            "transcript": transcript,
+            "offset_from": offset,
+            "offset_to": size,
+            "stamp": stamp,
+            "pushed_at": datetime.now(timezone.utc).isoformat(),
+            "items": items,
+        }
+        state.setdefault("pending", []).append(entry)
+        if op_id:
+            print(f"capture: extraction unverified (fast path); span "
+                  f"[{offset}->{size}] recorded as pending under operation "
+                  f"{op_id} — the next run confirms or re-pushes it")
+        else:
+            # No id means no way to ask. Record it anyway: an unresolvable
+            # span must be visible in durable state, not only in a log line.
+            print("capture: retain accepted but returned no operation id; span "
+                  f"[{offset}->{size}] recorded as pending and UNVERIFIABLE — "
+                  "it needs an operator, not a retry")
 
     state["offsets"][transcript] = size
     _save_state(tenant_home, state)
@@ -337,6 +531,12 @@ def cmd_capture(args: list[str], cfg: dict):
         t = _newest_transcript(cfg["transcript_dir"])
         transcript = str(t) if t else None
     if not transcript or not Path(transcript).exists():
+        # Still settle the ledger. A pending span belongs to a PAST transcript,
+        # so its fate does not depend on there being a current one -- and this
+        # is otherwise the branch where a ledger could sit unresolved forever.
+        state = _load_state(cfg["tenant_home"])
+        _reconcile_pending(cfg, state)
+        _save_state(cfg["tenant_home"], state)
         print(f"capture: no transcript ({transcript})")
         return True
     return _capture_path(transcript, cfg)
@@ -382,6 +582,15 @@ def cmd_status(args: list[str], cfg: dict):
                   f"{tok.get('input',0)} in / {tok.get('output',0)} out tokens")
     state = _load_state(cfg["tenant_home"])
     print("tracked transcripts:", len(state.get("offsets", {})))
+    # Spans pushed but not yet confirmed stored. A non-empty list here is the
+    # durable, greppable record that something may have been lost -- the whole
+    # point of the ledger is that this outlives the log line.
+    pending = state.get("pending") or []
+    print("unverified spans:", len(pending))
+    for e in pending:
+        print(f"  {e.get('transcript','?')} [{e.get('offset_from')}->"
+              f"{e.get('offset_to')}] operation={e.get('operation_id')} "
+              f"pushed={e.get('pushed_at')} retries={e.get('retries') or 0}")
 
 
 def cmd_reprocess(args: list[str], cfg: dict):
