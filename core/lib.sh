@@ -136,10 +136,33 @@ repo_name() {
 }
 
 # target_path — absolute path to the target checkout.
+#
+# The directory name defaults to the repo URL's basename, but a deployment
+# whose checkout directory differs from its repo name can override it with
+# `target.dir`. cfg already treats a blank value, "~", and "null" as absent,
+# so an empty `target.dir:` line falls back to the basename for free — no
+# extra handling needed here.
+#
+# `target.dir` becomes a single path SEGMENT appended after $DAEDALUS_HOME/
+# target/, not a multi-component path like target.nested — so it is rejected
+# outright if it contains a "/" at all, which also catches an absolute form
+# as a side effect. This is stricter than target.nested's guard (which must
+# allow "/" for legitimate subdirectories, so it checks for ".." and a
+# leading "/" specifically) because target.dir has no legitimate reason to
+# contain a path separator: it names one directory, not a location. A bare
+# "." or ".." has no "/" but is still a traversal (target/.. resolves to
+# $DAEDALUS_HOME itself), so it is checked separately.
 target_path() {
-  local url name
+  local url name dir
   url="$(cfg target.repo)" || die "config: target.repo is required"
   name="$(repo_name "$url")"
+  dir="$(cfg target.dir 2>/dev/null || true)"
+  if [ -n "$dir" ]; then
+    case "$dir" in
+      */*|.|..) die "config target.dir: $dir must be a single directory name, not a path" ;;
+    esac
+    name="$dir"
+  fi
   printf '%s\n' "$DAEDALUS_HOME/target/$name"
 }
 

@@ -184,3 +184,97 @@ stop_stub() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "a 1400-character memory survives injection intact, through the real entry point" {
+  # PROP-010. The old behavior cut every memory at 240 characters mid-word
+  # and appended an ellipsis, silently discarding whatever came after —
+  # including, in the reported case, the operative clause of the memory.
+  # This drives the actual CLI entry point end to end (stdin -> stdout),
+  # not the private _render() helper, per GC-1.
+  long_text=$(python3 -c "print('The scheduler executes rendered goal files rather than the manifest so an unenrolled goal can still run and this clause, which explains why, must survive intact past the two-hundred-forty character mark that used to cut memories off mid-word. ' * 6)" | cut -c1-1450)
+  len=${#long_text}
+  [ "$len" -gt 1400 ]
+
+  payload=$(python3 -c "import json,sys; print(json.dumps([{'type':'world','text': sys.argv[1]}]))" "$long_text")
+  start_stub "$payload"
+  run inject '{"prompt":"what did we establish about how the scheduler runs goals"}'
+  stop_stub
+
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+
+  # The full memory text must appear verbatim in the emitted context, and
+  # the tail of the source string is what a 240-char cut would have
+  # destroyed -- so check specifically for text at the end of the memory.
+  # Written to files rather than interpolated into a python -c string:
+  # the long_text/output payloads are large and quote-heavy enough that
+  # shell interpolation into an embedded script silently mangles them.
+  tail_fragment="${long_text: -40}"
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/out.json"
+  printf '%s' "$tail_fragment" > "$BATS_TEST_TMPDIR/tail.txt"
+  run python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+with open(sys.argv[2]) as f:
+    tail_fragment = f.read()
+ctx = d['hookSpecificOutput']['additionalContext']
+assert tail_fragment in ctx, 'tail of long memory missing from injected context'
+assert len(ctx) > 1400, f'injected context too short to hold the full memory: {len(ctx)}'
+" "$BATS_TEST_TMPDIR/out.json" "$BATS_TEST_TMPDIR/tail.txt"
+  [ "$status" -eq 0 ]
+}
+
+@test "no ellipsis truncation marker appears anywhere in the injected context" {
+  # PROP-010. Even for a memory well past the old 240-char cutoff, the
+  # injector must never append the "…" truncation marker -- full text or
+  # nothing. Checked on the JSON-decoded string, not raw stdout: Python's
+  # json.dumps renders "…" as a … escape sequence, not the literal
+  # glyph, so a raw substring match on $output would silently miss a real
+  # truncation.
+  long_text=$(python3 -c "print('x' * 900)")
+  payload=$(python3 -c "import json,sys; print(json.dumps([{'type':'world','text': sys.argv[1]}]))" "$long_text")
+  start_stub "$payload"
+  run inject '{"prompt":"what did we establish about how the scheduler runs goals"}'
+  stop_stub
+
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/out.json"
+  run python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+ctx = d['hookSpecificOutput']['additionalContext']
+assert '…' not in ctx, 'ellipsis truncation marker found in decoded output'
+" "$BATS_TEST_TMPDIR/out.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "MAX_RESULTS still bounds the count: 15 results in, 10 rendered" {
+  # PROP-010 also raises MAX_RESULTS to 10. Bounding the *number* of
+  # memories is legitimate (unlike per-memory character truncation), so
+  # this pins that the count cap still works post-fix -- asserted by
+  # counting rendered lines through the real entry point, never by
+  # asserting the constant's value (GC-2).
+  results_json=$(python3 -c "
+import json
+print(json.dumps([{'type': 'world', 'text': f'memory number {i} with enough words to pass as real content'} for i in range(15)]))
+")
+  start_stub "$results_json"
+  run inject '{"prompt":"what did we establish about how the scheduler runs goals"}'
+  stop_stub
+
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  printf '%s' "$output" > "$BATS_TEST_TMPDIR/out.json"
+  run python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+ctx = d['hookSpecificOutput']['additionalContext']
+rendered = [l for l in ctx.splitlines() if l.startswith('- [')]
+assert len(rendered) == 10, f'expected 10 rendered memories, got {len(rendered)}'
+" "$BATS_TEST_TMPDIR/out.json"
+  [ "$status" -eq 0 ]
+}

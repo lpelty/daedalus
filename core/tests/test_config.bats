@@ -122,3 +122,114 @@ EOF
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "a	b" ]
 }
+
+@test "target_path uses the repo URL basename when target.dir is absent" {
+  run target_path
+  [ "$status" -eq 0 ]
+  [ "$output" = "$DAEDALUS_HOME/target/thing" ]
+}
+
+@test "target_path honors target.dir when a deployment names its checkout differently than its repo" {
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing-harness.git
+  dir: thing
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_path
+  [ "$status" -eq 0 ]
+  [ "$output" = "$DAEDALUS_HOME/target/thing" ]
+}
+
+@test "target_path falls back to the basename when target.dir is blank" {
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing.git
+  dir:
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_path
+  [ "$status" -eq 0 ]
+  [ "$output" = "$DAEDALUS_HOME/target/thing" ]
+}
+
+@test "target_path falls back to the basename when target.dir is null" {
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing.git
+  dir: null
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_path
+  [ "$status" -eq 0 ]
+  [ "$output" = "$DAEDALUS_HOME/target/thing" ]
+}
+
+@test "target_path rejects a target.dir that attempts a parent-directory escape" {
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing.git
+  dir: ../../escaped
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_path
+  [ "$status" -ne 0 ]
+}
+
+@test "target_path rejects a bare .. target.dir with no slash" {
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing.git
+  dir: ..
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_path
+  [ "$status" -ne 0 ]
+}
+
+@test "target_path rejects an absolute target.dir" {
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing.git
+  dir: /tmp/daedalus-abs-escape
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_path
+  [ "$status" -ne 0 ]
+}

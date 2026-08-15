@@ -46,11 +46,10 @@ except Exception:  # pragma: no cover - import failure degrades to silence
 MIN_PROMPT_WORDS = 4
 
 # How many memories to surface. Enough to be useful, few enough that the
-# reader still reads them.
-MAX_RESULTS = 5
-
-# Per-memory character cap in the emitted block.
-MAX_CHARS = 240
+# reader still reads them. This bounds the *count* of memories, not the
+# length of any one of them — see _render(), which emits each memory's
+# full text. A truncated memory is a wrong memory, not a shorter one.
+MAX_RESULTS = 10
 
 # Seconds to wait on the backend. A slow query that delays every prompt is
 # worse than a query that silently gives up.
@@ -77,8 +76,6 @@ def _render(results: list) -> str:
         text = (r.get("text") or "").strip()
         if not text:
             continue
-        if len(text) > MAX_CHARS:
-            text = text[:MAX_CHARS].rstrip() + "…"
         kind = r.get("type") or "memory"
         lines.append(f"- [{kind}] {text}")
     if not lines:

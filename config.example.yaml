@@ -8,6 +8,12 @@ target:
   repo: https://github.com/OWNER/REPO.git
   branch: main
 
+  # Optional. The checkout directory name under target/, when it must differ
+  # from the repo URL's basename (e.g. a deployment whose checkout directory
+  # differs from its repo name). Omit to default to the basename. Must be a
+  # single directory name — no "/", no "..", not absolute.
+  # dir: REPO
+
   # Repos cloned INTO the ship checkout, at the exact paths they occupy in the
   # operator's real tree. Layout fidelity is a correctness requirement: a
   # target whose shape differs from the original turns every relative path

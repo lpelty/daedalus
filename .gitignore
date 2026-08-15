@@ -27,3 +27,6 @@ state/
 # identity-leakage guard correctly rejects for a public repo.
 __pycache__/
 *.pyc
+
+# SDD scratch — per-plan subagent workspace, never product content.
+.superpowers/

@@ -85,6 +85,25 @@ Worked example, `.claude/settings.local.json`:
 }
 ```
 
+### What happens when extraction fails
+
+The server returns `202` when it *accepts* a batch; extraction runs afterwards
+and can fail on its own. The `SessionEnd` hook cannot wait for that verdict —
+Claude Code gives its hooks a shared budget of roughly a second and a half,
+while extraction takes tens of seconds — so the hook records each pushed span
+in a retry ledger inside `state/hindsight/offsets.json` and returns.
+
+Every later run of `capture.py capture` (including `core/close.sh`) settles
+that ledger first: it asks the server how each pending operation ended, drops
+the spans that were stored, keeps the ones still running or unreachable, and
+re-pushes the ones that failed. A re-push reuses the original `document_id`s,
+which the API treats as replacing that document rather than adding a second
+copy of it.
+
+`core/capture.py status` prints the spans that are still unconfirmed. A
+non-empty list there means those turns may not be in memory yet; it should
+return to zero on its own once the backend is healthy.
+
 ### Reading memory back (optional)
 
 Capture writes; two mechanisms read.
