@@ -138,3 +138,62 @@ CFG
   run grep -qF "operator edit" "$DAEDALUS_HOME/vault/sessions/_template.md"
   [ "$status" -eq 0 ]
 }
+
+@test "sync-vault does not attempt a clone when the vault is tracked by the parent repo instead of being its own git checkout" {
+  # Absorb vault/ into DAEDALUS_HOME's own git history (subtree-style), with
+  # no vault/.git of its own — a deployment that folded its vault into the
+  # parent repo. vault.repo still points at a real upstream (config requires
+  # it), but there is no separate remote to pull from in this shape, so the
+  # old branch-on-vault/.git logic would take the clone path and fail hard
+  # against a non-empty destination.
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+    touch "$DAEDALUS_HOME/vault/$d/.keep"
+  done
+  git -C "$DAEDALUS_HOME" init --quiet
+  git -C "$DAEDALUS_HOME" -c user.email=t@t.com -c user.name=t add vault
+  git -C "$DAEDALUS_HOME" -c user.email=t@t.com -c user.name=t commit --quiet -m "absorb vault"
+
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"fatal:"* ]]
+}
+
+@test "sync-vault still scaffolds templates and layout for a parent-tracked vault" {
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+    touch "$DAEDALUS_HOME/vault/$d/.keep"
+  done
+  git -C "$DAEDALUS_HOME" init --quiet
+  git -C "$DAEDALUS_HOME" -c user.email=t@t.com -c user.name=t add vault
+  git -C "$DAEDALUS_HOME" -c user.email=t@t.com -c user.name=t commit --quiet -m "absorb vault"
+
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [ -d "$DAEDALUS_HOME/vault/exchange/messages" ]
+  [ -f "$DAEDALUS_HOME/vault/exchange/README.md" ]
+  [ -f "$DAEDALUS_HOME/vault/exchange/Exchange.base" ]
+  [ -f "$DAEDALUS_HOME/vault/sessions/_template.md" ]
+  [ -f "$DAEDALUS_HOME/vault/hot.md" ]
+}
+
+@test "sync-vault still pulls a standalone vault repo as before" {
+  bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ -d "$DAEDALUS_HOME/vault/.git" ]
+
+  echo "new upstream commit" >> "$VAULT_REPO/README.md"
+  git -C "$VAULT_REPO" add -A
+  git -C "$VAULT_REPO" -c user.email=t@t -c user.name=t commit -q -m "upstream update"
+
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  run grep -q "new upstream commit" "$DAEDALUS_HOME/vault/README.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "sync-vault still clones a genuinely absent vault" {
+  [ ! -e "$DAEDALUS_HOME/vault" ]
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [ -d "$DAEDALUS_HOME/vault/.git" ]
+}
