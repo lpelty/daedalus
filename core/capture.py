@@ -129,13 +129,73 @@ def _offsets_path(tenant_home: Path) -> Path:
     return tenant_home / "state" / "hindsight" / "offsets.json"
 
 
+def _transcript_key(transcript: str) -> str:
+    """The single identity a transcript is tracked under.
+
+    capture stored the path exactly as it was handed in while reprocess stored
+    the resolved one, so on any host where the transcript directory sits behind
+    a symlink (/tmp -> /private/tmp) one file acquired TWO offset keys and two
+    ledger entries -- and therefore pushed the same bytes twice. Every read and
+    write of the offsets map and the ledger goes through this.
+    """
+    try:
+        return str(Path(transcript).resolve())
+    except OSError:
+        # A path that cannot be resolved (a vanished mount) is still worth
+        # tracking under its literal spelling rather than crashing capture.
+        return str(transcript)
+
+
+def _lookup_offset(offsets: dict, transcript: str) -> int:
+    """Read a transcript's offset, honouring a key written by an older build.
+
+    Entries predating normalization sit under the un-normalized spelling. They
+    must still be found, or the upgrade re-ingests transcripts already captured.
+    """
+    key = _transcript_key(transcript)
+    if key in offsets:
+        return offsets[key]
+    if transcript in offsets:
+        return offsets[transcript]
+    return 0
+
+
+def _clean_pending(entries: list) -> list:
+    """Keep only ledger entries this code can actually act on.
+
+    _load_state's docstring promises tolerance of old or partial state, but it
+    type-checked only the two top-level keys: a pending list holding a bare
+    string raised AttributeError, exited 1, and left capture dead until someone
+    hand-edited the state file. An entry that cannot be used is dropped with a
+    line naming what went -- never silently, since a vanishing span is the
+    exact loss this ledger exists to make visible.
+    """
+    kept = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            print(f"capture: discarding malformed ledger entry (expected an "
+                  f"object, got {type(entry).__name__}): {entry!r:.120}",
+                  file=sys.stderr)
+            continue
+        items = entry.get("items")
+        if items is not None and not isinstance(items, list):
+            print(f"capture: discarding malformed ledger entry for "
+                  f"{entry.get('transcript','?')} (its items are "
+                  f"{type(items).__name__}, not a list); it cannot be re-pushed",
+                  file=sys.stderr)
+            continue
+        kept.append(entry)
+    return kept
+
+
 def _load_state(tenant_home: Path) -> dict:
     """Read the cursor state, tolerating a file written by an older build.
 
     A deployment that pulls this code has an existing offsets.json with only
     an "offsets" key. Missing keys are filled in rather than assumed, so the
     first run after an upgrade reconciles an empty ledger instead of crashing
-    on its own state.
+    on its own state. Individual ledger entries are validated too, not just the
+    top-level keys -- see _clean_pending.
     """
     p = _offsets_path(tenant_home)
     state = {"offsets": {}, "pending": []}
@@ -151,7 +211,7 @@ def _load_state(tenant_home: Path) -> dict:
         if isinstance(stored.get("offsets"), dict):
             state["offsets"] = stored["offsets"]
         if isinstance(stored.get("pending"), list):
-            state["pending"] = stored["pending"]
+            state["pending"] = _clean_pending(stored["pending"])
     return state
 
 
@@ -297,6 +357,34 @@ def _push_items(items: list[dict], stamp: str, bank: str, cfg: dict) -> dict:
                 api=cfg["api"])
 
 
+def _enforce_ledger_cap(entries: list) -> list:
+    """Trim the ledger to MAX_PENDING_SPANS, announcing anything forced out.
+
+    Each entry carries the pushed content, so an indefinitely unreachable
+    backend would grow this file without limit and tax every later run. Drop
+    the OLDEST first -- and say so at full volume, naming each span, because a
+    span leaving this ledger unconfirmed is the exact loss it exists to prevent.
+
+    Applied at every point that can grow the ledger, not only in reconcile:
+    eviction used to run before the fast path appended its new entry, so the
+    file settled at one entry ABOVE the stated cap.
+    """
+    if len(entries) <= MAX_PENDING_SPANS:
+        return entries
+    cut = len(entries) - MAX_PENDING_SPANS
+    overflow, kept = entries[:cut], entries[cut:]
+    print(f"capture: WARNING — {len(overflow)} unconfirmed span(s) exceeded "
+          f"the retry ledger's capacity and are being ABANDONED. These were "
+          f"pushed but never confirmed stored; if the backend did not "
+          f"extract them, they are lost:", file=sys.stderr)
+    for e in overflow:
+        print(f"capture:   LOST? {e.get('transcript','?')} "
+              f"[{e.get('offset_from')}->{e.get('offset_to')}] "
+              f"operation={e.get('operation_id')} pushed={e.get('pushed_at')}",
+              file=sys.stderr)
+    return kept
+
+
 def _reconcile_pending(cfg: dict, state: dict) -> None:
     """Settle the fate of spans pushed by an earlier run that could not wait.
 
@@ -314,19 +402,60 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
     instead (2026-07-09 incident, and GC-6).
 
     Mutates `state["pending"]` in place; the caller persists it. An entry is
-    only ever dropped on a confirmed verdict -- never on an unreachable
-    server, and never merely because it is old.
+    only ever dropped on a confirmed verdict, on being superseded (below) --
+    never on an unreachable server, and never merely because it is old.
+
+    SUPERSEDED ENTRIES. Re-pushing under the original document_ids is a
+    REPLACEMENT, which is what makes the retry safe -- but only while those ids
+    still hold the content the entry describes. If the transcript was re-read
+    from an EARLIER offset (reprocess, or any path that rewinds the cursor),
+    the next capture derives the same ids from the same starting offset while
+    reading MORE bytes, so those ids now hold newer, longer content. Re-pushing
+    the older items would delete it: the 2026-07-09 incident arriving by a
+    different route, destruction by stale ledger rather than by reused id.
+
+    The test is therefore whether the cursor has REWOUND behind this entry --
+    not whether it has merely moved. A cursor that advanced past an entry is
+    the normal, healthy case: the transcript grew and later spans were pushed
+    under their own ids, which do not collide with this one. Discarding those
+    would throw away exactly the unconfirmed spans this ledger exists to hold.
+
+    An entry with no stored cursor at all is treated as superseded. The ways to
+    reach that state are that the cursor was cleared (reprocess -- superseded
+    by definition) or that state was hand-edited; in both cases re-pushing
+    content nothing vouches for is the more dangerous choice. Losing a retry
+    costs one span, and the log names it; a wrong re-push destroys newer memory
+    silently.
     """
     pending = state.get("pending") or []
     if not pending:
         return
     bank = cfg["bank"]
+    offsets = state.get("offsets") or {}
     still_pending = []
     for entry in pending:
         op_id = entry.get("operation_id")
         items = entry.get("items") or []
         span = (f"{entry.get('transcript','?')} "
                 f"[{entry.get('offset_from')}->{entry.get('offset_to')}]")
+        transcript = entry.get("transcript")
+        if transcript is not None:
+            has_offset = (_transcript_key(transcript) in offsets
+                          or transcript in offsets)
+            current = _lookup_offset(offsets, transcript)
+            end = entry.get("offset_to")
+            # Superseded only if the cursor rewound behind this span's end (or
+            # vanished). A cursor at or past the end means the transcript
+            # simply grew, which does not touch this entry's document_ids.
+            rewound = (not isinstance(end, int)) or current < end
+            if not has_offset or rewound:
+                print(f"capture: pending span SUPERSEDED — {span}; the stored "
+                      f"offset for this transcript is now "
+                      f"{current if has_offset else 'unset'}, behind this "
+                      f"span's end, so its document_ids will be rewritten by a "
+                      f"re-read. Discarding it rather than re-pushing older "
+                      f"content over newer.", file=sys.stderr)
+                continue
         if not op_id or not items:
             # Nothing actionable: no id to poll and/or no content to re-push.
             # Keep it visible rather than dropping it silently.
@@ -370,25 +499,7 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
         retried["retries"] = int(entry.get("retries") or 0) + 1
         still_pending.append(retried)
 
-    # Bound the ledger. Each entry carries the pushed content, so an
-    # indefinitely unreachable backend would grow this file without limit and
-    # tax every later run. Drop the OLDEST first -- and say so at full volume,
-    # naming each span, because a span leaving this ledger unconfirmed is the
-    # exact loss the ledger exists to prevent.
-    if len(still_pending) > MAX_PENDING_SPANS:
-        overflow = still_pending[:len(still_pending) - MAX_PENDING_SPANS]
-        still_pending = still_pending[len(still_pending) - MAX_PENDING_SPANS:]
-        print(f"capture: WARNING — {len(overflow)} unconfirmed span(s) exceeded "
-              f"the retry ledger's capacity and are being ABANDONED. These were "
-              f"pushed but never confirmed stored; if the backend did not "
-              f"extract them, they are lost:", file=sys.stderr)
-        for e in overflow:
-            print(f"capture:   LOST? {e.get('transcript','?')} "
-                  f"[{e.get('offset_from')}->{e.get('offset_to')}] "
-                  f"operation={e.get('operation_id')} pushed={e.get('pushed_at')}",
-                  file=sys.stderr)
-
-    state["pending"] = still_pending
+    state["pending"] = _enforce_ledger_cap(still_pending)
 
 
 # --- commands ----------------------------------------------------------------
@@ -408,7 +519,10 @@ def _capture_path(transcript: str, cfg: dict):
     _reconcile_pending(cfg, state)
     _save_state(tenant_home, state)
 
-    offset = state["offsets"].get(transcript, 0)
+    # One identity per file, so capture and reprocess cannot each open their
+    # own cursor for it. The old spelling is still honoured on read.
+    key = _transcript_key(transcript)
+    offset = _lookup_offset(state["offsets"], transcript)
     size = Path(transcript).stat().st_size
     if size <= offset:
         print(f"capture: nothing new ({transcript}, offset={offset}, size={size})")
@@ -420,7 +534,8 @@ def _capture_path(transcript: str, cfg: dict):
 
     convo = _transcript_to_convo(new_lines, cfg["user_label"], cfg["assistant_label"])
     if not convo.strip():
-        state["offsets"][transcript] = size
+        state["offsets"].pop(transcript, None)
+        state["offsets"][key] = size
         _save_state(tenant_home, state)
         print("capture: new bytes but no conversational text; offset advanced.")
         return True
@@ -488,7 +603,7 @@ def _capture_path(transcript: str, cfg: dict):
         # (GC-6, 2026-07-09 incident).
         entry = {
             "operation_id": op_id,
-            "transcript": transcript,
+            "transcript": key,
             "offset_from": offset,
             "offset_to": size,
             "stamp": stamp,
@@ -496,6 +611,9 @@ def _capture_path(transcript: str, cfg: dict):
             "items": items,
         }
         state.setdefault("pending", []).append(entry)
+        # Enforce the cap AFTER the append. Reconcile trimmed before this ran,
+        # so the ledger settled one entry above the stated cap every time.
+        state["pending"] = _enforce_ledger_cap(state["pending"])
         if op_id:
             print(f"capture: extraction unverified (fast path); span "
                   f"[{offset}->{size}] recorded as pending under operation "
@@ -507,7 +625,10 @@ def _capture_path(transcript: str, cfg: dict):
                   f"[{offset}->{size}] recorded as pending and UNVERIFIABLE — "
                   "it needs an operator, not a retry")
 
-    state["offsets"][transcript] = size
+    # Retire any entry an older build left under the un-normalized spelling, so
+    # the file ends up with exactly one cursor rather than two that disagree.
+    state["offsets"].pop(transcript, None)
+    state["offsets"][key] = size
     _save_state(tenant_home, state)
     verb = "captured" if cfg.get("verify_extraction") else "queued"
     print(f"capture: {verb} {len(convo)} chars from {sid} in {len(items)} "
@@ -597,14 +718,38 @@ def cmd_reprocess(args: list[str], cfg: dict):
     if not args:
         print("usage: reprocess <transcript_path>")
         return
-    transcript = str(Path(args[0]).resolve())
+    transcript = _transcript_key(args[0])
     if not Path(transcript).exists():
         print(f"reprocess: no such transcript ({transcript})")
         return
     tenant_home = cfg["tenant_home"]
     state = _load_state(tenant_home)
+    # Clear the cursor under both spellings: an older build tracked this file
+    # under the path exactly as it was typed.
     state["offsets"].pop(transcript, None)
     state["offsets"].pop(args[0], None)
+
+    # Drop this transcript's unsettled spans. reprocess is about to re-read the
+    # file from zero and push it under the SAME document_ids, so every pending
+    # entry for it describes content those ids will no longer hold. Leaving
+    # them armed a re-push of the older, shorter span over the fuller one --
+    # destroying whatever was appended since (2026-07-09, by another route).
+    keys = {transcript, str(args[0])}
+    kept, dropped = [], []
+    for entry in state.get("pending") or []:
+        t = entry.get("transcript")
+        if t is not None and (str(t) in keys or _transcript_key(t) == transcript):
+            dropped.append(entry)
+        else:
+            kept.append(entry)
+    if dropped:
+        print(f"reprocess: discarding {len(dropped)} unsettled span(s) for this "
+              f"transcript — it is being re-read from the start, so their "
+              f"document_ids are superseded by this run:")
+        for e in dropped:
+            print(f"reprocess:   superseded [{e.get('offset_from')}->"
+                  f"{e.get('offset_to')}] operation={e.get('operation_id')}")
+    state["pending"] = kept
     _save_state(tenant_home, state)
     _capture_path(transcript, cfg)
 

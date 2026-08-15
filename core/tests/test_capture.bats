@@ -35,14 +35,24 @@ teardown() {
 
 # Reads the stored offset for the fixture transcript. Prints 0 when the
 # state file or the entry is absent — the same thing capture.py assumes.
+#
+# Looks the transcript up under both its resolved and its literal spelling.
+# capture tracks a file under one canonical (resolved) key so that capture and
+# reprocess cannot open competing cursors for it; on this platform the bats
+# temp dir sits behind a symlink (/var -> /private/var), so a helper that only
+# checked the literal path would report 0 for a cursor that is in fact set.
 stored_offset() {
   python3 - "$OFFSETS" "$TRANSCRIPT" <<'PY'
-import json, sys, pathlib
+import json, sys, pathlib, os
 p = pathlib.Path(sys.argv[1])
 if not p.exists():
     print(0); raise SystemExit
-d = json.loads(p.read_text() or "{}")
-print(d.get("offsets", {}).get(sys.argv[2], 0))
+offsets = json.loads(p.read_text() or "{}").get("offsets", {})
+t = sys.argv[2]
+for k in (os.path.realpath(t), t):
+    if k in offsets:
+        print(offsets[k]); raise SystemExit
+print(0)
 PY
 }
 
@@ -201,14 +211,17 @@ assert len(memory_lines[0]) >= 500, f'printed line shorter than the full source 
   run python3 "$CAPTURE" capture
   size=$(python3 -c "import os,sys; print(os.path.getsize(sys.argv[1]))" "$TRANSCRIPT")
   run python3 - "$OFFSETS" "$TRANSCRIPT" "$size" <<'PY'
-import json, sys, pathlib
+import json, sys, pathlib, os
 p = pathlib.Path(sys.argv[1])
 assert p.exists(), "no state file"
 pend = json.loads(p.read_text() or "{}").get("pending") or []
 assert pend, "no unconfirmed span recorded"
 e = pend[0]
 assert e.get("operation_id"), f"no operation id to resolve the span with: {e}"
-assert e.get("transcript") == sys.argv[2], f"wrong transcript: {e}"
+# The ledger records the same canonical identity the offsets map uses, so
+# compare resolved paths rather than the literal spelling handed in.
+assert os.path.realpath(e.get("transcript", "")) == os.path.realpath(sys.argv[2]), \
+    f"wrong transcript: {e}"
 assert e.get("offset_from") == 0, f"wrong span start: {e}"
 assert e.get("offset_to") == int(sys.argv[3]), f"wrong span end: {e}"
 PY
@@ -364,6 +377,239 @@ PY
   run python3 "$CAPTURE" capture
   [ "$status" -eq 0 ]
   run grep -qF "nothing new" <<< "$output"
+  [ "$status" -eq 0 ]
+}
+
+# --- a stale ledger entry must never overwrite newer content ----------------
+#
+# A pending entry names a document_id, and a repeated document_id is a
+# re-ingest that DELETES that document's prior memories. So an entry that
+# outlives the content it describes is not merely stale — re-pushing it
+# destroys whatever newer content now occupies those ids. That is the exact
+# mechanism of the 2026-07-09 incident, arriving by a different route.
+#
+# The route: reprocess resets the offset to 0, so the next capture re-pushes
+# the SAME document_ids carrying MORE content. If a pending entry from before
+# the reprocess then reports failed, reconciliation re-pushes the older,
+# shorter items under those same ids and the newer text is gone.
+
+@test "reprocess drops pending entries for the transcript it invalidates" {
+  # reprocess invalidates exactly the spans recorded against this transcript:
+  # it is about to re-read the file from zero under the same document_ids.
+  # Leaving them in the ledger arms a re-push of superseded content.
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture
+  [ "$(pending_count)" -gt 0 ]
+
+  run python3 "$CAPTURE" reprocess "$TRANSCRIPT"
+  [ "$status" -eq 0 ]
+
+  # Exactly one span is pending afterwards: the one reprocess itself pushed,
+  # not the stale one it superseded. Asserting "no entry describes a span the
+  # current offset no longer matches" rather than a literal count.
+  run python3 - "$OFFSETS" "$TRANSCRIPT" <<'PY'
+import json, sys, pathlib
+d = json.loads(pathlib.Path(sys.argv[1]).read_text() or "{}")
+offsets, pending = d.get("offsets", {}), d.get("pending") or []
+stale = [e for e in pending
+         if e.get("offset_to") != offsets.get(e.get("transcript"))]
+assert not stale, f"stale entries survived reprocess: {stale}"
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "a reprocessed transcript's newer content is not overwritten by a stale span" {
+  # The end-to-end defect, asserted on what actually reaches the server.
+  # Capture turn one, append turn two, reprocess (which re-pushes both under
+  # the original ids), then let the pre-reprocess operation report failed.
+  # Reconciliation must NOT re-push the turn-one-only items over them.
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture
+
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"BBBB the second turn that must survive"}}' >> "$TRANSCRIPT"
+  run python3 "$CAPTURE" reprocess "$TRANSCRIPT"
+
+  # Everything now fails, which is what would trigger the destructive re-push.
+  set_op_status "failed"
+  run python3 "$CAPTURE" capture
+
+  # No push carrying a document_id may lack the newer turn once that id has
+  # been seen carrying it — a later push under the same id would delete it.
+  run python3 - "$STUB_POSTS" <<'PY'
+import json, sys
+seen_with_new = set()
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    for item in json.loads(line).get("items", []):
+        did, content = item.get("document_id"), item.get("content", "")
+        if "BBBB" in content:
+            seen_with_new.add(did)
+        elif did in seen_with_new:
+            raise SystemExit(
+                f"document_id {did} was re-pushed WITHOUT the newer turn; "
+                f"that push deletes it")
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "a pending span whose recorded end no longer matches the stored offset is discarded" {
+  # The general guard, independent of reprocess. Any path that rewinds or
+  # rewrites the offset leaves entries describing content that no longer
+  # occupies those ids. Such an entry must be dropped, not re-pushed.
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture
+  [ "$(pending_count)" -gt 0 ]
+
+  # Rewrite the pending entry's recorded end so it no longer describes the
+  # span the stored offset says was captured. Reconciliation must discard it
+  # rather than re-push its items over whatever now holds those ids.
+  #
+  # The entry is pointed at a transcript that no longer exists, so the capture
+  # below is pure reconciliation — otherwise a fresh capture would re-sync the
+  # offset and paper over the mismatch before it could be asserted.
+  python3 - "$OFFSETS" "$TRANSCRIPT" <<'PY'
+import json, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+d = json.loads(p.read_text() or "{}")
+for e in d.get("pending", []):
+    e["offset_to"] = e.get("offset_to", 0) + 999
+p.write_text(json.dumps(d))
+PY
+  set_op_status "failed"
+  before=$(posted_document_ids | wc -l | tr -d ' ')
+  run python3 "$CAPTURE" capture
+
+  # The stale entry must be gone AND must not have been re-pushed.
+  after=$(posted_document_ids | wc -l | tr -d ' ')
+  [ "$after" -eq "$before" ]
+  run python3 - "$OFFSETS" <<'PY'
+import json, sys, pathlib
+d = json.loads(pathlib.Path(sys.argv[1]).read_text() or "{}")
+offsets, pending = d.get("offsets", {}), d.get("pending") or []
+stale = [e for e in pending
+         if e.get("offset_to") != offsets.get(e.get("transcript"))]
+assert not stale, f"stale entry kept: {stale}"
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "capture and reprocess agree on one identity for the same transcript" {
+  # reprocess resolved the path while capture stored it as given, so a
+  # symlinked temp dir produced two offset keys and two ledger entries for one
+  # file — and therefore duplicate pushes of the same bytes. Drive both real
+  # commands and assert the state has a single identity for the file.
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture
+  run python3 "$CAPTURE" reprocess "$TRANSCRIPT"
+
+  run python3 - "$OFFSETS" <<'PY'
+import json, sys, pathlib, os
+d = json.loads(pathlib.Path(sys.argv[1]).read_text() or "{}")
+keys = list(d.get("offsets", {}))
+# One file, one key — regardless of which spelling was used to reach it.
+reals = {os.path.realpath(k) for k in keys}
+assert len(keys) == len(reals), f"same file tracked under several keys: {keys}"
+tk = {e.get("transcript") for e in (d.get("pending") or [])}
+assert len({os.path.realpath(t) for t in tk}) == len(tk), \
+    f"same file pending under several keys: {tk}"
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "a ledger entry written by an older build under an unresolved path still settles" {
+  # Normalizing must not orphan entries the previous code wrote under the
+  # un-normalized spelling. Hand-write state in the old shape and confirm a
+  # normal capture still reconciles it rather than leaving it stranded.
+  start_op_stub "completed"
+  unresolved="$TRANSCRIPT"
+  mkdir -p "$(dirname "$OFFSETS")"
+  python3 - "$OFFSETS" "$unresolved" <<'PY'
+import json, sys, os
+size = os.path.getsize(sys.argv[2])
+json.dump({"offsets": {sys.argv[2]: size},
+           "pending": [{"operation_id": "op-legacy",
+                        "transcript": sys.argv[2],
+                        "offset_from": 0, "offset_to": size,
+                        "stamp": "2026-01-01",
+                        "items": [{"content": "legacy",
+                                   "document_id": "session-a-o0-p00"}]}]},
+          open(sys.argv[1], "w"))
+PY
+  run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+  # The operation reports completed, so the entry must drain rather than sit
+  # unresolvable under a key nothing looks up any more.
+  [ "$(pending_count)" -eq 0 ]
+}
+
+@test "the ledger never exceeds the cap it states" {
+  # Eviction ran before the append, so the ledger settled one entry above the
+  # cap. Asserted as an invariant against the module's own constant rather
+  # than a literal (GC-2/GC-5): whatever the cap is, the file must honour it.
+  start_op_stub "running"
+  for i in $(seq 1 60); do
+    printf '%s\n' "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"turn $i\"}}" >> "$TRANSCRIPT"
+    python3 "$CAPTURE" capture >/dev/null 2>&1
+  done
+  run python3 - "$OFFSETS" "$CAPTURE" <<'PY'
+import json, sys, pathlib, importlib.util
+spec = importlib.util.spec_from_file_location("capture", sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+n = len(json.loads(pathlib.Path(sys.argv[1]).read_text() or "{}").get("pending") or [])
+assert n <= mod.MAX_PENDING_SPANS, f"ledger holds {n}, cap is {mod.MAX_PENDING_SPANS}"
+PY
+  [ "$status" -eq 0 ]
+}
+
+# --- malformed state must degrade, not wedge capture ------------------------
+
+@test "a malformed pending entry is dropped instead of killing capture" {
+  # A non-dict in the pending list raised AttributeError, exit 1, and capture
+  # stayed dead until someone hand-edited the state file. The docstring
+  # promises tolerance of old or partial state; this makes it true one level
+  # deeper.
+  start_op_stub "running"
+  mkdir -p "$(dirname "$OFFSETS")"
+  python3 - "$OFFSETS" <<'PY'
+import json, sys
+json.dump({"offsets": {}, "pending": ["notadict"]}, open(sys.argv[1], "w"))
+PY
+  run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+}
+
+@test "a dropped malformed entry is named rather than silently discarded" {
+  start_op_stub "running"
+  mkdir -p "$(dirname "$OFFSETS")"
+  python3 - "$OFFSETS" <<'PY'
+import json, sys
+json.dump({"offsets": {}, "pending": ["notadict"]}, open(sys.argv[1], "w"))
+PY
+  run python3 "$CAPTURE" capture 2>&1
+  run grep -qiE "discard|drop|malformed" <<< "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "a pending entry whose items are not a list is dropped without crashing" {
+  # The stub reports "failed", which forces the re-push branch — the one that
+  # actually iterates items. Against an unreachable server this entry would
+  # resolve as "unknown" and never touch the malformed field, so the test
+  # would pass without exercising anything.
+  start_op_stub "failed"
+  mkdir -p "$(dirname "$OFFSETS")"
+  python3 - "$OFFSETS" <<'PY'
+import json, sys
+json.dump({"offsets": {},
+           "pending": [{"operation_id": "op-1", "transcript": "/x.jsonl",
+                        "offset_from": 0, "offset_to": 1, "items": "nope"}]},
+          open(sys.argv[1], "w"))
+PY
+  run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+  run grep -qiE "discard|drop|malformed" <<< "$output"
   [ "$status" -eq 0 ]
 }
 
