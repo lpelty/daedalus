@@ -228,6 +228,29 @@ EOF
   [[ "$output" == *"MISSING"*"vault"* ]]
 }
 
+@test "doctor finds a target checkout whose directory name differs from its repo name via target.dir" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing-harness.git
+  dir: thing
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"*"target checkout: $DAEDALUS_HOME/target/thing"* ]]
+}
+
 @test "doctor reports the YAML null spellings (null, ~) as missing" {
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
