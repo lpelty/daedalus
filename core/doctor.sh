@@ -46,8 +46,21 @@ else
   note_problem "target checkout — cannot determine path without config: target.repo"
 fi
 
-if [ ! -d "$DAEDALUS_HOME/vault/.git" ]; then
-  note_problem "vault is not a git repo: $DAEDALUS_HOME/vault — run core/sync-vault.sh"
+# A healthy vault is either its own git repo (vault/.git exists — the
+# original assumption), or a directory absorbed into the parent daedalus
+# repo via `git subtree add` — a deliberate choice on some deployments when
+# the vault holds session history on a single disk with no remote of its own.
+# `git ls-files --error-unmatch` alone is not sufficient: it checks the
+# INDEX, not the working tree, so it reports success even for a vault
+# deleted from disk after being committed (verified empirically). The
+# on-disk directory check guards against exactly that false green.
+vault_tracked_by_parent=0
+if [ -d "$DAEDALUS_HOME/vault" ] && git -C "$DAEDALUS_HOME" ls-files --error-unmatch vault >/dev/null 2>&1; then
+  vault_tracked_by_parent=1
+fi
+
+if [ ! -d "$DAEDALUS_HOME/vault/.git" ] && [ "$vault_tracked_by_parent" -eq 0 ]; then
+  note_problem "vault is not a git repo and is not tracked by the parent repo: $DAEDALUS_HOME/vault — run core/sync-vault.sh"
 else
   for d in infrastructure specs plans proposals pitfalls exchange; do
     if [ -d "$DAEDALUS_HOME/vault/$d" ]; then
