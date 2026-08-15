@@ -225,7 +225,12 @@ EOF
   rm -rf "$DAEDALUS_HOME/vault"
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"MISSING"*"vault"* ]]
+  # Assert the SPECIFIC signal the on-disk check produces, not merely that
+  # doctor failed. With the `-d` guard deleted, ls-files still reports the
+  # vault as tracked, doctor takes the else branch, and its six "MISSING
+  # vault/<subdir>" lines satisfied a loose *"MISSING"*"vault"* match — so
+  # this test stayed green against exactly the mutant it exists to catch.
+  [[ "$output" == *"vault is not a git repo and is not tracked by the parent repo"* ]]
 }
 
 @test "doctor finds a target checkout whose directory name differs from its repo name via target.dir" {
@@ -249,6 +254,64 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"*"target checkout: $DAEDALUS_HOME/target/thing"* ]]
+}
+
+@test "doctor blames a rejected target.dir on the config, not on a missing checkout" {
+  # target_path rejects a target.dir carrying a path separator. doctor swallowed
+  # that rejection with `|| true` and reported the generic "run
+  # core/sync-target.sh" — a remedy that cannot help, since sync-target calls
+  # the same function and hits the same rejection. The operator has to edit the
+  # config, so the config is what the message must name.
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  dir: ../escape
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+  run bash "$DAEDALUS_HOME/core/doctor.sh" 2>&1
+  [ "$status" -ne 0 ]
+  # Names the offending config key...
+  [[ "$output" == *"target.dir"* ]]
+  # ...and does not send the operator to a script that cannot fix it.
+  [[ "$output" != *"target checkout — run core/sync-target.sh"* ]]
+  # ...and reaches its verdict rather than dying mid-run. `die` inside a
+  # command substitution exits the whole script, which silently truncated
+  # doctor after the config checks.
+  [[ "$output" == *"problem(s) found"* ]]
+}
+
+@test "doctor keeps checking the rest of the deployment after a bad target.dir" {
+  # doctor's contract is that one broken thing does not hide the others: it
+  # names every problem in one run rather than aborting on the first. Surfacing
+  # the config error must not turn into an early exit.
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  dir: ../escape
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  # No vault at all, so a surviving run must also report the vault problem.
+  run bash "$DAEDALUS_HOME/core/doctor.sh" 2>&1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"target.dir"* ]]
+  [[ "$output" == *"MISSING"*"vault"* ]]
+  [[ "$output" == *"problem(s) found"* ]]
 }
 
 @test "doctor reports the YAML null spellings (null, ~) as missing" {

@@ -177,6 +177,30 @@ CFG
   [ -f "$DAEDALUS_HOME/vault/hot.md" ]
 }
 
+@test "sync-vault clones a vault that git still tracks but that is gone from disk" {
+  # The on-disk half of the parent-tracked check. `git ls-files --error-unmatch`
+  # reads the INDEX, not the working tree, so a vault committed and then deleted
+  # still looks tracked. Without the `-d` guard, sync-vault takes the
+  # "tracked by the parent — skip clone/pull" path and does NOT restore the
+  # vault, leaving the deployment with no vault and no error.
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+    touch "$DAEDALUS_HOME/vault/$d/.keep"
+  done
+  git -C "$DAEDALUS_HOME" init --quiet
+  git -C "$DAEDALUS_HOME" -c user.email=t@t.com -c user.name=t add vault
+  git -C "$DAEDALUS_HOME" -c user.email=t@t.com -c user.name=t commit --quiet -m "absorb vault"
+  rm -rf "$DAEDALUS_HOME/vault"
+
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  # The specific signal: it took the CLONE path and the vault is real again,
+  # rather than reporting the skip and leaving nothing behind.
+  [[ "$output" != *"skipping clone/pull"* ]]
+  [ -d "$DAEDALUS_HOME/vault/.git" ]
+  [ -f "$DAEDALUS_HOME/vault/README.md" ]
+}
+
 @test "sync-vault still pulls a standalone vault repo as before" {
   bash "$DAEDALUS_HOME/core/sync-vault.sh"
   [ -d "$DAEDALUS_HOME/vault/.git" ]

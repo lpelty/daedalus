@@ -5,8 +5,13 @@
 # standing up a deployment should learn everything that is wrong in one run.
 # Like gates.sh, this survives individual check failures instead of using
 # -e, because it must keep going after a failed check to report the rest.
-set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# AFTER the source, not before: lib.sh runs `set -euo pipefail`, so setting
+# this first had errexit switched straight back on underneath us. Every check
+# that returned non-zero then aborted the run instead of being counted, which
+# is the opposite of the contract stated above.
+set +e
+set -uo pipefail
 
 problems=0
 note_problem() { log "MISSING  $*"; problems=$((problems + 1)); }
@@ -34,8 +39,17 @@ fi
 # abort this script before the vault checks below ever run, silently
 # skipping checks instead of naming them as MISSING like everything else.
 if [ "$target_repo_ok" -eq 1 ]; then
+  # target_path also `die`s when it REJECTS the config — a target.dir carrying
+  # a path separator, for instance. Discarding that message with `|| true`
+  # turned a config error into the generic "run core/sync-target.sh", pointing
+  # the operator at a remedy that cannot possibly help: sync-target calls this
+  # same function and hits the same rejection. Keep stderr so the real cause
+  # can be reported, and keep going — doctor names every problem in one run.
+  target_err="$(target_path 2>&1 >/dev/null || true)"
   target="$(target_path 2>/dev/null || true)"
-  if [ -z "$target" ] || [ ! -d "$target" ]; then
+  if [ -n "$target_err" ]; then
+    note_problem "${target_err#daedalus: }"
+  elif [ -z "$target" ] || [ ! -d "$target" ]; then
     note_problem "target checkout — run core/sync-target.sh"
   elif [ ! -d "$target/.git" ]; then
     note_problem "target checkout is not a git repo: $target — run core/sync-target.sh"
