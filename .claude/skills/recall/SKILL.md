@@ -71,8 +71,8 @@ Omit `--types` to search all three.
                rebuild procedure. | When: on August 01, 2026
 ```
 
-Each line is one memory, truncated at 200 characters. Results are ranked by
-relevance, so the first few carry the most signal.
+Each line is one memory, printed in full. Results are ranked by relevance,
+so the first few carry the most signal.
 
 Treat what comes back as **true as of when it was recorded**, not as current
 state. An `experience` memory carries its date for exactly this reason. When

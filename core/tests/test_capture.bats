@@ -125,11 +125,62 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "recall prints a memory's full text, through the real CLI entry point" {
+  # PROP-010. cmd_recall used to slice each result to [:200] before
+  # printing, silently discarding whatever came after. Drives the actual
+  # `capture.py recall` invocation end to end, not a private helper.
+  long_text=$(python3 -c "print('The scheduler executes rendered goal files rather than the manifest, and the reason it matters is stated right here past the two-hundred character mark that used to cut recall output off mid-sentence. ' * 3)")
+  len=${#long_text}
+  [ "$len" -gt 200 ]
+
+  results_json=$(python3 -c "import json,sys; print(json.dumps([{'type':'world','text': sys.argv[1]}]))" "$long_text")
+  start_stub "$results_json"
+  run python3 "$CAPTURE" recall "what did we establish about the scheduler"
+  stop_stub
+
+  [ "$status" -eq 0 ]
+  tail_fragment="${long_text: -40}"
+  run grep -qF "$tail_fragment" <<< "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "recall's printed line is at least as long as the full source memory" {
+  # PROP-010. The old [:200] slice printed a line whose length was capped
+  # at 200 regardless of the source. Asserting the printed line is at
+  # least as long as a 500-char source (not asserting "500" or "200"
+  # directly, per GC-2) catches that regression without pinning a magic
+  # number.
+  long_text=$(python3 -c "print('x' * 500)")
+  results_json=$(python3 -c "import json,sys; print(json.dumps([{'type':'world','text': sys.argv[1]}]))" "$long_text")
+  start_stub "$results_json"
+  run python3 "$CAPTURE" recall "what did we establish about the scheduler"
+  stop_stub
+
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/recall_out.txt"
+  run python3 -c "
+import sys
+with open(sys.argv[1]) as f:
+    lines = f.read().splitlines()
+memory_lines = [l for l in lines if l.strip().startswith('[world]')]
+assert memory_lines, f'no rendered memory line found in output: {lines}'
+assert len(memory_lines[0]) >= 500, f'printed line shorter than the full source memory: {len(memory_lines[0])}'
+" "$BATS_TEST_TMPDIR/recall_out.txt"
+  [ "$status" -eq 0 ]
+}
+
 # A local stub standing in for the memory backend, so the success path can
-# be exercised without a live server.
+# be exercised without a live server. $1 (optional): JSON body to serve for
+# a POST to a path containing "/recall" — defaults to the plain capture-op
+# response every other test in this file relies on.
 start_stub() {
+  if [ "$#" -gt 0 ]; then
+    STUB_RECALL_RESULTS="$1"
+  else
+    STUB_RECALL_RESULTS='[]'
+  fi
   STUB_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
-  python3 - "$STUB_PORT" > "$BATS_TEST_TMPDIR/stub.log" 2>&1 <<'PY' &
+  python3 - "$STUB_PORT" "$STUB_RECALL_RESULTS" > "$BATS_TEST_TMPDIR/stub.log" 2>&1 <<'PY' &
 import sys, json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -137,7 +188,10 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         self.rfile.read(n)
-        body = json.dumps({"success": True, "items_count": 1}).encode()
+        if "/recall" in self.path:
+            body = json.dumps({"results": json.loads(sys.argv[2])}).encode()
+        else:
+            body = json.dumps({"success": True, "items_count": 1}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

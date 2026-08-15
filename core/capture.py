@@ -357,7 +357,7 @@ def cmd_recall(args: list[str], cfg: dict):
     results = res.get("results", [])
     print(f"{len(results)} result(s):")
     for r in results:
-        print(f"  [{r.get('type')}] {r.get('text','')[:200]}")
+        print(f"  [{r.get('type')}] {r.get('text','')}")
 
 
 def cmd_retain(args: list[str], cfg: dict):
