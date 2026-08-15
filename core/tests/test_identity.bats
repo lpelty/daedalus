@@ -52,31 +52,41 @@ setup() {
 #
 # PREMISE — read this before widening or narrowing the scan.
 #
-# This guard protects one thing: content reaching a *public* remote. It is
-# scoped to the distribution files (core/, CLAUDE.md, SOUL.md, README.md,
-# config.example.yaml) because those are the files that travel there.
+# This guard protects one thing: content reaching a *public* remote. The scan
+# covers every tracked path that ships as part of the distribution:
 #
-# It is deliberately NOT scoped to "every tracked file". That was the original
-# scope, and it rested on an assumption that was true only at a development
-# site: "this repo's only remote is public GitHub, so anything tracked is
-# anything published." That assumption is not universal. A deployment may set
-# origin to an internal host, keep the public remote as a fetch-only upstream
-# with its push URL disabled, and track its vault/ inside the repo. Under that
-# topology a whole-tree scan fails permanently and unavoidably — a knowledge
-# base document about a deployment cannot avoid naming that deployment, and a
-# skill that maintains deployment-specific things must name them. A guard that
-# is permanently red protects nothing; it trains its operator to ignore it.
+#   core/                 the scripts and their tests
+#   CLAUDE.md, SOUL.md    the loaded identity files
+#   README.md             operator documentation
+#   config.example.yaml   the shipped config template
+#   .claude/              settings.json and the shipped skills
 #
-# vault/ and .claude/ are excluded because CLAUDE.md already defines both as
-# per-deployment work product, not distribution. Their contents are expected
-# to name the local environment.
+# .claude/ IS scanned, and that inclusion is load-bearing: its tracked
+# contents — the settings file and the skills under .claude/skills/ — are
+# committed and travel to the remote exactly like core/ does. Anything there
+# publishes. (.claude/settings.local.json does NOT publish: it is gitignored,
+# so `git ls-files` never reports it and the scan never reads it. That is why
+# the scan is driven by git rather than by a filesystem walk.)
+#
+# vault/ is the ONE exclusion, and only vault/. A deployment may track its
+# vault inside this repo, and a knowledge-base document about a deployment
+# cannot avoid naming that deployment. Scanning it would make this guard
+# permanently red, and a guard that is always red protects nothing — it trains
+# its operator to ignore it. CLAUDE.md already defines vault/ as per-deployment
+# work product rather than distribution.
+#
+# The scan is deliberately NOT a whole-tree scan, for that one reason alone.
+# Every other tracked path is in scope, and paths come from `git ls-files` over
+# the prefixes above, so the scan follows the repo as files are added or
+# renamed rather than tracking a hand-maintained list. A NEW top-level path
+# that publishes would still need adding here.
 #
 # CONSEQUENCE: on a deployment whose vault is tracked in the repo, the thing
-# keeping local content off the public remote is a *config setting* (the
-# disabled push URL), not this test. No test currently verifies that setting
-# stays disabled. If you re-enable a public push URL on such a deployment, or
-# move per-deployment content into a distribution path, this guard will not
-# catch it — that is what you are invalidating.
+# keeping vault content off the public remote is a *config setting* (a disabled
+# push URL), not this test. No test verifies that setting stays disabled. If
+# you re-enable a public push URL on such a deployment, or move per-deployment
+# content out of vault/ into a distribution path, this guard will not catch the
+# first case — that is what you are invalidating.
 @test "no distribution file leaks personal-identity or environment facts" {
   cd "$DAEDALUS_HOME"
   self="core/tests/test_identity.bats"
@@ -90,9 +100,9 @@ setup() {
   # "billing", "billion", and "William", none of which are identity leaks,
   # so it can't share the unbounded pattern the other tokens use safely.
   #
-  # Paths come from `git ls-files` over the distribution prefixes, so the scan
-  # follows the repo as files are added or renamed rather than tracking a
-  # hand-maintained list.
+  # Paths come from `git ls-files` over the distribution prefixes (see PREMISE
+  # above), so the scan follows the repo as files are added or renamed rather
+  # than tracking a hand-maintained list.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ "$f" = "$self" ] && continue
@@ -103,7 +113,7 @@ setup() {
       offenders="$offenders $f(bill)"
     fi
   done <<EOF
-$(git ls-files -- core CLAUDE.md SOUL.md README.md config.example.yaml)
+$(git ls-files -- core .claude CLAUDE.md SOUL.md README.md config.example.yaml)
 EOF
 
   [ -z "$offenders" ] || { echo "personal-identity leak in:$offenders"; return 1; }
@@ -151,16 +161,46 @@ _run_scan_in_fixture() {
   [ "$status" -ne 0 ]
 }
 
-@test "wide scan ignores deployment-specific words in per-deployment paths" {
+@test "wide scan ignores deployment-specific words in the tracked vault" {
   _make_fixture_repo
   # A deployment whose vault is tracked in the repo: a knowledge-base document
-  # about that deployment necessarily names it, and a local settings file
-  # necessarily names the local layout. Neither travels to a public remote.
-  mkdir -p "$fixture/vault/infrastructure" "$fixture/.claude"
+  # about that deployment necessarily names it. vault/ does not travel to a
+  # public remote, and is the scan's single exclusion.
+  mkdir -p "$fixture/vault/infrastructure"
   printf 'This document describes the fleet running on this host.\n' \
     > "$fixture/vault/infrastructure/deployment.md"
-  printf '{"note": "/Users/someone/harness"}\n' > "$fixture/.claude/settings.local.json"
   git -C "$fixture" add -Af
+
+  run _run_scan_in_fixture
+  [ "$status" -eq 0 ]
+}
+
+@test "wide scan catches a leak in a .claude file, which publishes" {
+  # .claude/ is tracked and travels to the remote exactly like core/ does:
+  # settings.json and everything under .claude/skills/ publish. A scan that
+  # skipped it would leave the shipped skills unguarded — which is precisely
+  # the gap a narrower scope opened.
+  _make_fixture_repo
+  mkdir -p "$fixture/.claude/skills/example"
+  printf '# note about running the fleet on this host\n' \
+    > "$fixture/.claude/skills/example/SKILL.md"
+  git -C "$fixture" add -A
+
+  run _run_scan_in_fixture
+  [ "$status" -ne 0 ]
+}
+
+@test "wide scan does not read a gitignored local settings file" {
+  # .claude/settings.local.json holds per-deployment values (and on a real
+  # deployment, a live credential). It is gitignored, so `git ls-files` never
+  # reports it and the scan never opens it. Driving the scan from git rather
+  # than a filesystem walk is what makes that true — this pins it.
+  _make_fixture_repo
+  mkdir -p "$fixture/.claude"
+  printf '.claude/settings.local.json\n' > "$fixture/.gitignore"
+  printf '{"note": "/Users/someone/harness for larry"}\n' \
+    > "$fixture/.claude/settings.local.json"
+  git -C "$fixture" add -A
 
   run _run_scan_in_fixture
   [ "$status" -eq 0 ]
