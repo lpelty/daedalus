@@ -25,23 +25,122 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-@test "every builder path is denied for both Write and Edit" {
-  cd "$DAEDALUS_HOME"
-  for path in './core/**' './CLAUDE.md' './SOUL.md' './.claude/settings.json' './config.example.yaml' './README.md'; do
-    for verb in Write Edit; do
-      run grep -qF "\"$verb($path)\"" .claude/settings.json
-      [ "$status" -eq 0 ] || {
-        echo "missing deny rule: $verb($path)"
-        return 1
-      }
-    done
-  done
+# PROTECTED PATHS — the single source of truth for the tests below.
+#
+# One representative concrete file per protected area, NOT the glob text of the
+# deny rules. The tests ask "is this file covered by some Edit rule?", which is
+# a question about the protection actually in force; asserting the glob text
+# would only restate the config back to itself, and would break on a rule that
+# was legitimately broadened or narrowed while still covering the file.
+#
+# Deliberately not a count of anything. Adding a protected area means adding a
+# line here; no test needs its total edited to stay green.
+_protected_paths() {
+  cat <<'EOF'
+./core/capture.py
+./CLAUDE.md
+./SOUL.md
+./.claude/settings.json
+./.claude/settings.local.json
+./config.example.yaml
+./README.md
+EOF
 }
 
-@test "the deny list is exactly the 14 expected rules — no more, no fewer" {
+# Reports which of the given paths are NOT covered by any Edit(...) deny rule
+# in the settings file named as the first argument. Coverage is glob matching
+# against the rule's path, not string equality — a broader rule that still
+# covers the file counts, which is what "protected" actually means.
+_uncovered_by_edit_rules() {
+  settings="$1"
+  shift
+  python3 - "$settings" "$@" <<'PY'
+import fnmatch, json, os, sys
+
+settings, paths = sys.argv[1], sys.argv[2:]
+if not os.path.exists(settings):
+    print(" ".join(paths))
+    sys.exit(0)
+
+with open(settings) as fh:
+    deny = json.load(fh).get("permissions", {}).get("deny", [])
+
+globs = [r[len("Edit("):-1] for r in deny
+         if r.startswith("Edit(") and r.endswith(")")]
+
+uncovered = [p for p in paths
+             if not any(fnmatch.fnmatch(p, g) or fnmatch.fnmatch(p.lstrip("./"), g.lstrip("./"))
+                        for g in globs)]
+print(" ".join(uncovered))
+PY
+}
+
+# Reports every deny rule that names the Write tool, across both settings files.
+#
+# WHY THIS IS AN ASSERTION AND NOT AN OVERSIGHT — read before "fixing" the deny
+# list by pairing each Edit rule with a Write one:
+#
+#   Edit(path) deny rules cover ALL built-in file-editing tools — Edit, Write,
+#   NotebookEdit, the legacy multi-edit tool — plus file-touching commands the
+#   agent recognizes in a shell call. One Edit rule is the whole protection.
+#
+#   Write(path) rules in a deny list are ACCEPTED BUT NEVER CONSULTED. They are
+#   inert for file protection and are the sole cause of the startup warning
+#   "... is not matched by file permission checks — only Edit(path) rules are."
+#
+# So adding a Write rule back reintroduces the warning without adding one byte
+# of protection. The suite previously demanded those rules and passed happily
+# while half the rules it required were doing nothing — it was pinning the bug
+# in place. This function is what stops that from recurring.
+_write_rules_in() {
+  python3 - "$@" <<'PY'
+import json, os, sys
+
+found = []
+for settings in sys.argv[1:]:
+    if not os.path.exists(settings):
+        continue
+    with open(settings) as fh:
+        deny = json.load(fh).get("permissions", {}).get("deny", [])
+    found += ["%s: %s" % (settings, r) for r in deny if r.startswith("Write(")]
+print("; ".join(found))
+PY
+}
+
+# Glob matching does not require a file to exist, so a protected path that was
+# renamed or deleted would keep "passing" coverage forever while guarding
+# nothing. This pins the representative paths to real files, which is what makes
+# the coverage test above meaningful rather than self-satisfying.
+@test "every protected path names a file that exists" {
   cd "$DAEDALUS_HOME"
-  run bash -c "grep -cE '\"(Write|Edit)\\(' .claude/settings.json"
-  [ "$output" = "14" ]
+  missing=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    # settings.local.json is per-deployment and absent on a fresh clone; its
+    # coverage still matters, so it is exempt from existence but not from
+    # the Edit-rule check.
+    [ "$p" = "./.claude/settings.local.json" ] && continue
+    [ -e "$p" ] || missing="$missing $p"
+  done <<EOF
+$(_protected_paths)
+EOF
+  [ -z "$missing" ] || { echo "protected path does not exist:$missing"; return 1; }
+}
+
+@test "every protected path is covered by an Edit deny rule" {
+  cd "$DAEDALUS_HOME"
+  # shellcheck disable=SC2046
+  uncovered=$(_uncovered_by_edit_rules .claude/settings.json $(_protected_paths))
+  [ -z "$uncovered" ] || { echo "no Edit deny rule covers:$uncovered"; return 1; }
+}
+
+@test "no deny rule names the Write tool, in either settings file" {
+  cd "$DAEDALUS_HOME"
+  offenders=$(_write_rules_in .claude/settings.json .claude/settings.local.json)
+  [ -z "$offenders" ] || {
+    echo "inert Write deny rule present (see the comment above _write_rules_in): $offenders"
+    return 1
+  }
 }
 
 @test "the deny list does not block .claude/skills/**" {
@@ -77,13 +176,12 @@ setup() {
   # is protected alongside the tracked settings file. The broad ./.claude/**
   # rule used to cover it incidentally; narrowing that rule to unblock skills
   # removed the coverage, and this test pins it back.
-  for f in settings.json settings.local.json; do
-    for verb in Write Edit; do
-      run grep -qF "\"$verb(./.claude/$f)\"" .claude/settings.json
-      [ "$status" -eq 0 ] || {
-        echo "missing deny rule: $verb(./.claude/$f)"
-        return 1
-      }
-    done
-  done
+  #
+  # Both files are already in _protected_paths, so the coverage test above would
+  # catch a regression here too. This test is kept separate for its failure
+  # signal: it names the permission surface specifically, which is the
+  # highest-stakes entry in that list and the one whose loss is self-amplifying.
+  uncovered=$(_uncovered_by_edit_rules .claude/settings.json \
+    ./.claude/settings.json ./.claude/settings.local.json)
+  [ -z "$uncovered" ] || { echo "permission surface unprotected:$uncovered"; return 1; }
 }
