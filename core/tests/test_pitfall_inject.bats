@@ -159,3 +159,168 @@ EOF
   run python3 "$SCRIPT" --match-path "relative/x.bats"
   [ "$output" = "outside" ]
 }
+
+@test "warn: denied with trailer, retry allowed and injected, new session denied again" {
+  use_fixture aa-bad-timeout
+  run hook "$(bash_call 'timeout 30 sleep 1')"
+  [ "$status" -eq 0 ]
+  denied
+  [ "$(count 'The timeout command is absent on this platform')" -gt 0 ]
+  [ "$(count 'One-time warning for this session')" -eq 1 ]
+  run hook "$(bash_call 'timeout 30 sleep 1')"
+  [ "$(count '"permissionDecision"')" -eq 0 ]
+  [ "$(count '"additionalContext"')" -eq 1 ]
+  [ "$(count 'Pitfall: The timeout command is absent on this platform')" -eq 1 ]
+  run hook "$(bash_call 'timeout 30 sleep 1' s2)"
+  denied
+}
+
+@test "precision with control: connect-timeout allowed; -k form and \$N form denied" {
+  use_fixture aa-bad-timeout
+  run hook "$(bash_call 'curl --connect-timeout 5 http://x')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run hook "$(bash_call 'timeout -k 5 10 x')"
+  denied
+  run hook "$(bash_call 'timeout $N x' s3)"
+  denied
+}
+
+@test "block ignores state: seeded injected, seeded warned, unwritable state" {
+  cat > "$DAEDALUS_HOME/vault/pitfalls/ee-block.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  bash:
+    - 'rm -rf /'
+enforce: block
+---
+# Never remove the root
+
+Body.
+EOF
+  f="$DAEDALUS_HOME/vault/pitfalls/ee-block.md"
+  for stage in injected warned; do
+    printf '{"s1:main": {"%s": {"stage": "%s", "touched": "2026-01-01T00:00:00"}}}' "$f" "$stage" \
+      > "$DAEDALUS_HOME/state/pitfall-seen.json"
+    run hook "$(bash_call 'rm -rf /')"
+    denied
+    [ "$(count 'Never remove the root')" -gt 0 ]
+  done
+  chmod 500 "$DAEDALUS_HOME/state"
+  run hook "$(bash_call 'rm -rf /')"
+  chmod 700 "$DAEDALUS_HOME/state"
+  denied
+}
+
+@test "warn without state degrades to a visible inject, never silence, never a second deny" {
+  use_fixture aa-bad-timeout
+  rm -rf "$DAEDALUS_HOME/state"
+  touch "$DAEDALUS_HOME/state"          # a file where the directory should be: mkdir -p fails
+  run hook "$(bash_call 'timeout 30 sleep 1')"
+  [ "$status" -eq 0 ]
+  [ "$(count '"permissionDecision"')" -eq 0 ]
+  [ "$(count 'Pitfall: The timeout command is absent')" -eq 1 ]
+  [ "$(count 'warn degraded: state/ unwritable')" -eq 1 ]
+  rm -f "$DAEDALUS_HOME/state"
+}
+
+@test "path edit fires the bats pitfall at root and nested; outside both roots is silent (with control)" {
+  use_fixture bb-bats-brackets
+  run hook "$(edit_call "$TARGET/x.bats")"
+  denied
+  run hook "$(edit_call "$TARGET/sub/deep/x.bats" s2)"
+  denied
+  run hook "$(edit_call "$BATS_TEST_TMPDIR/elsewhere/x.bats" s3)"
+  [ -z "$output" ]
+  run hook "$(edit_call "$TARGET/x.bats" s3)"
+  denied
+}
+
+@test "subagent isolation: seen for main still fires for a subagent" {
+  use_fixture aa-bad-timeout
+  run hook "$(bash_call 'timeout 30 x')"
+  run hook "$(bash_call 'timeout 30 x')"
+  [ "$(count '"permissionDecision"')" -eq 0 ]
+  run hook "$(bash_call 'timeout 30 x' s1 sub-1)"
+  denied
+}
+
+@test "cap and order: five injects yield exactly the first three by filename" {
+  local n
+  for n in 1 2 3 4 5; do
+    cat > "$DAEDALUS_HOME/vault/pitfalls/p$n.md" <<EOF
+---
+type: pitfall
+applies-to:
+  bash:
+    - 'echo'
+---
+# Pitfall number $n
+
+Body $n.
+EOF
+  done
+  run hook "$(bash_call 'echo hi')"
+  [ "$(count 'Pitfall: Pitfall number 1')" -eq 1 ]
+  [ "$(count 'Pitfall: Pitfall number 2')" -eq 1 ]
+  [ "$(count 'Pitfall: Pitfall number 3')" -eq 1 ]
+  [ "$(count 'Pitfall number 4')" -eq 0 ]
+  [ "$(count 'Pitfall number 5')" -eq 0 ]
+  run hook "$(bash_call 'echo hi')"
+  [ "$(count 'Pitfall number 4')" -eq 1 ]
+  [ "$(count 'Pitfall number 5')" -eq 1 ]
+}
+
+@test "two warns on one call: one deny naming both; retry injects both" {
+  use_fixture aa-bad-timeout
+  cat > "$DAEDALUS_HOME/vault/pitfalls/ff-second-warn.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  bash:
+    - 'sleep'
+enforce: warn
+---
+# Sleeping in a hook stalls every call
+
+Body.
+EOF
+  run hook "$(bash_call 'timeout 30 sleep 1')"
+  denied
+  [ "$(count '"permissionDecision": "deny"')" -eq 1 ]
+  [ "$(count 'The timeout command is absent')" -gt 0 ]
+  [ "$(count 'Sleeping in a hook')" -gt 0 ]
+  run hook "$(bash_call 'timeout 30 sleep 1')"
+  [ "$(count '"permissionDecision"')" -eq 0 ]
+  [ "$(count 'Pitfall: The timeout command')" -eq 1 ]
+  [ "$(count 'Pitfall: Sleeping in a hook')" -eq 1 ]
+}
+
+@test "bad input with controls: malformed stdin silent; no session_id still blocks; broken sibling skipped" {
+  run hook 'not json'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  cat > "$DAEDALUS_HOME/vault/pitfalls/ee-block.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  bash:
+    - 'rm -rf /'
+enforce: block
+---
+# Never remove the root
+
+Body.
+EOF
+  run hook '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+  denied
+  printf -- '---\napplies-to:\n  bash:\n    - "[unclosed"\nenforce: block\n---\n# Broken\n\nB.\n' \
+    > "$DAEDALUS_HOME/vault/pitfalls/ab-broken.md"
+  use_fixture cc-flow-list
+  printf -- '---\nenforce: sometimes\napplies-to:\n  bash:\n    - "rm"\n---\n# Bad enforce\n\nB.\n' \
+    > "$DAEDALUS_HOME/vault/pitfalls/ac-bad-enforce.md"
+  run hook "$(bash_call 'rm -rf /' s9)"
+  denied
+  [ "$(count 'Never remove the root')" -gt 0 ]
+}

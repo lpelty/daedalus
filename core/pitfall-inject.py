@@ -263,6 +263,240 @@ def rel_path(file_path: str, target: Optional[Path], root: Path) -> Optional[str
     return None
 
 
+# --- Loading and matching ---------------------------------------------------
+
+def load_pitfalls(root: Path) -> Tuple[List[dict], List[Tuple[str, str, str]]]:
+    """All parseable pitfalls in filename order, plus the skipped ones as
+    (file, reason, raw_enforce) — raw_enforce is what the file *says* even
+    though it failed to parse, so a dark block/warn can be announced."""
+    good: List[dict] = []
+    skipped: List[Tuple[str, str, str]] = []
+    d = root / "vault" / "pitfalls"
+    if not d.is_dir():
+        return good, skipped
+    for f in sorted(d.glob("*.md")):
+        if f.name.startswith("_"):
+            continue
+        try:
+            good.append(parse_pitfall(f))
+        except (Unparseable, OSError, UnicodeDecodeError) as e:
+            raw = ""
+            try:
+                m = re.search(r"^enforce:\s*(block|warn)\b", f.read_text(errors="replace"), re.M)
+                raw = m.group(1) if m else ""
+            except OSError:
+                pass
+            skipped.append((str(f), str(e), raw))
+    return good, skipped
+
+
+class _Stall(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise _Stall()
+
+
+def search(pattern: str, text: str) -> Optional[bool]:
+    """re.search under a one-second alarm. True/False on a decision; None if
+    the pattern would not compile, is over-long, or stalled."""
+    if len(pattern) > PATTERN_MAX_LEN:
+        return None
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return None
+    signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(PATTERN_SECS)
+    try:
+        return rx.search(text) is not None
+    except _Stall:
+        return None
+    finally:
+        signal.alarm(0)
+
+
+def match_pitfall(p: dict, tool: str, tool_input: dict, rel: Optional[str]) -> Tuple[bool, bool]:
+    """(matched, stalled). Bash patterns run against the command; path globs
+    against the relative path (already resolved by the caller)."""
+    matched = stalled = False
+    if tool == "Bash":
+        cmd = str(tool_input.get("command", ""))
+        for pat in p["bash"]:
+            r = search(pat, cmd)
+            if r is None and len(pat) <= PATTERN_MAX_LEN:
+                try:
+                    re.compile(pat)
+                    stalled = True          # compiled, yet returned None: the alarm fired
+                except re.error:
+                    pass
+            elif r:
+                matched = True
+    elif rel is not None:
+        for rx in p["path_regex"]:
+            if re.fullmatch(rx, rel):
+                matched = True
+    return matched, stalled
+
+
+# --- Seen-state -------------------------------------------------------------
+
+def _seen_path(root: Path) -> Path:
+    return root / "state" / "pitfall-seen.json"
+
+
+def load_seen(root: Path) -> dict:
+    try:
+        data = json.loads(_seen_path(root).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_seen(root: Path, data: dict) -> bool:
+    """Atomic write with pruning. False when state cannot be written."""
+    cutoff = time.time() - PRUNE_DAYS * 86400
+    for key in list(data):
+        entries = data[key]
+        if not isinstance(entries, dict):
+            del data[key]
+            continue
+        for f in list(entries):
+            try:
+                t = time.mktime(time.strptime(entries[f].get("touched", ""), "%Y-%m-%dT%H:%M:%S"))
+            except (ValueError, AttributeError, OverflowError):
+                t = 0
+            if t < cutoff:
+                del entries[f]
+        if not entries:
+            del data[key]
+    try:
+        d = _seen_path(root).parent
+        d.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".seen-", suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, str(_seen_path(root)))
+        return True
+    except OSError:
+        return False
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _sanitize(s: object) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(s or "")) or "none"
+
+
+# --- Rendering --------------------------------------------------------------
+
+def _reason(p: dict) -> str:
+    return "%s\n\n%s\n\n(full text: %s)" % (p["title"], p["first_paragraph"], p["file"])
+
+
+def _context_block(p: dict) -> str:
+    return "## Pitfall: %s\n%s\n(full text: %s)" % (p["title"], p["first_paragraph"], p["file"])
+
+
+def _emit(obj: dict) -> None:
+    signal.alarm(0)
+    sys.stdout.write(json.dumps(obj))
+    sys.stdout.flush()
+
+
+def _deny(reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def _context(text: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "additionalContext": text[:MAX_CHARS]}}
+
+
+# --- The hook ---------------------------------------------------------------
+
+def run_hook(payload: dict, root: Path) -> Optional[dict]:
+    tool = payload.get("tool_name")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool, str) or not isinstance(tool_input, dict):
+        return None
+    pitfalls, skipped = load_pitfalls(root)
+    rel = None
+    if tool in ("Edit", "Write", "NotebookEdit"):
+        fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        rel = rel_path(str(fp), target_root(root), root)
+
+    announce: List[str] = []
+    for f, reason, raw in skipped:
+        if raw:
+            announce.append("Pitfall %s is unparseable (%s) and would %s; fix its frontmatter." % (f, reason, raw))
+
+    # 1. block — no state involved.
+    for p in [q for q in pitfalls if q["enforce"] == "block"]:
+        matched, stalled = match_pitfall(p, tool, tool_input, rel)
+        if stalled:
+            announce.append("Pitfall %s has a pattern that stalled and was skipped." % p["file"])
+        if matched:
+            reason = _reason(p)
+            if announce:
+                reason += "\n\n" + "\n".join("Note: " + a for a in announce)
+            return _deny(reason)
+
+    # 2. warn / inject candidates.
+    warns: List[dict] = []
+    injects: List[dict] = []
+    for p in [q for q in pitfalls if q["enforce"] in ("warn", "inject")]:
+        matched, stalled = match_pitfall(p, tool, tool_input, rel)
+        if stalled:
+            announce.append("Pitfall %s has a pattern that stalled and was skipped." % p["file"])
+        if matched:
+            (warns if p["enforce"] == "warn" else injects).append(p)
+    if not warns and not injects and not announce:
+        return None
+
+    key = "%s:%s" % (_sanitize(payload.get("session_id")), _sanitize(payload.get("agent_id") or "main"))
+    seen = load_seen(root)
+    mine = seen.setdefault(key, {})
+    if not isinstance(mine, dict):
+        mine = seen[key] = {}
+
+    degraded = False
+    fresh_warns = [p for p in warns if p["file"] not in mine]
+    if fresh_warns:
+        for p in fresh_warns:
+            mine[p["file"]] = {"stage": "warned", "touched": _now()}
+        if save_seen(root, seen):
+            reason = "\n\n---\n\n".join(_reason(p) for p in fresh_warns) + "\n\n" + WARN_TRAILER
+            if announce:
+                reason += "\n\n" + "\n".join("Note: " + a for a in announce)
+            return _deny(reason)
+        degraded = True            # cannot record the warn: fall through as inject, visibly
+        for p in fresh_warns:
+            mine.pop(p["file"], None)
+
+    pending = [p for p in warns + injects if mine.get(p["file"], {}).get("stage") != "injected"]
+    chosen = pending[:MAX_INJECT]
+    blocks: List[str] = []
+    ann_key = "__announced__"
+    already = set(mine.get(ann_key, {}).get("items", [])) if isinstance(mine.get(ann_key), dict) else set()
+    new_ann = [a for a in announce if a not in already]
+    blocks.extend(new_ann)
+    for p in chosen:
+        blocks.append(_context_block(p) + (" (warn degraded: state/ unwritable)" if degraded and p in warns else ""))
+        mine[p["file"]] = {"stage": "injected", "touched": _now()}
+    if new_ann:
+        mine[ann_key] = {"stage": "injected", "touched": _now(), "items": sorted(already | set(new_ann))}
+    if not blocks:
+        return None
+    save_seen(root, seen)          # failure here is the enhancement half: emit anyway
+    return _context("\n\n".join(blocks))
+
+
 # --- Entry points -----------------------------------------------------------
 
 def _cmd_parse(arg: str) -> int:
@@ -292,6 +526,19 @@ def main(argv: List[str]) -> int:
         rel = rel_path(argv[2], target_root(root), root)
         print(rel if rel is not None else "outside")
         return 0
+    # Hook mode.
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            return 0
+    except (ValueError, OSError):
+        return 0
+    try:
+        out = run_hook(payload, daedalus_root())
+    except Exception:            # the enhancement half: never break a session
+        return 0
+    if out is not None:
+        _emit(out)
     return 0
 
 
