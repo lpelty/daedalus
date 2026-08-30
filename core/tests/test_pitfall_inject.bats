@@ -419,3 +419,44 @@ EOF
   [ "$(count '"additionalContext"')" -eq 1 ]
   [ "$(count 'cc-flow-list.md')" -gt 0 ]
 }
+
+@test "stall isolation: a pathological block pattern before a matching one still denies, and is announced" {
+  printf -- '---\napplies-to:\n  bash:\n    - "(a+)+$"\nenforce: block\n---\n# Pathological\n\nB.\n' \
+    > "$DAEDALUS_HOME/vault/pitfalls/aa-patho.md"
+  printf -- '---\napplies-to:\n  bash:\n    - "rm -rf"\nenforce: block\n---\n# Real block\n\nB.\n' \
+    > "$DAEDALUS_HOME/vault/pitfalls/zz-real.md"
+  start=$(date +%s)
+  run hook "$(bash_call 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab rm -rf x')"
+  end=$(date +%s)
+  denied
+  [ "$(count 'Real block')" -gt 0 ]
+  [ $((end - start)) -lt 3 ]
+  # By the Task 3 ruling, an announcement rides the SAME call's deny reason —
+  # there is no next call for the stall to appear on.
+  [ "$(count 'has a pattern that stalled')" -eq 1 ]
+}
+
+@test "dark block announced once per session key" {
+  use_fixture cc-flow-list
+  run hook "$(bash_call 'echo fine')"
+  [ "$(count 'is unparseable')" -eq 1 ]
+  [ "$(count 'would block')" -eq 1 ]
+  run hook "$(bash_call 'echo fine')"
+  [ "$(count 'is unparseable')" -eq 0 ]
+  run hook "$(bash_call 'echo fine' s2)"
+  [ "$(count 'is unparseable')" -eq 1 ]
+}
+
+@test "PreCompact clears the session's seen-state so pitfalls fire again" {
+  use_fixture aa-bad-timeout
+  run hook "$(bash_call 'timeout 30 x')"
+  run hook "$(bash_call 'timeout 30 x')"
+  [ "$(count 'Pitfall: The timeout command')" -eq 1 ]
+  run hook "$(bash_call 'timeout 30 x')"
+  [ -z "$output" ]
+  run hook '{"hook_event_name":"PreCompact","session_id":"s1","trigger":"auto"}'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run hook "$(bash_call 'timeout 30 x')"
+  denied
+}

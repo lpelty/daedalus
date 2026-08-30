@@ -548,6 +548,17 @@ def main(argv: List[str]) -> int:
             return 0
     except (ValueError, OSError):
         return 0
+    if payload.get("hook_event_name") == "PreCompact":
+        try:
+            root = daedalus_root()
+            seen = load_seen(root)
+            sid = _sanitize(payload.get("session_id"))
+            for key in [k for k in seen if k.startswith(sid + ":")]:
+                del seen[key]
+            save_seen(root, seen)
+        except Exception:
+            pass
+        return 0
     try:
         out = run_hook(payload, daedalus_root())
     except Exception:            # the enhancement half: never break a session
