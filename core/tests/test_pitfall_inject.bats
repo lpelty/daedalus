@@ -102,3 +102,60 @@ denied() {      # denied — $output is a deny decision
   [ "$(count 'enforce')" -gt 0 ]
   [ "$(count '"unparseable"')" -eq 1 ]
 }
+
+@test "glob table: positives and negatives per row" {
+  cat > "$DAEDALUS_HOME/vault/pitfalls/gg-globs.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  path:
+    - '**/*.bats'
+    - '**/hooks/**'
+    - 'a/**/b'
+    - 'settings*.json'
+    - 'x?y'
+---
+# Globs
+
+Body.
+EOF
+  run python3 "$SCRIPT" --parse "$DAEDALUS_HOME/vault/pitfalls/gg-globs.md"
+  [ "$status" -eq 0 ]
+  [ "$(count '"unparseable"')" -eq 0 ]
+  # Positives, then negatives, through --match-glob <glob> <relpath>.
+  for pair in '**/*.bats|x.bats' '**/*.bats|a/b/x.bats' '**/hooks/**|x/hooks' \
+              '**/hooks/**|x/hooks/capture.py' 'a/**/b|a/b' 'a/**/b|a/x/y/b' \
+              'settings*.json|settings.json' 'settings*.json|settings.local.json' 'x?y|xzy'; do
+    run python3 "$SCRIPT" --match-glob "${pair%%|*}" "${pair#*|}"
+    [ "$output" = "match" ]
+  done
+  for pair in '**/*.bats|x.batsx' '*.bats|a/x.bats' '**/hooks/**|x/hooksy' 'a/**/b|a/bb' \
+              'settings*.json|settingsXjson' 'x?y|x/y'; do
+    run python3 "$SCRIPT" --match-glob "${pair%%|*}" "${pair#*|}"
+    [ "$output" = "no match" ]
+  done
+}
+
+@test "glob table: brackets, braces, bare **, leading slash are unparseable and named" {
+  for g in '**/*.{py,sh}' 'a[bc]' 'a**b' '/abs/x' './rel/x'; do
+    run python3 "$SCRIPT" --match-glob "$g" "anything"
+    [ "$(count 'unparseable')" -eq 1 ]
+  done
+}
+
+@test "path relativity: target root from lib.sh target_path, resolved through symlinks" {
+  ln -s "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR/link"
+  export DAEDALUS_HOME="$BATS_TEST_TMPDIR/link"
+  # A lexically earlier directory under target/ must not win.
+  mkdir -p "$BATS_TEST_TMPDIR/link/target/aaa/.git"
+  run python3 "$SCRIPT" --match-path "$BATS_TEST_TMPDIR/link/target/thing/sub/x.bats"
+  [ "$output" = "sub/x.bats" ]
+  run python3 "$SCRIPT" --match-path "$TARGET/x.bats"
+  [ "$output" = "x.bats" ]
+  run python3 "$SCRIPT" --match-path "$BATS_TEST_TMPDIR/link/vault/hot.md"
+  [ "$output" = "vault/hot.md" ]
+  run python3 "$SCRIPT" --match-path "$BATS_TEST_TMPDIR/elsewhere/x.bats"
+  [ "$output" = "outside" ]
+  run python3 "$SCRIPT" --match-path "relative/x.bats"
+  [ "$output" = "outside" ]
+}

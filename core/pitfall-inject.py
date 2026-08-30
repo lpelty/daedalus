@@ -174,6 +174,7 @@ def parse_pitfall(path: Path) -> Dict[str, object]:
     fields, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     title, para = _title_and_paragraph(fields, body)
     applies = fields.get("applies-to") or {}
+    regexes = [glob_to_regex(g).pattern for g in applies.get("path", [])]
     return {
         "file": str(path),
         "title": title,
@@ -181,7 +182,85 @@ def parse_pitfall(path: Path) -> Dict[str, object]:
         "enforce": fields["enforce"],
         "bash": list(applies.get("bash", [])),
         "path": list(applies.get("path", [])),
+        "path_regex": regexes,
     }
+
+
+# --- Globs and paths --------------------------------------------------------
+
+def glob_to_regex(glob: str) -> "re.Pattern[str]":
+    """Translate the spec's glob dialect to a full-match regex.
+    `**/` = zero or more segments; trailing `/**` = optionally anything below;
+    `*` = within a segment (may be empty); `?` = one non-slash character;
+    everything else literal. Brackets, braces, a bare `**`, and a leading
+    `/` or `./` are outside the dialect and raise Unparseable."""
+    if glob.startswith(("/", "./")):
+        raise Unparseable("glob must be relative: %s" % glob)
+    if any(c in glob for c in "[]{}"):
+        raise Unparseable("glob uses [ ] or { }: %s" % glob)
+    out: List[str] = []
+    i = 0
+    n = len(glob)
+    while i < n:
+        if glob.startswith("**/", i) and (i == 0 or glob[i - 1] == "/"):
+            out.append("(?:[^/]+/)*")
+            i += 3
+        elif glob.startswith("/**", i) and i + 3 == n:
+            out.append("(?:/.*)?")
+            i += 3
+        elif glob.startswith("**", i):
+            raise Unparseable("bare ** inside a segment: %s" % glob)
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    return re.compile("".join(out))
+
+
+def daedalus_root() -> Path:
+    env = os.environ.get("DAEDALUS_HOME")
+    if env:
+        return Path(env).resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+def target_root(root: Path) -> Optional[Path]:
+    """The product's one source for the target checkout: lib.sh target_path."""
+    lib = root / "core" / "lib.sh"
+    if not lib.is_file():
+        return None
+    try:
+        r = subprocess.run(
+            ["bash", "-c", 'source "$1"; target_path', "_", str(lib)],
+            capture_output=True, text=True, timeout=3,
+            env=dict(os.environ, DAEDALUS_HOME=str(root)),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return Path(r.stdout.strip()).resolve()
+
+
+def rel_path(file_path: str, target: Optional[Path], root: Path) -> Optional[str]:
+    """Path relative to the target checkout if under it, else relative to the
+    Daedalus root, else None. Both sides resolved."""
+    if not file_path or not os.path.isabs(file_path):
+        return None
+    p = Path(file_path).resolve()
+    for base in (target, root):
+        if base is None:
+            continue
+        try:
+            return p.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return None
 
 
 # --- Entry points -----------------------------------------------------------
@@ -200,6 +279,19 @@ def _cmd_parse(arg: str) -> int:
 def main(argv: List[str]) -> int:
     if len(argv) >= 3 and argv[1] == "--parse":
         return _cmd_parse(argv[2])
+    if len(argv) >= 4 and argv[1] == "--match-glob":
+        try:
+            rx = glob_to_regex(argv[2])
+        except Unparseable as e:
+            print("unparseable: %s" % e)
+            return 0
+        print("match" if rx.fullmatch(argv[3]) else "no match")
+        return 0
+    if len(argv) >= 3 and argv[1] == "--match-path":
+        root = daedalus_root()
+        rel = rel_path(argv[2], target_root(root), root)
+        print(rel if rel is not None else "outside")
+        return 0
     return 0
 
 
