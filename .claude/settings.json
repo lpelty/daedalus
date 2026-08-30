@@ -9,5 +9,30 @@
       "Edit(./config.example.yaml)",
       "Edit(./README.md)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }

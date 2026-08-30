@@ -11,6 +11,7 @@ bash "$DAEDALUS_HOME/core/sync-target.sh" || die "target sync failed"
 
 log "phase 2/4: vault"
 bash "$DAEDALUS_HOME/core/sync-vault.sh" || die "vault sync failed"
+mkdir -p "$DAEDALUS_HOME/state" || die "could not create state/"
 
 log "phase 3/4: scaffold"
 if cfg target.scaffold >/dev/null 2>&1; then

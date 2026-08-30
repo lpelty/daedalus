@@ -512,6 +512,55 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
     return _context("\n\n".join(blocks))
 
 
+# --- Doctor -----------------------------------------------------------------
+
+def check(root: Path) -> List[str]:
+    lines: List[str] = []
+    good, skipped = load_pitfalls(root)
+    cannot: List[Tuple[str, str]] = []
+    for p in good:
+        if not p["bash"] and not p["path"]:
+            cannot.append((p["file"], "no applies-to" if "applies-to" not in _raw_fields(p["file"]) else "applies-to has no patterns"))
+            continue
+        bad = [pat for pat in p["bash"] if search(pat, "") is None and _compile_error(pat)]
+        if bad:
+            cannot.append((p["file"], "uncompilable or over-long pattern: %s" % bad[0]))
+    lines.append("pitfalls: %d total, %d cannot fire, %d unparseable" % (len(good) + len(skipped), len(cannot), len(skipped)))
+    for f, why in cannot:
+        lines.append("  %s: %s" % (Path(f).name, why))
+    for f, why, _raw in skipped:
+        lines.append("  %s: %s" % (Path(f).name, why))
+    tp = target_root(root)
+    if tp is None and (root / "core" / "lib.sh").is_file():
+        lines.append("  target root: lib.sh target_path did not resolve; path patterns cannot fire")
+    probe = root / "state"
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(probe), prefix=".probe-")
+        os.close(fd)
+        os.unlink(tmp)
+    except OSError:
+        lines.append("  state/ unwritable — warn degrades to inject")
+    return lines
+
+
+def _raw_fields(file: str) -> str:
+    try:
+        return Path(file).read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _compile_error(pat: str) -> bool:
+    if len(pat) > PATTERN_MAX_LEN:
+        return True
+    try:
+        re.compile(pat)
+        return False
+    except re.error:
+        return True
+
+
 # --- Entry points -----------------------------------------------------------
 
 def _cmd_parse(arg: str) -> int:
@@ -540,6 +589,10 @@ def main(argv: List[str]) -> int:
         root = daedalus_root()
         rel = rel_path(argv[2], target_root(root), root)
         print(rel if rel is not None else "outside")
+        return 0
+    if len(argv) >= 2 and argv[1] == "--check":
+        for line in check(daedalus_root()):
+            print(line)
         return 0
     # Hook mode.
     try:

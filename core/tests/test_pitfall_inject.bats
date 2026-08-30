@@ -460,3 +460,31 @@ EOF
   run hook "$(bash_call 'timeout 30 x')"
   denied
 }
+
+@test "--check names cannot-fire, unparseable, and an unwritable state dir" {
+  use_fixture aa-bad-timeout cc-flow-list
+  printf -- '---\ntype: pitfall\n---\n# No trigger\n\nB.\n' > "$DAEDALUS_HOME/vault/pitfalls/nn-none.md"
+  printf -- '---\napplies-to:\n  bash:\n---\n# Empty list\n\nB.\n' > "$DAEDALUS_HOME/vault/pitfalls/oo-empty.md"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(count 'pitfalls: 4 total, 2 cannot fire, 1 unparseable')" -eq 1 ]
+  [ "$(count 'nn-none.md: no applies-to')" -eq 1 ]
+  [ "$(count 'oo-empty.md: applies-to has no patterns')" -eq 1 ]
+  [ "$(count 'cc-flow-list.md: applies-to.bash: flow list')" -eq 1 ]
+  [ "$(count 'state/ unwritable')" -eq 0 ]
+  chmod 500 "$DAEDALUS_HOME/state"
+  run python3 "$SCRIPT" --check
+  chmod 700 "$DAEDALUS_HOME/state"
+  [ "$(count 'state/ unwritable')" -eq 1 ]
+}
+
+@test "template never fires even with live patterns" {
+  cp "$SRC/templates/pitfall.md" "$DAEDALUS_HOME/vault/pitfalls/_template.md"
+  run python3 "$SCRIPT" --parse "$DAEDALUS_HOME/vault/pitfalls/_template.md"
+  [ "$(count '"unparseable"')" -eq 0 ]
+  run hook "$(bash_call 'timeout 30 x')"
+  [ -z "$output" ]
+  use_fixture aa-bad-timeout
+  run hook "$(bash_call 'timeout 30 x')"
+  denied
+}

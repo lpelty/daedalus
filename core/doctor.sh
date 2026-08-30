@@ -85,6 +85,20 @@ else
   done
 fi
 
+# Pitfall triggers: a pitfall that cannot fire is a pitfall that will be
+# missed again. Informational — never a problem — and skipped, visibly, when
+# the script is absent (the doctor fixture copies only lib.sh and doctor.sh).
+if [ -f "$DAEDALUS_HOME/core/pitfall-inject.py" ]; then
+  python3 "$DAEDALUS_HOME/core/pitfall-inject.py" --check 2>&1 | while IFS= read -r line; do
+    case "$line" in
+      "  "*) log "NOTE     $line" ;;
+      *)     log "NOTE     $line" ;;
+    esac
+  done || true
+else
+  log "NOTE     pitfalls: check skipped (core/pitfall-inject.py absent)"
+fi
+
 if [ "$problems" -ne 0 ]; then
   die "$problems problem(s) found"
 fi

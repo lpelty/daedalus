@@ -221,3 +221,12 @@ CFG
   [ "$status" -eq 0 ]
   [ -d "$DAEDALUS_HOME/vault/.git" ]
 }
+
+@test "sync-vault installs the pitfall template once" {
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/vault/pitfalls/_template.md" ]
+  printf 'edited\n' >> "$DAEDALUS_HOME/vault/pitfalls/_template.md"
+  run bash "$DAEDALUS_HOME/core/sync-vault.sh"
+  [ "$(grep -c '^edited$' "$DAEDALUS_HOME/vault/pitfalls/_template.md")" -eq 1 ]
+}
