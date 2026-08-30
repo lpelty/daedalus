@@ -30,3 +30,6 @@ __pycache__/
 
 # SDD scratch — per-plan subagent workspace, never product content.
 .superpowers/
+
+# Linked worktrees for feature branches (superpowers:using-git-worktrees).
+.worktrees/
