@@ -324,3 +324,98 @@ EOF
   denied
   [ "$(count 'Never remove the root')" -gt 0 ]
 }
+
+@test "block stage stays reachable when file_path is unresolvable (embedded NUL); bash-pattern block still fires" {
+  cat > "$DAEDALUS_HOME/vault/pitfalls/ee-block.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  bash:
+    - 'rm -rf /'
+enforce: block
+---
+# Never remove the root
+
+Body.
+EOF
+  cat > "$DAEDALUS_HOME/vault/pitfalls/eg-path-block.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  path:
+    - '**/*.bats'
+enforce: block
+---
+# Bats files are off limits
+
+Body.
+EOF
+  payload="$(python3 -c '
+import json
+print(json.dumps({
+    "hook_event_name": "PreToolUse",
+    "session_id": "s1",
+    "tool_name": "Edit",
+    "tool_input": {"file_path": "/a\x00b/x.bats", "old_string": "a", "new_string": "b"},
+}))
+')"
+  run hook "$payload"
+  [ "$status" -eq 0 ]
+  run hook "$(bash_call 'rm -rf /' s9)"
+  denied
+  [ "$(count 'Never remove the root')" -gt 0 ]
+}
+
+@test "path patterns run under the same per-pattern alarm as bash patterns (unit-level via search())" {
+  # The glob dialect (glob_to_regex) only ever emits [^/]*, [^/], (?:[^/]+/)*,
+  # (?:/.*)? and escaped literals — none of which can catastrophically
+  # backtrack, so a pathological path_regex cannot be produced from
+  # frontmatter through the shipped grammar. This checks search()'s
+  # full=True branch directly (the function match_pitfall's path arm now
+  # calls), proving the alarm guard applies there too, independent of
+  # whether the glob dialect can ever hand it a stalling pattern.
+  run python3 -c "
+import importlib.util, time
+spec = importlib.util.spec_from_file_location('pitfall_inject', '$SCRIPT')
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+t0 = time.time()
+r = m.search(r'(a+)+\$', 'a' * 30 + 'b', full=True)
+elapsed = time.time() - t0
+assert r is None, 'expected a stall (None), got %r' % (r,)
+assert elapsed < 3, 'alarm did not bound the stall: %.2fs' % elapsed
+print('guarded', elapsed)
+"
+  [ "$status" -eq 0 ]
+  [ "$(count 'guarded')" -eq 1 ]
+}
+
+@test "deny-plus-announcement: an unparseable block-declaring sibling rides the block deny reason, then is announced once on a later call, not marked seen by the deny" {
+  # cc-flow-list.md declares `enforce: block` but its bash pattern is a flow
+  # list (`['never']`) — genuinely Unparseable, unlike a pitfall whose
+  # pattern merely fails to compile as regex (still a parsed, "good" pitfall
+  # per load_pitfalls). This is the fixture load_pitfalls's skip path
+  # actually exercises with a non-empty raw_enforce.
+  cat > "$DAEDALUS_HOME/vault/pitfalls/ee-block.md" <<'EOF'
+---
+type: pitfall
+applies-to:
+  bash:
+    - 'rm -rf /'
+enforce: block
+---
+# Never remove the root
+
+Body.
+EOF
+  use_fixture cc-flow-list
+  run hook "$(bash_call 'rm -rf /')"
+  denied
+  [ "$(count 'Never remove the root')" -gt 0 ]
+  [ "$(count 'Note:')" -gt 0 ]
+  [ "$(count 'cc-flow-list.md')" -gt 0 ]
+  run hook "$(bash_call 'echo fine')"
+  [ "$(count '"permissionDecision"')" -eq 0 ]
+  [ "$(count '"additionalContext"')" -eq 1 ]
+  [ "$(count 'cc-flow-list.md')" -gt 0 ]
+}

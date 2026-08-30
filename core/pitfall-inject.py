@@ -298,9 +298,10 @@ def _on_alarm(signum, frame):
     raise _Stall()
 
 
-def search(pattern: str, text: str) -> Optional[bool]:
-    """re.search under a one-second alarm. True/False on a decision; None if
-    the pattern would not compile, is over-long, or stalled."""
+def search(pattern: str, text: str, full: bool = False) -> Optional[bool]:
+    """re.search (or, with full=True, re.fullmatch) under a one-second alarm.
+    True/False on a decision; None if the pattern would not compile, is
+    over-long, or stalled."""
     if len(pattern) > PATTERN_MAX_LEN:
         return None
     try:
@@ -310,6 +311,8 @@ def search(pattern: str, text: str) -> Optional[bool]:
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.alarm(PATTERN_SECS)
     try:
+        if full:
+            return rx.fullmatch(text) is not None
         return rx.search(text) is not None
     except _Stall:
         return None
@@ -319,7 +322,8 @@ def search(pattern: str, text: str) -> Optional[bool]:
 
 def match_pitfall(p: dict, tool: str, tool_input: dict, rel: Optional[str]) -> Tuple[bool, bool]:
     """(matched, stalled). Bash patterns run against the command; path globs
-    against the relative path (already resolved by the caller)."""
+    against the relative path (already resolved by the caller). Every
+    pattern — bash or path — runs under search()'s per-pattern alarm."""
     matched = stalled = False
     if tool == "Bash":
         cmd = str(tool_input.get("command", ""))
@@ -335,7 +339,14 @@ def match_pitfall(p: dict, tool: str, tool_input: dict, rel: Optional[str]) -> T
                 matched = True
     elif rel is not None:
         for rx in p["path_regex"]:
-            if re.fullmatch(rx, rel):
+            r = search(rx, rel, full=True)
+            if r is None and len(rx) <= PATTERN_MAX_LEN:
+                try:
+                    re.compile(rx)
+                    stalled = True          # compiled, yet returned None: the alarm fired
+                except re.error:
+                    pass
+            elif r:
                 matched = True
     return matched, stalled
 
@@ -429,7 +440,11 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
     rel = None
     if tool in ("Edit", "Write", "NotebookEdit"):
         fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        rel = rel_path(str(fp), target_root(root), root)
+        try:
+            rel = rel_path(str(fp), target_root(root), root)
+        except Exception:
+            rel = None          # unresolvable path (e.g. an embedded NUL): path patterns
+                                 # simply won't match it; bash-pattern blocks still run
 
     announce: List[str] = []
     for f, reason, raw in skipped:
