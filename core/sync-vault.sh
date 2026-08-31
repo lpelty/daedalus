@@ -64,6 +64,13 @@ else
   log "wrote pitfalls/_template.md"
 fi
 
+if [ -f "$dest/proposals/_template.md" ]; then
+  :
+else
+  cp "$tpl_dir/proposal.md" "$dest/proposals/_template.md"
+  log "wrote proposals/_template.md"
+fi
+
 if [ -f "$dest/hot.md" ]; then
   :
 else

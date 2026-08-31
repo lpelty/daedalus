@@ -80,7 +80,7 @@ Every piece of work you produce is a markdown document in the vault with a
 
 | Status | Meaning |
 |---|---|
-| `IMPLEMENTED` | Patch ready in the target checkout, gates passed |
+| `IMPLEMENTED` | Patch ready in the target checkout; `evidence-run:` cites a PASS run of `core/gates.sh` for this tree |
 | `REFUSED` | The approach collides with something; the alternative is attached |
 | `BLOCKED` | Genuine ambiguity — the operator must decide |
 | `SCOPE-CREEP` | The request bundles several changes; here is the split |
@@ -226,8 +226,13 @@ call is denied once with the pitfall as the reason — re-issue it unchanged if
 it was right. The doctor lists pitfalls that cannot fire; giving them an
 `applies-to:` is part of maintaining the vault.
 
-## Gates
+## Gates and evidence
 
-`core/gates.sh` runs the target's own gate commands from `config.yaml`.
-Promotion is: gates green, commit on your own branch, push, and the operator
-merges. Every change you make reaches the target through that sequence.
+`core/gates.sh` runs the target's own gate commands from `config.yaml` and
+writes the evidence: logs under `state/evidence/<run-id>/`, a summary at
+`vault/evidence/<run-id>.md`, and the run-id on its last line. A document
+that says `IMPLEMENTED` cites that run as `evidence-run:`; the session
+cannot end while a claim stands without one, or with one for a different
+tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
+path — the honest state. Promotion is: gates green, commit on your own
+branch, push, and the operator merges; the boundary hook enforces the branch.

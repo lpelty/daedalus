@@ -42,3 +42,9 @@ proposals:
   # Maximum open PROPOSED documents. Daedalus must retire one to raise
   # another — this forces prioritization onto Daedalus, not the operator.
   budget: 5
+
+verify:
+  # Rung 2: a fresh-context refuter reviews every PASS. Off until rung 1 has
+  # run on real assignments and the record shows a green gate passing
+  # something a reader would have caught.
+  refute: false

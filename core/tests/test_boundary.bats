@@ -44,6 +44,9 @@ _protected_paths() {
 ./.claude/settings.local.json
 ./config.example.yaml
 ./README.md
+./config.yaml
+./state/evidence/keep
+./vault/evidence/keep
 EOF
 }
 
@@ -116,10 +119,13 @@ PY
   missing=""
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    # settings.local.json is per-deployment and absent on a fresh clone; its
-    # coverage still matters, so it is exempt from existence but not from
-    # the Edit-rule check.
-    [ "$p" = "./.claude/settings.local.json" ] && continue
+    # settings.local.json is per-deployment and absent on a fresh clone;
+    # state/evidence and vault/evidence are gitignored evidence directories
+    # with no committed contents. Their coverage still matters, so they are
+    # exempt from existence but not from the Edit-rule check.
+    case "$p" in
+      ./.claude/settings.local.json|./config.yaml|./state/evidence/keep|./vault/evidence/keep) continue ;;
+    esac
     [ -e "$p" ] || missing="$missing $p"
   done <<EOF
 $(_protected_paths)

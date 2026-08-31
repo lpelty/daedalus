@@ -4,7 +4,7 @@ setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  cp "$SRC/lib.sh" "$SRC/doctor.sh" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/doctor.sh" "$SRC/verifylib.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
   export DAEDALUS_HOME
 }
 
@@ -49,6 +49,55 @@ EOF
   done
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ]
+}
+
+@test "doctor notes the stage is unarmed when vault/evidence has no evidence yet; clears once one exists" {
+  # Finding 1: claims() returns [] until vault/evidence/ has a dated *.md
+  # file, which is also what forces the first gates.sh run to happen at
+  # all — with none yet, the whole stage is inert and gives no signal that
+  # it is. This pins the VISIBILITY half: a NOTE line that does not turn
+  # doctor red (NOTE is not MISSING, so it must not count toward $problems).
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+
+  # No vault/evidence/ directory at all yet.
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"NOTE"*"verify: stage unarmed"*"run core/gates.sh once to arm it"*) : ;; *) echo "expected the unarmed NOTE; got: $output"; return 1 ;; esac
+
+  # An empty vault/evidence/ directory (present, but no *.md yet) is the same case.
+  mkdir -p "$DAEDALUS_HOME/vault/evidence"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"stage unarmed"*) : ;; *) echo "expected the unarmed NOTE for an empty evidence dir; got: $output"; return 1 ;; esac
+
+  # One evidence doc arms the stage — the NOTE must clear.
+  cat > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md" <<'EOF'
+---
+type: evidence
+created: 2026-01-01T00:00:00
+result: PASS
+fingerprint: deadbeef
+config-sha: deadbeef
+---
+EOF
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"stage unarmed"*) echo "NOTE should have cleared once evidence exists: $output"; return 1 ;; *) : ;; esac
 }
 
 @test "doctor reports a missing exchange directory by name" {
@@ -344,6 +393,116 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"MISSING"*"target.repo"* ]]
+}
+
+@test "doctor reports an unverified claim (IMPLEMENTED with no evidence-run) and clears once cited" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+
+  # First evidence for the deployment — claims.py only considers a doctor-
+  # scanned document a claim once at least one evidence record exists.
+  mkdir -p "$DAEDALUS_HOME/vault/evidence"
+  cat > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md" <<'EOF'
+---
+type: evidence
+created: 2026-01-01T00:00:00
+result: PASS
+fingerprint: deadbeef
+config-sha: deadbeef
+---
+EOF
+
+  # A completion claim recorded after that first evidence, with no
+  # evidence-run citing a PASS gate run for this deployment.
+  cat > "$DAEDALUS_HOME/vault/proposals/PROP-1.md" <<'EOF'
+---
+type: proposal
+status: IMPLEMENTED
+author: daedalus
+updated-by: daedalus
+created: 2026-02-01
+---
+EOF
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING"*"unverified claim"*"PROP-1.md"* ]]
+
+  # Cite an evidence-run — doctor's --doctor pass is offline (live=False), so
+  # it checks only that evidence-run is present and that record's result is
+  # PASS; it does not re-verify fingerprint/config-sha against a live tree.
+  cat > "$DAEDALUS_HOME/vault/proposals/PROP-1.md" <<'EOF'
+---
+type: proposal
+status: IMPLEMENTED
+author: daedalus
+updated-by: daedalus
+created: 2026-02-01
+evidence-run: 20260101-000000-abcdef
+---
+EOF
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "a crashing verify-hook.py --doctor turns doctor red instead of silently green" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+
+  # Otherwise-healthy fixture, no claims at all — the empty stdout from a
+  # crashing verify-hook.py must not be mistaken for "no unverified claims".
+  # Stub prints nothing and exits 3, standing in for a real crash (e.g. a
+  # traceback on stderr, which is discarded by doctor's 2>/dev/null exactly
+  # as a real crash's traceback would be).
+  cat > "$DAEDALUS_HOME/core/verify-hook.py" <<'EOF'
+#!/usr/bin/env python3
+import sys
+sys.exit(3)
+EOF
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"check failed"* ]]
+  [[ "$output" == *"exited 3"* ]]
+  [[ "$output" != *"Traceback"* ]]
+
+  # Positive control: restore the real verify-hook.py (copied by setup() from
+  # the source tree) and confirm doctor goes back to green on the same,
+  # still-claim-free fixture.
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  cp "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/verify-hook.py"
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
 }
 
 @test "doctor notes that the pitfall check is skipped when the script is absent, and stays green" {

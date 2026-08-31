@@ -106,6 +106,45 @@ else
   log "NOTE     pitfalls: check skipped (core/pitfall-inject.py absent)"
 fi
 
+# Arm-state visibility: claims() returns [] until vault/evidence/ has at
+# least one dated *.md file, which is also what forces the first gates run
+# to happen at all. That is a real gap, not a bug — but a silent one, since
+# a deployment with no evidence yet is inert and gives no signal that it is.
+# This is visibility only; nothing here runs gates.sh or writes evidence.
+if [ ! -d "$DAEDALUS_HOME/vault/evidence" ] || [ -z "$(find "$DAEDALUS_HOME/vault/evidence" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]; then
+  log "NOTE     verify: stage unarmed — no evidence yet; run core/gates.sh once to arm it"
+fi
+
+# Unverified claims: a completion recorded without a PASS gate run for this
+# deployment. Same rule as the Stop hook, over the whole vault.
+#
+# Captured into a variable first, then iterated with a here-string rather
+# than piping straight into the while loop — a pipeline's right-hand side
+# runs in a subshell, so note_problem's increment to $problems would not
+# survive past the loop and every unverified claim would go uncounted even
+# though it printed. The here-string keeps the loop (and note_problem) in
+# the current shell.
+#
+# The exit code is checked too, right after the command substitution. A
+# crashing verify-hook.py prints nothing to stdout, which previously read as
+# "no unverified claims" — the doctor stayed green and silent on top of a
+# broken claims-checker. That is this repo's founding pitfall class: a
+# diagnostic for silent failure that failed silently. A non-zero exit is
+# itself a problem, so it goes through note_problem and turns doctor red.
+if [ -f "$DAEDALUS_HOME/core/verify-hook.py" ]; then
+  unverified="$(python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    note_problem "unverified-claims check failed (core/verify-hook.py --doctor exited $rc)"
+  else
+    while IFS= read -r line; do
+      [ -n "$line" ] && note_problem "unverified claim: $line"
+    done <<EOF
+$unverified
+EOF
+  fi
+fi
+
 if [ "$problems" -ne 0 ]; then
   die "$problems problem(s) found"
 fi
