@@ -81,3 +81,18 @@ fp() { bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>/dev/null; }
   [ "$status" -eq 0 ]
   case "$output" in *fingerprint_secs=*) : ;; *) echo "no timing: $output"; return 1 ;; esac
 }
+
+@test "a nested repo already ignored by the parent does not null the fingerprint" {
+  # The live failure this pins: the parent repo gitignores the nested dir, and
+  # an explicit :(exclude) pathspec for an ignored path makes git add error
+  # ("Use -f"), nulling every fingerprint. Ignored-by-parent nested paths need
+  # no exclude at all — git add skips them by itself.
+  printf 'sub/\n' >> "$T/.gitignore"
+  git -C "$T" add .gitignore
+  git -C "$T" -c user.email=t@x -c user.name=t commit -q -m ign
+  a="$(fp)"
+  [ "$a" != "null" ]
+  # nested content must still move the combined fingerprint (fingerprinted separately)
+  printf 'm\n' >> "$T/sub/n.txt"
+  [ "$(fp)" != "$a" ]
+}

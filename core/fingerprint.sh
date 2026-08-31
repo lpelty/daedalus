@@ -43,8 +43,20 @@ $(cfg_pairs target.nested 2>/dev/null)
 EOF
 fi
 
+# Exclude pathspecs are only for nested repos the parent can SEE. A nested
+# path already covered by the parent's .gitignore is skipped by `git add`
+# on its own — and naming it in an explicit :(exclude) pathspec makes git
+# treat the ignored path as explicitly requested, which errors ("Use -f")
+# and nulled every fingerprint on the live deployment. Ignored nested repos
+# are still fingerprinted separately below; they just need no exclude.
+nested_excl=()
+for rel in ${nested[@]+"${nested[@]}"}; do
+  git -C "$target" check-ignore -q "$rel" 2>/dev/null && continue
+  nested_excl+=("$rel")
+done
+
 lines=""
-tree="$(fp_repo "$target" ${nested[@]+"${nested[@]}"})" || emit_null
+tree="$(fp_repo "$target" ${nested_excl[@]+"${nested_excl[@]}"})" || emit_null
 lines=".:$tree"
 for rel in ${nested[@]+"${nested[@]}"}; do
   tree="$(fp_repo "$target/$rel")" || emit_null
