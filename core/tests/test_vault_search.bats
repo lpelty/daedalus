@@ -302,3 +302,18 @@ EOF
   run python3 "$SCRIPT" --check
   [ "$(count 'index run older')" -eq 1 ]
 }
+
+@test "the REAL config.example.yaml recall block parses to exact placeholder values" {
+  # Live file, not a frozen copy: this is the test that fails if an inline
+  # comment or a bare trailing quote creeps into the example (spec A-1).
+  REAL="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/config.example.yaml"
+  cp "$REAL" "$DAEDALUS_HOME/config.yaml"
+  v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.vault-query')"
+  [ "$v" = '<command printing JSON results for query "$1">' ]
+  v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.vault-index')"
+  [ "$v" = '<command that (re)indexes the vault into the store>' ]
+  v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.store')"
+  [ "$v" = 'state/chroma' ]
+  v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.ruff')"
+  [ "$v" = 'uvx ruff@0.16.5' ]
+}
