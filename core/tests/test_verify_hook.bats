@@ -69,6 +69,19 @@ claim() {  # claim <file> <status> <updated-by> <created> [evidence-run]
   run stop; [ "$status" -eq 0 ]
 }
 
+@test "gate definition changed before the run (pre-run tamper) blocks even though the run matches live; restored and re-run passes" {
+  cp "$DAEDALUS_HOME/config.yaml" "$BATS_TEST_TMPDIR/marker-cfg.bak"
+  printf '  - echo extra\n' >> "$DAEDALUS_HOME/config.yaml"
+  id="$(gate)"
+  claim PROP-1.md IMPLEMENTED daedalus 2026-12-01 "$id"
+  run stop; [ "$status" -eq 2 ]
+  case "$output" in *"config.yaml"*"restart"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+  cp "$BATS_TEST_TMPDIR/marker-cfg.bak" "$DAEDALUS_HOME/config.yaml"
+  id2="$(gate)"
+  claim PROP-1.md IMPLEMENTED daedalus 2026-12-01 "$id2"
+  run stop; [ "$status" -eq 0 ]
+}
+
 @test "FAIL run cited blocks with the log path; INVALID cited blocks" {
   printf 'gates:\n  - false\n' > /dev/null
   sed -i.bak 's/  - true/  - false/' "$DAEDALUS_HOME/config.yaml"; rm -f "$DAEDALUS_HOME/config.yaml.bak"

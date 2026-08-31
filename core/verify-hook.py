@@ -41,8 +41,9 @@ def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], 
             continue
         if not live:
             continue
-        expected_cfg = v.sha256_file(root / "config.yaml")
-        if rec.get("config_sha") != expected_cfg:
+        live_cfg = v.sha256_file(root / "config.yaml")
+        marker_cfg = marker.get("config_sha") if marker else None
+        if rec.get("config_sha") != live_cfg or (marker_cfg is not None and rec.get("config_sha") != marker_cfg):
             out.append("%s cites evidence-run %s, but the gate definition (config.yaml) changed this session; re-run core/gates.sh — if the operator changed it, restart the session (it re-snapshots)." % (p, rid))
             continue
         if fp_now == "null":
