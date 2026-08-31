@@ -221,9 +221,20 @@ if missing:
 
 cmds = json.dumps(cfg["hooks"])
 for script in ("session-start.py", "guard-bash.py", "pitfall-inject.py",
-               "boundary-hook.py", "verify-hook.py"):
+               "boundary-hook.py", "verify-hook.py", "code-context.py"):
     if script not in cmds:
         sys.exit("hook script not wired in effective config: %s" % script)
+
+pre = cfg["hooks"].get("PreToolUse", [])
+placed = any(
+    e.get("matcher") == "Edit|Write"
+    and any("code-context.py" in h.get("command", "") for h in e.get("hooks", []))
+    for e in pre)
+if not placed:
+    sys.exit("code-context.py must be a PreToolUse entry with matcher Edit|Write")
+compact = json.dumps(cfg["hooks"].get("PreCompact", []))
+if "code-context.py" not in compact:
+    sys.exit("code-context.py must also be wired on PreCompact (seen-state reset)")
 PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

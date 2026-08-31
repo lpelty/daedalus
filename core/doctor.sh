@@ -106,6 +106,36 @@ else
   log "NOTE     pitfalls: check skipped (core/pitfall-inject.py absent)"
 fi
 
+# Document recall: enhancement-layer health, NOTE lines only (spec §2.6).
+if [ -f "$DAEDALUS_HOME/core/vault-search.py" ]; then
+  recall_out="$(python3 "$DAEDALUS_HOME/core/vault-search.py" --check 2>/dev/null)"
+  recall_status=$?
+  if [ "$recall_status" -ne 0 ]; then
+    log "NOTE     document recall: check failed (core/vault-search.py --check exited $recall_status)"
+  else
+    printf '%s\n' "$recall_out" | while IFS= read -r line; do
+      log "NOTE     $line"
+    done
+  fi
+else
+  log "NOTE     document recall: check skipped (core/vault-search.py absent)"
+fi
+
+# Code context: enhancement-layer health, NOTE lines only (spec §3.3).
+if [ -f "$DAEDALUS_HOME/core/code-context.py" ]; then
+  cc_out="$(python3 "$DAEDALUS_HOME/core/code-context.py" --check 2>/dev/null)"
+  cc_status=$?
+  if [ "$cc_status" -ne 0 ]; then
+    log "NOTE     code context: check failed (core/code-context.py --check exited $cc_status)"
+  else
+    printf '%s\n' "$cc_out" | while IFS= read -r line; do
+      log "NOTE     $line"
+    done
+  fi
+else
+  log "NOTE     code context: check skipped (core/code-context.py absent)"
+fi
+
 # Arm-state visibility: claims() returns [] until vault/evidence/ has at
 # least one dated *.md file, which is also what forces the first gates run
 # to happen at all. That is a real gap, not a bug — but a silent one, since

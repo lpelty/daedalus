@@ -48,3 +48,24 @@ verify:
   # run on real assignments and the record shows a green gate passing
   # something a reader would have caught.
   refute: false
+
+recall:
+  # Optional retrieval layer (spec: document-recall-and-code-context design).
+  # Deployment-owned engine commands, same trust model as gates:.
+  # SINGLE-QUOTE the command values: cfg strips edge quotes blindly, so a
+  # bare value ending in a quote character silently loses it. Comments on
+  # their own lines only — cfg does not strip inline comments.
+  # Both commands run as: bash -c "<cmd>" _ <args...> with
+  # DAEDALUS_RECALL_STORE exported (resolved absolute store path; the
+  # command MUST read it). vault-query receives the query text as "$1" --
+  # reference "$1" in the command yourself; the runner never appends it.
+  # vault-index takes no args; its stdout MUST end with a line
+  # "indexed=<int> purged=<int>".
+  vault-query: '<command printing JSON results for query "$1">'
+  vault-index: '<command that (re)indexes the vault into the store>'
+  # Store location: a relative path resolved under the Daedalus home.
+  # Absolute paths and ".." are rejected.
+  store: state/chroma
+  # Code context engine (optional). Pin the version: an unpinned uvx ruff
+  # floats to latest and un-certifies the JSON shape the hook parses.
+  ruff: 'uvx ruff@0.16.5'

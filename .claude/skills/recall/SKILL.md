@@ -90,3 +90,18 @@ before concluding the memory is absent.
 A `recall failed:` line means the backend is unreachable or the credential is
 wrong. That is a tooling problem, not an empty memory — say so plainly rather
 than reporting that nothing was found.
+
+## Document recall
+
+Episodic recall answers "what happened"; document recall answers "what is
+written". When the question is about vault content — a spec, a plan, an
+exchange entry, "where is X written" — query the vault index:
+
+```bash
+python3 <deployment root>/core/vault-search.py query "<text>"
+```
+
+Output is a JSON array of `{"path", "snippet", ...}` results, best-first.
+Empty output means no index, no engine configured, or no hits — fall back
+to grep over `vault/`. Never compose the engine command yourself; the
+runner is the only execution path.
