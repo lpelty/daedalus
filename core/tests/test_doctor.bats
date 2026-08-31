@@ -571,3 +571,24 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c 'NOTE     pitfalls: check failed (core/pitfall-inject.py --check exited 3)')" -eq 1 ]
   [ "$(printf '%s\n' "$output" | grep -c 'Traceback')" -eq 0 ]
 }
+
+@test "doctor NOTEs vault-search --check lines; absent script -> skipped line" {
+  cp "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$(printf '%s\n' "$output" | grep -cF 'NOTE     document recall:')" -gt 0 ]
+  rm "$DAEDALUS_HOME/core/vault-search.py"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$(printf '%s\n' "$output" | grep -cF 'document recall: check skipped')" -eq 1 ]
+}

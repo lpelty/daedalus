@@ -210,3 +210,95 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(cat "$DAEDALUS_HOME/state/recall-last-index")" = "old" ]
 }
+
+@test "--check: unconfigured is the summary itself; healthy is summary only" {
+  write_config "  store: state/chroma"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$output" = "document recall: unconfigured" ]
+  # healthy: engine answers, store + stamp fresh
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<'EOF'
+#!/bin/bash
+echo '[]'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$BATS_TEST_TMPDIR/eng.sh \"\$1\"'" "  vault-index: 'true'"
+  mkdir -p "$DAEDALUS_HOME/state/chroma" "$DAEDALUS_HOME/vault/specs"
+  printf '# x' > "$DAEDALUS_HOME/vault/specs/x.md"
+  sleep 1
+  printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$output" = "document recall: configured, probe ok" ]
+}
+
+@test "--check: each condition line fires on its fixture" {
+  # failing engine
+  write_config "  vault-query: 'false'" "  vault-index: 'true'"
+  mkdir -p "$DAEDALUS_HOME/state/chroma"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'query command failing')" -eq 1 ]
+  # corrupted values: BOTH real cfg mangle classes, named by --check
+  # (the Task 1 mangle tests pin only silence; this is the detector's pin)
+  write_config "  vault-query: \"$BATS_TEST_TMPDIR/eng.sh\" " "  vault-index: 'true'"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'looks corrupted')" -eq 1 ]
+  write_config "  vault-query: \"$BATS_TEST_TMPDIR/eng.sh\" # tail" "  vault-index: 'true'"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'looks corrupted')" -eq 1 ]
+  # rejected store is NAMED by --check (spec A-5)
+  write_config "  vault-query: 'true'" "  store: /tmp/evil"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'recall.store rejected')" -eq 1 ]
+  # store missing
+  rm -rf "$DAEDALUS_HOME/state/chroma"
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<'EOF'
+#!/bin/bash
+echo '[]'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$BATS_TEST_TMPDIR/eng.sh \"\$1\"'" "  vault-index: 'true'"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'no index at')" -eq 1 ]
+  # stamp without a store
+  printf 'x' > "$DAEDALUS_HOME/state/recall-last-index"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'stamp without a store')" -eq 1 ]
+  # store present, stamp absent -> the "no index stamp" NOTE
+  rm -f "$DAEDALUS_HOME/state/recall-last-index"
+  mkdir -p "$DAEDALUS_HOME/state/chroma"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'no index stamp')" -eq 1 ]
+  # stale: vault newer than stamp
+  printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  mkdir -p "$DAEDALUS_HOME/vault/specs"
+  sleep 1
+  printf '# y' > "$DAEDALUS_HOME/vault/specs/y.md"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'index run older than newest vault change')" -eq 1 ]
+  # reindex key unset
+  write_config "  vault-query: '$BATS_TEST_TMPDIR/eng.sh \"\$1\"'"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'reindex command unconfigured')" -eq 1 ]
+}
+
+@test "--check staleness scan ignores evidence/ and dot-dirs" {
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<'EOF'
+#!/bin/bash
+echo '[]'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$BATS_TEST_TMPDIR/eng.sh \"\$1\"'" "  vault-index: 'true'"
+  mkdir -p "$DAEDALUS_HOME/state/chroma" "$DAEDALUS_HOME/vault/evidence" "$DAEDALUS_HOME/vault/.obsidian"
+  printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  sleep 1
+  printf '# e' > "$DAEDALUS_HOME/vault/evidence/e.md"     # gates.sh churn
+  printf '# o' > "$DAEDALUS_HOME/vault/.obsidian/o.md"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'index run older')" -eq 0 ]
+  sleep 1
+  mkdir -p "$DAEDALUS_HOME/vault/specs"
+  printf '# real' > "$DAEDALUS_HOME/vault/specs/real.md"  # positive control
+  run python3 "$SCRIPT" --check
+  [ "$(count 'index run older')" -eq 1 ]
+}
