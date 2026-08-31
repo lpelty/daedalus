@@ -184,3 +184,59 @@ print(line.count(".py,") + 1)
 ')"
   [ "$n" -eq 20 ]
 }
+
+@test "--check: summary always; fallback line when no ruff; not-runnable line on bad ruff" {
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(count 'code context: engine ast fallback')" -eq 1 ]
+  [ "$(count 'no recall.ruff configured')" -eq 1 ]
+  add_ruff_config "/bin/false"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'configured ruff not runnable')" -eq 1 ]
+}
+
+@test "--check healthy with working ruff: summary line only" {
+  require_ruff
+  add_ruff_config "$HOME/.local/bin/uvx ruff@0.16.5"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]     # exactly one non-empty line
+  [ "$(count 'code context: engine ruff')" -eq 1 ]
+}
+
+@test "--check: end-to-end probe reports fallback when ruff exceeds the budget" {
+  cat > "$BATS_TEST_TMPDIR/slowruff.sh" <<'EOF'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "ruff 0.16.5"; exit 0; }
+sleep 6
+echo '{}'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/slowruff.sh"
+  add_ruff_config "$BATS_TEST_TMPDIR/slowruff.sh"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'fell back to ast')" -eq 1 ]
+}
+
+@test "--check diagnoses an unresolvable target root distinctly (not as over-cap)" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(count 'target root unresolved')" -eq 1 ]
+  [ "$(count 'over the 2000 cap')" -eq 0 ]
+}
+
+@test "--check names the cap on an over-cap tree; the hook is SILENT on it" {
+  for i in $(seq 1 2001); do : > "$T/f$i.py"; done
+  run python3 "$SCRIPT" --check
+  [ "$(count 'over the 2000 cap')" -eq 1 ]
+  run hook "$(edit_call "$T/pkg/core.py" scapx)"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}

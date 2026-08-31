@@ -592,3 +592,24 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$(printf '%s\n' "$output" | grep -cF 'document recall: check skipped')" -eq 1 ]
 }
+
+@test "doctor NOTEs code-context --check; absent script -> skipped line" {
+  cp "$SRC/code-context.py" "$DAEDALUS_HOME/core/"
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$(printf '%s\n' "$output" | grep -cF 'NOTE     code context:')" -gt 0 ]
+  rm "$DAEDALUS_HOME/core/code-context.py"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$(printf '%s\n' "$output" | grep -cF 'code context: check skipped')" -eq 1 ]
+}
