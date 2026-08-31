@@ -301,23 +301,27 @@ def _on_alarm(signum, frame):
 def search(pattern: str, text: str, full: bool = False) -> Optional[bool]:
     """re.search (or, with full=True, re.fullmatch) under a one-second alarm.
     True/False on a decision; None if the pattern would not compile, is
-    over-long, or stalled."""
-    if len(pattern) > PATTERN_MAX_LEN:
-        return None
+    over-long, or stalled. PATTERN_MAX_LEN is a bash-pattern hygiene cap
+    (spec §2/§3); full=True patterns are translated globs (glob_to_regex
+    emits only non-backtracking constructs), so they are exempt — the
+    per-pattern alarm still guards them against a stall."""
     try:
-        rx = re.compile(pattern)
-    except re.error:
-        return None
-    signal.signal(signal.SIGALRM, _on_alarm)
-    signal.alarm(PATTERN_SECS)
-    try:
-        if full:
-            return rx.fullmatch(text) is not None
-        return rx.search(text) is not None
+        if not full and len(pattern) > PATTERN_MAX_LEN:
+            return None
+        try:
+            rx = re.compile(pattern)
+        except re.error:
+            return None
+        signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(PATTERN_SECS)
+        try:
+            if full:
+                return rx.fullmatch(text) is not None
+            return rx.search(text) is not None
+        finally:
+            signal.alarm(0)
     except _Stall:
         return None
-    finally:
-        signal.alarm(0)
 
 
 def match_pitfall(p: dict, tool: str, tool_input: dict, rel: Optional[str]) -> Tuple[bool, bool]:
@@ -340,12 +344,13 @@ def match_pitfall(p: dict, tool: str, tool_input: dict, rel: Optional[str]) -> T
     elif rel is not None:
         for rx in p["path_regex"]:
             r = search(rx, rel, full=True)
-            if r is None and len(rx) <= PATTERN_MAX_LEN:
-                try:
-                    re.compile(rx)
-                    stalled = True          # compiled, yet returned None: the alarm fired
-                except re.error:
-                    pass
+            if r is None:
+                # path_regex always comes from glob_to_regex, which only ever
+                # emits compilable, non-backtracking regex (or parse_pitfall
+                # would have raised Unparseable) and search() no longer caps
+                # full=True patterns by length — so None here means only one
+                # thing: the per-pattern alarm fired.
+                stalled = True
             elif r:
                 matched = True
     return matched, stalled
@@ -485,6 +490,9 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
     if fresh_warns:
         for p in fresh_warns:
             mine[p["file"]] = {"stage": "warned", "touched": _now()}
+        # Announcements riding a deny are deliberately not recorded here: the
+        # deny paths stay state-free and may repeat until an inject records
+        # them.
         if save_seen(root, seen):
             reason = "\n\n---\n\n".join(_reason(p) for p in fresh_warns) + "\n\n" + WARN_TRAILER
             if announce:
@@ -523,8 +531,16 @@ def check(root: Path) -> List[str]:
             cannot.append((p["file"], "no applies-to" if "applies-to" not in _raw_fields(p["file"]) else "applies-to has no patterns"))
             continue
         bad = [pat for pat in p["bash"] if search(pat, "") is None and _compile_error(pat)]
-        if bad:
+        if bad and len(bad) == len(p["bash"]) and not p["path"]:
+            # every bash pattern is bad and there is no path pattern to save
+            # it: the whole pitfall is dead.
             cannot.append((p["file"], "uncompilable or over-long pattern: %s" % bad[0]))
+        elif bad:
+            # a valid sibling pattern (bash or path) still fires — the
+            # pitfall itself is alive, only this one pattern is dead. Still
+            # counted in M, but the label no longer implies the whole
+            # pitfall cannot fire.
+            cannot.append((p["file"], "pattern cannot fire: %s" % bad[0]))
     lines.append("pitfalls: %d total, %d cannot fire, %d unparseable" % (len(good) + len(skipped), len(cannot), len(skipped)))
     for f, why in cannot:
         lines.append("  %s: %s" % (Path(f).name, why))

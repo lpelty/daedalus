@@ -488,6 +488,36 @@ EOF
   [ "$(count 'state/ unwritable')" -eq 0 ]
 }
 
+@test "--check: one dead pattern beside one live pattern is labeled per-pattern, not as a dead pitfall" {
+  printf -- '---\ntype: pitfall\napplies-to:\n  bash:\n    - "fine pattern"\n    - "(a{300,"\nenforce: inject\n---\n# Mixed pattern pitfall\n\nB.\n' \
+    > "$DAEDALUS_HOME/vault/pitfalls/pp-mixed.md"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(count 'pitfalls: 1 total, 1 cannot fire, 0 unparseable')" -eq 1 ]
+  [ "$(count 'pp-mixed.md: pattern cannot fire: (a{300,')" -eq 1 ]
+  [ "$(count 'uncompilable or over-long pattern')" -eq 0 ]
+  run hook "$(bash_call 'this is a fine pattern match')"
+  [ "$(count 'Pitfall: Mixed pattern pitfall')" -eq 1 ]
+}
+
+@test "path glob whose translated regex exceeds 200 chars still matches and still blocks" {
+  use_fixture hh-long-glob-block
+  seg1="this-is-a-very-long-dashed-directory-segment-number-one-repeated-again-and-again"
+  seg2="this-is-a-very-long-dashed-directory-segment-number-two-repeated-again-and-again"
+  glob="$seg1/$seg2/**/*.bats"
+  run python3 "$SCRIPT" --parse "$FIX/hh-long-glob-block.md"
+  [ "$status" -eq 0 ]
+  regexlen="$(python3 "$SCRIPT" --parse "$FIX/hh-long-glob-block.md" \
+    | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["path_regex"][0]))')"
+  [ "$regexlen" -gt 200 ]
+  mkdir -p "$TARGET/$seg1/$seg2"
+  run hook "$(edit_call "$TARGET/$seg1/$seg2/x.bats")"
+  denied
+  [ "$(count 'Deep dashed directories under this tree are off limits')" -gt 0 ]
+  run python3 "$SCRIPT" --match-glob "$glob" "$seg1/$seg2/x.bats"
+  [ "$output" = "match" ]
+}
+
 @test "template never fires even with live patterns" {
   cp "$SRC/templates/pitfall.md" "$DAEDALUS_HOME/vault/pitfalls/_template.md"
   run python3 "$SCRIPT" --parse "$DAEDALUS_HOME/vault/pitfalls/_template.md"

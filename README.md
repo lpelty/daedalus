@@ -157,7 +157,8 @@ the tracked `.claude/settings.json` surfaces it on the matching tool call:
 
 `inject` attaches the pitfall to the tool result. `warn` denies the call once
 per session with the pitfall as the reason, then lets the retry through.
-`block` denies it every time. Block-lists only, one pattern per line, quoted.
+`block` denies it every time. Block-lists only, one pattern per line, quoted
+or bare (bare items lose a trailing ` #comment`).
 `core/doctor.sh` reports pitfalls that cannot fire and files it cannot parse;
 `python3 core/pitfall-inject.py --parse <file>` shows how one file is read.
 
