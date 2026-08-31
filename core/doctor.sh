@@ -85,6 +85,24 @@ else
   done
 fi
 
+# Unverified claims: a completion recorded without a PASS gate run for this
+# deployment. Same rule as the Stop hook, over the whole vault.
+#
+# Captured into a variable first, then iterated with a here-string rather
+# than piping straight into the while loop — a pipeline's right-hand side
+# runs in a subshell, so note_problem's increment to $problems would not
+# survive past the loop and every unverified claim would go uncounted even
+# though it printed. The here-string keeps the loop (and note_problem) in
+# the current shell.
+if [ -f "$DAEDALUS_HOME/core/verify-hook.py" ]; then
+  unverified="$(python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor 2>/dev/null)"
+  while IFS= read -r line; do
+    [ -n "$line" ] && note_problem "unverified claim: $line"
+  done <<EOF
+$unverified
+EOF
+fi
+
 if [ "$problems" -ne 0 ]; then
   die "$problems problem(s) found"
 fi

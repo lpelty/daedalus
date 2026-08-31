@@ -153,3 +153,15 @@ and a recorded miss is what argues for loosening them.
   its tooling needs are its own work product, not distribution.
 - Development happens at one site only. Defects found in Daedalus travel back
   as a proposal, not a local patch.
+
+### The verify stage
+
+Hooks in the tracked `.claude/settings.json` make a completion claim
+unrecordable without evidence. `core/gates.sh` writes the evidence; the
+`Stop` hook checks any `IMPLEMENTED`/`completion` document changed this
+session against it; the boundary hook blocks edits to Daedalus's own code,
+the gate definition, and the evidence. Everything is snapshotted at session
+start, so if you change `config.yaml` or a file under `core/` mid-session,
+Daedalus is blocked with a reason naming the remedy: restart the session.
+On a new machine the hooks are held until the workspace-trust dialog is
+accepted. `core/doctor.sh` reports unverified claims offline.

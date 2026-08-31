@@ -8,7 +8,7 @@ updated: YYYY-MM-DD
 assignment: EX-NNN
 touched: []
 findings: 0
-status: IMPLEMENTED
+status: open
 ---
 
 <!-- File: vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md — NNN is a global running

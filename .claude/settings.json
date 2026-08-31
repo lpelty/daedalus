@@ -7,7 +7,19 @@
       "Edit(./.claude/settings.json)",
       "Edit(./.claude/settings.local.json)",
       "Edit(./config.example.yaml)",
-      "Edit(./README.md)"
+      "Edit(./README.md)",
+      "Edit(./config.yaml)",
+      "Edit(./state/**)",
+      "Edit(./vault/evidence/**)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/session-start.py", "timeout": 10}]}],
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/guard-bash.py", "timeout": 5}]}],
+    "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]}],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]},
+      {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/verify-hook.py", "timeout": 60}]}
     ]
   }
 }

@@ -35,6 +35,7 @@ from: <sender>
 to: <recipient>
 kind: issue | idea | question | dissent | completion
 status: OPEN | ANSWERED | IMPLEMENTED | REFUSED | BLOCKED | SCOPE-CREEP
+evidence-run: <run-id>   # required when status is IMPLEMENTED or kind is completion
 in-reply-to: EX-006      # omit to start a thread
 ---
 ```

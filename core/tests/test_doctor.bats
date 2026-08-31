@@ -4,7 +4,7 @@ setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  cp "$SRC/lib.sh" "$SRC/doctor.sh" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/doctor.sh" "$SRC/verifylib.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
   export DAEDALUS_HOME
 }
 
@@ -344,4 +344,69 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -ne 0 ]
   [[ "$output" == *"MISSING"*"target.repo"* ]]
+}
+
+@test "doctor reports an unverified claim (IMPLEMENTED with no evidence-run) and clears once cited" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+
+  # First evidence for the deployment — claims.py only considers a doctor-
+  # scanned document a claim once at least one evidence record exists.
+  mkdir -p "$DAEDALUS_HOME/vault/evidence"
+  cat > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md" <<'EOF'
+---
+type: evidence
+created: 2026-01-01T00:00:00
+result: PASS
+fingerprint: deadbeef
+config-sha: deadbeef
+---
+EOF
+
+  # A completion claim recorded after that first evidence, with no
+  # evidence-run citing a PASS gate run for this deployment.
+  cat > "$DAEDALUS_HOME/vault/proposals/PROP-1.md" <<'EOF'
+---
+type: proposal
+status: IMPLEMENTED
+author: daedalus
+updated-by: daedalus
+created: 2026-02-01
+---
+EOF
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING"*"unverified claim"*"PROP-1.md"* ]]
+
+  # Cite an evidence-run — doctor's --doctor pass is offline (live=False), so
+  # it checks only that evidence-run is present and that record's result is
+  # PASS; it does not re-verify fingerprint/config-sha against a live tree.
+  cat > "$DAEDALUS_HOME/vault/proposals/PROP-1.md" <<'EOF'
+---
+type: proposal
+status: IMPLEMENTED
+author: daedalus
+updated-by: daedalus
+created: 2026-02-01
+evidence-run: 20260101-000000-abcdef
+---
+EOF
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
 }
