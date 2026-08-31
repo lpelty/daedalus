@@ -130,3 +130,57 @@ hook() { printf '%s' "$1" | python3 "$SCRIPT"; }
   [ "$(count 'pkg.core')" -eq 1 ]
   chmod 755 "$DAEDALUS_HOME/state"
 }
+
+add_ruff_config() {  # add_ruff_config <ruff-cmd>
+  printf 'recall:\n  ruff: '"'"'%s'"'"'\n' "$1" >> "$DAEDALUS_HOME/config.yaml"
+}
+
+require_ruff() {
+  "$HOME/.local/bin/uvx" ruff@0.16.5 --version >/dev/null 2>&1 || skip "uvx ruff unavailable"
+  # guard against the vacuous-parity trap: ruff must complete on this fixture
+  # standalone, or the "ruff engine" side would silently be the ast answer
+  ( cd "$T" && "$HOME/.local/bin/uvx" ruff@0.16.5 analyze graph --direction dependents >/dev/null 2>&1 ) \
+    || skip "ruff cannot analyze the fixture on this machine"
+}
+
+@test "engine parity: real ruff gives the ast answer INCLUDING exclusions" {
+  require_ruff
+  ast_out="$(python3 "$SCRIPT" "$T/pkg/core.py" | sort)"
+  add_ruff_config "$HOME/.local/bin/uvx ruff@0.16.5"
+  ruff_out="$(python3 "$SCRIPT" "$T/pkg/core.py" | sort)"
+  [ "$ast_out" = "$ruff_out" ]
+  [ -n "$ast_out" ]                       # positive control: parity of nothing proves nothing
+  [ "$(printf '%s\n' "$ruff_out" | grep -cF 'fakevenv')" -eq 0 ]   # post-filter, not ruff defaults
+}
+
+@test "broken ruff engine: ast answer, silently" {
+  add_ruff_config "/bin/false"
+  run python3 "$SCRIPT" "$T/pkg/core.py"
+  [ "$status" -eq 0 ]
+  [ "$(count 'pkg/user_a.py')" -eq 1 ]
+}
+
+@test "symlinked DAEDALUS_HOME: same answer under the ruff engine" {
+  require_ruff
+  add_ruff_config "$HOME/.local/bin/uvx ruff@0.16.5"
+  ln -s "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR/link-home"
+  direct="$(python3 "$SCRIPT" "$T/pkg/core.py" | sort)"
+  linked="$(DAEDALUS_HOME="$BATS_TEST_TMPDIR/link-home" python3 "$SCRIPT" "$BATS_TEST_TMPDIR/link-home/target/thing/pkg/core.py" | sort)"
+  [ "$direct" = "$linked" ]
+  [ -n "$direct" ]
+}
+
+@test "banner caps: >20 dependents lists 20 + (+N more)" {
+  for i in $(seq 1 25); do
+    printf 'import pkg.core\n' > "$T/pkg/dep$i.py"
+  done
+  run hook "$(edit_call "$T/pkg/core.py" scap)"
+  [ "$(count '(+' )" -eq 1 ]
+  n="$(printf '%s' "$output" | python3 -c '
+import json,sys
+t = json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]
+line = t.split("\n")[1]
+print(line.count(".py,") + 1)
+')"
+  [ "$n" -eq 20 ]
+}
