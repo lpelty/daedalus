@@ -85,6 +85,27 @@ else
   done
 fi
 
+# Pitfall triggers: a pitfall that cannot fire is a pitfall that will be
+# missed again. Informational — never a problem — and skipped, visibly, when
+# the script is absent (the doctor fixture copies only lib.sh and doctor.sh).
+# stderr goes to /dev/null rather than being merged into the piped stream: a
+# crashing --check must not print a raw Python traceback disguised as doctor
+# NOTE lines. On a non-zero exit we report exactly one line naming the exit
+# code instead.
+if [ -f "$DAEDALUS_HOME/core/pitfall-inject.py" ]; then
+  pitfall_out="$(python3 "$DAEDALUS_HOME/core/pitfall-inject.py" --check 2>/dev/null)"
+  pitfall_status=$?
+  if [ "$pitfall_status" -ne 0 ]; then
+    log "NOTE     pitfalls: check failed (core/pitfall-inject.py --check exited $pitfall_status)"
+  else
+    printf '%s\n' "$pitfall_out" | while IFS= read -r line; do
+      log "NOTE     $line"
+    done
+  fi
+else
+  log "NOTE     pitfalls: check skipped (core/pitfall-inject.py absent)"
+fi
+
 if [ "$problems" -ne 0 ]; then
   die "$problems problem(s) found"
 fi

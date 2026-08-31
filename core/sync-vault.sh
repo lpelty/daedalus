@@ -57,6 +57,13 @@ else
   log "wrote sessions/_template.md"
 fi
 
+if [ -f "$dest/pitfalls/_template.md" ]; then
+  :
+else
+  cp "$tpl_dir/pitfall.md" "$dest/pitfalls/_template.md"
+  log "wrote pitfalls/_template.md"
+fi
+
 if [ -f "$dest/hot.md" ]; then
   :
 else
