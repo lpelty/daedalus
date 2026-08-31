@@ -168,3 +168,27 @@ EOF
   [ "$status" -ne 0 ]
   case "$output" in *"outside"*) : ;; *) echo "expected refusal: $output"; return 1 ;; esac
 }
+
+@test "refute runs only when enabled, receives diff + criteria + evidence, and a REFUTED verdict flips the run to FAIL" {
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'VERDICT: REFUTED\nThe change does not do what the criteria say.\n'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]   # disabled: untouched
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  [ -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+  [ "$(grep -c "$id-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest")" -eq 1 ]
+}

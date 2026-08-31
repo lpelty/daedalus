@@ -89,11 +89,37 @@ if [ "$fp_before" = "null" ] || [ "$fp_after" = "null" ] || [ "$fp_before" != "$
   result=INVALID
 fi
 
+# Vault summary — no output excerpt; the vault is a pushed repository.
+# Written before run.json (and before the refute call below) because
+# refute.sh's evidence input IS this file: rung 2 reads $ev_vault/$run_id.md
+# as the "never the narrative" summary. The header's `result:` line reflects
+# the pre-refute verdict; if refute flips `result` to FAIL below, run.json
+# (written after) carries the flipped value, but this file's header is not
+# rewritten — it is refute's *input*, not its output, and rewriting would
+# mean re-deriving what refute already read.
+{
+  printf -- '---\ntype: evidence\nrun-id: %s\nresult: %s\nfingerprint: %s\nconfig-sha: %s\ncreated: %s\n---\n' \
+    "$run_id" "$result" "$fp_before" "$config_sha" "$started"
+  printf '# Gate run %s — %s\n\n| # | command | exit | seconds | log |\n|---|---|---|---|---|\n' "$run_id" "$result"
+  printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r n code dur logf cmd; do
+    [ -n "$n" ] || continue
+    printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
+  done
+} > "$ev_vault/$run_id.md"
+
+if [ "$result" = PASS ] && [ "$(cfg verify.refute 2>/dev/null || true)" = "true" ]; then
+  if ! bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}"; then
+    result=FAIL; failed=1; fail_log="$ev_vault/$run_id-review.md"
+  fi
+fi
+
 # run.json — through python for correct JSON escaping of arbitrary commands.
 # The row data is written to a temp file OUTSIDE the evidence tree (so it
 # never needs a manifest line) and its path passed via argv, not piped on
 # stdin: `python3 -` already consumes stdin as the program source (the
-# heredoc), so a second use of stdin for data is silently empty.
+# heredoc), so a second use of stdin for data is silently empty. Written
+# after the refute call so a REFUTED verdict's flipped `result` is what gets
+# recorded here.
 rows_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rows" > "$rows_tmp"
 python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" <<'PY'
@@ -114,17 +140,6 @@ with open(out, "w") as fh:
     json.dump(rec, fh, indent=2)
 PY
 rm -f "$rows_tmp"
-
-# Vault summary — no output excerpt; the vault is a pushed repository.
-{
-  printf -- '---\ntype: evidence\nrun-id: %s\nresult: %s\nfingerprint: %s\nconfig-sha: %s\ncreated: %s\n---\n' \
-    "$run_id" "$result" "$fp_before" "$config_sha" "$started"
-  printf '# Gate run %s — %s\n\n| # | command | exit | seconds | log |\n|---|---|---|---|---|\n' "$run_id" "$result"
-  printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r n code dur logf cmd; do
-    [ -n "$n" ] || continue
-    printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
-  done
-} > "$ev_vault/$run_id.md"
 
 {
   printf '%s\n' "$ev_state/run.json" "$ev_vault/$run_id.md"
