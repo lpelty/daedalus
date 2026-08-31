@@ -92,11 +92,11 @@ fi
 # Vault summary — no output excerpt; the vault is a pushed repository.
 # Written before run.json (and before the refute call below) because
 # refute.sh's evidence input IS this file: rung 2 reads $ev_vault/$run_id.md
-# as the "never the narrative" summary. The header's `result:` line reflects
-# the pre-refute verdict; if refute flips `result` to FAIL below, run.json
-# (written after) carries the flipped value, but this file's header is not
-# rewritten — it is refute's *input*, not its output, and rewriting would
-# mean re-deriving what refute already read.
+# as the "never the narrative" summary. If refute flips `result` below, the
+# frontmatter `result:` line here is rewritten in place immediately after
+# (bash-3.2-safe sed -i.bak, .bak removed) so this file and run.json never
+# disagree — a re-setup deployment's state-loss fallback reads this
+# frontmatter verbatim, so a stale PASS here would be a real false claim.
 {
   printf -- '---\ntype: evidence\nrun-id: %s\nresult: %s\nfingerprint: %s\nconfig-sha: %s\ncreated: %s\n---\n' \
     "$run_id" "$result" "$fp_before" "$config_sha" "$started"
@@ -108,8 +108,20 @@ fi
 } > "$ev_vault/$run_id.md"
 
 if [ "$result" = PASS ] && [ "$(cfg verify.refute 2>/dev/null || true)" = "true" ]; then
-  if ! bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}"; then
-    result=FAIL; failed=1; fail_log="$ev_vault/$run_id-review.md"
+  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" 2>&1 >/dev/null)"
+  refute_code=$?
+  if [ "$refute_code" -eq 1 ] || [ "$refute_code" -eq 2 ]; then
+    result=FAIL; failed=1
+    if [ "$refute_code" -eq 2 ]; then
+      # No review file exists yet — refute.sh exits before writing one when
+      # the refuter CLI itself is missing. Fail loud with the refuter's own
+      # message rather than pointing at a path that was never created.
+      log "refute: $refute_msg"
+      fail_log="$refute_msg"
+    else
+      fail_log="$ev_vault/$run_id-review.md"
+    fi
+    sed -i.bak "s/^result: .*/result: $result/" "$ev_vault/$run_id.md" && rm -f "$ev_vault/$run_id.md.bak"
   fi
 fi
 

@@ -191,4 +191,42 @@ EOF
   [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
   [ -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
   [ "$(grep -c "$id-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest")" -eq 1 ]
+  # FINDING 1: the vault .md frontmatter must agree with run.json after the flip.
+  [ "$(grep -c "^result: FAIL" "$DAEDALUS_HOME/vault/evidence/$id.md")" -eq 1 ]
+}
+
+@test "refute with claude missing from PATH fails loud instead of silently staying PASS" {
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  # A PATH built from a fixed set of directories with no `claude` on it — the
+  # host running this suite may have a real claude CLI installed, and the
+  # brief is explicit that a real `claude` must never be invoked in tests.
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *"claude not found"*) : ;;
+    *) echo "expected 'claude not found' in output; got: $output"; return 1 ;;
+  esac
+}
+
+@test "a markdown-wrapped VERDICT: REFUTED still flips the run to FAIL" {
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin2"
+  cat > "$BATS_TEST_TMPDIR/bin2/claude" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '**VERDICT:** REFUTED\nThe change does not do what the criteria say.\n'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin2/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  PATH="$BATS_TEST_TMPDIR/bin2:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
 }
