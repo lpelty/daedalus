@@ -118,6 +118,7 @@ EOF
   id="$(printf '%s\n' "$output" | tail -1)"
   [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
   [ "$(grep -c '"fingerprint": "null"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 0 ]
+  [ "$(grep -c "fingerprint.err" "$DAEDALUS_HOME/vault/evidence/.manifest")" -ge 1 ]
   write_config "  - echo mutated > new.txt"
   run bash "$DAEDALUS_HOME/core/gates.sh"
   id="$(printf '%s\n' "$output" | tail -1)"
@@ -139,6 +140,25 @@ EOF
   [ "$(grep -c SECRET_TOKEN_abc "$DAEDALUS_HOME/state/evidence/$id/gate-1.log")" -eq 1 ]
   [ "$(grep -c SECRET_TOKEN_abc "$DAEDALUS_HOME/vault/evidence/$id.md")" -eq 0 ]
   [ "$(grep -c '"exit": 1' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+}
+
+@test "a gate command containing a literal tab is refused loudly, before any evidence claims PASS" {
+  # write_config's heredoc can't carry a literal tab byte reliably, so the
+  # config is written directly with printf, embedding a real tab (\t) inside
+  # the gate command — not an escaped/quoted tab, the actual byte that would
+  # corrupt the tab-delimited row format.
+  printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n  - echo one\ttwo\n' \
+    > "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"contains a tab"*) : ;; *) echo "expected a tab refusal; got: $output"; return 1 ;; esac
+  # No evidence run.json anywhere should ever claim PASS for this run: the
+  # refusal must happen before any gate executes, so no run directory with a
+  # PASS result exists at all.
+  if [ -d "$DAEDALUS_HOME/state/evidence" ]; then
+    run grep -rl '"result": "PASS"' "$DAEDALUS_HOME/state/evidence"
+    [ "$status" -ne 0 ]
+  fi
 }
 
 @test "config outside DAEDALUS_HOME is refused" {

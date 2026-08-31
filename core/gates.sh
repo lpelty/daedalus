@@ -38,6 +38,20 @@ fp_before="$(fingerprint)"
 fp_secs="$(sed -n 's/^fingerprint_secs=//p' "$ev_state/fingerprint.err" 2>/dev/null | tail -1)"
 [ -n "$fp_secs" ] || fp_secs=0
 
+# The evidence row format below is tab-delimited. A literal tab inside a gate
+# command would silently corrupt that format — line.split("\t", 4) absorbs the
+# extra field into the wrong column instead of erroring. config.yaml is
+# operator-authored, so a tab in a gate command is an error, not a use case:
+# refuse loudly, upfront, before any gate runs or any evidence is recorded.
+while IFS= read -r gate; do
+  [ -n "$gate" ] || continue
+  case "$gate" in
+    *"$(printf '\t')"*) die "config gates: gate command contains a tab character — refusing (the evidence row format is tab-delimited): $gate" ;;
+  esac
+done <<EOF
+$(cfg_list gates)
+EOF
+
 failed=0
 gate_count=0
 rows=""
