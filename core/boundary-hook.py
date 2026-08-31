@@ -12,7 +12,6 @@ command already ran.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -86,7 +85,7 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
             if str(p.resolve()) not in manifest:
                 stray.append(str(p))
     if stray:
-        reasons.append("Evidence files exist that no gate run produced: %s. Evidence is written by core/gates.sh only." % ", ".join(sorted(stray)))
+        reasons.append("Evidence files exist that no gate run produced: %s. Evidence is written by core/gates.sh only.%s" % (", ".join(sorted(stray)), RESTART))
 
 
 def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[str]) -> None:

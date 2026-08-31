@@ -71,13 +71,17 @@ def sha256_file(p: Path) -> str:
 
 def local_settings_sha(root: Path) -> str:
     """Only the keys that change what the harness enforces. A permission
-    prompt's "don't ask again" writes `allow`, which must not count."""
+    prompt's "don't ask again" writes `allow`, which must not count.
+    `disableAllHooks` is included because it is a single-key way to turn off
+    every hook this stage depends on — the same enforcement-relevant class
+    as `deny` and `hooks`, not the operator's own business like `allow`."""
     p = root / ".claude" / "settings.local.json"
     try:
         data = json.loads(p.read_text())
     except (OSError, ValueError):
         data = {}
-    subset = {"deny": (data.get("permissions") or {}).get("deny", []), "hooks": data.get("hooks", {})}
+    subset = {"deny": (data.get("permissions") or {}).get("deny", []), "hooks": data.get("hooks", {}),
+              "disableAllHooks": data.get("disableAllHooks", False)}
     return sha256_text(json.dumps(subset, sort_keys=True))
 
 
@@ -238,10 +242,10 @@ def changed_vault_docs(root: Path, since_sha: Optional[str], since_time: Optiona
     is still a claim; the whole-vault mode already covers dirt because it
     lists everything on disk, so the status union is skipped there."""
     g, spec = vault_git(root)
-    base = root / "vault" if not spec else root
     if since_sha is None and since_time is None:
         vdir = root / "vault"
         return sorted(p for p in vdir.rglob("*.md") if p.is_file())
+    base = root / "vault" if not spec else root
     names: set = set()
     if since_sha:
         code, out, _ = run(g + ["diff", "--name-only", since_sha] + spec)

@@ -113,6 +113,8 @@ def write_operands(seg: List[str]) -> List[str]:
         ops.extend(t for t in seg[1:] if not t.startswith("-"))
     if head in ("cp", "mv", "install") and len(seg) >= 3:
         ops.append(seg[-1])
+    if head in ("rm", "unlink"):
+        ops.extend(t for t in seg[1:] if not t.startswith("-"))
     if head == "patch":
         ops.extend(t for t in seg[1:] if not t.startswith("-"))
     if head == "git" and len(seg) >= 3 and seg[1] in ("apply", "checkout") and "--" in seg:

@@ -4,11 +4,12 @@ already wrong.
 
 The marker is the root of trust for every later check — vault HEAD for the
 claim window, config hashes, the operator's own uncommitted changes to
-protected files, the target's origin/main. Written on `startup` and `fork`,
-or when none exists for this session; never overwritten, so a claim made
-before a compaction stays inside the window. Then the offline evidence check
-runs, so a claim that slipped past a crashed session is the first thing the
-new session sees. Silent on any failure of its own.
+protected files, the target's origin/main. Written only when no marker
+exists yet for this session id, regardless of `source` — never overwritten,
+so a claim made before a compaction (or a second `startup`/`fork` payload
+for the same session) stays inside the window. Then the offline evidence
+check runs, so a claim that slipped past a crashed session is the first
+thing the new session sees. Silent on any failure of its own.
 """
 from __future__ import annotations
 
@@ -47,11 +48,10 @@ def main() -> int:
         return 0
     root = v.ROOT
     sid = payload.get("session_id")
-    source = payload.get("source", "startup")
     mp = v.marker_path(root, sid)
     notes = []
     try:
-        if source in ("startup", "fork") or not mp.exists():
+        if not mp.exists():
             origin = ""
             t = v.target_root(root)
             if t is not None:
@@ -83,6 +83,9 @@ def main() -> int:
         if bad:
             notes.append("Unverified claims in the vault — run core/gates.sh and cite the run-id, or change the status:\n"
                          + "\n".join("  - " + b for b in bad))
+        ev_dir = root / "vault" / "evidence"
+        if not ev_dir.is_dir() or not any(ev_dir.glob("*.md")):
+            notes.append("verify: stage unarmed — no evidence yet; run core/gates.sh once to arm it")
         ev = root / "state" / "evidence"
         if ev.is_dir():
             runs = sorted(ev.glob("*/run.json"))

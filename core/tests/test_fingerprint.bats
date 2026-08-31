@@ -24,6 +24,13 @@ EOF
   git -C "$T/sub" add -A; git -C "$T/sub" -c user.email=t@x -c user.name=t commit -q -m n
 }
 
+teardown() {
+  # An unreadable fixture path left behind by a failing assertion would
+  # block bats' own tmpdir cleanup — restore permissions unconditionally,
+  # whether or not this test's own restore line was reached.
+  [ -n "${T:-}" ] && [ -e "$T/subdir" ] && chmod -R u+rwx "$T/subdir" 2>/dev/null || true
+}
+
 fp() { bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>/dev/null; }
 
 @test "content changes it, touch does not, revert restores it" {
@@ -50,6 +57,23 @@ fp() { bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>/dev/null; }
 @test "null when the target is not a repo, when index.lock exists, and when fingerprint.sh's add fails" {
   rm -rf "$T/.git"; [ "$(fp)" = "null" ]
   git init -q "$T"; touch "$T/.git/index.lock"; [ "$(fp)" = "null" ]
+}
+
+@test "an unreadable file inside a subdirectory makes git add fail, and fingerprint prints null (drill-6)" {
+  # Pins the `|| { rm -f "$idx"; return 1; }` on `git add` in fp_repo. On
+  # this platform an unreadable DIRECTORY only produces a warning from `git
+  # add -A` (still exit 0) — an unreadable FILE inside a subdirectory is
+  # what actually makes `add` fail (exit 128), verified empirically before
+  # writing this test. That failure must propagate as `null`, never the
+  # empty-tree hash a half-built index would otherwise produce.
+  rm -rf "$T/.git"; git init -q "$T"
+  git -C "$T" -c user.email=t@x -c user.name=t commit -q --allow-empty -m init
+  mkdir -p "$T/subdir"
+  printf 'secret\n' > "$T/subdir/locked.txt"
+  chmod 000 "$T/subdir/locked.txt"
+  [ "$(fp)" = "null" ]
+  chmod 644 "$T/subdir/locked.txt"
+  [ "$(fp)" != "null" ]
 }
 
 @test "prints fingerprint_secs on stderr and exits 0" {

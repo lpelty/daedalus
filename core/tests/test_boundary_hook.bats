@@ -93,6 +93,12 @@ open('$m', 'w').write(json.dumps(d))
   run hook Stop; [ "$status" -eq 2 ]
 }
 
+@test "disableAllHooks written mid-session blocks check 2 instead of silently evading it" {
+  printf '{"disableAllHooks":true}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run hook Stop; [ "$status" -eq 2 ]
+  case "$output" in *"settings.local.json"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+}
+
 @test "evidence: a gates.sh run passes; a hand-written file in the window blocks; a pre-marker unmanifested file does not" {
   printf -- '---\ntype: evidence\n---\n' > "$DAEDALUS_HOME/vault/evidence/20200101-000000-aaaaaa.md"
   touch -t 202001010000 "$DAEDALUS_HOME/vault/evidence/20200101-000000-aaaaaa.md"
@@ -102,6 +108,7 @@ open('$m', 'w').write(json.dumps(d))
   printf -- '---\ntype: evidence\nresult: PASS\n---\n' > "$DAEDALUS_HOME/vault/evidence/20261231-000000-ffffff.md"
   run hook Stop; [ "$status" -eq 2 ]
   case "$output" in *"20261231-000000-ffffff.md"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+  case "$output" in *"restart the session"*) : ;; *) echo "check 3's reason should name the restart remedy: $output"; return 1 ;; esac
 }
 
 @test "promotion: a commit on target main past recorded origin/main blocks even after push; no origin is a note" {

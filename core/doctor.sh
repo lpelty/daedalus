@@ -85,6 +85,15 @@ else
   done
 fi
 
+# Arm-state visibility: claims() returns [] until vault/evidence/ has at
+# least one dated *.md file, which is also what forces the first gates run
+# to happen at all. That is a real gap, not a bug — but a silent one, since
+# a deployment with no evidence yet is inert and gives no signal that it is.
+# This is visibility only; nothing here runs gates.sh or writes evidence.
+if [ ! -d "$DAEDALUS_HOME/vault/evidence" ] || [ -z "$(find "$DAEDALUS_HOME/vault/evidence" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]; then
+  log "NOTE     verify: stage unarmed — no evidence yet; run core/gates.sh once to arm it"
+fi
+
 # Unverified claims: a completion recorded without a PASS gate run for this
 # deployment. Same rule as the Stop hook, over the whole vault.
 #

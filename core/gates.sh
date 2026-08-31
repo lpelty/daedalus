@@ -18,6 +18,33 @@ esac
 target="$(target_path)"
 [ -d "$target" ] || die "no target checkout at $target — run core/sync-target.sh"
 
+# Validation first, side effects after: everything below this point can die
+# without having created a run directory, written fingerprint.err, or
+# touched the manifest — an early-die evidence tree with nothing to point a
+# BLOCKED claim at, which the boundary check then flags as unmanifested with
+# no remedy. So both checks that can `die` run BEFORE any evidence
+# directory, fingerprint, or run-id exists.
+
+# The evidence row format below is tab-delimited. A literal tab inside a gate
+# command would silently corrupt that format — line.split("\t", 4) absorbs the
+# extra field into the wrong column instead of erroring. config.yaml is
+# operator-authored, so a tab in a gate command is an error, not a use case:
+# refuse loudly, upfront, before any gate runs or any evidence is recorded.
+while IFS= read -r gate; do
+  [ -n "$gate" ] || continue
+  case "$gate" in
+    *"$(printf '\t')"*) die "config gates: gate command contains a tab character — refusing (the evidence row format is tab-delimited): $gate" ;;
+  esac
+done <<EOF
+$(cfg_list gates)
+EOF
+
+# Zero-gates refusal, also moved ahead of any evidence-directory creation —
+# counted directly off cfg_list's output rather than the gate-count computed
+# during the run loop below, since that loop hasn't executed yet at this point.
+gate_list_count="$(cfg_list gates | grep -c .)" || gate_list_count=0
+[ "$gate_list_count" -gt 0 ] || die "no gates configured — refusing to report success (check the gates: list in config.yaml)"
+
 run_id="$(date +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 ev_state="$DAEDALUS_HOME/state/evidence/$run_id"
 ev_vault="$DAEDALUS_HOME/vault/evidence"
@@ -37,20 +64,6 @@ config_sha="$(shasum -a 256 "$DAEDALUS_CONFIG" | awk '{print $1}')"
 fp_before="$(fingerprint)"
 fp_secs="$(sed -n 's/^fingerprint_secs=//p' "$ev_state/fingerprint.err" 2>/dev/null | tail -1)"
 [ -n "$fp_secs" ] || fp_secs=0
-
-# The evidence row format below is tab-delimited. A literal tab inside a gate
-# command would silently corrupt that format — line.split("\t", 4) absorbs the
-# extra field into the wrong column instead of erroring. config.yaml is
-# operator-authored, so a tab in a gate command is an error, not a use case:
-# refuse loudly, upfront, before any gate runs or any evidence is recorded.
-while IFS= read -r gate; do
-  [ -n "$gate" ] || continue
-  case "$gate" in
-    *"$(printf '\t')"*) die "config gates: gate command contains a tab character — refusing (the evidence row format is tab-delimited): $gate" ;;
-  esac
-done <<EOF
-$(cfg_list gates)
-EOF
 
 failed=0
 gate_count=0
@@ -77,10 +90,6 @@ $gate_count	$code	$dur	$log_file	$gate"
 done <<EOF
 $(cfg_list gates)
 EOF
-
-if [ "$gate_count" -eq 0 ]; then
-  die "no gates configured — refusing to report success (check the gates: list in config.yaml)"
-fi
 
 fp_after="$(fingerprint)"
 result=PASS
@@ -164,5 +173,9 @@ if [ "$failed" -ne 0 ]; then
   log "log: $fail_log"
   die "one or more gates failed"
 fi
-log "all gates passed ($result)"
-printf '%s\n' "$run_id"
+if [ "$result" = INVALID ]; then
+  log "run INVALID — do not cite"
+else
+  log "all gates passed ($result)"
+  printf '%s\n' "$run_id"
+fi

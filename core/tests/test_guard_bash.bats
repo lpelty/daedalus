@@ -63,6 +63,9 @@ allowed() { [ -z "$output" ]; }
   run guard 'python3 -c "open(\"core/lib.sh\").read()"'; allowed
   run guard 'grep -i x core/lib.sh'; allowed
   run guard 'sed -i "" s/a/b/ state/session-s1.json'; denied
+  run guard 'rm state/session-s1.json'; denied
+  run guard 'unlink state/session-s1.json'; denied
+  run guard 'rm target/thing/scratch.txt'; allowed
 }
 
 @test "a heredoc with an apostrophe mentioning CLAUDE.md is allowed; one redirecting into it is denied" {

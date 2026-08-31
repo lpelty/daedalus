@@ -41,6 +41,48 @@ start() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"
   case "$output" in *"CLAUDE.md"*) : ;; *) echo "compact notice lost the marker's protected snapshot: $output"; return 1 ;; esac
 }
 
+@test "session-start notes the stage is unarmed when vault/evidence is empty; clears once one evidence doc exists" {
+  # Finding 1, session-start.py half: same NOTE as doctor.sh, surfaced in
+  # additionalContext so it's the first thing the operator sees.
+  run start s7 startup
+  [ "$status" -eq 0 ]
+  case "$output" in *"verify: stage unarmed"*"run core/gates.sh once to arm it"*) : ;; *) echo "expected the unarmed notice; got: $output"; return 1 ;; esac
+
+  cat > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md" <<'EOF'
+---
+type: evidence
+created: 2026-01-01T00:00:00
+result: PASS
+fingerprint: deadbeef
+config-sha: deadbeef
+---
+EOF
+  run start s8 startup
+  [ "$status" -eq 0 ]
+  case "$output" in *"stage unarmed"*) echo "notice should have cleared once evidence exists: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "a second startup payload for the same session id never overwrites the marker" {
+  # Finding 3: source used to gate whether an existing marker got
+  # overwritten (startup/fork always rewrote), which meant a claim made
+  # before a mid-session `startup`/`fork` payload could fall outside the
+  # window it was actually made in. The marker is now written only when
+  # absent for this session id, regardless of source.
+  run start s6 startup
+  [ "$status" -eq 0 ]
+  m="$DAEDALUS_HOME/state/session-s6.json"
+  [ -f "$m" ]
+  before="$(cat "$m")"
+  # Change tree state that would visibly alter a freshly-computed marker
+  # (vault head moves, a new protected-file edit appears) so a rewrite would
+  # not be byte-identical to the original by coincidence.
+  git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q --allow-empty -m later
+  printf 'more dirt\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  run start s6 startup
+  [ "$status" -eq 0 ]
+  [ "$(cat "$m")" = "$before" ]
+}
+
 @test "a claim committed by a crashed session is still found; a cited-and-passing claim is not" {
   printf -- '---\ntype: evidence\nrun-id: 20260101-000000-abcdef\nresult: PASS\ncreated: 2026-01-01T00:00:00\n---\n' > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md"
   printf -- '---\ntype: proposal\nstatus: IMPLEMENTED\nupdated-by: daedalus\ncreated: 2026-02-01\n---\n# Committed\n' > "$DAEDALUS_HOME/vault/proposals/PROP-COMMITTED.md"

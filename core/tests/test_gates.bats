@@ -93,12 +93,39 @@ EOF
   esac
 }
 
-@test "a PASS run writes run.json, the vault summary, the manifest, and prints the run-id last" {
+@test "an empty gates list dies before creating a run directory — validation before side effects" {
+  # The zero-gates die used to happen after the run-id, mkdir, and
+  # fingerprint work, which stranded a fingerprint.err and an empty run
+  # directory that no manifest line ever pointed at. Both validations now
+  # run first: nothing under state/evidence/ should exist at all.
+  write_config ""
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ]
+}
+
+@test "a gate command containing a tab dies before creating a run directory — validation before side effects" {
+  printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n  - echo one\ttwo\n' \
+    > "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"contains a tab"*) : ;; *) echo "expected a tab refusal; got: $output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ]
+}
+
+@test "a run whose fingerprint is null writes run.json, the vault summary, and the manifest as INVALID, and does not print a citable run-id" {
+  # The fixture target is not a git repo, so the fingerprint is null on both
+  # sides and the run is INVALID — a run.json and vault summary still get
+  # written (this test locates them by directory listing, not by parsing a
+  # run-id off stdout), but nothing in the output should read as a citable
+  # run-id: an INVALID run is not something a claim should point at.
   write_config "  - true"
   run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ]
-  id="$(printf '%s\n' "$output" | tail -1)"
-  case "$id" in [0-9]*-[0-9]*-[0-9a-f]*) : ;; *) echo "no run-id: $output"; return 1 ;; esac
+  case "$output" in *"run INVALID — do not cite"*) : ;; *) echo "expected the INVALID notice; got: $output"; return 1 ;; esac
+  case "$output" in *"all gates passed"*) echo "must not print the PASS message for an INVALID run: $output"; return 1 ;; *) : ;; esac
+  id="$(ls "$DAEDALUS_HOME/state/evidence" | head -1)"
+  [ -n "$id" ]
   [ -f "$DAEDALUS_HOME/state/evidence/$id/run.json" ]
   [ -f "$DAEDALUS_HOME/state/evidence/$id/gate-1.log" ]
   [ -f "$DAEDALUS_HOME/vault/evidence/$id.md" ]
@@ -106,6 +133,20 @@ EOF
   [ "$(grep -c "^result: INVALID" "$DAEDALUS_HOME/vault/evidence/$id.md")" -eq 1 ]
   [ "$(grep -c "$id" "$DAEDALUS_HOME/vault/evidence/.manifest")" -ge 3 ]
   [ "$(grep -c 'echo\|true' "$DAEDALUS_HOME/vault/evidence/$id.md")" -ge 1 ]
+}
+
+@test "a PASS run prints the run-id last" {
+  write_config "  - true"
+  cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  git init -q "$DAEDALUS_HOME/target/thing"
+  git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ]
+  id="$(printf '%s\n' "$output" | tail -1)"
+  case "$id" in [0-9]*-[0-9]*-[0-9a-f]*) : ;; *) echo "no run-id: $output"; return 1 ;; esac
+  [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  case "$output" in *"all gates passed"*) : ;; *) echo "expected the PASS message; got: $output"; return 1 ;; esac
 }
 
 @test "a git target yields a real fingerprint and PASS; a gate that mutates the tree yields INVALID" {
@@ -119,9 +160,12 @@ EOF
   [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
   [ "$(grep -c '"fingerprint": "null"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 0 ]
   [ "$(grep -c "fingerprint.err" "$DAEDALUS_HOME/vault/evidence/.manifest")" -ge 1 ]
+  prev_id="$id"
   write_config "  - echo mutated > new.txt"
   run bash "$DAEDALUS_HOME/core/gates.sh"
-  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$status" -eq 0 ]
+  case "$output" in *"run INVALID — do not cite"*) : ;; *) echo "expected the INVALID notice; got: $output"; return 1 ;; esac
+  id="$(ls "$DAEDALUS_HOME/state/evidence" | grep -v "^$prev_id\$")"
   [ "$(grep -c '"result": "INVALID"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
 }
 

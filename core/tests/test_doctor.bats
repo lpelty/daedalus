@@ -51,6 +51,55 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "doctor notes the stage is unarmed when vault/evidence has no evidence yet; clears once one exists" {
+  # Finding 1: claims() returns [] until vault/evidence/ has a dated *.md
+  # file, which is also what forces the first gates.sh run to happen at
+  # all — with none yet, the whole stage is inert and gives no signal that
+  # it is. This pins the VISIBILITY half: a NOTE line that does not turn
+  # doctor red (NOTE is not MISSING, so it must not count toward $problems).
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+
+  # No vault/evidence/ directory at all yet.
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"NOTE"*"verify: stage unarmed"*"run core/gates.sh once to arm it"*) : ;; *) echo "expected the unarmed NOTE; got: $output"; return 1 ;; esac
+
+  # An empty vault/evidence/ directory (present, but no *.md yet) is the same case.
+  mkdir -p "$DAEDALUS_HOME/vault/evidence"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"stage unarmed"*) : ;; *) echo "expected the unarmed NOTE for an empty evidence dir; got: $output"; return 1 ;; esac
+
+  # One evidence doc arms the stage — the NOTE must clear.
+  cat > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md" <<'EOF'
+---
+type: evidence
+created: 2026-01-01T00:00:00
+result: PASS
+fingerprint: deadbeef
+config-sha: deadbeef
+---
+EOF
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"stage unarmed"*) echo "NOTE should have cleared once evidence exists: $output"; return 1 ;; *) : ;; esac
+}
+
 @test "doctor reports a missing exchange directory by name" {
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
