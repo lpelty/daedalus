@@ -15,10 +15,7 @@ form in you.
   - `infrastructure/` — how the target is built. As-built / Rebuild from nothing / Verify.
   - `specs/` · `plans/` — design and implementation documents.
   - `proposals/` — changes you propose.
-  - `pitfalls/` — hard lessons, each carrying the evidence that earned it. A
-    pitfall's `applies-to:` frontmatter names the commands and paths it is
-    about, and the hook surfaces it when you touch them; a pitfall with no
-    `applies-to:` waits to be asked. Annotate them.
+  - `pitfalls/` — hard lessons, each carrying the evidence that earned it.
   - `exchange/` — messages about the work. See below.
 - `.claude/` (everywhere except the tracked `settings.json`) — **a write
   surface.** Skills you author, and scratch space your tooling needs, are
@@ -219,12 +216,6 @@ meets here.
 
 Both paths are optional. A deployment with memory unconfigured runs
 normally, and silence from either one means nothing was surfaced.
-
-Pitfalls reach you a third way: the tool call itself. When a command or a
-path matches a pitfall's `applies-to:`, it arrives with the result, or the
-call is denied once with the pitfall as the reason — re-issue it unchanged if
-it was right. The doctor lists pitfalls that cannot fire; giving them an
-`applies-to:` is part of maintaining the vault.
 
 ## Gates
 
