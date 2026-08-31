@@ -70,3 +70,63 @@ count() { printf '%s\n' "$output" | grep -cF -- "$1"; }
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+edit_call() {   # edit_call <abs-file-path> [session_id] [agent_id]
+  local p="$1" sid="${2:-s1}" aid="${3:-}"
+  local agent=""
+  [ -n "$aid" ] && agent=", \"agent_id\": \"$aid\""
+  printf '{"hook_event_name":"PreToolUse","session_id":"%s"%s,"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' \
+    "$sid" "$agent" "$p"
+}
+
+hook() { printf '%s' "$1" | python3 "$SCRIPT"; }
+
+@test "hook: dependents banner with derived module name; decoys absent; leaf/non-py/outside silent" {
+  run hook "$(edit_call "$T/pkg/core.py")"
+  [ "$status" -eq 0 ]
+  [ "$(count '5 files import pkg.core')" -eq 1 ]
+  [ "$(count 'additionalContext')" -eq 1 ]
+  [ "$(count 'fakevenv')" -eq 0 ]
+  run hook "$(edit_call "$T/leaf.py" s2)"
+  [ -z "$output" ]
+  run hook "$(edit_call "$T/pkg/core.txt" s3)"
+  [ -z "$output" ]
+  run hook "$(edit_call /etc/hosts s4)"
+  [ -z "$output" ]
+}
+
+@test "hook: dedup per session-key; new key fires; PreCompact resets" {
+  run hook "$(edit_call "$T/pkg/core.py" sX)"
+  [ "$(count 'pkg.core')" -eq 1 ]
+  run hook "$(edit_call "$T/pkg/core.py" sX)"
+  [ -z "$output" ]
+  run hook "$(edit_call "$T/pkg/core.py" sY)"
+  [ "$(count 'pkg.core')" -eq 1 ]
+  printf '{"hook_event_name":"PreCompact","session_id":"sX"}' | python3 "$SCRIPT"
+  run hook "$(edit_call "$T/pkg/core.py" sX)"
+  [ "$(count 'pkg.core')" -eq 1 ]
+}
+
+@test "hook: die-before-emit does not mark seen — the next edit fires" {
+  DAEDALUS_CODE_CONTEXT_TEST_DIE=render run hook "$(edit_call "$T/pkg/core.py" sZ)"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run hook "$(edit_call "$T/pkg/core.py" sZ)"
+  [ "$(count 'pkg.core')" -eq 1 ]
+}
+
+@test "hook: silence on malformed stdin and forced stall; unreadable state DEGRADES to repetition" {
+  run bash -c "printf 'not json' | python3 '$SCRIPT'"
+  [ "$status" -eq 0 ]; [ -z "$output" ]
+  DAEDALUS_CODE_CONTEXT_TEST_SLEEP=5 run hook "$(edit_call "$T/pkg/core.py" sW)"
+  [ "$status" -eq 0 ]; [ -z "$output" ]
+  # unreadable state/: banner still emits, and emits AGAIN (dedup degraded,
+  # not the hook dead) — spec B-4 as amended: repetition, never silence
+  chmod 000 "$DAEDALUS_HOME/state"
+  run hook "$(edit_call "$T/pkg/core.py" sQ)"
+  [ "$status" -eq 0 ]
+  [ "$(count 'pkg.core')" -eq 1 ]
+  run hook "$(edit_call "$T/pkg/core.py" sQ)"
+  [ "$(count 'pkg.core')" -eq 1 ]
+  chmod 755 "$DAEDALUS_HOME/state"
+}
