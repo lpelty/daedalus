@@ -94,13 +94,25 @@ fi
 # survive past the loop and every unverified claim would go uncounted even
 # though it printed. The here-string keeps the loop (and note_problem) in
 # the current shell.
+#
+# The exit code is checked too, right after the command substitution. A
+# crashing verify-hook.py prints nothing to stdout, which previously read as
+# "no unverified claims" — the doctor stayed green and silent on top of a
+# broken claims-checker. That is this repo's founding pitfall class: a
+# diagnostic for silent failure that failed silently. A non-zero exit is
+# itself a problem, so it goes through note_problem and turns doctor red.
 if [ -f "$DAEDALUS_HOME/core/verify-hook.py" ]; then
   unverified="$(python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor 2>/dev/null)"
-  while IFS= read -r line; do
-    [ -n "$line" ] && note_problem "unverified claim: $line"
-  done <<EOF
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    note_problem "unverified-claims check failed (core/verify-hook.py --doctor exited $rc)"
+  else
+    while IFS= read -r line; do
+      [ -n "$line" ] && note_problem "unverified claim: $line"
+    done <<EOF
 $unverified
 EOF
+  fi
 fi
 
 if [ "$problems" -ne 0 ]; then

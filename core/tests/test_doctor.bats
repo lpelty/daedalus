@@ -410,3 +410,48 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ]
 }
+
+@test "a crashing verify-hook.py --doctor turns doctor red instead of silently green" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do
+    mkdir -p "$DAEDALUS_HOME/vault/$d"
+  done
+
+  # Otherwise-healthy fixture, no claims at all — the empty stdout from a
+  # crashing verify-hook.py must not be mistaken for "no unverified claims".
+  # Stub prints nothing and exits 3, standing in for a real crash (e.g. a
+  # traceback on stderr, which is discarded by doctor's 2>/dev/null exactly
+  # as a real crash's traceback would be).
+  cat > "$DAEDALUS_HOME/core/verify-hook.py" <<'EOF'
+#!/usr/bin/env python3
+import sys
+sys.exit(3)
+EOF
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"check failed"* ]]
+  [[ "$output" == *"exited 3"* ]]
+  [[ "$output" != *"Traceback"* ]]
+
+  # Positive control: restore the real verify-hook.py (copied by setup() from
+  # the source tree) and confirm doctor goes back to green on the same,
+  # still-claim-free fixture.
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  cp "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/verify-hook.py"
+
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+}
