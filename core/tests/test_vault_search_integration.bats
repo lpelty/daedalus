@@ -1,12 +1,13 @@
 #!/usr/bin/env bats
 #
 # Spec A-9's through-the-runner clause: the real engine driven by
-# vault-search.py. Skips where the fleet engine isn't present.
+# vault-search.py. Skips where the engine checkout this machine provides
+# isn't present.
 
 setup() {
-  ENGINE_DIR="$HOME/fleet/engine"
+  ENGINE_DIR="${DAEDALUS_RECALL_TEST_ENGINE:-}"
   UV="$HOME/.local/bin/uv"
-  { [ -d "$ENGINE_DIR" ] && [ -x "$UV" ]; } || skip "fleet engine unavailable"
+  { [ -n "$ENGINE_DIR" ] && [ -d "$ENGINE_DIR" ] && [ -x "$UV" ]; } || skip "recall engine not configured (set DAEDALUS_RECALL_TEST_ENGINE)"
   [ -f "$ENGINE_DIR/pipeline/daedalus_recall.py" ] || skip "daedalus_recall not built yet"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
