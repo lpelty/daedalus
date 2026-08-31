@@ -209,8 +209,19 @@ def vault_head(root: Path) -> Optional[str]:
 
 
 def changed_vault_docs(root: Path, since_sha: Optional[str], since_time: Optional[float]) -> List[Path]:
+    """Three modes, selected by which of since_sha/since_time is given:
+    whole-vault (both None) — every *.md under vault/, recursive, committed
+    or not, for a crash-recovery/doctor sweep with no prior marker to anchor
+    to; since-sha — files changed between since_sha and the working tree;
+    since-time — files changed in commits since since_time. The two windowed
+    modes also union in live `git status` dirt, since an uncommitted claim
+    is still a claim; the whole-vault mode already covers dirt because it
+    lists everything on disk, so the status union is skipped there."""
     g, spec = vault_git(root)
     base = root / "vault" if not spec else root
+    if since_sha is None and since_time is None:
+        vdir = root / "vault"
+        return sorted(p for p in vdir.rglob("*.md") if p.is_file())
     names: set = set()
     if since_sha:
         code, out, _ = run(g + ["diff", "--name-only", since_sha] + spec)

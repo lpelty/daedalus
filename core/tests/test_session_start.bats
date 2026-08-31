@@ -31,8 +31,22 @@ start() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"
   case "$output" in *"uncommitted changes"*) : ;; *) echo "no operator-dirt notice: $output"; return 1 ;; esac
   before="$(cat "$m")"
   git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q --allow-empty -m later
+  git -C "$DAEDALUS_HOME" checkout -- CLAUDE.md
   run start s1 compact
   [ "$(cat "$m")" = "$before" ]
+  case "$output" in *"CLAUDE.md"*) : ;; *) echo "compact notice lost the marker's protected snapshot: $output"; return 1 ;; esac
+}
+
+@test "a claim committed by a crashed session is still found; a cited-and-passing claim is not" {
+  printf -- '---\ntype: evidence\nrun-id: 20260101-000000-abcdef\nresult: PASS\ncreated: 2026-01-01T00:00:00\n---\n' > "$DAEDALUS_HOME/vault/evidence/20260101-000000-abcdef.md"
+  printf -- '---\ntype: proposal\nstatus: IMPLEMENTED\nupdated-by: daedalus\ncreated: 2026-02-01\n---\n# Committed\n' > "$DAEDALUS_HOME/vault/proposals/PROP-COMMITTED.md"
+  printf -- '---\ntype: proposal\nstatus: IMPLEMENTED\nupdated-by: daedalus\ncreated: 2026-02-01\nevidence-run: 20260101-000000-abcdef\n---\n# Cited\n' > "$DAEDALUS_HOME/vault/proposals/PROP-CITED.md"
+  git -C "$DAEDALUS_HOME/vault" add -A
+  git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q -m "crashed session's claims"
+  run start s3 startup
+  [ "$status" -eq 0 ]
+  case "$output" in *"PROP-COMMITTED.md"*"no evidence-run"*) : ;; *) echo "committed claim not announced: $output"; return 1 ;; esac
+  case "$output" in *"PROP-CITED.md"*) echo "cited-and-passing claim wrongly flagged: $output"; return 1 ;; *) : ;; esac
 }
 
 @test "an unverified claim from a crashed session is announced at start" {
