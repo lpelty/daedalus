@@ -132,6 +132,26 @@ def protected_status(root: Path) -> List[str]:
     return sorted(ln for ln in out.splitlines() if ln.strip()) if code == 0 else []
 
 
+def protected_snapshot(root: Path) -> Dict[str, Dict[str, str]]:
+    """Per-path detail behind protected_status's lines: the porcelain line
+    plus a content hash, keyed by path. A porcelain line alone conflates
+    "this path has dirt" with "this path's content is dirt" — a file that
+    was already dirty at session start (operator-owned) can be edited
+    further while its line stays the same two letters, and the reverse
+    (staging with no content change) flips the line without changing
+    content. Hashing lets check 1 key on content, not on git's status
+    letters. Content hash is of the current working-tree file (empty
+    string's hash for a path git reports but that no longer exists, e.g.
+    a delete)."""
+    out: Dict[str, Dict[str, str]] = {}
+    for ln in protected_status(root):
+        path = ln[3:].split(" -> ")[-1].strip().strip('"')
+        p = root / path
+        sha = sha256_file(p) if p.is_file() else ""
+        out[path] = {"line": ln, "sha": sha}
+    return out
+
+
 # --- Marker -----------------------------------------------------------------
 
 def _safe(s: object) -> str:

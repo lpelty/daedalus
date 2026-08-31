@@ -27,7 +27,11 @@ start() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"
   m="$DAEDALUS_HOME/state/session-s1.json"
   [ -f "$m" ]
   [ "$(grep -c '"vault_head"' "$m")" -eq 1 ]
-  [ "$(grep -c 'CLAUDE.md' "$m")" -eq 1 ]
+  # CLAUDE.md appears three times by design: once in the protected_status
+  # porcelain line, once as the protected_snapshot dict key, and once inside
+  # that entry's own "line" field (the porcelain line kept alongside the hash).
+  [ "$(grep -c 'CLAUDE.md' "$m")" -eq 3 ]
+  [ "$(python3 -c "import json,sys; print('CLAUDE.md' in json.load(open('$m'))['protected_snapshot'])")" = "True" ]
   case "$output" in *"uncommitted changes"*) : ;; *) echo "no operator-dirt notice: $output"; return 1 ;; esac
   before="$(cat "$m")"
   git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q --allow-empty -m later

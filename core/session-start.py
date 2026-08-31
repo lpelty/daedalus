@@ -64,6 +64,7 @@ def main() -> int:
                 "local_settings_sha": v.local_settings_sha(root),
                 "target_origin_main": origin,
                 "protected_status": v.protected_status(root),
+                "protected_snapshot": v.protected_snapshot(root),
             }
             mp.parent.mkdir(parents=True, exist_ok=True)
             mp.write_text(json.dumps(marker, indent=2))

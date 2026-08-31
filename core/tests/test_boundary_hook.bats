@@ -27,12 +27,17 @@ EOF
 
 hook() { printf '{"hook_event_name":"%s","session_id":"s1"}' "$1" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
 
-@test "new protected dirt blocks on PostToolUse and Stop; snapshot dirt does not; revert passes" {
+@test "new protected dirt blocks on PostToolUse and Stop; snapshot dirt further edited blocks; revert passes" {
   printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
   printf '{"hook_event_name":"SessionStart","session_id":"s2","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
   printf 'more\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  # Content-hash keying (Finding 1): a snapshot-dirty file edited FURTHER
+  # this session is content-changed relative to the snapshot's hash, even
+  # though its porcelain line (" M CLAUDE.md") is unchanged — this must block.
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s2\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 2 ]
+  case "$output" in *"CLAUDE.md"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+  printf 'x\nop\n' > "$DAEDALUS_HOME/CLAUDE.md"   # back to exactly the snapshot's content
   printf 'x\n' >> "$DAEDALUS_HOME/core/lib.sh"
   run bash -c "printf '{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"s2\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 2 ]
@@ -40,6 +45,39 @@ hook() { printf '{"hook_event_name":"%s","session_id":"s1"}' "$1" | python3 "$DA
   git -C "$DAEDALUS_HOME" checkout -q -- core/lib.sh
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s2\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 0 ]
+}
+
+@test "content hashing: untouched snapshot dirt passes; no-op stage of snapshot dirt passes; old-format marker degrades without crashing" {
+  # (a) covered above (edited further blocks). (b) untouched snapshot dirt.
+  printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  printf '{"hook_event_name":"SessionStart","session_id":"s3","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s3\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 0 ]
+  # (c) staged with no content change (" M" -> "M ") must not block — same sha.
+  git -C "$DAEDALUS_HOME" add CLAUDE.md
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s3\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 0 ]
+  git -C "$DAEDALUS_HOME" reset -q CLAUDE.md
+  # CLAUDE.md is still dirty (op\n appended) at this point — the (d) marker
+  # below has an empty protected_status, so this dirt is "new" under the
+  # degraded line comparison and must still be caught.
+  # (d) old-format marker (no protected_snapshot key) degrades to the line
+  # comparison instead of crashing.
+  m="$DAEDALUS_HOME/state/session-s4.json"
+  python3 -c "
+import json, sys
+sys.path.insert(0, '$DAEDALUS_HOME/core')
+import verifylib as v
+from pathlib import Path
+root = Path('$DAEDALUS_HOME')
+d = {'session_id': 's4', 'started': '2020-01-01T00:00:00', 'vault_head': None,
+     'config_sha': v.sha256_file(root / 'config.yaml'),
+     'local_settings_sha': v.local_settings_sha(root), 'target_origin_main': '', 'protected_status': []}
+open('$m', 'w').write(json.dumps(d))
+"
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s4\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ]
+  case "$output" in *"CLAUDE.md"*) : ;; *) echo "old-format marker should still catch new dirt via line comparison: $output"; return 1 ;; esac
 }
 
 @test "config change blocks; a 'don't ask again' allow entry does not; a deny change does" {
@@ -78,4 +116,15 @@ hook() { printf '{"hook_event_name":"%s","session_id":"s1"}' "$1" | python3 "$DA
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s5\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 0 ]
   case "$output" in *"no origin"*) : ;; *) echo "expected a note: $output"; return 1 ;; esac
+}
+
+@test "no-marker degrade notice names the restart remedy" {
+  # Finding 2: the marker-less degrade notice must carry the remedy, not just
+  # announce the gap. Whether this particular tree is otherwise clean enough
+  # to pass (exit 0, note printed to stdout) or has protected dirt of its own
+  # (exit 2, note folded into the blocked reasons) is incidental — either way
+  # the "session-start hook did not run" notice must name the restart fix.
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"no-such-session\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  case "$status" in 0|2) : ;; *) echo "unexpected exit: $status"; return 1 ;; esac
+  case "$output" in *"session-start hook did not run"*"restart the session"*) : ;; *) echo "no-marker notice missing the restart remedy: $output"; return 1 ;; esac
 }

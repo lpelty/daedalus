@@ -25,12 +25,29 @@ RESTART = " If the operator made this change, restart the session — it re-snap
 
 
 def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
-    now = set(v.protected_status(root))
-    before = set(marker.get("protected_status", []))
-    new = sorted(now - before)
-    if new:
+    snapshot = marker.get("protected_snapshot")
+    if snapshot is None:
+        # Old-format marker (pre-content-hash session-start): degrade to the
+        # line-comparison this replaced. A snapshot-dirty file edited further
+        # without changing its porcelain line (e.g. still " M") is missed
+        # here — that gap is exactly what the hash keying above closes, but
+        # never crash on an old marker.
+        now = set(v.protected_status(root))
+        before = set(marker.get("protected_status", []))
+        new = sorted(now - before)
+        if new:
+            reasons.append("Protected files changed this session: %s. Revert these — Daedalus's own code changes by proposal, not by edit.%s"
+                           % (", ".join(ln[3:] for ln in new), RESTART))
+        return
+    now = v.protected_snapshot(root)
+    bad: List[str] = []
+    for path, cur in now.items():
+        before = snapshot.get(path)
+        if before is None or cur.get("sha") != before.get("sha"):
+            bad.append(path)
+    if bad:
         reasons.append("Protected files changed this session: %s. Revert these — Daedalus's own code changes by proposal, not by edit.%s"
-                       % (", ".join(ln[3:] for ln in new), RESTART))
+                       % (", ".join(sorted(bad)), RESTART))
 
 
 def check_config(root: Path, marker: dict, reasons: List[str]) -> None:
@@ -104,7 +121,7 @@ def main() -> int:
         if marker is None:
             marker = {"protected_status": [], "config_sha": v.sha256_file(root / "config.yaml"),
                       "local_settings_sha": v.local_settings_sha(root), "started": "", "target_origin_main": ""}
-            notes.append("The session-start hook did not run; boundary checks compare against the current state.")
+            notes.append("The session-start hook did not run; boundary checks compare against the current state.%s" % RESTART)
             # With no snapshot, any protected dirt counts.
         check_protected(root, marker, reasons)
         check_config(root, marker, reasons)
