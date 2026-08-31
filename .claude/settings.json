@@ -15,36 +15,15 @@
   },
   "hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/session-start.py", "timeout": 10}]}],
-    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/guard-bash.py", "timeout": 5}]}],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/guard-bash.py", "timeout": 5}]},
+      {"matcher": "Bash|Edit|Write|NotebookEdit", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py", "timeout": 5}]}
+    ],
     "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]}],
     "Stop": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]},
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/verify-hook.py", "timeout": 60}]}
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Edit|Write|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py",
-            "timeout": 5
-          }
-        ]
-      }
     ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
+    "PreCompact": [{"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py", "timeout": 5}]}]
   }
 }

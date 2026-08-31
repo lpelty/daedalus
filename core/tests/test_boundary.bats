@@ -191,3 +191,39 @@ EOF
     ./.claude/settings.json ./.claude/settings.local.json)
   [ -z "$uncovered" ] || { echo "permission surface unprotected:$uncovered"; return 1; }
 }
+
+@test "settings.json parses with unique keys and every wired hook event survives" {
+  cd "$DAEDALUS_HOME"
+  # The verify-stage merge produced two top-level "hooks" keys; JSON parsers
+  # keep the last, so SessionStart, guard-bash, boundary, and the verify Stop
+  # hook were silently dark while the file looked fully wired (found live,
+  # 2026-08-31). Duplicate keys anywhere in the file are a parse-shadowing
+  # hazard, and the event list asserts the protection actually in force —
+  # the same posture as the deny-rule coverage tests above.
+  run python3 - <<'PY'
+import json, sys
+
+def reject_dupes(pairs):
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            sys.exit("duplicate key shadows earlier value: %r" % k)
+        seen.add(k)
+    return dict(pairs)
+
+with open(".claude/settings.json") as fh:
+    cfg = json.load(fh, object_pairs_hook=reject_dupes)
+
+events = set(cfg.get("hooks", {}))
+missing = {"SessionStart", "PreToolUse", "PostToolUse", "Stop", "PreCompact"} - events
+if missing:
+    sys.exit("hook events lost from effective config: %s" % sorted(missing))
+
+cmds = json.dumps(cfg["hooks"])
+for script in ("session-start.py", "guard-bash.py", "pitfall-inject.py",
+               "boundary-hook.py", "verify-hook.py"):
+    if script not in cmds:
+        sys.exit("hook script not wired in effective config: %s" % script)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
