@@ -161,3 +161,52 @@ PY
   run python3 "$SCRIPT" query "some query text"
   [ "$(report_count 'store=')" -eq 1 ]
 }
+
+@test "index: success + count line + store present -> stamp written, line echoed" {
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<EOF
+#!/bin/bash
+mkdir -p "\$DAEDALUS_RECALL_STORE"
+echo "some engine noise"
+echo "indexed=3 purged=1"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "  vault-index: '$BATS_TEST_TMPDIR/eng.sh'"
+  run python3 "$SCRIPT" index
+  [ "$status" -eq 0 ]
+  [ "$(count 'indexed=3 purged=1')" -eq 1 ]
+  [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
+
+@test "index: exit 0 without count line -> no stamp" {
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<EOF
+#!/bin/bash
+mkdir -p "\$DAEDALUS_RECALL_STORE"
+echo "done"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "  vault-index: '$BATS_TEST_TMPDIR/eng.sh'"
+  run python3 "$SCRIPT" index
+  [ "$status" -eq 0 ]
+  [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
+
+@test "index: count line but store never created -> no stamp (misbound engine)" {
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<'EOF'
+#!/bin/bash
+echo "indexed=5 purged=0"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "  vault-index: '$BATS_TEST_TMPDIR/eng.sh'"
+  run python3 "$SCRIPT" index
+  [ "$status" -eq 0 ]
+  [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
+
+@test "index: failing engine leaves an existing stamp untouched" {
+  mkdir -p "$DAEDALUS_HOME/state"
+  printf 'old' > "$DAEDALUS_HOME/state/recall-last-index"
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "  vault-index: 'false'"
+  run python3 "$SCRIPT" index
+  [ "$status" -eq 0 ]
+  [ "$(cat "$DAEDALUS_HOME/state/recall-last-index")" = "old" ]
+}
