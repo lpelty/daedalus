@@ -387,3 +387,28 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c 'NOTE     pitfalls: 1 total, 1 cannot fire')" -eq 1 ]
   [ "$(printf '%s\n' "$output" | grep -c 'NOTE       nn.md: no applies-to')" -eq 1 ]
 }
+
+
+@test "doctor survives a crashing pitfall-inject.py --check quietly, exit status unchanged" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  mkdir -p "$DAEDALUS_HOME/target/thing/.git" "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+  cat > "$DAEDALUS_HOME/core/pitfall-inject.py" <<'EOF'
+import sys
+sys.exit(3)
+EOF
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'NOTE     pitfalls: check failed (core/pitfall-inject.py --check exited 3)')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'Traceback')" -eq 0 ]
+}

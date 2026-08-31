@@ -476,6 +476,16 @@ EOF
   run python3 "$SCRIPT" --check
   chmod 700 "$DAEDALUS_HOME/state"
   [ "$(count 'state/ unwritable')" -eq 1 ]
+  rm -rf "$DAEDALUS_HOME/state"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(count 'state/ absent')" -eq 1 ]
+  [ ! -e "$DAEDALUS_HOME/state" ]
+  mkdir -p "$DAEDALUS_HOME/state"
+  run python3 "$SCRIPT" --check
+  [ "$status" -eq 0 ]
+  [ "$(count 'state/ absent')" -eq 0 ]
+  [ "$(count 'state/ unwritable')" -eq 0 ]
 }
 
 @test "template never fires even with live patterns" {

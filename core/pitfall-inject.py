@@ -534,13 +534,15 @@ def check(root: Path) -> List[str]:
     if tp is None and (root / "core" / "lib.sh").is_file():
         lines.append("  target root: lib.sh target_path did not resolve; path patterns cannot fire")
     probe = root / "state"
-    try:
-        probe.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(probe), prefix=".probe-")
-        os.close(fd)
-        os.unlink(tmp)
-    except OSError:
-        lines.append("  state/ unwritable — warn degrades to inject")
+    if not probe.is_dir():
+        lines.append("  state/ absent — run core/setup.sh")
+    else:
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(probe), prefix=".probe-")
+            os.close(fd)
+            os.unlink(tmp)
+        except OSError:
+            lines.append("  state/ unwritable — warn degrades to inject")
     return lines
 
 
