@@ -143,6 +143,27 @@ deliberately conservative: prompts shorter than four words are skipped, and
 at most five memories are surfaced. Those numbers are a starting position,
 and a recorded miss is what argues for loosening them.
 
+### Pitfall triggers
+
+A pitfall in `vault/pitfalls/` can declare what it applies to, and the hook in
+the tracked `.claude/settings.json` surfaces it on the matching tool call:
+
+    applies-to:
+      bash:
+        - '<python regex over the command>'
+      path:
+        - '<glob over the path, relative to the target checkout>'
+    enforce: inject | warn | block
+
+`inject` attaches the pitfall to the tool result. `warn` denies the call once
+per session with the pitfall as the reason, then lets the retry through.
+`block` denies it every time. Block-lists only, one pattern per line, quoted.
+`core/doctor.sh` reports pitfalls that cannot fire and files it cannot parse;
+`python3 core/pitfall-inject.py --parse <file>` shows how one file is read.
+
+On a new machine the tracked hooks are held until the workspace-trust dialog
+is accepted the first time Claude Code opens this directory.
+
 ## Rules
 
 - **Daedalus's own code belongs to the distribution.** Updates arrive by
