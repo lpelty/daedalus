@@ -274,3 +274,94 @@ EOF
   id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
   [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
 }
+
+@test "a bold-word VERDICT (asterisks before the colon) still flips the run to FAIL" {
+  # **VERDICT**: REFUTED — the asterisks close BEFORE the colon. The old
+  # regex only allowed them after (VERDICT:**), so this shape passed as
+  # STANDS. Ledgered as a refute-enablement gap in 055; pinned here.
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin3"
+  cat > "$BATS_TEST_TMPDIR/bin3/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'The criteria are not met.\n\n> **VERDICT**: REFUTED\n'
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin3/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  PATH="$BATS_TEST_TMPDIR/bin3:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+}
+
+@test "a present-but-failing claude CLI fails the run loud instead of yielding STANDS" {
+  # The second ledgered gap: claude on PATH but exiting nonzero used to
+  # leave an empty verdict body, the REFUTED grep missed, and the run
+  # stayed PASS — crash reported as green, this repo's founding pitfall.
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin4"
+  cat > "$BATS_TEST_TMPDIR/bin4/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+exit 1
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin4/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  PATH="$BATS_TEST_TMPDIR/bin4:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  case "$output" in *"refuter CLI failed"*) : ;; *) echo "expected a loud refuter failure; got: $output"; return 1 ;; esac
+}
+
+@test "a refuter reply with no VERDICT line fails the run instead of defaulting to STANDS" {
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin5"
+  cat > "$BATS_TEST_TMPDIR/bin5/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'I reviewed the change and found several concerns.\n'
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin5/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  PATH="$BATS_TEST_TMPDIR/bin5:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  case "$output" in *"no VERDICT line"*) : ;; *) echo "expected the no-verdict reason; got: $output"; return 1 ;; esac
+  # The review file WAS written in this exit-2 sub-case — pin that it exists
+  # and is manifested, not just incidentally named in stderr text.
+  [ -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+  [ "$(grep -c "$id-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest")" -eq 1 ]
+}
+
+@test "an echoed instruction line does not false-REFUTE a run whose real verdict is STANDS" {
+  # The prompt tells the model to end with "VERDICT: REFUTED or VERDICT:
+  # STANDS"; a reply quoting that line verbatim matched the old prefix-only
+  # regex and flipped a passing run. The verdict match is line-anchored now.
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin6"
+  cat > "$BATS_TEST_TMPDIR/bin6/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'VERDICT: REFUTED or VERDICT: STANDS was requested; my verdict follows.\n\nVERDICT: STANDS\n'
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin6/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  PATH="$BATS_TEST_TMPDIR/bin6:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ]
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+}

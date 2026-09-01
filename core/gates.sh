@@ -122,9 +122,10 @@ if [ "$result" = PASS ] && [ "$(cfg verify.refute 2>/dev/null || true)" = "true"
   if [ "$refute_code" -eq 1 ] || [ "$refute_code" -eq 2 ]; then
     result=FAIL; failed=1
     if [ "$refute_code" -eq 2 ]; then
-      # No review file exists yet — refute.sh exits before writing one when
-      # the refuter CLI itself is missing. Fail loud with the refuter's own
-      # message rather than pointing at a path that was never created.
+      # Exit 2 = the refuter could not certify: CLI missing/failed (no review
+      # file was written) or a reply with no VERDICT line (review file exists;
+      # the refuter's message carries its path). Either way the refuter's own
+      # message is the honest fail_log.
       log "refute: $refute_msg"
       fail_log="$refute_msg"
     else
