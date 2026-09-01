@@ -365,3 +365,97 @@ STUB
   id="$(printf '%s\n' "$output" | tail -1)"
   [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
 }
+
+@test "a hung refuter is killed at verify.refute_timeout — its whole process group — and fails the run loud instead of hanging gates" {
+  # The residual after f7528ea: crash and mute both fail loud, but a claude
+  # that never returns hung gates.sh forever — no verdict, no FAIL, no
+  # evidence, just a stuck gate. A hung reviewer is not a verdict either:
+  # bound the invocation, kill it, and land in the same uncertifiable exit 2.
+  #
+  # The stub has the real shape of a hang: the CLI itself answers TERM, but
+  # the thing it is waiting on (a tool child, an MCP server, a node process
+  # whose event loop is blocked) ignores TERM. A watchdog that stops once
+  # the direct child dies leaves that descendant running.
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin6"
+  cat > "$BATS_TEST_TMPDIR/bin6/claude" <<STUB
+#!/usr/bin/env bash
+cat > /dev/null
+sh -c 'trap "" TERM; echo \$\$ > "\$0"; exec sleep 60' "$BATS_TEST_TMPDIR/hung-child.pid" &
+wait
+printf 'VERDICT: STANDS\n'
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin6/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n  refute_timeout: 2\n' >> "$DAEDALUS_HOME/config.yaml"
+  t0="$(date +%s)"
+  PATH="$BATS_TEST_TMPDIR/bin6:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  elapsed="$(( $(date +%s) - t0 ))"
+  [ "$status" -ne 0 ]
+  [ "$elapsed" -lt 15 ] || { echo "gates.sh waited ${elapsed}s — the refuter was not bounded"; return 1; }
+  case "$output" in *"refuter timed out"*) : ;; *) echo "expected a loud timeout; got: $output"; return 1 ;; esac
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  [ "$(grep -c "^result: FAIL" "$DAEDALUS_HOME/vault/evidence/$id.md")" -eq 1 ]
+  # A killed reviewer wrote no verdict: no review file may claim one.
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+  # And nothing it spawned survives it. Reaping after reparenting is not
+  # instantaneous, so allow two seconds; a zombie counts as dead.
+  child="$(cat "$BATS_TEST_TMPDIR/hung-child.pid")"
+  [ -n "$child" ]
+  alive() { kill -0 "$1" 2>/dev/null && case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1 ;; *) return 0 ;; esac; }
+  for _ in $(seq 1 20); do alive "$child" || break; sleep 0.1; done
+  if alive "$child"; then
+    kill -9 "$child" 2>/dev/null
+    echo "the TERM-ignoring child ($child) survived the watchdog — only the shim was killed"; return 1
+  fi
+}
+
+@test "an invalid verify.refute_timeout is refused before any gate runs — validation before side effects, never an unbounded run" {
+  # A typo in operator config must not manufacture evidence: a FAIL run.json
+  # written after every gate has executed reads, in the record, exactly like
+  # a real refutation. gates.sh refuses up front, the way it refuses a tab in
+  # a gate command or an empty gates list.
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  mkdir -p "$BATS_TEST_TMPDIR/bin7"
+  cat > "$BATS_TEST_TMPDIR/bin7/claude" <<STUB
+#!/usr/bin/env bash
+cat > /dev/null
+touch "$BATS_TEST_TMPDIR/claude-ran"
+printf 'VERDICT: STANDS\n'
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin7/claude"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  for bad in 'ten minutes' '0' '00' '-5' '600.5' '99999999999999999999'; do
+    rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
+    write_config "  - true"
+    printf 'verify:\n  refute: true\n  refute_timeout: %s\n' "$bad" >> "$DAEDALUS_HOME/config.yaml"
+    PATH="$BATS_TEST_TMPDIR/bin7:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+    [ "$status" -ne 0 ] || { echo "refute_timeout=$bad was accepted"; return 1; }
+    case "$output" in *"whole number of seconds"*) : ;; *) echo "expected a refute_timeout refusal for '$bad'; got: $output"; return 1 ;; esac
+    [ ! -d "$DAEDALUS_HOME/state/evidence" ] || { echo "refute_timeout=$bad created evidence before being refused"; return 1; }
+    [ ! -f "$BATS_TEST_TMPDIR/claude-ran" ] || { echo "refute_timeout=$bad reached the refuter"; return 1; }
+  done
+}
+
+@test "a refute.sh that dies with an unexpected exit code fails the run — no nonzero refuter exit is a PASS" {
+  # gates.sh allow-listed refuter exits 1 and 2. A refuter killed by a
+  # signal exits 143 and left result=PASS: a reviewer that never finished,
+  # certifying. Any nonzero exit is not a verdict.
+  cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  printf '#!/usr/bin/env bash\nkill -TERM $$\n' > "$DAEDALUS_HOME/core/refute.sh"
+  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  write_config "  - true"
+  printf 'verify:\n  refute: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ -n "$id" ] || { echo "no run-id in output: $output"; return 1; }
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  [ "$(grep -c "^result: FAIL" "$DAEDALUS_HOME/vault/evidence/$id.md")" -eq 1 ]
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+}

@@ -14,6 +14,10 @@ command -v claude >/dev/null 2>&1 || {
   printf 'claude not found on PATH — cannot run the rung-2 refuter\n' >&2
   exit 2
 }
+command -v python3 >/dev/null 2>&1 || {
+  printf 'python3 not found on PATH — cannot run the rung-2 refuter watchdog\n' >&2
+  exit 2
+}
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
@@ -31,9 +35,68 @@ verdict_file="$ev/$run_id-review.md"
 # reported as green, this repo's founding pitfall class. Unknown is exit 2,
 # never STANDS.
 body="$(mktemp)"
-claude -p --settings '{"disableAllHooks": true}' < "$prompt" > "$body" 2>/dev/null
+# A claude that never returns used to hang gates.sh forever — no verdict, no
+# FAIL, no evidence, a stuck gate (the residual after crash and mute were
+# made loud). Bound the invocation to verify.refute_timeout seconds
+# (validated by lib.sh refute_timeout; gates.sh has already refused a bad
+# value before running any gate — this is the belt to that brace). On expiry
+# the whole process group is killed: claude spawns children (MCP servers,
+# tool processes), and a single-pid kill would orphan them, still running,
+# still writing to $body. The run then lands in the same uncertifiable exit 2
+# below. python3 because macOS ships no `timeout` and bash 3.2 has no clean
+# watchdog. The timeout is signalled by a marker file, not an exit code, so
+# a claude that itself exits 124 within the deadline is not misreported.
+timeout_s="$(refute_timeout)" || { rm -f "$prompt" "$body"; exit 2; }
+timed_out="$body.timed-out"
+python3 - "$timeout_s" "$prompt" "$body" "$timed_out" <<'PY'
+import os, signal, subprocess, sys
+secs, prompt, body, marker = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+
+def kill_group(p):
+    # TERM, a short grace, then KILL — unconditionally. The direct child is
+    # a shim that answers TERM at once; the hung descendant this exists for
+    # is exactly the process that may never service TERM (a node event loop
+    # that is blocked, a tool ignoring signals). Stopping once the child is
+    # reaped would report success while the group is still alive.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+with open(prompt) as i, open(body, "w") as o:
+    p = subprocess.Popen(["claude", "-p", "--settings", '{"disableAllHooks": true}'],
+                         stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True)
+timed_out = False
+try:
+    p.wait(timeout=secs)
+except subprocess.TimeoutExpired:
+    timed_out = True
+finally:
+    # Every exit that leaves the group possibly alive kills it: the timeout,
+    # a Ctrl-C (claude sits in its own session now, so the terminal's SIGINT
+    # reaches this watchdog but never claude), any exception. Nothing
+    # outlives the watchdog.
+    if p.poll() is None:
+        kill_group(p)
+if timed_out:
+    open(marker, "w").close()
+    sys.exit(124)
+rc = p.returncode
+# A signal death is negative here; report it bash-style (SIGKILL = 137, not 247).
+sys.exit(128 - rc if rc < 0 else rc)
+PY
 claude_rc=$?
 rm -f "$prompt"
+if [ -e "$timed_out" ]; then
+  rm -f "$body" "$timed_out"
+  printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$timeout_s" >&2
+  exit 2
+fi
 if [ "$claude_rc" -ne 0 ] || ! [ -s "$body" ]; then
   had_output="$([ -s "$body" ] && printf 'with' || printf 'no')"
   rm -f "$body"

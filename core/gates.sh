@@ -45,6 +45,16 @@ EOF
 gate_list_count="$(cfg_list gates | grep -c .)" || gate_list_count=0
 [ "$gate_list_count" -gt 0 ] || die "no gates configured — refusing to report success (check the gates: list in config.yaml)"
 
+# The refuter's timeout is operator config too. Discovered late — inside
+# refute.sh, after every gate has run — a typo there records a FAIL run.json
+# and vault summary that read, in the evidence, exactly like a real
+# refutation. Refuse it here, with the other config errors, before a run-id
+# exists. refute.sh re-checks (belt to this brace) but should never be the
+# one to find it.
+if [ "$(cfg verify.refute 2>/dev/null || true)" = "true" ]; then
+  refute_timeout >/dev/null || die "config verify.refute_timeout is invalid — refusing before any gate runs"
+fi
+
 run_id="$(date +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 ev_state="$DAEDALUS_HOME/state/evidence/$run_id"
 ev_vault="$DAEDALUS_HOME/vault/evidence"
@@ -119,17 +129,21 @@ fi
 if [ "$result" = PASS ] && [ "$(cfg verify.refute 2>/dev/null || true)" = "true" ]; then
   refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" 2>&1 >/dev/null)"
   refute_code=$?
-  if [ "$refute_code" -eq 1 ] || [ "$refute_code" -eq 2 ]; then
+  if [ "$refute_code" -ne 0 ]; then
     result=FAIL; failed=1
-    if [ "$refute_code" -eq 2 ]; then
-      # Exit 2 = the refuter could not certify: CLI missing/failed (no review
-      # file was written) or a reply with no VERDICT line (review file exists;
-      # the refuter's message carries its path). Either way the refuter's own
-      # message is the honest fail_log.
+    if [ "$refute_code" -eq 1 ]; then
+      # Exit 1 = REFUTED; the review file is the fail_log.
+      fail_log="$ev_vault/$run_id-review.md"
+    else
+      # Exit 2 = the refuter could not certify: CLI missing, python3 missing,
+      # CLI failed or timed out and was killed (no review file was written),
+      # or a reply with no VERDICT line (review file exists; the refuter's
+      # message carries its path). Any other code = refute.sh itself died —
+      # a signal, a die — and there is no verdict either. Only 0 is STANDS;
+      # an allow-list of failure codes once let 143 stay PASS. Either way
+      # the refuter's own message is the honest fail_log.
       log "refute: $refute_msg"
       fail_log="$refute_msg"
-    else
-      fail_log="$ev_vault/$run_id-review.md"
     fi
     sed -i.bak "s/^result: .*/result: $result/" "$ev_vault/$run_id.md" && rm -f "$ev_vault/$run_id.md.bak"
   fi

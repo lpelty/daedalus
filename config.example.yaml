@@ -48,6 +48,12 @@ verify:
   # run on real assignments and the record shows a green gate passing
   # something a reader would have caught.
   refute: false
+  # Seconds the refuter's claude invocation may run before its whole process
+  # group is killed and the run FAILs as uncertifiable (exit 2 — never
+  # STANDS). A hung reviewer used to hang gates.sh indefinitely. A whole
+  # number of seconds, 1..9999999; absent or empty means 600. Anything else
+  # is refused before any gate runs.
+  refute_timeout: 600
 
 recall:
   # Optional retrieval layer (spec: document-recall-and-code-context design).

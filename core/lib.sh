@@ -192,6 +192,24 @@ target_path() {
 # effect — a future edit could drop those flags and every existing test
 # would still pass, because they only ever look at $dest, never at $tmp,
 # and $tmp is gone by the time an assertion runs.
+# verify.refute_timeout, validated: a whole number of seconds, 1..9999999
+# (a longer string overflows the watchdog's float conversion, and no review
+# takes 115 days). Absent, empty, `~` and `null` all mean the default 600 —
+# the absent-equals-empty convention cfg applies to every key. Prints the
+# seconds; on a bad value prints the reason to stderr and returns 1, so each
+# caller picks its own exit: gates.sh dies before any evidence exists,
+# refute.sh exits 2 (cannot certify).
+refute_timeout() {
+  local t
+  t="$(cfg verify.refute_timeout 2>/dev/null || printf 600)"
+  case "$t" in
+    *[!0-9]*) : ;;
+    *) if [ "${#t}" -le 7 ] && [ "$t" -gt 0 ]; then printf '%s\n' "$t"; return 0; fi ;;
+  esac
+  printf 'verify.refute_timeout must be a whole number of seconds > 0 (got: %s)\n' "$t" >&2
+  return 1
+}
+
 scaffold_repo() {
   local url="$1" dest="$2" tmp d existing
   [ -n "$url" ] || die "scaffold_repo: url is required"
