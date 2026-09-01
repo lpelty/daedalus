@@ -24,6 +24,8 @@ Commands (run via `uv run --project <engine>/services/hindsight python capture.p
     status              Server health + bank stats + token usage + offsets
     reprocess <path>    Force full re-ingest of a transcript (ignores offset)
 """
+from __future__ import annotations
+
 import sys
 import os
 import json

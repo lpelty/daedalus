@@ -259,3 +259,18 @@ _run_scan_in_fixture() {
   run grep -q "Set .HINDSIGHT_API_TENANT_API_KEY. explicitly on the hook command" "$DAEDALUS_HOME/README.md"
   [ "$status" -eq 0 ]
 }
+
+@test "runtime-evaluated PEP 604 unions carry the future import (3.9 deployments)" {
+  # `X | None` in a def signature COMPILES under 3.9 but raises TypeError at
+  # import time unless the file has `from __future__ import annotations`.
+  # A compile sweep is blind to it (found live on the 3.9 deployment,
+  # 2026-08-31: capture.py killed capture, close, and recall-inject at once).
+  cd "$DAEDALUS_HOME"
+  bad=""
+  for f in core/*.py; do
+    if grep -qE '\| None|None \|' "$f"; then
+      grep -q 'from __future__ import annotations' "$f" || bad="$bad $f"
+    fi
+  done
+  [ -z "$bad" ] || { echo "PEP 604 unions without the future import:$bad"; return 1; }
+}
