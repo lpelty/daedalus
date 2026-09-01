@@ -290,6 +290,21 @@ def claims(root: Path, since_sha: Optional[str], since_time: Optional[float]) ->
 
 # --- Evidence ---------------------------------------------------------------
 
+def manifest_paths(root: Path) -> set:
+    """Resolved paths listed in vault/evidence/.manifest — the files gates.sh
+    says it wrote. One reader for boundary-hook's two checks."""
+    out: set = set()
+    mp = root / "vault" / "evidence" / ".manifest"
+    try:
+        for ln in mp.read_text().splitlines():
+            ln = ln.strip()
+            if ln:
+                out.add(str(Path(ln).resolve()))
+    except OSError:
+        pass
+    return out
+
+
 def run_record(root: Path, run_id: str) -> Optional[dict]:
     if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", run_id or ""):
         return None

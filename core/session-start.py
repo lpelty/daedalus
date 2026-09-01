@@ -51,6 +51,7 @@ def main() -> int:
     mp = v.marker_path(root, sid)
     notes = []
     try:
+        pre_existing = mp.exists()
         if not mp.exists():
             origin = ""
             t = v.target_root(root)
@@ -76,6 +77,18 @@ def main() -> int:
                 except OSError:
                     pass
         marker = v.read_marker(root, sid) or {}
+        src = str(payload.get("source", "")).lower()
+        if pre_existing and src in ("resume", "startup") and marker.get("started"):
+            # The marker is deliberately write-once per session id (a claim's
+            # window must survive compaction and duplicate startup payloads),
+            # so a resume reuses the snapshot taken at the ORIGINAL start.
+            # Say so, so an operator who restarted-to-re-baseline learns why
+            # nothing changed and what actually re-baselines (PROP-017 f.3).
+            notes.append("This session id resumed with its original snapshot "
+                         "(taken %s). A boundary block naming operator changes "
+                         "clears only in a FRESH session, or after the operator "
+                         "deletes %s from outside the session."
+                         % (marker.get("started"), mp))
         if marker.get("protected_status"):
             notes.append("The operator has uncommitted changes in protected files (%s); not yours, not blocked."
                          % ", ".join(ln[3:] for ln in marker["protected_status"]))

@@ -135,3 +135,43 @@ open('$m', 'w').write(json.dumps(d))
   case "$status" in 0|2) : ;; *) echo "unexpected exit: $status"; return 1 ;; esac
   case "$output" in *"session-start hook did not run"*"restart the session"*) : ;; *) echo "no-marker notice missing the restart remedy: $output"; return 1 ;; esac
 }
+
+@test "visible-vault layout: gates.sh evidence is excused; rewritten past evidence still blocks" {
+  # PROP-017 finding 1: with a vault the parent git can SEE (not gitignored,
+  # not its own repo — one real deployment's layout), every gates.sh run
+  # tripped check_protected on its own sanctioned output. The manifest-aware
+  # excusal must clear exactly that, while a rewrite of PRE-EXISTING evidence
+  # (real tampering) still blocks.
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  printf 'target/\nconfig.yaml\nstate/\n.claude/settings.local.json\n' > "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add .gitignore
+  printf -- '---\ntype: evidence\nresult: PASS\n---\nold run\n' > "$DAEDALUS_HOME/vault/evidence/20200101-000000-aaaaaa.md"
+  touch -t 202001010000 "$DAEDALUS_HOME/vault/evidence/20200101-000000-aaaaaa.md"
+  printf '{"hook_event_name":"SessionStart","session_id":"s9","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null
+  run bash -c "printf '{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"s9\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 0 ]
+  # positive control A: rewriting evidence that PRE-DATES the session blocks
+  printf 'tampered\n' >> "$DAEDALUS_HOME/vault/evidence/20200101-000000-aaaaaa.md"
+  run bash -c "printf '{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"s9\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ]
+  case "$output" in *"20200101-000000-aaaaaa.md"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+  git -C "$DAEDALUS_HOME" checkout -q -- . 2>/dev/null || true
+  printf -- '---\ntype: evidence\nresult: PASS\n---\nold run\n' > "$DAEDALUS_HOME/vault/evidence/20200101-000000-aaaaaa.md"
+  # positive control B: a NEW hand-written, unmanifested evidence file blocks
+  printf -- '---\ntype: evidence\nresult: PASS\n---\n' > "$DAEDALUS_HOME/vault/evidence/20261231-000000-ffffff.md"
+  run bash -c "printf '{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"s9\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ]
+  case "$output" in *"20261231-000000-ffffff.md"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+}
+
+@test "a second gates.sh run in the same session is also excused (manifest grows)" {
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  printf 'target/\nconfig.yaml\nstate/\n.claude/settings.local.json\n' > "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add .gitignore
+  printf '{"hook_event_name":"SessionStart","session_id":"sA","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sA\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 0 ]
+}

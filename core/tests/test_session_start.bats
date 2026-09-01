@@ -102,3 +102,18 @@ EOF
   [ "$status" -eq 0 ]
   case "$output" in *"PROP-9.md"*"no evidence-run"*) : ;; *) echo "claim not announced: $output"; return 1 ;; esac
 }
+
+@test "a resume with an existing marker announces the original snapshot and the re-baseline path" {
+  # PROP-017 finding 3: "restart the session — it re-snapshots" was false
+  # under resume (--continue reuses the session id; the marker is write-once).
+  # The marker stays write-once — the fix is saying so, with the operator's
+  # actual escape named.
+  run start sR startup
+  [ "$status" -eq 0 ]
+  run start sR resume
+  [ "$status" -eq 0 ]
+  case "$output" in *"resumed with its original snapshot"*"session-sR.json"*) : ;; *) echo "resume note missing: $output"; return 1 ;; esac
+  # compact stays silent about it (mid-session, not an operator restart)
+  run start sR compact
+  case "$output" in *"resumed with its original snapshot"*) echo "compact must not carry the resume note: $output"; return 1 ;; *) : ;; esac
+}

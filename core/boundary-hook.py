@@ -20,7 +20,27 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 
-RESTART = " If the operator made this change, restart the session — it re-snapshots."
+RESTART = (" If the operator made this change, restart the session — a FRESH "
+           "session re-snapshots. A resume (--continue) keeps the old session "
+           "id and its snapshot; to re-baseline under resume, the operator "
+           "deletes state/session-<id>.json from outside the session first.")
+
+
+def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
+    """A vault/evidence path new this session that gates.sh actually
+    recorded is the stage's own output, not tampering (PROP-017 finding 1):
+    it must be listed in the manifest AND have the state-side run record
+    (the vault-side frontmatter fallback would let a hand-written file
+    vouch for itself). `.manifest` is rewritten by every run; its entries
+    are judged here and by check_evidence, so the file itself is excused."""
+    name = rel.rsplit("/", 1)[-1]
+    if name == ".manifest":
+        return True
+    if str((root / rel).resolve()) not in manifest:
+        return False
+    rid = name[:-3] if name.endswith(".md") else ""
+    rec = v.run_record(root, rid)
+    return bool(rec) and rec.get("source") == "state"
 
 
 def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
@@ -40,9 +60,21 @@ def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
         return
     now = v.protected_snapshot(root)
     bad: List[str] = []
+    manifest = None
     for path, cur in now.items():
         before = snapshot.get(path)
         if before is None or cur.get("sha") != before.get("sha"):
+            # New-this-session evidence that gates.sh recorded is the verify
+            # stage's own sanctioned output — running the gate must not trip
+            # the boundary (PROP-017). Evidence that PRE-DATES the session
+            # and changed is still tampering and still lands in `bad`.
+            if before is None and path.startswith("vault/evidence/"):
+                if manifest is None:
+                    manifest = v.manifest_paths(root)
+                if _sanctioned_evidence(root, path, manifest):
+                    continue
+            if path == "vault/evidence/.manifest":
+                continue   # rewritten by every run; entries judged above/check_evidence
             bad.append(path)
     if bad:
         reasons.append("Protected files changed this session: %s. Revert these — Daedalus's own code changes by proposal, not by edit.%s"
@@ -61,15 +93,7 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
         since = time.mktime(time.strptime(marker.get("started", "")[:19], "%Y-%m-%dT%H:%M:%S"))
     except (ValueError, TypeError):
         since = 0
-    manifest = set()
-    mp = root / "vault" / "evidence" / ".manifest"
-    try:
-        for ln in mp.read_text().splitlines():
-            ln = ln.strip()
-            if ln:
-                manifest.add(str(Path(ln).resolve()))
-    except OSError:
-        pass
+    manifest = v.manifest_paths(root)
     stray: List[str] = []
     for d in (root / "state" / "evidence", root / "vault" / "evidence"):
         if not d.is_dir():
