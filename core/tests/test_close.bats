@@ -135,15 +135,25 @@ import sys, json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class H(BaseHTTPRequestHandler):
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(n)
-        body = json.dumps({"success": True, "items_count": 1}).encode()
+    # Speaks the PROP-002 verify-extraction protocol close.sh depends on:
+    # the retain POST returns an operation_id, and capture then polls
+    # GET .../operations/<id> until the status is terminal. The original
+    # stub predated that protocol (no operation_id, no GET handler), which
+    # left these two tests red from PROP-002's reapply until 2026-09-01.
+    def _json(self, obj):
+        body = json.dumps(obj).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(n)
+        self._json({"success": True, "items_count": 1, "async": True,
+                    "operation_id": "stub-op-1"})
+    def do_GET(self):
+        self._json({"status": "completed", "extraction_errors_count": 0})
     def log_message(self, *a):
         pass
 
