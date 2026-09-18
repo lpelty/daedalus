@@ -96,3 +96,53 @@ fp() { bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>/dev/null; }
   printf 'm\n' >> "$T/sub/n.txt"
   [ "$(fp)" != "$a" ]
 }
+
+# --- target.fingerprint_exclude (PROP-018 second addendum, 2026-09-17) ---
+
+with_exclude() {                     # $1 = the config value for fingerprint_exclude
+  cat > "$DAEDALUS_HOME/config.yaml" <<CFG
+target:
+  repo: https://example.com/thing.git
+  branch: main
+  nested: sub=https://example.com/sub.git
+  fingerprint_exclude: $1
+CFG
+}
+
+@test "fingerprint_exclude: editing an excluded file does not move the fingerprint; editing any other file still does" {
+  printf '0.27.0\n' > "$T/VERSION"; printf '# log\n' > "$T/CHANGELOG.md"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m meta
+  with_exclude "VERSION, CHANGELOG.md"
+  a="$(fp)"; [ "$a" != "null" ]
+  printf '0.28.0\n' > "$T/VERSION";        [ "$(fp)" = "$a" ]
+  printf '## 0.28.0\n' >> "$T/CHANGELOG.md"; [ "$(fp)" = "$a" ]
+  printf 'two\n' >> "$T/a.txt";           [ "$(fp)" != "$a" ]
+  git -C "$T" checkout -q -- a.txt;       [ "$(fp)" = "$a" ]
+  # the exclusion itself is part of the hash: removing it makes the edited metadata count again
+  with_exclude ""; sed -i '' '/fingerprint_exclude/d' "$DAEDALUS_HOME/config.yaml"
+  [ "$(fp)" != "$a" ]
+}
+
+@test "fingerprint_exclude: a path that does not exist in the target is a no-op, not null" {
+  a="$(fp)"
+  with_exclude "CHANGELOG.md, VERSION"
+  [ "$(fp)" = "$a" ]
+}
+
+@test "fingerprint_exclude: a gitignored path is skipped rather than nulling every fingerprint (the 'Use -f' trap)" {
+  a="$(fp)"
+  with_exclude "ignored"
+  b="$(fp)"
+  [ "$b" != "null" ]
+  [ "$b" = "$a" ]
+}
+
+@test "fingerprint_exclude: a path that could leave the checkout nulls the fingerprint and names itself on stderr" {
+  for bad in "../outside" "/etc/passwd" ":(top)VERSION" "VERSION, ../x"; do
+    with_exclude "$bad"
+    out="$(bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>"$BATS_TEST_TMPDIR/err")"; st=$?
+    [ "$st" -eq 0 ]
+    [ "$out" = "null" ] || { echo "expected null for '$bad', got: $out"; return 1; }
+    grep -q "must stay inside the target checkout" "$BATS_TEST_TMPDIR/err" || { echo "no reason on stderr for '$bad'"; return 1; }
+  done
+}

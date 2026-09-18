@@ -22,6 +22,19 @@ target:
   # Form: path=url, comma separated. Omit the key when the target is one repo.
   nested: agents/AGENT=https://github.com/OWNER/IDENTITY.git
 
+  # Optional. Files inside the target checkout to leave OUT of the evidence
+  # fingerprint: distribution metadata whose prose edits would otherwise
+  # invalidate every evidence citation and force a full gate run (measured
+  # on one deployment: six full suite runs in a day from changelog wording
+  # and a version bump, with the tested code unchanged). Comma separated,
+  # relative to the target root. Name ONLY files no gate command reads —
+  # excluding one a test depends on hides a real change, and that check is
+  # yours, not Daedalus's. A gitignored path is skipped; a path that could
+  # leave the checkout ("/", "..") nulls the fingerprint with the reason in
+  # fingerprint.err. Changing this list changes config-sha, which itself
+  # retires existing citations — set it once, deliberately.
+  # fingerprint_exclude: VERSION, CHANGELOG.md
+
   # A repo whose DIRECTORY NAMES are recreated empty inside the ship checkout.
   # Contents are never downloaded. Use this where a target harness expects a
   # directory tree to exist — scripts write into it — but its contents are the

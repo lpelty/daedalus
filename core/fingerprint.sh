@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Content fingerprint of the target checkout: independent of HEAD and of the
 # index, covering untracked (unignored) content, with nested repositories
-# excluded from the parent tree and fingerprinted separately.
+# excluded from the parent tree and fingerprinted separately, and any paths
+# named in target.fingerprint_exclude left out of the parent tree entirely.
 #
 # Prints exactly one line: a sha256, or `null` on ANY failure. Never a hash
 # of a half-built index — `write-tree` on a temp index that `add` never
@@ -55,8 +56,41 @@ for rel in ${nested[@]+"${nested[@]}"}; do
   nested_excl+=("$rel")
 done
 
+# Operator-named paths to leave OUT of the parent tree (config
+# target.fingerprint_exclude: comma-separated, relative to the target root).
+# `write-tree` cannot tell a changelog comma from a rewrite of the code under
+# test, so every prose revision to distribution metadata invalidated every
+# evidence citation and forced a full gate run — six in one day on one
+# deployment, with the tested code unchanged (PROP-018, second
+# addendum). This is a per-target decision made in config, never a list
+# hardcoded here: excluding a file a gate reads would hide a real change, so
+# the operator names the files and owns that check. Two guards, both
+# verified against git 2.50 before writing: a path that is gitignored is
+# skipped (naming it in :(exclude) errors "Use -f" and nulls everything, the
+# same trap as nested repos above), and a path that could leave the checkout
+# ("/", "..", or pathspec magic ":") nulls the fingerprint with a named
+# reason on stderr rather than silently widening the tree. A path that does
+# not exist is a no-op for git and needs no guard.
+extra_excl=()
+if raw_excl="$(cfg target.fingerprint_exclude 2>/dev/null)"; then
+  while IFS= read -r rel; do
+    rel="$(printf '%s' "$rel" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$rel" ] || continue
+    case "$rel" in
+      /*|*..*|:*)
+        printf 'fingerprint: config target.fingerprint_exclude: path %s must stay inside the target checkout\n' "$rel" >&2
+        emit_null
+        ;;
+    esac
+    git -C "$target" check-ignore -q "$rel" 2>/dev/null && continue
+    extra_excl+=("$rel")
+  done <<EOF
+$(printf '%s\n' "$raw_excl" | tr ',' '\n')
+EOF
+fi
+
 lines=""
-tree="$(fp_repo "$target" ${nested_excl[@]+"${nested_excl[@]}"})" || emit_null
+tree="$(fp_repo "$target" ${nested_excl[@]+"${nested_excl[@]}"} ${extra_excl[@]+"${extra_excl[@]}"})" || emit_null
 lines=".:$tree"
 for rel in ${nested[@]+"${nested[@]}"}; do
   tree="$(fp_repo "$target/$rel")" || emit_null
