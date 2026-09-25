@@ -209,6 +209,47 @@ PY
   case "$output" in *"20261231-000000-ffffff.md"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
 }
 
+@test "visible-vault layout: the refuter's <run>-review.md is excused like the run's other evidence; a hand-written review for no run still blocks" {
+  # refute.sh writes vault/evidence/<run-id>-review.md and manifests it,
+  # but _sanctioned_evidence read the run-id off the file name, and
+  # "<run-id>-review" is no run: with the refuter on by default, every
+  # STANDS verdict in a vault the parent git can see blocked the Stop hook
+  # as protected dirt Daedalus cannot revert.
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  # __pycache__/ as the real .gitignore has it: refute-pitfalls.py imports pitfall-inject.py.
+  printf 'target/\nconfig.yaml\nstate/\n.claude/settings.local.json\n__pycache__/\n' > "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add .gitignore
+  mkdir -p "$DAEDALUS_HOME/core/agents" "$BATS_TEST_TMPDIR/bin"
+  cp "$SRC/refute.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
+  printf '#!/usr/bin/env bash\ncat > /dev/null\nprintf "VERDICT: STANDS\\n"\n' > "$BATS_TEST_TMPDIR/bin/claude"
+  chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+gates:
+  - true
+verify:
+  refute: true
+EOF
+  printf 'b\n' >> "$T/a.txt"      # something for the refuter to review
+  printf '{"hook_event_name":"SessionStart","session_id":"sB","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ]
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sB\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 0 ] || { echo "the run's own review blocked: $output"; return 1; }
+  # Positive control: a review file for a run that has no record is not the
+  # stage's output, manifest line or not.
+  printf -- '---\ntype: evidence-review\n---\nVERDICT: STANDS\n' > "$DAEDALUS_HOME/vault/evidence/20261231-000000-ffffff-review.md"
+  printf '%s\n' "$DAEDALUS_HOME/vault/evidence/20261231-000000-ffffff-review.md" >> "$DAEDALUS_HOME/vault/evidence/.manifest"
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sB\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ]
+  case "$output" in *"20261231-000000-ffffff-review.md"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+}
+
 @test "a second gates.sh run in the same session is also excused (manifest grows)" {
   rm -rf "$DAEDALUS_HOME/vault/.git"
   printf 'target/\nconfig.yaml\nstate/\n.claude/settings.local.json\n' > "$DAEDALUS_HOME/.gitignore"

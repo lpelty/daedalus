@@ -39,6 +39,13 @@ def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
     if str((root / rel).resolve()) not in manifest:
         return False
     rid = name[:-3] if name.endswith(".md") else ""
+    # The refuter's verdict, <run-id>-review.md, is refute.sh's output for
+    # that run and stands on the run's own record: strip the suffix so it
+    # is judged by the same run.json. It was not, and with the refuter on
+    # by default every STANDS verdict in a vault the parent git can see
+    # blocked the Stop hook as protected dirt.
+    if rid.endswith("-review"):
+        rid = rid[:-len("-review")]
     rec = v.run_record(root, rid)
     return bool(rec) and rec.get("source") == "state"
 
