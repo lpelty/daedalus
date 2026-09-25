@@ -194,16 +194,29 @@ After every PASS, `core/refute.sh` hands the run to a fresh-context reviewer
 and a `VERDICT: REFUTED` flips it to FAIL with the review
 (`vault/evidence/<run-id>-review.md`) as the log. The reviewer is the charter
 at `core/agents/refuter.md` — a Claude Code subagent definition restricted to
-`Read`, `Grep` and `Glob` (no `Bash`, no `Edit`, no `Write`), `model: opus`,
-bounded turns, no `CLAUDE.md`, and deliberately no memory: it never sees the
-author's reasoning and starts from nothing every run. It receives the
-acceptance criteria (`GATES_CRITERIA=<file>` when calling `core/gates.sh`),
-the evidence record, the pitfalls whose `applies-to: path:` matches a touched
-path (plus every pitfall with no `applies-to:`), and the diff — in that order.
+`Read`, `Grep` and `Glob` (no `Bash`, no `Edit`, no `Write`), a pinned model,
+bounded turns, and deliberately no memory: it never sees the author's
+reasoning and starts from nothing every run. It receives the acceptance
+criteria (`GATES_CRITERIA=<file>` when calling `core/gates.sh`), the evidence
+record, the pitfalls whose `applies-to: path:` matches a touched path (plus
+every pitfall with no `applies-to:`), and the diff — in that order — and is
+told the checkout's absolute path so it can read the touched files. A
+pitfall selector that crashes or is missing makes the run uncertifiable
+(FAIL), never a silent "(none)".
+
 The charter lives under `core/` because `claude -p --agent <name>` resolves
 only from `.claude/agents/` of the working directory, which is one of
 Daedalus's write surfaces; `core/` is not. `refute.sh` renders it with
-`core/agentdef.py` and passes the result to `claude --agents`.
+`core/agentdef.py` and passes the result to `claude --agents`, and runs
+`claude` from an empty temporary directory with the target granted through
+`--add-dir`. That is what keeps project instructions out of the review: the
+charter requests `omitClaudeMd`, but measured on Claude Code 2.1.282 that
+key in an `--agents` definition does not stop `claude -p --agent` from
+loading the working directory's `CLAUDE.md`, whereas a `CLAUDE.md` under an
+`--add-dir` directory is not loaded. So neither Daedalus's nor the target's
+`CLAUDE.md` reaches the reviewer. The user-level `~/.claude/CLAUDE.md` of the
+account running Daedalus still does (also measured); if that matters on
+your deployment, keep it free of anything that would steer a reviewer.
 
 It is **on by default**: an unset `verify.refute` means `true`. To turn it
 off, set `verify.refute: false` *and* a non-empty `verify.refute_off_reason`

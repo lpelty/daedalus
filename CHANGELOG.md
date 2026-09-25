@@ -18,9 +18,15 @@ was inert exactly where it mattered.
   gate). Refspecs are parsed: `push origin mainline`, `push origin
   HEAD:mainline`, `push origin feature:mainline`, `push -u origin mainline`
   and `+src:refs/heads/mainline` are denied; a feature branch in any shape is
-  allowed; `--force`/`-f` stay denied; a bare `git push` is denied while on
-  the trunk. `main` and `master` stay denied alongside the configured trunk.
-  Deny messages name the configured branch.
+  allowed; `--force`/`-f` stay denied; a bare `git push`, `push origin HEAD`,
+  `push -u origin HEAD` and `push origin @` are denied while on the trunk
+  (they push the checked-out branch); `--all`/`--branches`/`--mirror` are
+  denied from any branch inside the target. `main` and `master` stay denied
+  alongside the configured trunk. Deny messages name the configured branch.
+  A `switch -c` followed by a plain `switch` back to the trunk in the same
+  command no longer earns the commit its branch credit. An unreadable
+  `config.yaml` fails closed for push and commit inside `target/` (the guard
+  used to skip every git rule when it could not find the target).
 - **Doctor checks the trunk name.** `core/doctor.sh` checks that
   `target.branch` exists at origin (`refs/remotes/origin/<branch>`, no
   network) and on a miss prints one plain-language line: "config.yaml says
@@ -33,11 +39,17 @@ was inert exactly where it mattered.
 - **The refuter is a charter, and it is on by default.** The rung-2 reviewer
   is now a Claude Code subagent definition at `core/agents/refuter.md`
   (distribution code): `Read`/`Grep`/`Glob` only, no `Bash`/`Edit`/`Write`,
-  `model: opus`, bounded turns, no `CLAUDE.md`, no memory. `core/refute.sh`
-  renders it (`core/agentdef.py`) and runs `claude -p --agent refuter
-  --agents <rendered>`, passes `--model` from `verify.refute_model` when set,
-  and feeds the pitfalls that apply to the touched paths
-  (`core/refute-pitfalls.py`) between the evidence and the diff.
+  `model: opus`, bounded turns, no memory. `core/refute.sh` renders it
+  (`core/agentdef.py`) and runs `claude -p --agent refuter --agents
+  <rendered> --add-dir <target>` from an empty temporary directory, passes
+  `--model` from `verify.refute_model` when set, tells the reviewer the
+  checkout's absolute path, and feeds the pitfalls that apply to the touched
+  paths (`core/refute-pitfalls.py`) between the evidence and the diff; a
+  selector that crashes or is missing is uncertifiable (FAIL), not "(none)".
+  The empty working directory is what keeps the project `CLAUDE.md` files
+  out of the review — measured on Claude Code 2.1.282, `omitClaudeMd` in an
+  `--agents` definition does not do that on its own; the user-level
+  `~/.claude/CLAUDE.md` still loads (see README).
   `core/gates.sh` treats an unset `verify.refute` as `true`; `verify.refute:
   false` is honored only with a non-empty `verify.refute_off_reason`,
   otherwise gates.sh dies before running any gate. A missing
