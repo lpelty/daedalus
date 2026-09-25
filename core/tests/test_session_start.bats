@@ -117,3 +117,30 @@ EOF
   run start sR compact
   case "$output" in *"resumed with its original snapshot"*) echo "compact must not carry the resume note: $output"; return 1 ;; *) : ;; esac
 }
+
+@test "startup (PROP-019): records target_branch and target_base from config; announces when origin/<branch> cannot be resolved" {
+  T="$DAEDALUS_HOME/target/thing"; mkdir -p "$DAEDALUS_HOME/target"
+  git init -q -b mainline "$T"; printf 'a\n' > "$T/a.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m i
+  git init -q --bare "$BATS_TEST_TMPDIR/o.git"; git -C "$T" remote add origin "$BATS_TEST_TMPDIR/o.git"; git -C "$T" push -q origin mainline
+  # config says main, origin only has mainline: the marker must record the failure by name and the hook must say so at start
+  run start sA startup
+  [ "$status" -eq 0 ]
+  case "$output" in *"Promotion gate"*"origin/main"*) : ;; *) echo "start did not announce the unresolvable gate: $output"; return 1 ;; esac
+  python3 - "$DAEDALUS_HOME/state/session-sA.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["target_branch"] == "main", m
+assert m["target_base"] == "", m
+assert "main" in m["target_base_error"], m
+PY
+  # config fixed to mainline: the marker records the branch and its origin sha; no announcement
+  sed -i.bak 's/^  branch: main$/  branch: mainline/' "$DAEDALUS_HOME/config.yaml"; rm -f "$DAEDALUS_HOME/config.yaml.bak"
+  run start sB startup
+  [ "$status" -eq 0 ]
+  case "$output" in *"Promotion gate"*) echo "resolved gate must not announce: $output"; return 1 ;; *) : ;; esac
+  python3 - "$DAEDALUS_HOME/state/session-sB.json" "$(git -C "$T" rev-parse origin/mainline)" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["target_branch"] == "mainline" and m["target_base"] == sys.argv[2] and m["target_base_error"] == "", m
+PY
+}

@@ -53,6 +53,14 @@ def target_root(root: Path) -> Optional[Path]:
     return Path(out).resolve() if out else None
 
 
+def target_branch(root: Path) -> str:
+    """config.yaml target.branch; 'main' when unset. PROP-019: the promotion gate must
+    read this instead of assuming 'main' — a target on any other branch name had an
+    inert gate that reported itself skipped."""
+    out = _lib(root, "cfg target.branch 2>/dev/null || true").strip()
+    return out or "main"
+
+
 def nested_relpaths(root: Path) -> List[str]:
     out = _lib(root, "cfg target.nested >/dev/null 2>&1 && cfg_pairs target.nested | cut -f1")
     return [ln for ln in out.splitlines() if ln.strip()]

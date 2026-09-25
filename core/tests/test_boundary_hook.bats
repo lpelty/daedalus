@@ -111,7 +111,7 @@ open('$m', 'w').write(json.dumps(d))
   case "$output" in *"restart the session"*) : ;; *) echo "check 3's reason should name the restart remedy: $output"; return 1 ;; esac
 }
 
-@test "promotion: a commit on target main past recorded origin/main blocks even after push; no origin is a note" {
+@test "promotion: a commit on target main past recorded origin/main blocks even after push; no origin is an explicit does-not-apply note" {
   printf 'b\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am b
   run hook Stop; [ "$status" -eq 2 ]
   case "$output" in *"main moved"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
@@ -122,7 +122,44 @@ open('$m', 'w').write(json.dumps(d))
   printf '{"hook_event_name":"SessionStart","session_id":"s5","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s5\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 0 ]
-  case "$output" in *"no origin"*) : ;; *) echo "expected a note: $output"; return 1 ;; esac
+  # PROP-019: the only benign skip is "nothing shared to protect", and it must say so — never "nothing to check".
+  case "$output" in *"does not apply"*"no origin remote"*) : ;; *) echo "expected an explicit does-not-apply note: $output"; return 1 ;; esac
+}
+
+sess() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"startup"}' "$1" | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null; }
+hook_as() { printf '{"hook_event_name":"%s","session_id":"%s"}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+
+@test "promotion (PROP-019): the gate reads config target.branch — a target whose branch is not 'main' is gated" {
+  # The reported defect: both call sites hardcoded 'main'; a deployment on any other branch name had an inert gate.
+  rm -rf "$T"; git init -q -b mainline "$T"; printf 'a\n' > "$T/a.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m i
+  git init -q --bare "$BATS_TEST_TMPDIR/origin2.git"; git -C "$T" remote add origin "$BATS_TEST_TMPDIR/origin2.git"; git -C "$T" push -q origin mainline
+  sed -i.bak 's/^  branch: main$/  branch: mainline/' "$DAEDALUS_HOME/config.yaml"; rm -f "$DAEDALUS_HOME/config.yaml.bak"
+  sess s6
+  run hook_as Stop s6; [ "$status" -eq 0 ]                       # nothing moved yet: the gate evaluated and passed
+  printf 'b\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am b
+  run hook_as Stop s6; [ "$status" -eq 2 ]
+  case "$output" in *"mainline moved"*"origin/mainline"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+}
+
+@test "promotion (PROP-019): a configured branch that origin does not have REFUSES and names what it could not determine" {
+  # Fail closed: a gate that cannot evaluate must not pass by default. The message names the branch and the remedy.
+  sed -i.bak 's/^  branch: main$/  branch: mainline/' "$DAEDALUS_HOME/config.yaml"; rm -f "$DAEDALUS_HOME/config.yaml.bak"
+  sess s7
+  run hook_as Stop s7; [ "$status" -eq 2 ]
+  case "$output" in *"could not evaluate"*"mainline"*"target.branch"*) : ;; *) echo "expected a named refusal: $output"; return 1 ;; esac
+  run hook_as PostToolUse s7; [ "$status" -eq 0 ]              # still Stop-only
+}
+
+@test "promotion (PROP-019): a marker written before the branch-aware gate refuses with the restart remedy" {
+  python3 - "$DAEDALUS_HOME/state" <<'PY'
+import json, sys, pathlib
+p = pathlib.Path(sys.argv[1]) / "session-s1.json"
+m = json.loads(p.read_text()); m.pop("target_branch", None); m.pop("target_base", None); m.pop("target_base_error", None)
+m["target_origin_main"] = "deadbeef"
+p.write_text(json.dumps(m))
+PY
+  run hook Stop; [ "$status" -eq 2 ]
+  case "$output" in *"could not evaluate"*"restart the session"*) : ;; *) echo "expected a refusal naming the remedy: $output"; return 1 ;; esac
 }
 
 @test "no-marker degrade notice names the restart remedy" {

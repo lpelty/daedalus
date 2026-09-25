@@ -5,7 +5,7 @@ route around.
 Four checks against the session-start marker: protected files modified
 beyond the operator's snapshot; the gate definition's hash; evidence files
 in this session's window that no run produced; and (Stop only) target main
-having moved past where origin/main stood at session start. On Stop, exit 2
+having moved past where origin/<config target.branch> stood at session start (PROP-019: fail-closed). On Stop, exit 2
 ends nothing until fixed; on PostToolUse, exit 2 is immediate feedback — the
 command already ran.
 """
@@ -113,19 +113,39 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
 
 
 def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[str]) -> None:
+    """PROP-019: the gate reads config target.branch, and FAILS CLOSED. The one benign
+    skip — the target has no origin remote, so there is nothing shared to protect — says
+    so in those words. Every other state in which the comparison cannot be made is a
+    refusal that names what could not be determined, never a note that reads like
+    "nothing to check"."""
     t = v.target_root(root)
     if t is None:
         return
-    base = marker.get("target_origin_main") or ""
-    if not base:
-        notes.append("Promotion check skipped: the target has no origin/main recorded (no origin remote, or never fetched).")
+    if "target_branch" not in marker:
+        reasons.append("Promotion check could not evaluate: this session's marker predates the branch-aware gate "
+                       "(no target_branch recorded), so the comparison base is unknown.%s" % RESTART)
         return
-    code, out, _ = v.run(["git", "-C", str(t), "rev-list", "--count", base + "..main"])
+    branch = marker.get("target_branch") or "main"
+    base = marker.get("target_base") or ""
+    err = marker.get("target_base_error") or ""
+    if err == "no origin remote":
+        notes.append("Promotion check does not apply: the target has no origin remote, so there is no shared "
+                     "branch to protect. (Add a remote and restart the session to arm it.)")
+        return
+    if not base:
+        reasons.append("Promotion check could not evaluate: %s. The gate refuses rather than skips when it cannot "
+                       "compare; fix config target.branch or fetch origin, then restart the session."
+                       % (err or "origin/%s was not recorded at session start" % branch))
+        return
+    code, out, gerr = v.run(["git", "-C", str(t), "rev-list", "--count", base + ".." + branch])
     if code != 0:
-        notes.append("Promotion check skipped: could not compare main with the recorded origin/main.")
+        reasons.append("Promotion check could not evaluate: git rev-list %s..%s failed in the target (%s). The gate "
+                       "refuses rather than skips when it cannot compare.%s"
+                       % (base[:12], branch, (gerr or "").strip().splitlines()[-1:] or ["no output"], RESTART))
         return
     if out.strip() not in ("", "0"):
-        reasons.append("Target main moved this session (%s commit(s) past origin/main at session start) — the operator merges; work on a branch.%s" % (out.strip(), RESTART))
+        reasons.append("Target %s moved this session (%s commit(s) past origin/%s at session start) — the operator "
+                       "merges; work on a branch.%s" % (branch, out.strip(), branch, RESTART))
 
 
 def main() -> int:
@@ -143,7 +163,9 @@ def main() -> int:
     try:
         if marker is None:
             marker = {"protected_status": [], "config_sha": v.sha256_file(root / "config.yaml"),
-                      "local_settings_sha": v.local_settings_sha(root), "started": "", "target_origin_main": ""}
+                      "local_settings_sha": v.local_settings_sha(root), "started": "",
+                      "target_branch": v.target_branch(root), "target_base": "",
+                      "target_base_error": "session-start hook did not run, so origin/<branch> was never recorded"}
             notes.append("The session-start hook did not run; boundary checks compare against the current state.%s" % RESTART)
             # With no snapshot, any protected dirt counts.
         check_protected(root, marker, reasons)

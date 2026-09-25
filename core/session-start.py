@@ -4,7 +4,7 @@ already wrong.
 
 The marker is the root of trust for every later check — vault HEAD for the
 claim window, config hashes, the operator's own uncommitted changes to
-protected files, the target's origin/main. Written only when no marker
+protected files, the target's origin/<config target.branch> (PROP-019). Written only when no marker
 exists yet for this session id, regardless of `source` — never overwritten,
 so a claim made before a compaction (or a second `startup`/`fork` payload
 for the same session) stays inside the window. Then the offline evidence
@@ -53,17 +53,32 @@ def main() -> int:
     try:
         pre_existing = mp.exists()
         if not mp.exists():
-            origin = ""
+            # PROP-019: resolve origin/<config target.branch>, and when that fails record WHY,
+            # so the boundary hook can refuse by name instead of skipping by silence.
+            branch, base, base_err = v.target_branch(root), "", ""
             t = v.target_root(root)
             if t is not None:
-                code, out, _ = v.run(["git", "-C", str(t), "rev-parse", "origin/main"])
-                origin = out.strip() if code == 0 else ""
+                rcode, _, _ = v.run(["git", "-C", str(t), "remote", "get-url", "origin"])
+                if rcode != 0:
+                    base_err = "no origin remote"
+                else:
+                    code, out, err = v.run(["git", "-C", str(t), "rev-parse", "--verify", "-q", "origin/" + branch])
+                    if code == 0:
+                        base = out.strip()
+                    else:
+                        base_err = ("origin has no branch '%s' (config target.branch); fetch origin or fix the config"
+                                    % branch)
+                if base_err and base_err != "no origin remote":
+                    notes.append("Promotion gate: cannot resolve origin/%s — %s. Every Stop will REFUSE until this is "
+                                 "fixed and the session restarted." % (branch, base_err))
             marker = {
                 "session_id": str(sid), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "vault_head": v.vault_head(root),
                 "config_sha": v.sha256_file(root / "config.yaml"),
                 "local_settings_sha": v.local_settings_sha(root),
-                "target_origin_main": origin,
+                "target_branch": branch,
+                "target_base": base,
+                "target_base_error": base_err,
                 "protected_status": v.protected_status(root),
                 "protected_snapshot": v.protected_snapshot(root),
             }
