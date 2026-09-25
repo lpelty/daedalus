@@ -8,11 +8,21 @@
 # that switch).
 #
 # The reviewer is the charter at core/agents/refuter.md — a Claude Code
-# subagent definition (Read/Grep/Glob only, no Bash, fresh context, no
-# CLAUDE.md), rendered by core/agentdef.py and passed with `--agents`:
+# subagent definition (Read/Grep/Glob only, no Bash, fresh context),
+# rendered by core/agentdef.py and passed with `--agents`:
 # `claude -p --agent <name>` resolves only from .claude/agents/ of the cwd,
 # which is a write surface Daedalus could edit; core/ is not. The model is
 # the charter's unless config verify.refute_model overrides it.
+#
+# claude runs from an EMPTY scratch directory with the target granted by
+# --add-dir, and the prompt names the target's absolute path. Two reasons,
+# both measured on Claude Code 2.1.282: (1) the charter's `omitClaudeMd`
+# does not stop `claude -p --agent` from loading the cwd's CLAUDE.md (a
+# sentinel placed there was quoted back by a tool-less refuter), while a
+# CLAUDE.md under an --add-dir directory is not loaded — so the reviewer
+# never sees Daedalus's or the target's project instructions; (2) the diff's
+# paths are target-relative and the reviewer needs an address to Read them
+# at (Read/Grep/Glob reach --add-dir paths by absolute path, verified).
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
@@ -54,14 +64,29 @@ paths="$(mktemp)"
   git -C "$target" diff --name-only "origin/$base"...HEAD 2>/dev/null || git -C "$target" diff --name-only "$base"...HEAD 2>/dev/null
   git -C "$target" diff --name-only HEAD 2>/dev/null
 } | sort -u > "$paths"
+# The pitfall selector is an input, not a decoration: a selector that
+# crashed or is missing used to render as "(none)" — byte-identical to "no
+# pitfalls apply" — and the run could still STAND on a review that never
+# saw the pitfalls. A non-zero exit is uncertifiable, like a charter that
+# does not render (exit 2), and the reason reaches the operator.
+pitfalls_err="$(mktemp)"
+pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$paths" 2>"$pitfalls_err")"
+pitfalls_rc=$?
+if [ "$pitfalls_rc" -ne 0 ]; then
+  pitfalls_reason="$(tr '\n' ' ' < "$pitfalls_err" | tail -c 400)"
+  rm -f "$paths" "$pitfalls_err" "$agent_json"
+  printf 'pitfall selector failed (python3 core/refute-pitfalls.py exited %s: %s) — cannot certify the run\n' "$pitfalls_rc" "${pitfalls_reason:-no message}" >&2
+  exit 2
+fi
+rm -f "$pitfalls_err"
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
   printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n\n'
+  printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n\n' "$target"
   printf '## Acceptance criteria\n'; [ -f "$criteria" ] && cat "$criteria" || printf '(none supplied)\n'
   printf '\n## Evidence\n'; cat "$ev/$run_id.md"
   printf '\n## Pitfalls that apply to the touched paths\n'
-  pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$paths" 2>/dev/null)" || pitfalls_text=""
   if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
   printf '\n## Diff against %s\n' "$base"
   # Committed work against the base (three-dot: since the merge base), then
@@ -92,16 +117,21 @@ body="$(mktemp)"
 # a claude that itself exits 124 within the deadline is not misreported.
 timeout_s="$(refute_timeout)" || { rm -f "$prompt" "$body" "$agent_json"; exit 2; }
 timed_out="$body.timed-out"
-python3 - "$timeout_s" "$prompt" "$body" "$timed_out" "$agent_json" "$agent_name" "$refute_model" <<'PY'
+# The empty working directory claude runs from (see the header): no
+# CLAUDE.md, no .claude/, nothing of Daedalus's or the target's project
+# context — the target is reachable through --add-dir only.
+workdir="$(mktemp -d)"
+python3 - "$timeout_s" "$prompt" "$body" "$timed_out" "$agent_json" "$agent_name" "$refute_model" "$target" "$workdir" <<'PY'
 import os, signal, subprocess, sys
 secs, prompt, body, marker = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-agent_json, agent_name, model = sys.argv[5], sys.argv[6], sys.argv[7]
+agent_json, agent_name, model, target, workdir = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
 # The charter is passed as a rendered --agents file and selected with
 # --agent; hooks are off (the refuter is not the builder, and the builder's
 # hooks would snapshot and block around it). --model only when the operator
-# set verify.refute_model; otherwise the charter's model applies.
+# set verify.refute_model; otherwise the charter's model applies. --add-dir
+# grants the read-only tools the target checkout from the empty cwd.
 argv = ["claude", "-p", "--agent", agent_name, "--agents", agent_json,
-        "--settings", '{"disableAllHooks": true}']
+        "--settings", '{"disableAllHooks": true}', "--add-dir", target]
 if model:
     argv += ["--model", model]
 
@@ -122,7 +152,7 @@ def kill_group(p):
             pass
 
 with open(prompt) as i, open(body, "w") as o:
-    p = subprocess.Popen(argv, stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True)
+    p = subprocess.Popen(argv, stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True, cwd=workdir)
 timed_out = False
 try:
     p.wait(timeout=secs)
@@ -144,6 +174,7 @@ sys.exit(128 - rc if rc < 0 else rc)
 PY
 claude_rc=$?
 rm -f "$prompt" "$agent_json"
+rm -rf "$workdir"
 if [ -e "$timed_out" ]; then
   rm -f "$body" "$timed_out"
   printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$timeout_s" >&2

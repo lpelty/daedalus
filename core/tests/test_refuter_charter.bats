@@ -30,7 +30,7 @@ d = json.load(sys.stdin)["refuter"]
 print(eval(sys.argv[1], {"d": d}))' "$1"
 }
 
-@test "the real charter renders: name refuter, read-only tools, no Bash/Edit/Write, opus, bounded turns, no CLAUDE.md, no memory" {
+@test "the real charter renders: name refuter, read-only tools, no Bash/Edit/Write, a pinned model, bounded turns, omitClaudeMd requested, no memory" {
   run python3 "$RENDER" "$CHARTER"
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | python3 -c 'import json,sys; print(list(json.load(sys.stdin)))')" = "['refuter']" ]
@@ -39,7 +39,9 @@ print(eval(sys.argv[1], {"d": d}))' "$1"
     [ "$(field "'$t' in d['tools']")" = "False" ]
     [ "$(field "'$t' in d['disallowedTools']")" = "True" ]
   done
-  [ "$(field 'd["model"]')" = "opus" ]
+  # A model is pinned (not inherited from whoever runs gates.sh); which one is
+  # the charter's business, not an invariant of the reviewer.
+  [ -n "$(field 'd["model"]')" ] && [ "$(field 'd["model"]')" != "inherit" ]
   [ "$(field 'isinstance(d["maxTurns"], int) and 15 <= d["maxTurns"] <= 40')" = "True" ]
   [ "$(field 'd["omitClaudeMd"]')" = "True" ]
   # Fresh context every run is the point: no persistent memory field.
@@ -55,7 +57,8 @@ print(eval(sys.argv[1], {"d": d}))' "$1"
     [ "$(printf '%s\n' "$prompt" | grep -cF -- "$needle")" -ge 1 ] || { echo "charter prompt lacks: $needle"; return 1; }
   done
   # The frontmatter is not part of the prompt.
-  [ "$(printf '%s\n' "$prompt" | grep -c '^model: opus')" -eq 0 ]
+  [ "$(printf '%s\n' "$prompt" | grep -c '^model: ')" -eq 0 ]
+  [ "$(printf '%s\n' "$prompt" | grep -c '^name: refuter')" -eq 0 ]
 }
 
 @test "the renderer refuses a file that is not an agent definition, naming the reason" {

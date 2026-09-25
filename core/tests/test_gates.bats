@@ -37,9 +37,13 @@ install_refuter() {
 }
 
 # git_target — make the fixture target a committed git repo, so the
-# fingerprint is real and a PASS is a PASS.
+# fingerprint is real and a PASS is a PASS. `-b main` because the config
+# names `main` as the base: on a host whose init.defaultBranch is master
+# the base ref would not exist, every diff against it would fail the same
+# way with or without a fix, and a positive control on the diff would pass
+# vacuously (it did — Xcode's gitconfig sets main and hid it).
 git_target() {
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
 }
 
@@ -162,7 +166,7 @@ git_target() {
 @test "a PASS run prints the run-id last" {
   write_config "  - true"
   cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
-  git init -q "$DAEDALUS_HOME/target/thing"
+  git init -q -b main "$DAEDALUS_HOME/target/thing"
   git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -175,7 +179,7 @@ git_target() {
 
 @test "a git target yields a real fingerprint and PASS; a gate that mutates the tree yields INVALID" {
   cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
-  git init -q "$DAEDALUS_HOME/target/thing"
+  git init -q -b main "$DAEDALUS_HOME/target/thing"
   git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true"
@@ -246,7 +250,7 @@ cat > /dev/null
 printf 'VERDICT: REFUTED\nThe change does not do what the criteria say.\n'
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -265,7 +269,7 @@ EOF
 
 @test "refute with claude missing from PATH fails loud instead of silently staying PASS" {
   install_refuter
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   # A PATH built from a fixed set of directories with no `claude` on it — the
@@ -288,7 +292,7 @@ cat > /dev/null
 printf '**VERDICT:** REFUTED\nThe change does not do what the criteria say.\n'
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin2/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin2:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -309,7 +313,7 @@ cat > /dev/null
 printf 'The criteria are not met.\n\n> **VERDICT**: REFUTED\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin3/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin3:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -330,7 +334,7 @@ cat > /dev/null
 exit 1
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin4/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin4:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -349,7 +353,7 @@ cat > /dev/null
 printf 'I reviewed the change and found several concerns.\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin5/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin5:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -375,7 +379,7 @@ cat > /dev/null
 printf 'VERDICT: REFUTED or VERDICT: STANDS was requested; my verdict follows.\n\nVERDICT: STANDS\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin6/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin6:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -404,7 +408,7 @@ wait
 printf 'VERDICT: STANDS\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin6/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true
   refute_timeout: 2"
@@ -445,7 +449,7 @@ touch "$BATS_TEST_TMPDIR/claude-ran"
 printf 'VERDICT: STANDS\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin7/claude"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   for bad in 'ten minutes' '0' '00' '-5' '600.5' '99999999999999999999'; do
     rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
@@ -465,7 +469,7 @@ STUB
   # certifying. Any nonzero exit is not a verdict.
   cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
   printf '#!/usr/bin/env bash\nkill -TERM $$\n' > "$DAEDALUS_HOME/core/refute.sh"
-  git init -q "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
   write_config "  - true" "  refute: true"
   run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -487,6 +491,7 @@ recording_stub() {
 #!/usr/bin/env bash
 printf '%s\\n' "\$@" > "$1/argv"
 cat > "$1/stdin"
+pwd > "$1/cwd"
 # --agents names a file that must exist AT CALL TIME (refute.sh deletes it after).
 prev=""; for a in "\$@"; do [ "\$prev" = "--agents" ] && cp "\$a" "$1/agents.json"; prev="\$a"; done
 printf 'VERDICT: STANDS\\n'
@@ -581,24 +586,40 @@ STUB
   PATH="$BATS_TEST_TMPDIR/bin10:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ]
   argv="$BATS_TEST_TMPDIR/bin10/argv"
-  [ "$(sed -n 1p "$argv")" = "-p" ]
-  [ "$(sed -n 2p "$argv")" = "--agent" ]
-  [ "$(sed -n 3p "$argv")" = "refuter" ]
-  [ "$(sed -n 4p "$argv")" = "--agents" ]
-  [ "$(sed -n 6p "$argv")" = "--settings" ]
-  [ "$(sed -n 7p "$argv")" = '{"disableAllHooks": true}' ]
-  [ "$(grep -c -- '--model' "$argv")" -eq 0 ]
+  # The invariants, not the argv positions: print mode, the charter selected
+  # by name from a rendered file that existed at call time, hooks off, the
+  # target granted as an extra directory, no --model unless configured.
+  python3 - "$argv" "$DAEDALUS_HOME/target/thing" <<'CHECK'
+import json, sys
+argv = open(sys.argv[1]).read().split("\n")
+pairs = list(zip(argv, argv[1:]))
+assert "-p" in argv, argv
+assert ("--agent", "refuter") in pairs, argv
+agents = [b for a, b in pairs if a == "--agents"]
+assert len(agents) == 1 and agents[0].startswith("/"), argv
+settings = [b for a, b in pairs if a == "--settings"]
+assert len(settings) == 1 and json.loads(settings[0]).get("disableAllHooks") is True, argv
+assert ("--add-dir", sys.argv[2]) in pairs, argv
+assert "--model" not in argv, argv
+CHECK
+  # The stub ran from an EMPTY directory — not Daedalus's, not the target's —
+  # so neither project's CLAUDE.md is in the reviewer's context.
+  cwd="$(cat "$BATS_TEST_TMPDIR/bin10/cwd")"
+  [ "$cwd" != "$DAEDALUS_HOME" ] && [ "$cwd" != "$DAEDALUS_HOME/target/thing" ]
+  case "$cwd" in "$DAEDALUS_HOME"/*) echo "refuter ran inside DAEDALUS_HOME: $cwd"; return 1 ;; esac
+  [ ! -d "$cwd" ]   # a temp dir, removed afterwards
   # The --agents file existed at call time and was the rendered charter.
   [ -f "$BATS_TEST_TMPDIR/bin10/agents.json" ]
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))["refuter"]
 assert sorted(d["tools"]) == ["Glob", "Grep", "Read"], d["tools"]
-assert "Bash" in d["disallowedTools"] and d["model"] == "opus" and d["omitClaudeMd"] is True
+assert "Bash" in d["disallowedTools"] and d["omitClaudeMd"] is True
+assert d["model"] and d["model"] != "inherit", d["model"]
 assert "Never validate" in d["prompt"]
 ' "$BATS_TEST_TMPDIR/bin10/agents.json"
   # ...and is gone afterwards (a temp file, not a tracked artifact).
-  [ ! -f "$(sed -n 5p "$argv")" ]
+  [ ! -f "$(grep -A1 -- '^--agents$' "$argv" | tail -1)" ]
   # verify.refute_model overrides the charter's model on the command line.
   rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
   write_config "  - true" "  refute: true
@@ -617,17 +638,30 @@ assert "Never validate" in d["prompt"]
   printf -- '---\ntype: pitfall\n---\n# Waits to be asked\n\nA lesson with no trigger.\n' > "$DAEDALUS_HOME/vault/pitfalls/zz-no-trigger.md"
   printf 'old\n' > "$DAEDALUS_HOME/target/thing/t.bats"
   git_target
+  # Committed work on a feature branch (the three-dot diff against main)...
+  git -C "$DAEDALUS_HOME/target/thing" switch -q -c fix/x
+  printf 'committed\n' > "$DAEDALUS_HOME/target/thing/c.txt"
+  git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m c
+  # ...and uncommitted work on top (the diff against HEAD).
   printf 'new\n' >> "$DAEDALUS_HOME/target/thing/t.bats"      # the diff touches a .bats file
   printf 'AC-1: the thing must thing.\n' > "$BATS_TEST_TMPDIR/criteria.md"
   write_config "  - true" "  refute: true"
   GATES_CRITERIA="$BATS_TEST_TMPDIR/criteria.md" PATH="$BATS_TEST_TMPDIR/bin11:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ]
   stdin="$BATS_TEST_TMPDIR/bin11/stdin"
+  # The reviewer is told where the checkout is: the diff's paths are relative to it.
+  [ "$(grep -cF "checkout at $DAEDALUS_HOME/target/thing" "$stdin")" -eq 1 ]
   [ "$(grep -cF 'AC-1: the thing must thing.' "$stdin")" -eq 1 ]
   [ "$(grep -cF '## Pitfalls that apply to the touched paths' "$stdin")" -eq 1 ]
   [ "$(grep -cF '### Pitfall: A non-final double-bracket assertion is silently ignored' "$stdin")" -eq 1 ]
   [ "$(grep -cF '### Pitfall: Waits to be asked' "$stdin")" -eq 1 ]
   [ "$(grep -cF 'timeout command is absent' "$stdin")" -eq 0 ]
+  # Each hunk exactly once: the committed one from the three-dot diff, the
+  # uncommitted one from the diff against HEAD. A two-dot fallback showed
+  # the uncommitted hunk twice; a missing base ref would show the committed
+  # hunk zero times.
+  [ "$(grep -cF '+committed' "$stdin")" -eq 1 ]
   [ "$(grep -cF '+new' "$stdin")" -eq 1 ]
   # Order: criteria, evidence, pitfalls, diff.
   c="$(grep -nF '## Acceptance criteria' "$stdin" | cut -d: -f1)"
@@ -644,6 +678,28 @@ assert "Never validate" in d["prompt"]
   [ "$(grep -cF 'double-bracket' "$stdin")" -eq 0 ]
   [ "$(grep -c -A1 -F '## Pitfalls that apply to the touched paths' "$stdin")" -ge 1 ]
   [ "$(grep -A1 -F '## Pitfalls that apply to the touched paths' "$stdin" | tail -1)" = "(none)" ]
+}
+
+@test "a missing or crashing pitfall selector cannot certify: run FAIL, no review file, claude never started, reason in the log" {
+  install_refuter
+  recording_stub "$BATS_TEST_TMPDIR/bin13"
+  git_target
+  write_config "  - true" "  refute: true"
+  printf 'raise SystemExit("boom")\n' > "$DAEDALUS_HOME/core/refute-pitfalls.py"
+  PATH="$BATS_TEST_TMPDIR/bin13:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"pitfall selector failed"*"boom"*) : ;; *) echo "expected the selector failure with its reason; got: $output"; return 1 ;; esac
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+  [ ! -f "$BATS_TEST_TMPDIR/bin13/argv" ]
+  # A selector that is not there at all is the same case — it used to read as "(none)".
+  rm "$DAEDALUS_HOME/core/refute-pitfalls.py"
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
+  PATH="$BATS_TEST_TMPDIR/bin13:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"pitfall selector failed"*) : ;; *) echo "expected the selector failure; got: $output"; return 1 ;; esac
+  [ ! -f "$BATS_TEST_TMPDIR/bin13/argv" ]
 }
 
 @test "a missing or unrenderable charter cannot certify: exit 2, run FAIL, no review file, claude never started" {
