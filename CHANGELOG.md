@@ -21,12 +21,15 @@ was inert exactly where it mattered.
   allowed; `--force`/`-f` stay denied; a bare `git push` is denied while on
   the trunk. `main` and `master` stay denied alongside the configured trunk.
   Deny messages name the configured branch.
-- **Doctor checks the trunk name.** `core/doctor.sh` compares `target.branch`
-  with the target's recorded default branch (`refs/remotes/origin/HEAD`, no
-  network) and on a mismatch prints one plain-language line: "config.yaml
-  says target.branch: main but the target's default branch is mainline;
-  change config.yaml to target.branch: mainline". An unset origin/HEAD is
-  reported as undeterminable, never guessed.
+- **Doctor checks the trunk name.** `core/doctor.sh` checks that
+  `target.branch` exists at origin (`refs/remotes/origin/<branch>`, no
+  network) and on a miss prints one plain-language line: "config.yaml says
+  target.branch: main but origin has no branch by that name (its default
+  branch is mainline); fix target.branch in config.yaml". A branch that
+  exists but is not the remote's default (`refs/remotes/origin/HEAD`) is a
+  NOTE naming both, not a problem — a deliberately non-default trunk must
+  not turn doctor red and block `setup.sh`. Missing origin refs or an unset
+  origin/HEAD are reported as undeterminable, never guessed.
 - **The refuter is a charter, and it is on by default.** The rung-2 reviewer
   is now a Claude Code subagent definition at `core/agents/refuter.md`
   (distribution code): `Read`/`Grep`/`Glob` only, no `Bash`/`Edit`/`Write`,

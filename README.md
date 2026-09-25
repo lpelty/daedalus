@@ -211,8 +211,11 @@ saying why — without the reason `core/gates.sh` refuses to run any gate.
 `verify.refute_model` overrides the charter's model; `verify.refute_timeout`
 (default 600 s) bounds the review, and a review that crashes, times out or
 ends without a verdict is uncertifiable and FAILs the run — never STANDS.
-`core/doctor.sh` also checks that `config.yaml`'s `target.branch` is the
-target's actual default branch, since every branch-aware guard reads it.
+`core/doctor.sh` also checks that `config.yaml`'s `target.branch` exists at
+the target's origin, since every branch-aware guard reads it: a branch origin
+does not have is MISSING; one that exists but is not the remote's default
+branch is a NOTE naming both, because a deployment may guard a trunk that is
+not the default and `setup.sh` must not be blocked by that.
 
 **For the maintainer:** this checkout is also the development site, so a
 plain development session in here fires these same hooks — they don't know

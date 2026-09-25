@@ -59,21 +59,37 @@ if [ "$target_repo_ok" -eq 1 ]; then
     # deny, the promotion gate) reads config target.branch; a config that
     # names a branch the target does not use leaves all of them inert while
     # reporting themselves fine — one deployment ran with `main`
-    # configured against a GitLab trunk called `mainline`. Compare
-    # against the remote's default branch, which `git clone` records as
-    # refs/remotes/origin/HEAD. No network: `git remote show origin` would
-    # answer when origin/HEAD is unset, but it contacts the remote, so an
-    # unset origin/HEAD is reported as undeterminable rather than guessed.
+    # configured against a GitLab trunk called `mainline`. The hard test
+    # is existence: a configured branch that origin does not have is a
+    # MISSING (sync-target.sh cannot even fetch it). A branch that exists
+    # but is not the remote's default (refs/remotes/origin/HEAD, recorded
+    # by `git clone`) is a NOTE naming both, never a problem: a deployment
+    # may deliberately guard a trunk that is not the remote's default, and
+    # setup.sh dies on a red doctor — prescribing "change to the default"
+    # there would re-inert every branch guard. No network: `git remote show
+    # origin` would answer when origin/HEAD is unset, but it contacts the
+    # remote, so an unset origin/HEAD is reported as undeterminable rather
+    # than guessed. (An unset target.branch is already MISSING above.)
     configured_branch="$(cfg target.branch 2>/dev/null || true)"
     if [ -n "$configured_branch" ]; then
       remote_default="$(git -C "$target" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
       remote_default="${remote_default#origin/}"
-      if [ -z "$remote_default" ]; then
-        log "NOTE     target.branch: cannot determine the target's default branch (origin/HEAD is not recorded in $target), so config.yaml's target.branch: $configured_branch is unchecked"
+      if [ -z "$(git -C "$target" for-each-ref --count=1 refs/remotes/origin/ 2>/dev/null)" ]; then
+        # No remote-tracking refs at all (a checkout with no origin, or one
+        # that is not a git repo git can read): absence proves nothing.
+        log "NOTE     target.branch: cannot tell whether $configured_branch exists at origin (no origin refs are recorded in $target), so config.yaml's target.branch is unchecked"
+      elif ! git -C "$target" rev-parse --verify -q "refs/remotes/origin/$configured_branch" >/dev/null 2>&1; then
+        if [ -n "$remote_default" ]; then
+          note_problem "config.yaml says target.branch: $configured_branch but origin has no branch by that name (its default branch is $remote_default); fix target.branch in config.yaml"
+        else
+          note_problem "config.yaml says target.branch: $configured_branch but origin has no branch by that name; fix target.branch in config.yaml"
+        fi
+      elif [ -z "$remote_default" ]; then
+        log "NOTE     target.branch: $configured_branch exists at origin; cannot tell whether it is the target's default branch (origin/HEAD is not recorded in $target)"
       elif [ "$remote_default" = "$configured_branch" ]; then
         log "OK       target.branch: $configured_branch is the target's default branch"
       else
-        note_problem "config.yaml says target.branch: $configured_branch but the target's default branch is $remote_default; change config.yaml to target.branch: $remote_default"
+        log "NOTE     target.branch: $configured_branch exists at origin but is not its default branch ($remote_default) — confirm this is the trunk you mean to guard"
       fi
     fi
   fi
