@@ -8,10 +8,17 @@ verifylib.target_branch — never a hardcoded "main": a GitLab deployment whose
 trunk is `mainline` had a guard that denied `main` and let `mainline` through
 (the same defect class PROP-019 fixed in the promotion gate). "main" and
 "master" stay denied alongside the configured trunk as defense in depth for a
-config that names the wrong one; neither is ever a feature branch. Relative paths resolve against the hook's `cwd`, then any
+config that names the wrong one; neither is ever a feature branch. A push
+whose refspec names the current commit (`HEAD`, `@`) is resolved to the
+current branch before that comparison, and `--all`/`--mirror` are denied
+outright inside the target: both push the trunk whatever branch is checked
+out. Relative paths resolve against the hook's `cwd`, then any
 `cd <dir> &&` earlier in the same command. Fails open on its own errors,
 except that an unparseable command is still checked for redirect and `-i`
-operands that resolve to protected paths. Everything this guard can be
+operands that resolve to protected paths, and that an unreadable config
+fails CLOSED for git inside `target/`: with no trunk to compare against,
+a push or commit there is denied rather than waved through (the same rule
+boundary-hook.py applies since PROP-019). Everything this guard can be
 routed around is caught by boundary-hook.py from git state.
 """
 from __future__ import annotations
@@ -93,17 +100,33 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         if sub == a and (b in rest or (b == "-f" and any(r.startswith("-f") for r in rest))):
             if not (sub == "checkout" and rest and rest[-1] != "."):
                 return "`git %s %s` destroys work; ask the operator." % (a, b)
-    if sub == "push" and under(repo, target):
+    if sub not in ("push", "commit"):
+        return None
+    if target is None:
+        # config.yaml could not be read, so the trunk is unknown. A repo under
+        # this deployment's target/ is still the target: fail closed there.
+        if under(repo, (v.ROOT / "target").resolve()):
+            return "config.yaml cannot be read, so the trunk is unknown; refusing `git %s` inside the target until it is fixed." % sub
+        return None
+    if not under(repo, target):
+        return None
+    if sub == "push":
         if any(r in ("--force", "-f") or r.startswith("--force") or r.startswith("-f") for r in rest):
             return "The operator merges; a forced push rewrites history — push your branch, without --force."
         trunk = v.target_branch(v.ROOT)
-        dests = push_destinations(rest)
-        if not dests and branch_of(repo) in trunk_names(trunk):
-            return "The operator merges; you are on %s — switch to a branch and push that, not %s." % (branch_of(repo), trunk)
+        if any(r in PUSH_EVERYTHING for r in rest):
+            return "The operator merges; `git push %s` pushes %s too — push your branch by name." % (
+                next(r for r in rest if r in PUSH_EVERYTHING), trunk)
+        cur = branch_of(repo)
+        # `push origin HEAD` / `push -u origin HEAD` / `push origin @` push the
+        # current branch to its same-named remote branch: resolve before comparing.
+        dests = [cur if d in ("HEAD", "@") else d for d in push_destinations(rest)]
+        if not dests and cur in trunk_names(trunk):
+            return "The operator merges; you are on %s — switch to a branch and push that, not %s." % (cur, trunk)
         hit = [d for d in dests if d in trunk_names(trunk)]
         if hit:
             return "The operator merges; push your branch, not %s." % hit[0]
-    if sub == "commit" and under(repo, target) and not branch_created:
+    if sub == "commit" and not branch_created:
         trunk = v.target_branch(v.ROOT)
         if branch_of(repo) in trunk_names(trunk):
             return "Branch first (`git switch -c fix/<slug>`), then commit — you are on %s." % branch_of(repo)
@@ -119,6 +142,9 @@ def trunk_names(trunk: str) -> set:
 
 # push options that take a separate value argument; skipped with their value.
 PUSH_VALUE_OPTS = {"--repo", "--receive-pack", "--exec", "-o", "--push-option"}
+# push options that push every local branch — the trunk among them — with no
+# refspec naming it; denied outright inside the target.
+PUSH_EVERYTHING = {"--all", "--branches", "--mirror"}
 
 
 def push_destinations(rest: List[str]) -> List[str]:
@@ -218,6 +244,10 @@ def main() -> int:
                 _, args = git_repo_and_args(seg, here)
                 if args[:2] in (["switch", "-c"], ["checkout", "-b"]):
                     branch_created = True
+                elif args[:1] in (["switch"], ["checkout"]) and len(args) == 2 and not args[1].startswith("-"):
+                    # `switch -c fix/x && switch mainline && commit` lands the
+                    # commit on the trunk: a later plain switch cancels the credit.
+                    branch_created = False
                 reason = check_git(seg, here, target, branch_created)
                 if reason:
                     deny(reason)

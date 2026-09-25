@@ -102,6 +102,18 @@ EOF2
   run guard 'git push origin +fix/x:refs/heads/mainline' "$T"; denied
   run guard 'cd target/thing && git push origin mainline'; denied
   run guard 'git -C target/thing push origin mainline'; denied
+  # A refspec naming the current commit pushes the current branch — the most
+  # common idiom after a bare branch name, and it was allowed on the trunk.
+  run guard 'git push origin HEAD' "$T"; denied
+  run guard 'git push -u origin HEAD' "$T"; denied
+  run guard 'git push origin @' "$T"; denied
+  # Every-branch pushes carry the trunk whatever is checked out.
+  run guard 'git push --all origin' "$T"; denied
+  run guard 'git push --mirror origin' "$T"; denied
+  # main and master stay denied under a mainline config (defense in depth).
+  run guard 'git push origin main' "$T"; denied
+  run guard 'git push origin master' "$T"; denied
+  run guard 'git push origin HEAD:master' "$T"; denied
 }
 
 @test "trunk from config: pushing a feature branch is allowed, in every refspec shape" {
@@ -116,6 +128,14 @@ EOF2
   # A branch whose name merely CONTAINS the trunk's name is not the trunk.
   run guard 'git push origin fix/mainline-guard' "$T"; allowed
   run guard 'git push origin feature/main' "$T"; allowed
+  # HEAD / @ resolve to the checked-out branch: allowed once that is a feature branch.
+  git -C "$T" switch -q -c fix/y
+  run guard 'git push origin HEAD' "$T"; allowed
+  run guard 'git push -u origin HEAD' "$T"; allowed
+  run guard 'git push origin @' "$T"; allowed
+  # ...but --all/--mirror still push mainline from here.
+  run guard 'git push --all origin' "$T"; denied
+  run guard 'git push --mirror origin' "$T"; denied
 }
 
 @test "trunk from config: a forced push is denied whatever the branch" {
@@ -137,8 +157,23 @@ EOF2
   run guard 'git commit -m x' "$T"; denied; case "$output" in *"on mainline"*) : ;; *) echo "message must name the branch: $output"; return 1 ;; esac
   run guard 'git -C target/thing commit -m x'; denied
   run guard 'git switch -c fix/x && git commit -m x' "$T"; allowed
+  # A branch created and then left before the commit earns no credit.
+  run guard 'git switch -c fix/x && git switch mainline && git commit -m x' "$T"; denied
+  run guard 'git checkout -b fix/x && git checkout mainline && git commit -m x' "$T"; denied
   git -C "$T" switch -q -c fix/y
   run guard 'git commit -m x' "$T"; allowed
+}
+
+@test "trunk from config: an unreadable config fails CLOSED for push and commit inside target/, and only there" {
+  use_mainline
+  chmod 000 "$DAEDALUS_HOME/config.yaml"
+  run guard 'git push origin mainline' "$T"; denied; case "$output" in *"config.yaml cannot be read"*) : ;; *) echo "message must name the cause: $output"; return 1 ;; esac
+  run guard 'git push origin fix/x' "$T"; denied
+  run guard 'git commit -m x' "$T"; denied
+  run guard 'git -C vault commit -m x'; allowed
+  run guard 'git -C vault push origin main'; allowed
+  chmod 644 "$DAEDALUS_HOME/config.yaml"
+  run guard 'git push origin fix/x' "$T"; allowed
 }
 
 @test "trunk from config: with target.branch unset the trunk is main; main and master stay denied as defense in depth" {
