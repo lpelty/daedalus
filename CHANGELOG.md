@@ -7,8 +7,10 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named
-`mainline`: `core/guard-bash.py` hardcoded `main`/`master`, so a push to
-`mainline` was not denied — the guard was inert exactly where it mattered.
+`mainline` (the deployment is not named here: distribution files carry no
+environment facts — see `core/tests/test_identity.bats`): `core/guard-bash.py`
+hardcoded `main`/`master`, so a push to `mainline` was not denied — the guard
+was inert exactly where it mattered.
 
 - **Branch guard reads `target.branch`.** The push deny and the
   commit-on-trunk deny in `core/guard-bash.py` read the configured trunk

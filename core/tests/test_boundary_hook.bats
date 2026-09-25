@@ -8,12 +8,19 @@ setup() {
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
+  # The refuter is on by default (v0.6.1); this suite is about the boundary
+  # hook, and a real claude must never run in tests, so it is off with the
+  # reason gates.sh demands. Every rewrite of this file below must keep the
+  # same bytes, or the config-sha check reads the rewrite as a change.
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
   repo: https://example.com/thing.git
   branch: main
 gates:
   - true
+verify:
+  refute: false
+  refute_off_reason: bats fixture — a real claude must never be invoked in tests
 EOF
   T="$DAEDALUS_HOME/target/thing"
   git init -q -b main "$T"; printf 'a\n' > "$T/a.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m i
@@ -85,7 +92,7 @@ open('$m', 'w').write(json.dumps(d))
   run hook Stop; [ "$status" -eq 2 ]
   case "$output" in *"config.yaml"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
   git -C "$DAEDALUS_HOME" checkout -q -- . 2>/dev/null || true
-  printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n  - true\n' > "$DAEDALUS_HOME/config.yaml"
+  printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n  - true\nverify:\n  refute: false\n  refute_off_reason: bats fixture — a real claude must never be invoked in tests\n' > "$DAEDALUS_HOME/config.yaml"
   run hook Stop; [ "$status" -eq 0 ]
   printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":["Bash(ls:*)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   run hook Stop; [ "$status" -eq 0 ]

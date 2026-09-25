@@ -58,8 +58,8 @@ if [ "$target_repo_ok" -eq 1 ]; then
     # The trunk name. Every branch-aware guard (guard-bash's push/commit
     # deny, the promotion gate) reads config target.branch; a config that
     # names a branch the target does not use leaves all of them inert while
-    # reporting themselves fine — the Smartsheet deployment ran with
-    # `main` configured against a GitLab trunk called `mainline`. Compare
+    # reporting themselves fine — one deployment ran with `main`
+    # configured against a GitLab trunk called `mainline`. Compare
     # against the remote's default branch, which `git clone` records as
     # refs/remotes/origin/HEAD. No network: `git remote show origin` would
     # answer when origin/HEAD is unset, but it contacts the remote, so an

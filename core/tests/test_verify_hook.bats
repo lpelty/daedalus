@@ -9,12 +9,17 @@ setup() {
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/session-start.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
+  # Refuter off with a reason (v0.6.1 default-on): this suite is about the
+  # Stop gate, and a real claude must never run in tests.
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
   repo: https://example.com/thing.git
   branch: main
 gates:
   - true
+verify:
+  refute: false
+  refute_off_reason: bats fixture — a real claude must never be invoked in tests
 EOF
   T="$DAEDALUS_HOME/target/thing"
   git init -q "$T"; printf 'a\n' > "$T/a.txt"; git -C "$T" add -A

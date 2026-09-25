@@ -113,7 +113,7 @@ setup() {
       offenders="$offenders $f(bill)"
     fi
   done <<EOF
-$(git ls-files -- core .claude CLAUDE.md SOUL.md README.md config.example.yaml)
+$(git ls-files -- core .claude CLAUDE.md SOUL.md README.md CHANGELOG.md config.example.yaml)
 EOF
 
   [ -z "$offenders" ] || { echo "personal-identity leak in:$offenders"; return 1; }
