@@ -89,7 +89,7 @@ if [ "$target_repo_ok" -eq 1 ]; then
       elif [ "$remote_default" = "$configured_branch" ]; then
         log "OK       target.branch: $configured_branch is the target's default branch"
       else
-        log "NOTE     target.branch: $configured_branch exists at origin but is not its default branch ($remote_default) — confirm this is the trunk you mean to guard"
+        log "NOTE     target.branch: $configured_branch exists at origin but is not its default branch ($remote_default) — confirm this is the trunk you mean to guard; the branch guard denies pushes and commits to $remote_default as well"
       fi
     fi
   fi

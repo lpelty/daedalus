@@ -194,6 +194,37 @@ EOF2
   run guard 'git push origin fix/x' "$T"; allowed
 }
 
+@test "trunk from config: the remote's default branch is denied too — the incident shape (config main, origin default mainline) cannot push or commit mainline" {
+  # Config says main, origin's default is mainline, and main exists at
+  # origin as well — the shape `git clone --branch main` produced on the
+  # deployment that prompted v0.6.1. Doctor can only NOTE it (a deliberate
+  # non-default trunk looks the same), so the guard reads
+  # refs/remotes/origin/HEAD and denies the default branch alongside the
+  # configured one. Before this, `git push origin HEAD:mainline` was allowed.
+  rm -rf "$T"
+  O="$BATS_TEST_TMPDIR/origin.git"; W="$BATS_TEST_TMPDIR/work"
+  git init -q --bare -b mainline "$O"; git init -q -b mainline "$W"
+  printf 'x\n' > "$W/README.md"; git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m i
+  git -C "$W" push -q "$O" mainline; git -C "$W" branch -q main; git -C "$W" push -q "$O" main
+  git clone -q --branch main "$O" "$T"      # exactly as core/sync-target.sh clones
+  run guard 'git push origin HEAD:mainline' "$T"; denied; case "$output" in *"not mainline"*) : ;; *) echo "message must name mainline: $output"; return 1 ;; esac
+  run guard 'git push origin mainline' "$T"; denied
+  run guard 'git push origin fix/x:refs/heads/mainline' "$T"; denied
+  run guard 'git push origin main' "$T"; denied
+  run guard 'git push origin fix/x' "$T"; allowed
+  git -C "$T" switch -q mainline
+  run guard 'git commit -m x' "$T"; denied; case "$output" in *"on mainline"*) : ;; *) echo "message must name the branch: $output"; return 1 ;; esac
+  run guard 'git push' "$T"; denied
+  git -C "$T" switch -q -c fix/y
+  run guard 'git commit -m x' "$T"; allowed
+  run guard 'git push origin HEAD' "$T"; allowed
+  # With no origin/HEAD recorded there is no default to add: the configured
+  # names alone apply, and a feature branch is still free.
+  git -C "$T" symbolic-ref --delete refs/remotes/origin/HEAD
+  run guard 'git push origin fix/x' "$T"; allowed
+  run guard 'git push origin main' "$T"; denied
+}
+
 @test "trunk from config: with target.branch unset the trunk is main; main and master stay denied as defense in depth" {
   printf 'target:\n  repo: https://example.com/thing.git\n' > "$DAEDALUS_HOME/config.yaml"
   run guard 'git push origin main' "$T"; denied

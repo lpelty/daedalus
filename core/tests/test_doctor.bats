@@ -680,6 +680,24 @@ clone_target_with_default_branch() {   # clone_target_with_default_branch <defau
   [ "$(printf '%s\n' "$output" | grep -c 'change config.yaml')" -eq 0 ]
 }
 
+@test "doctor: the originating incident shape (config main, origin default mainline, main also at origin) is a NOTE that names both and says the guard covers the default" {
+  # The shape sync-target.sh's `git clone --branch main` produced on the
+  # deployment that prompted v0.6.1: config says main, origin's default is
+  # mainline, and main exists at origin too. From the checkout alone this
+  # is indistinguishable from a deliberately non-default trunk, so doctor
+  # stays green with a NOTE (a red doctor would block setup.sh on the
+  # legitimate shape). What makes that safe is the branch guard: it denies
+  # pushes and commits to the remote default as well as the configured
+  # trunk (test_guard_bash.bats), and the NOTE says so.
+  clone_target_with_default_branch mainline main
+  doctor_config_with_branch main
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -cF 'NOTE     target.branch: main exists at origin but is not its default branch (mainline)')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -cF 'the branch guard denies pushes and commits to mainline as well')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'MISSING.*target.branch')" -eq 0 ]
+}
+
 @test "doctor is green when config target.branch matches the target's default branch" {
   clone_target_with_default_branch mainline
   doctor_config_with_branch mainline

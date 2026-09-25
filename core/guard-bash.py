@@ -8,7 +8,10 @@ verifylib.target_branch — never a hardcoded "main": a GitLab deployment whose
 trunk is `mainline` had a guard that denied `main` and let `mainline` through
 (the same defect class PROP-019 fixed in the promotion gate). "main" and
 "master" stay denied alongside the configured trunk as defense in depth for a
-config that names the wrong one; neither is ever a feature branch. A push
+config that names the wrong one; neither is ever a feature branch — and so
+does the remote's default branch (refs/remotes/origin/HEAD), because the
+config that names the wrong trunk is exactly the one doctor cannot tell from
+a deliberately non-default trunk. A push
 whose refspec names the current commit (`HEAD`, `@`) is resolved to the
 current branch before that comparison, and `--all`/`--mirror` are denied
 outright inside the target: both push the trunk whatever branch is checked
@@ -123,23 +126,41 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         dests = [cur if d in ("HEAD", "@") else d for d in push_destinations(rest)]
         if PUSH_MATCHING in dests:
             return "The operator merges; the refspec `:` pushes every matching branch, %s too — push your branch by name." % trunk
-        if not dests and cur in trunk_names(trunk):
+        if not dests and cur in trunk_names(trunk, repo):
             return "The operator merges; you are on %s — switch to a branch and push that, not %s." % (cur, trunk)
-        hit = [d for d in dests if d in trunk_names(trunk)]
+        hit = [d for d in dests if d in trunk_names(trunk, repo)]
         if hit:
             return "The operator merges; push your branch, not %s." % hit[0]
     if sub == "commit" and not branch_created:
         trunk = v.target_branch(v.ROOT)
-        if branch_of(repo) in trunk_names(trunk):
+        if branch_of(repo) in trunk_names(trunk, repo):
             return "Branch first (`git switch -c fix/<slug>`), then commit — you are on %s." % branch_of(repo)
     return None
 
 
-def trunk_names(trunk: str) -> set:
-    """The configured trunk plus the two conventional names. A feature
-    branch is never called main or master, so denying them costs nothing
-    and still protects a deployment whose config names the wrong trunk."""
-    return {trunk, "main", "master"}
+def remote_default(repo: Path) -> str:
+    """The remote's default branch as `git clone` recorded it
+    (refs/remotes/origin/HEAD), or "" when it is not recorded. No network."""
+    code, out, _ = v.run(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    out = out.strip()
+    return out[len("origin/"):] if code == 0 and out.startswith("origin/") else ""
+
+
+def trunk_names(trunk: str, repo: Optional[Path] = None) -> set:
+    """The configured trunk, the remote's default branch, and the two
+    conventional names. A feature branch is never called main or master, so
+    denying them costs nothing and still protects a deployment whose config
+    names the wrong trunk. The remote default is there for the same reason
+    with sharper teeth: the originating incident was config `main` against
+    an origin whose default is `mainline` while `main` also existed there —
+    doctor can only NOTE that shape (a deliberately non-default trunk looks
+    identical), so the guard denies the default branch too."""
+    names = {trunk, "main", "master"}
+    if repo is not None:
+        d = remote_default(repo)
+        if d:
+            names.add(d)
+    return names
 
 
 # push options that take a separate value argument; skipped with their value.
