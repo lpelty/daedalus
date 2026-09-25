@@ -234,5 +234,9 @@ writes the evidence: logs under `state/evidence/<run-id>/`, a summary at
 that says `IMPLEMENTED` cites that run as `evidence-run:`; the session
 cannot end while a claim stands without one, or with one for a different
 tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
-path — the honest state. Promotion is: gates green, commit on your own
-branch, push, and the operator merges; the boundary hook enforces the branch.
+path — the honest state. A fresh-context refuter reviews every PASS; a
+`REFUTED` verdict is a FAIL with the review as the log, and a green run the
+refuter could not certify is a FAIL too. Promotion is: gates green, commit on
+your own branch, push, and the operator merges; the boundary hook enforces
+the branch, which is `target.branch` in `config.yaml`, never assumed to be
+`main`.

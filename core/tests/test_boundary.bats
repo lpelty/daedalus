@@ -44,6 +44,8 @@ _protected_paths() {
 ./.claude/settings.local.json
 ./config.example.yaml
 ./README.md
+./CHANGELOG.md
+./core/agents/refuter.md
 ./config.yaml
 ./state/evidence/keep
 ./vault/evidence/keep

@@ -57,15 +57,26 @@ proposals:
   budget: 5
 
 verify:
-  # Rung 2: a fresh-context refuter reviews every PASS. Off until rung 1 has
-  # run on real assignments and the record shows a green gate passing
-  # something a reader would have caught.
-  refute: false
+  # Rung 2: a fresh-context refuter (core/agents/refuter.md — Read/Grep/Glob
+  # only, no Bash, no CLAUDE.md, no memory) reviews every PASS and ends with
+  # VERDICT: REFUTED or STANDS. REFUTED flips the run to FAIL with the review
+  # as the log; a crashed, timed-out or verdict-less review is uncertifiable
+  # and FAILs too — never STANDS. ON by default: omitting this key means true.
+  refute: true
+  # The off-switch. `refute: false` is honored ONLY when refute_off_reason is
+  # a non-empty string saying why; without one gates.sh refuses to run any
+  # gate. An unreviewed green run is this project's founding pitfall, so
+  # turning the reviewer off is a decision that has to be written down.
+  # refute: false
+  # refute_off_reason: rung 1 has not run on a real assignment here yet
+  # Optional. Model for the refuter, overriding the charter's (opus). An
+  # alias (sonnet, opus) or a full model name. Omit to use the charter's.
+  # refute_model: sonnet
   # Seconds the refuter's claude invocation may run before its whole process
   # group is killed and the run FAILs as uncertifiable (exit 2 — never
   # STANDS). A hung reviewer used to hang gates.sh indefinitely. A whole
-  # number of seconds, 1..9999999; absent or empty means 600. Anything else
-  # is refused before any gate runs.
+  # number of seconds, 1..9999999; absent or empty means 600 — so default-on
+  # needs no timeout line. Anything else is refused before any gate runs.
   refute_timeout: 600
 
 recall:

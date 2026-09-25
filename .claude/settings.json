@@ -8,6 +8,7 @@
       "Edit(./.claude/settings.local.json)",
       "Edit(./config.example.yaml)",
       "Edit(./README.md)",
+      "Edit(./CHANGELOG.md)",
       "Edit(./config.yaml)",
       "Edit(./state/**)",
       "Edit(./vault/evidence/**)"

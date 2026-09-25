@@ -188,6 +188,32 @@ Daedalus is blocked with a reason naming the remedy: restart the session.
 On a new machine the hooks are held until the workspace-trust dialog is
 accepted. `core/doctor.sh` reports unverified claims offline.
 
+#### The refuter (rung 2)
+
+After every PASS, `core/refute.sh` hands the run to a fresh-context reviewer
+and a `VERDICT: REFUTED` flips it to FAIL with the review
+(`vault/evidence/<run-id>-review.md`) as the log. The reviewer is the charter
+at `core/agents/refuter.md` — a Claude Code subagent definition restricted to
+`Read`, `Grep` and `Glob` (no `Bash`, no `Edit`, no `Write`), `model: opus`,
+bounded turns, no `CLAUDE.md`, and deliberately no memory: it never sees the
+author's reasoning and starts from nothing every run. It receives the
+acceptance criteria (`GATES_CRITERIA=<file>` when calling `core/gates.sh`),
+the evidence record, the pitfalls whose `applies-to: path:` matches a touched
+path (plus every pitfall with no `applies-to:`), and the diff — in that order.
+The charter lives under `core/` because `claude -p --agent <name>` resolves
+only from `.claude/agents/` of the working directory, which is one of
+Daedalus's write surfaces; `core/` is not. `refute.sh` renders it with
+`core/agentdef.py` and passes the result to `claude --agents`.
+
+It is **on by default**: an unset `verify.refute` means `true`. To turn it
+off, set `verify.refute: false` *and* a non-empty `verify.refute_off_reason`
+saying why — without the reason `core/gates.sh` refuses to run any gate.
+`verify.refute_model` overrides the charter's model; `verify.refute_timeout`
+(default 600 s) bounds the review, and a review that crashes, times out or
+ends without a verdict is uncertifiable and FAILs the run — never STANDS.
+`core/doctor.sh` also checks that `config.yaml`'s `target.branch` is the
+target's actual default branch, since every branch-aware guard reads it.
+
 **For the maintainer:** this checkout is also the development site, so a
 plain development session in here fires these same hooks — they don't know
 the difference between an assignment and you editing `core/` by hand. For a
