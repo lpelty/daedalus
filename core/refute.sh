@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Rung 2: a fresh-context refuter. Receives the acceptance criteria (the
-# assignment file named in $2, if any), the evidence summary, the pitfalls
-# that apply to the touched paths, and the target diff against its base —
-# never the narrative. Writes the verdict beside the evidence and prints
+# assignment file named in $2, if any), the evidence summary ($3, or the
+# vault copy), the pitfalls that apply to the touched paths, and the diff
+# against the base — assembled per repository, the target and each
+# target.nested checkout, untracked files included — never the narrative. Writes the verdict beside the evidence and prints
 # REFUTED or STANDS. Runs after every PASS unless config says
 # `verify.refute: false` with a `verify.refute_off_reason` (gates.sh owns
 # that switch).
@@ -67,14 +68,109 @@ agent_name="$(python3 -c 'import json,sys; print(next(iter(json.load(open(sys.ar
   exit 2
 }
 refute_model="$(cfg verify.refute_model 2>/dev/null || true)"
-# The paths the diff touches, relative to the target root — the frame the
-# pitfalls' `applies-to: path:` globs are written in. Same two diffs as the
-# prompt's diff section below.
-paths="$(mktemp)"
-{
-  git -C "$target" diff --name-only "origin/$base"...HEAD 2>/dev/null || git -C "$target" diff --name-only "$base"...HEAD 2>/dev/null
-  git -C "$target" diff --name-only HEAD 2>/dev/null
-} | sort -u > "$paths"
+# --- The diff, assembled per repository ------------------------------------
+# The target's write surface may be a nested repository (config
+# target.nested): on one deployment every change Daedalus makes lands in
+# one, and the outer `git diff` never showed it — gitignored, the nested
+# path is invisible to the outer repo; tracked as a gitlink, it is a
+# one-line `Subproject commit …-dirty` stamp with no content. Default-on
+# then made an opus review of an EMPTY diff mandatory on every PASS. So the
+# diff is assembled per repository — the outer checkout, then each nested
+# path — each against its own base, with the nested relpath prefixed onto
+# every path (--src-prefix/--dst-prefix and on the name list) so the
+# reviewer reads target-relative paths and the pitfalls' `applies-to:
+# path:` globs match them. Untracked files are in it too: a temporary
+# index seeded from the repo's own and brought up to date with `git add
+# -A` (fingerprint.sh's technique), diffed against HEAD, shows a new file
+# as a hunk, where `git diff HEAD` never showed a new file at all. An
+# empty assembled diff is uncertifiable (exit 2), never handed to the
+# model: a review of nothing that says STANDS is this repo's founding
+# pitfall class.
+#
+# Bases: the outer repo's is `origin/<target.branch>`, falling back to the
+# local branch (three-dot, since the merge base — a two-dot `diff $base`
+# compares the working tree and showed every uncommitted hunk twice). A
+# nested repo's is the branch sync-target.sh cloned and fast-forwards:
+# origin's default (refs/remotes/origin/HEAD), then its upstream, then the
+# outer names. A repo with no resolvable base contributes its uncommitted
+# work only.
+base_ref() {   # base_ref <repo> <candidate>... — the first that resolves
+  local repo="$1" c; shift
+  for c in "$@"; do
+    [ -n "$c" ] || continue
+    if git -C "$repo" rev-parse --verify -q "$c^{commit}" >/dev/null 2>&1; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+nested_head() {   # nested_head <repo> — origin's default branch, short, or nothing
+  local h
+  h="$(git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)" || return 1
+  [ -n "$h" ] && printf '%s\n' "$h"
+}
+# repo_diff <repo> <prefix> <names-out> <diff-out> <base-or-empty> [exclude-relpath...]
+repo_diff() {
+  local repo="$1" prefix="$2" names="$3" out="$4" base="$5" idx real n; shift 5
+  local ex=()
+  for n in "$@"; do ex+=(":(exclude)$n"); done
+  local pfx=("--src-prefix=a/$prefix" "--dst-prefix=b/$prefix")
+  if [ -n "$base" ]; then
+    git -C "$repo" diff --name-only "$base"...HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null | sed "s|^|$prefix|" >> "$names"
+    git -C "$repo" diff "${pfx[@]}" "$base"...HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+  fi
+  # Uncommitted AND untracked work against HEAD, through a temporary index:
+  # seeded from the real one (so a tracked gitlink is not reported deleted),
+  # then `add -A` brings it to the working tree. The real index is untouched.
+  idx="$(mktemp -u)" || return 1
+  real="$(git -C "$repo" rev-parse --git-path index 2>/dev/null)"
+  case "$real" in /*) : ;; *) real="$repo/$real" ;; esac
+  [ -f "$real" ] && cp "$real" "$idx"
+  if GIT_INDEX_FILE="$idx" git -C "$repo" -c advice.addEmbeddedRepo=false add -A -- . ${ex[@]+"${ex[@]}"} >/dev/null 2>&1; then
+    GIT_INDEX_FILE="$idx" git -C "$repo" diff --cached --name-only HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null | sed "s|^|$prefix|" >> "$names"
+    GIT_INDEX_FILE="$idx" git -C "$repo" diff --cached "${pfx[@]}" HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+  else
+    # The temp index could not be built (an index.lock, an unreadable tree):
+    # the working-tree diff, which at least carries the edits to tracked files.
+    git -C "$repo" diff --name-only HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null | sed "s|^|$prefix|" >> "$names"
+    git -C "$repo" diff "${pfx[@]}" HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+  fi
+  rm -f "$idx" "$idx.lock"
+}
+nested_rel=()   # bash 3.2: no mapfile
+if cfg target.nested >/dev/null 2>&1; then
+  while IFS="$(printf '\t')" read -r rel _url; do
+    [ -n "$rel" ] || continue
+    nested_rel+=("$rel")
+  done <<EOF
+$(cfg_pairs target.nested 2>/dev/null)
+EOF
+fi
+# Exclude pathspecs only for nested paths the outer repo can SEE: naming a
+# gitignored path in an explicit :(exclude) makes `git add` treat it as
+# requested and error ("Use -f") — the trap fingerprint.sh already met.
+outer_excl=()
+for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
+  git -C "$target" check-ignore -q "$rel" 2>/dev/null && continue
+  outer_excl+=("$rel")
+done
+paths="$(mktemp)"; names_raw="$(mktemp)"; diff_file="$(mktemp)"
+outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
+printf '### . (against %s)\n' "${outer_base:-HEAD only — no base ref resolves}" >> "$diff_file"
+repo_diff "$target" "" "$names_raw" "$diff_file" "$outer_base" ${outer_excl[@]+"${outer_excl[@]}"}
+for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
+  nrepo="$target/$rel"
+  [ -d "$nrepo" ] || continue
+  git -C "$nrepo" rev-parse --git-dir >/dev/null 2>&1 || continue
+  nbase="$(base_ref "$nrepo" "$(nested_head "$nrepo" || true)" "@{u}" "origin/$base" "$base" || true)"
+  printf '\n### %s (against %s)\n' "$rel" "${nbase:-HEAD only — no base ref resolves}" >> "$diff_file"
+  repo_diff "$nrepo" "$rel/" "$names_raw" "$diff_file" "$nbase"
+done
+sort -u "$names_raw" > "$paths"; rm -f "$names_raw"
+if ! grep -q '^diff --git ' "$diff_file"; then
+  rm -f "$paths" "$diff_file" "$agent_json"
+  printf 'nothing to review — %s has no change against %s (committed, uncommitted or untracked%s); cannot certify a run with an empty diff\n' \
+    "$target" "${outer_base:-$base}" "$([ "${#nested_rel[@]}" -gt 0 ] && printf ', in it or in %s' "${nested_rel[*]}")" >&2
+  exit 2
+fi
 # The pitfall selector is an input, not a decoration: a selector that
 # crashed or is missing used to render as "(none)" — byte-identical to "no
 # pitfalls apply" — and the run could still STAND on a review that never
@@ -85,7 +181,7 @@ pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$paths" 2>"$p
 pitfalls_rc=$?
 if [ "$pitfalls_rc" -ne 0 ]; then
   pitfalls_reason="$(tr '\n' ' ' < "$pitfalls_err" | tail -c 400)"
-  rm -f "$paths" "$pitfalls_err" "$agent_json"
+  rm -f "$paths" "$diff_file" "$pitfalls_err" "$agent_json"
   printf 'pitfall selector failed (python3 core/refute-pitfalls.py exited %s: %s) — cannot certify the run\n' "$pitfalls_rc" "${pitfalls_reason:-no message}" >&2
   exit 2
 fi
@@ -100,14 +196,11 @@ prompt="$(mktemp)"
   printf '\n## Pitfalls that apply to the touched paths\n'
   if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
   printf '\n## Diff against %s\n' "$base"
-  # Committed work against the base (three-dot: since the merge base), then
-  # the uncommitted work against HEAD. The local-branch fallback is also
-  # three-dot: a two-dot `diff $base` compares the WORKING TREE to the base,
-  # so with HEAD on the base every uncommitted hunk appeared twice.
-  git -C "$target" diff "origin/$base"...HEAD 2>/dev/null || git -C "$target" diff "$base"...HEAD 2>/dev/null
-  git -C "$target" diff HEAD
+  # One section per repository (assembled above): committed work since the
+  # merge base, then uncommitted and untracked work against HEAD.
+  cat "$diff_file"
 } > "$prompt"
-rm -f "$paths"
+rm -f "$paths" "$diff_file"
 verdict_file="$ev/$run_id-review.md"
 # The refuter's exit code and output are both load-bearing. A claude that is
 # present but fails (or prints nothing) used to leave an empty verdict body,

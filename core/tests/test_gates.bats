@@ -42,9 +42,15 @@ install_refuter() {
 # the base ref would not exist, every diff against it would fail the same
 # way with or without a fix, and a positive control on the diff would pass
 # vacuously (it did — Xcode's gitconfig sets main and hid it).
+#
+# It leaves ONE uncommitted edit behind: the refuter refuses an empty diff
+# (exit 2, "nothing to review — cannot certify"), so a fixture whose tree
+# matches its base would FAIL every review-shaped test for the wrong reason
+# — and, before that refusal existed, let a stub verdict "review" nothing.
 git_target() {
   git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
   git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  printf 'edited after the commit\n' >> "$DAEDALUS_HOME/target/thing/marker.txt"
 }
 
 @test "all gates passing exits 0" {
@@ -250,8 +256,7 @@ cat > /dev/null
 printf 'VERDICT: REFUTED\nThe change does not do what the criteria say.\n'
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true"
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   id="$(printf '%s\n' "$output" | tail -1)"
@@ -269,8 +274,7 @@ EOF
 
 @test "refute with claude missing from PATH fails loud instead of silently staying PASS" {
   install_refuter
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true"
   # A PATH built from a fixed set of directories with no `claude` on it — the
   # host running this suite may have a real claude CLI installed, and the
@@ -292,8 +296,7 @@ cat > /dev/null
 printf '**VERDICT:** REFUTED\nThe change does not do what the criteria say.\n'
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin2/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin2:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
@@ -313,8 +316,7 @@ cat > /dev/null
 printf 'The criteria are not met.\n\n> **VERDICT**: REFUTED\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin3/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin3:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
@@ -334,8 +336,7 @@ cat > /dev/null
 exit 1
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin4/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin4:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
@@ -353,8 +354,7 @@ cat > /dev/null
 printf 'I reviewed the change and found several concerns.\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin5/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin5:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
@@ -379,8 +379,7 @@ cat > /dev/null
 printf 'VERDICT: REFUTED or VERDICT: STANDS was requested; my verdict follows.\n\nVERDICT: STANDS\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin6/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin6:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ]
@@ -408,8 +407,7 @@ wait
 printf 'VERDICT: STANDS\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin6/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   write_config "  - true" "  refute: true
   refute_timeout: 2"
   t0="$(date +%s)"
@@ -501,8 +499,7 @@ touch "$BATS_TEST_TMPDIR/claude-ran"
 printf 'VERDICT: STANDS\n'
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin7/claude"
-  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
-  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+  git_target
   for bad in 'ten minutes' '0' '00' '-5' '600.5' '99999999999999999999'; do
     rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
     write_config "  - true" "  refute: true
@@ -730,6 +727,99 @@ assert "Never validate" in d["prompt"]
   [ "$(grep -cF 'double-bracket' "$stdin")" -eq 0 ]
   [ "$(grep -c -A1 -F '## Pitfalls that apply to the touched paths' "$stdin")" -ge 1 ]
   [ "$(grep -A1 -F '## Pitfalls that apply to the touched paths' "$stdin" | tail -1)" = "(none)" ]
+}
+
+@test "the refuter's diff covers a nested repository (target.nested) and untracked files, paths prefixed with the nested relpath, and never a Subproject stamp" {
+  # On the one live deployment the target's write surface is a nested repo
+  # that the outer .gitignore hides: the outer \`git diff\` showed nothing,
+  # so every PASS was reviewed against an EMPTY diff — and default-on made
+  # that opus review of nothing mandatory. Tracked as a gitlink instead,
+  # the outer diff is a one-line \`Subproject commit …-dirty\` stamp, no
+  # content. And \`git diff HEAD\` never showed an untracked new file.
+  install_refuter
+  recording_stub "$BATS_TEST_TMPDIR/bin15"
+  # A pitfall whose glob is written in the target frame, matching the nested path.
+  mkdir -p "$DAEDALUS_HOME/vault/pitfalls"
+  printf -- "---\ntype: pitfall\ndate: 2026-01-01\napplies-to:\n  path:\n    - 'agents/**'\n---\n# Identity files carry no environment facts\n\nA lesson about agents/.\n" > "$DAEDALUS_HOME/vault/pitfalls/id-facts.md"
+  # The nested repo, cloned from a bare origin the way sync-target.sh clones
+  # (so origin/HEAD is recorded): committed work on a branch, plus an edit.
+  O="$BATS_TEST_TMPDIR/nested-origin.git"; W="$BATS_TEST_TMPDIR/nested-work"
+  git init -q --bare -b main "$O"; git init -q -b main "$W"
+  printf 'identity\n' > "$W/CLAUDE.md"; git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m i
+  git -C "$W" push -q "$O" main
+  printf 'agents/\n' > "$DAEDALUS_HOME/target/thing/.gitignore"      # the live shape: the outer repo cannot see it
+  git_target
+  git clone -q "$O" "$DAEDALUS_HOME/target/thing/agents/one"
+  N="$DAEDALUS_HOME/target/thing/agents/one"
+  git -C "$N" switch -q -c fix/n
+  printf 'nested committed\n' > "$N/SOUL.md"; git -C "$N" add -A; git -C "$N" -c user.email=t@x -c user.name=t commit -q -m n
+  printf 'nested edit\n' >> "$N/CLAUDE.md"
+  printf 'brand new\n' > "$DAEDALUS_HOME/target/thing/new.txt"       # untracked in the outer repo
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: https://example.com/thing.git
+  branch: main
+  nested: agents/one=$O
+gates:
+  - true
+verify:
+  refute: true
+EOF
+  PATH="$BATS_TEST_TMPDIR/bin15:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "gates failed: $output"; return 1; }
+  stdin="$BATS_TEST_TMPDIR/bin15/stdin"
+  # The nested repo's hunks, once each, under target-relative paths.
+  [ "$(grep -cF '+nested committed' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '+nested edit' "$stdin")" -eq 1 ]
+  [ "$(grep -cF 'diff --git a/agents/one/CLAUDE.md b/agents/one/CLAUDE.md' "$stdin")" -eq 1 ]
+  [ "$(grep -cF 'diff --git a/agents/one/SOUL.md b/agents/one/SOUL.md' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '### agents/one (against origin/main)' "$stdin")" -eq 1 ]
+  # The outer repo's untracked file is a hunk, and its edit too.
+  [ "$(grep -cF 'diff --git a/new.txt b/new.txt' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '+brand new' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '+edited after the commit' "$stdin")" -eq 1 ]
+  [ "$(grep -c 'Subproject commit' "$stdin")" -eq 0 ]
+  # The pitfall selector saw the prefixed path.
+  [ "$(grep -cF '### Pitfall: Identity files carry no environment facts' "$stdin")" -eq 1 ]
+  # The real index of both repos is untouched by the temp-index technique.
+  [ -z "$(git -C "$DAEDALUS_HOME/target/thing" diff --cached --name-only)" ]
+  [ -z "$(git -C "$N" diff --cached --name-only)" ]
+  # The same with the nested repo TRACKED as a gitlink in the outer repo.
+  rm "$DAEDALUS_HOME/target/thing/.gitignore"
+  git -C "$DAEDALUS_HOME/target/thing" -c advice.addEmbeddedRepo=false add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m gitlink
+  printf 'outer edit\n' >> "$DAEDALUS_HOME/target/thing/marker.txt"
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
+  PATH="$BATS_TEST_TMPDIR/bin15:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "gates failed (gitlink shape): $output"; return 1; }
+  [ "$(grep -cF '+nested edit' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '+nested committed' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '+outer edit' "$stdin")" -eq 1 ]
+  [ "$(grep -c 'Subproject commit' "$stdin")" -eq 0 ]
+}
+
+@test "an empty diff — nothing in the target or its nested repos differs from the base — cannot certify: exit 2, run FAIL, claude never started" {
+  # A review of nothing that says STANDS is this repo's founding pitfall
+  # class, and default-on used to make it mandatory on every PASS of a
+  # deployment whose write surface the outer diff could not see.
+  install_refuter
+  recording_stub "$BATS_TEST_TMPDIR/bin16"
+  git_target
+  git -C "$DAEDALUS_HOME/target/thing" checkout -q -- marker.txt     # undo git_target's edit: a clean tree
+  write_config "  - true" "  refute: true"
+  PATH="$BATS_TEST_TMPDIR/bin16:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"nothing to review"*"cannot certify"*) : ;; *) echo "expected the empty-diff refusal; got: $output"; return 1 ;; esac
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
+  [ ! -f "$BATS_TEST_TMPDIR/bin16/argv" ]
+  # Positive control: one untracked file is a diff, and the review runs.
+  printf 'x\n' > "$DAEDALUS_HOME/target/thing/new.txt"
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
+  PATH="$BATS_TEST_TMPDIR/bin16:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/bin16/argv" ]
 }
 
 @test "a missing or crashing pitfall selector cannot certify: run FAIL, no review file, claude never started, reason in the log" {
