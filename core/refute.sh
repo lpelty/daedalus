@@ -30,6 +30,17 @@ run_id="$1"; criteria="${2:-}"
 target="$(target_path)"
 base="$(cfg target.branch 2>/dev/null || printf main)"
 ev="$DAEDALUS_HOME/vault/evidence"
+# The evidence summary to review: the file gates.sh hands over in $3, or the
+# vault copy. gates.sh passes a file OUTSIDE the evidence tree, because the
+# vault summary is written only after the verdict — a summary written
+# before it, with `result: PASS`, is a PASS-labelled evidence file with no
+# manifest line and no run.json for as long as the review runs, and a
+# review killed from outside (a tool timeout) left it there for good.
+evidence_file="${3:-$ev/$run_id.md}"
+[ -f "$evidence_file" ] || {
+  printf 'evidence summary missing at %s — cannot run the rung-2 refuter\n' "$evidence_file" >&2
+  exit 2
+}
 command -v claude >/dev/null 2>&1 || {
   printf 'claude not found on PATH — cannot run the rung-2 refuter\n' >&2
   exit 2
@@ -85,7 +96,7 @@ prompt="$(mktemp)"
   printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n\n'
   printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n\n' "$target"
   printf '## Acceptance criteria\n'; [ -f "$criteria" ] && cat "$criteria" || printf '(none supplied)\n'
-  printf '\n## Evidence\n'; cat "$ev/$run_id.md"
+  printf '\n## Evidence\n'; cat "$evidence_file"
   printf '\n## Pitfalls that apply to the touched paths\n'
   if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
   printf '\n## Diff against %s\n' "$base"
@@ -151,6 +162,16 @@ def kill_group(p):
         except subprocess.TimeoutExpired:
             pass
 
+# A SIGTERM or SIGHUP to this watchdog — a Bash tool timeout killing
+# gates.sh's process group, a closed terminal — must ALSO run the finally
+# below. Python's default action for both is to die at once, skipping every
+# finally: the watchdog was gone and claude, in its own session, ran on
+# unowned — measured with a stub claude that outlived the watchdog by the
+# full length of its work. A handler that raises SystemExit unwinds through
+# the finally instead, and the exit code is the bash convention (128+n).
+for _sig, _code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129)):
+    signal.signal(_sig, lambda *_a, _c=_code: sys.exit(_c))
+
 with open(prompt) as i, open(body, "w") as o:
     p = subprocess.Popen(argv, stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True, cwd=workdir)
 timed_out = False
@@ -161,8 +182,8 @@ except subprocess.TimeoutExpired:
 finally:
     # Every exit that leaves the group possibly alive kills it: the timeout,
     # a Ctrl-C (claude sits in its own session now, so the terminal's SIGINT
-    # reaches this watchdog but never claude), any exception. Nothing
-    # outlives the watchdog.
+    # reaches this watchdog but never claude), a SIGTERM/SIGHUP (handled
+    # above), any exception. Nothing outlives the watchdog.
     if p.poll() is None:
         kill_group(p)
 if timed_out:

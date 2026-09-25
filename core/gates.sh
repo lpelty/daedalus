@@ -130,26 +130,44 @@ if [ "$fp_before" = "null" ] || [ "$fp_after" = "null" ] || [ "$fp_before" != "$
   result=INVALID
 fi
 
-# Vault summary — no output excerpt; the vault is a pushed repository.
-# Written before run.json (and before the refute call below) because
-# refute.sh's evidence input IS this file: rung 2 reads $ev_vault/$run_id.md
-# as the "never the narrative" summary. If refute flips `result` below, the
-# frontmatter `result:` line here is rewritten in place immediately after
-# (bash-3.2-safe sed -i.bak, .bak removed) so this file and run.json never
-# disagree — a re-setup deployment's state-loss fallback reads this
-# frontmatter verbatim, so a stale PASS here would be a real false claim.
+# The evidence summary — no output excerpt; the vault is a pushed
+# repository. Written FIRST to a temp file outside the evidence tree, and
+# copied into the vault only after the refuter has spoken, with the final
+# result. The vault copy used to be written here, before the refute call,
+# with `result: PASS`, and its manifest line only at the end: for the whole
+# length of an opus review (up to verify.refute_timeout) a PASS-labelled
+# evidence file sat under vault/evidence/** with no manifest line and no
+# run.json — and a review killed from outside (a Bash tool timeout is
+# 120 s by default) left it there for good, under a protected path Daedalus
+# cannot remove: exactly the unmanifested evidence with no remedy that the
+# validation-first rule above exists to prevent. refute.sh reads the
+# summary from the path passed as its third argument.
+write_summary() {   # write_summary <path> <result>
+  {
+    printf -- '---\ntype: evidence\nrun-id: %s\nresult: %s\nfingerprint: %s\nconfig-sha: %s\ncreated: %s\n---\n' \
+      "$run_id" "$2" "$fp_before" "$config_sha" "$started"
+    printf '# Gate run %s — %s\n\n| # | command | exit | seconds | log |\n|---|---|---|---|---|\n' "$run_id" "$2"
+    printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r n code dur logf cmd; do
+      [ -n "$n" ] || continue
+      printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
+    done
+  } > "$1"
+}
+summary_tmp="$(mktemp)" || die "cannot create a temp file for the evidence summary"
+write_summary "$summary_tmp" "$result"
+
+# Everything under the run directory that is complete at this point goes
+# into the manifest BEFORE the refuter runs: the gate logs and the
+# fingerprint error file are what they are, verdict or no verdict. If the
+# review is killed from outside, what is left behind is manifested and
+# carries no result at all — run.json and the vault summary come after.
 {
-  printf -- '---\ntype: evidence\nrun-id: %s\nresult: %s\nfingerprint: %s\nconfig-sha: %s\ncreated: %s\n---\n' \
-    "$run_id" "$result" "$fp_before" "$config_sha" "$started"
-  printf '# Gate run %s — %s\n\n| # | command | exit | seconds | log |\n|---|---|---|---|---|\n' "$run_id" "$result"
-  printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r n code dur logf cmd; do
-    [ -n "$n" ] || continue
-    printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
-  done
-} > "$ev_vault/$run_id.md"
+  [ -f "$ev_state/fingerprint.err" ] && printf '%s\n' "$ev_state/fingerprint.err"
+  printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}'
+} >> "$manifest"
 
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
-  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" 2>&1 >/dev/null)"
+  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" "$summary_tmp" 2>&1 >/dev/null)"
   refute_code=$?
   if [ "$refute_code" -ne 0 ]; then
     result=FAIL; failed=1
@@ -159,17 +177,23 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
     else
       # Exit 2 = the refuter could not certify: CLI missing, python3 missing,
       # CLI failed or timed out and was killed (no review file was written),
-      # or a reply with no VERDICT line (review file exists; the refuter's
-      # message carries its path). Any other code = refute.sh itself died —
-      # a signal, a die — and there is no verdict either. Only 0 is STANDS;
-      # an allow-list of failure codes once let 143 stay PASS. Either way
-      # the refuter's own message is the honest fail_log.
+      # nothing to review, or a reply with no VERDICT line (review file
+      # exists; the refuter's message carries its path). Any other code =
+      # refute.sh itself died — a signal, a die — and there is no verdict
+      # either. Only 0 is STANDS; an allow-list of failure codes once let
+      # 143 stay PASS. Either way the refuter's own message is the honest
+      # fail_log.
       log "refute: $refute_msg"
       fail_log="$refute_msg"
     fi
-    sed -i.bak "s/^result: .*/result: $result/" "$ev_vault/$run_id.md" && rm -f "$ev_vault/$run_id.md.bak"
   fi
 fi
+
+# The vault summary, with the verdict folded into `result`, so this file and
+# run.json never disagree — a re-setup deployment's state-loss fallback reads
+# this frontmatter verbatim, so a stale PASS here would be a real false claim.
+write_summary "$ev_vault/$run_id.md" "$result"
+rm -f "$summary_tmp"
 
 # run.json — through python for correct JSON escaping of arbitrary commands.
 # The row data is written to a temp file OUTSIDE the evidence tree (so it
@@ -199,11 +223,7 @@ with open(out, "w") as fh:
 PY
 rm -f "$rows_tmp"
 
-{
-  printf '%s\n' "$ev_state/run.json" "$ev_vault/$run_id.md"
-  [ -f "$ev_state/fingerprint.err" ] && printf '%s\n' "$ev_state/fingerprint.err"
-  printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}'
-} >> "$manifest"
+printf '%s\n' "$ev_state/run.json" "$ev_vault/$run_id.md" >> "$manifest"
 
 if [ "$failed" -ne 0 ]; then
   log "run-id: $run_id"

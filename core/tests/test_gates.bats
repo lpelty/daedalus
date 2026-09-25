@@ -435,6 +435,58 @@ STUB
   fi
 }
 
+@test "a SIGTERM to gates.sh's process group mid-review (a tool timeout) takes claude down with it and strands no PASS-labelled or unmanifested evidence" {
+  # Two defects behind one kill. The watchdog's finally did not run on
+  # SIGTERM (Python's default action is an immediate exit), so claude — in
+  # its own session — outlived it, still working, still writing. And
+  # gates.sh wrote vault/evidence/<run>.md with result: PASS before the
+  # review and its manifest line only after, so the kill left a
+  # PASS-labelled evidence file with no manifest entry and no run.json
+  # under a protected path Daedalus cannot remove. Daedalus runs gates.sh
+  # from the Bash tool, whose default timeout is 120 s against a 600 s
+  # review: this is the realistic shape, not a corner.
+  install_refuter
+  mkdir -p "$BATS_TEST_TMPDIR/bin14"
+  cat > "$BATS_TEST_TMPDIR/bin14/claude" <<STUB
+#!/usr/bin/env bash
+cat > /dev/null
+echo \$\$ > "$BATS_TEST_TMPDIR/claude.pid"
+exec sleep 60
+STUB
+  chmod +x "$BATS_TEST_TMPDIR/bin14/claude"
+  git_target
+  write_config "  - true" "  refute: true"
+  # gates.sh in its OWN process group, so the kill reaches gates.sh,
+  # refute.sh and the watchdog together — the way a tool timeout kills —
+  # and nothing else. The stub claude is in its own session (refute.sh puts
+  # it there) and is reached only if the watchdog does its job.
+  PATH="$BATS_TEST_TMPDIR/bin14:$PATH" python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash "$DAEDALUS_HOME/core/gates.sh" > "$BATS_TEST_TMPDIR/gates.out" 2>&1 &
+  G=$!
+  for _ in $(seq 1 100); do [ -s "$BATS_TEST_TMPDIR/claude.pid" ] && break; sleep 0.1; done
+  [ -s "$BATS_TEST_TMPDIR/claude.pid" ] || { echo "the stub claude never started: $(cat "$BATS_TEST_TMPDIR/gates.out")"; return 1; }
+  stub="$(cat "$BATS_TEST_TMPDIR/claude.pid")"
+  kill -TERM -- "-$G"
+  wait "$G" || true
+  alive() { kill -0 "$1" 2>/dev/null && case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1 ;; *) return 0 ;; esac; }
+  for _ in $(seq 1 30); do alive "$stub" || break; sleep 0.1; done
+  if alive "$stub"; then
+    kill -9 "$stub" 2>/dev/null
+    echo "claude ($stub) outlived the watchdog after SIGTERM — the finally never ran"; return 1
+  fi
+  # No evidence file may claim a result the review never reached: the vault
+  # summary is written only after the verdict, so the vault holds nothing
+  # for this run (at most the manifest).
+  [ -z "$(ls "$DAEDALUS_HOME/vault/evidence"/*.md 2>/dev/null)" ] || { echo "stranded vault evidence:"; head -5 "$DAEDALUS_HOME/vault/evidence"/*.md; return 1; }
+  # ...and whatever the run did leave under state/ is in the manifest, so
+  # the boundary check has a remedy for it instead of a stray file.
+  [ -f "$DAEDALUS_HOME/vault/evidence/.manifest" ] || { echo "no manifest at all"; return 1; }
+  for f in "$DAEDALUS_HOME"/state/evidence/*/*; do
+    [ -f "$f" ] || continue
+    grep -qxF "$f" "$DAEDALUS_HOME/vault/evidence/.manifest" || { echo "unmanifested: $f"; return 1; }
+  done
+}
+
 @test "an invalid verify.refute_timeout is refused before any gate runs — validation before side effects, never an unbounded run" {
   # A typo in operator config must not manufacture evidence: a FAIL run.json
   # written after every gate has executed reads, in the record, exactly like
