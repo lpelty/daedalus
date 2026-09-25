@@ -121,6 +121,8 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         # `push origin HEAD` / `push -u origin HEAD` / `push origin @` push the
         # current branch to its same-named remote branch: resolve before comparing.
         dests = [cur if d in ("HEAD", "@") else d for d in push_destinations(rest)]
+        if PUSH_MATCHING in dests:
+            return "The operator merges; the refspec `:` pushes every matching branch, %s too — push your branch by name." % trunk
         if not dests and cur in trunk_names(trunk):
             return "The operator merges; you are on %s — switch to a branch and push that, not %s." % (cur, trunk)
         hit = [d for d in dests if d in trunk_names(trunk)]
@@ -145,6 +147,9 @@ PUSH_VALUE_OPTS = {"--repo", "--receive-pack", "--exec", "-o", "--push-option"}
 # push options that push every local branch — the trunk among them — with no
 # refspec naming it; denied outright inside the target.
 PUSH_EVERYTHING = {"--all", "--branches", "--mirror"}
+# push_destinations' marker for the matching refspec `:` (or `+:`): every
+# local branch with a same-named remote branch, which includes the trunk.
+PUSH_MATCHING = ":"
 
 
 def push_destinations(rest: List[str]) -> List[str]:
@@ -174,8 +179,18 @@ def push_destinations(rest: List[str]) -> List[str]:
     dests: List[str] = []
     for spec in positionals[1:]:
         spec = spec.lstrip("+")
+        if spec == ":":
+            # The "matching" refspec: every local branch that already exists
+            # at the remote is pushed, the trunk among them, without naming
+            # it. `git push origin :` from a feature branch moved a bare
+            # origin's trunk in a probe. An everything-push, like --all.
+            dests.append(PUSH_MATCHING)
+            continue
         if ":" in spec:
-            spec = spec.split(":", 1)[1]
+            src, spec = spec.split(":", 1)
+            if not spec:
+                # `fix/y:` — explicit source, same-named destination.
+                spec = src
         if spec.startswith("refs/heads/"):
             spec = spec[len("refs/heads/"):]
         if spec:
@@ -244,9 +259,13 @@ def main() -> int:
                 _, args = git_repo_and_args(seg, here)
                 if args[:2] in (["switch", "-c"], ["checkout", "-b"]):
                     branch_created = True
-                elif args[:1] in (["switch"], ["checkout"]) and len(args) == 2 and not args[1].startswith("-"):
+                elif args[:1] in (["switch"], ["checkout"]) and len(args) == 2 \
+                        and (args[1] == "-" or args[1] == "--detach" or not args[1].startswith("-")):
                     # `switch -c fix/x && switch mainline && commit` lands the
-                    # commit on the trunk: a later plain switch cancels the credit.
+                    # commit on the trunk: a later plain switch cancels the
+                    # credit. `-` is a branch name (the previous branch — the
+                    # trunk, right after `switch -c`), not an option, and
+                    # `--detach` leaves the new branch too.
                     branch_created = False
                 reason = check_git(seg, here, target, branch_created)
                 if reason:

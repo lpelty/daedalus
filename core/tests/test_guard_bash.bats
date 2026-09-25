@@ -110,6 +110,10 @@ EOF2
   # Every-branch pushes carry the trunk whatever is checked out.
   run guard 'git push --all origin' "$T"; denied
   run guard 'git push --mirror origin' "$T"; denied
+  # The matching refspec `:` (and `+:`) pushes every branch that already
+  # exists at the remote — the trunk among them — without naming any.
+  run guard 'git push origin :' "$T"; denied; case "$output" in *"mainline"*) : ;; *) echo "message must name the trunk: $output"; return 1 ;; esac
+  run guard 'git push origin +:' "$T"; denied
   # main and master stay denied under a mainline config (defense in depth).
   run guard 'git push origin main' "$T"; denied
   run guard 'git push origin master' "$T"; denied
@@ -136,6 +140,13 @@ EOF2
   # ...but --all/--mirror still push mainline from here.
   run guard 'git push --all origin' "$T"; denied
   run guard 'git push --mirror origin' "$T"; denied
+  # ...and so does the matching refspec: measured with a bare origin, `git
+  # push origin :` from fix/y moved origin's mainline to the local one.
+  run guard 'git push origin :' "$T"; denied
+  run guard 'git push origin +:' "$T"; denied
+  # Positive control: an explicit source with an empty destination is the
+  # same-named branch (git itself rejects the spelling), not an everything-push.
+  run guard 'git push origin fix/y:' "$T"; allowed
 }
 
 @test "trunk from config: a forced push is denied whatever the branch" {
@@ -160,6 +171,13 @@ EOF2
   # A branch created and then left before the commit earns no credit.
   run guard 'git switch -c fix/x && git switch mainline && git commit -m x' "$T"; denied
   run guard 'git checkout -b fix/x && git checkout mainline && git commit -m x' "$T"; denied
+  # `-` is the previous branch — the trunk, right after `switch -c` — and the
+  # most common spelling of going back; `--detach` leaves the new branch too.
+  run guard 'git switch -c fix/x && git switch - && git commit -m x' "$T"; denied
+  run guard 'git switch -c fix/x && git checkout - && git commit -m x' "$T"; denied
+  run guard 'git checkout -b fix/x && git checkout - && git commit -m x' "$T"; denied
+  run guard 'git switch -c fix/x && git switch --detach && git commit -m x' "$T"; denied
+  run guard 'git checkout -b fix/x && git checkout --detach && git commit -m x' "$T"; denied
   git -C "$T" switch -q -c fix/y
   run guard 'git commit -m x' "$T"; allowed
 }
