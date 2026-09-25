@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """PreToolUse(Bash) guard: the speed bump in front of the boundary check.
 
-Denies, with a reason, pushes to main and commits on main inside the target,
-destructive git, and writes whose operand resolves to a protected path of
-this deployment. Relative paths resolve against the hook's `cwd`, then any
+Denies, with a reason, pushes to the trunk and commits on the trunk inside
+the target, destructive git, and writes whose operand resolves to a protected
+path of this deployment. The trunk is config.yaml target.branch, read through
+verifylib.target_branch — never a hardcoded "main": a GitLab deployment whose
+trunk is `mainline` had a guard that denied `main` and let `mainline` through
+(the same defect class PROP-019 fixed in the promotion gate). "main" and
+"master" stay denied alongside the configured trunk as defense in depth for a
+config that names the wrong one; neither is ever a feature branch. Relative paths resolve against the hook's `cwd`, then any
 `cd <dir> &&` earlier in the same command. Fails open on its own errors,
 except that an unparseable command is still checked for redirect and `-i`
 operands that resolve to protected paths. Everything this guard can be
@@ -89,12 +94,67 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
             if not (sub == "checkout" and rest and rest[-1] != "."):
                 return "`git %s %s` destroys work; ask the operator." % (a, b)
     if sub == "push" and under(repo, target):
-        if any(r in ("main", "master", "--force", "-f") or r.startswith("--force") or ":main" in r for r in rest):
-            return "The operator merges; push your branch, not main."
+        if any(r in ("--force", "-f") or r.startswith("--force") or r.startswith("-f") for r in rest):
+            return "The operator merges; a forced push rewrites history — push your branch, without --force."
+        trunk = v.target_branch(v.ROOT)
+        dests = push_destinations(rest)
+        if not dests and branch_of(repo) in trunk_names(trunk):
+            return "The operator merges; you are on %s — switch to a branch and push that, not %s." % (branch_of(repo), trunk)
+        hit = [d for d in dests if d in trunk_names(trunk)]
+        if hit:
+            return "The operator merges; push your branch, not %s." % hit[0]
     if sub == "commit" and under(repo, target) and not branch_created:
-        if branch_of(repo) in ("main", "master"):
-            return "Branch first (`git switch -c fix/<slug>`), then commit."
+        trunk = v.target_branch(v.ROOT)
+        if branch_of(repo) in trunk_names(trunk):
+            return "Branch first (`git switch -c fix/<slug>`), then commit — you are on %s." % branch_of(repo)
     return None
+
+
+def trunk_names(trunk: str) -> set:
+    """The configured trunk plus the two conventional names. A feature
+    branch is never called main or master, so denying them costs nothing
+    and still protects a deployment whose config names the wrong trunk."""
+    return {trunk, "main", "master"}
+
+
+# push options that take a separate value argument; skipped with their value.
+PUSH_VALUE_OPTS = {"--repo", "--receive-pack", "--exec", "-o", "--push-option"}
+
+
+def push_destinations(rest: List[str]) -> List[str]:
+    """The remote-side branch names a `git push` writes to, from its refspecs.
+    `push origin mainline` -> [mainline]; `push origin HEAD:mainline` and
+    `push origin feature:mainline` -> [mainline]; `push -u origin fix/x` ->
+    [fix/x]; `push origin +src:refs/heads/mainline` -> [mainline]. The first
+    positional is the remote, every later one a refspec. Options are skipped,
+    with a following value for the ones that take one as a separate word.
+    A bare `git push` yields [] (the current branch is the destination —
+    the caller checks that from git state)."""
+    positionals: List[str] = []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--":
+            positionals.extend(rest[i + 1:])
+            break
+        if a.startswith("-"):
+            if a in PUSH_VALUE_OPTS and "=" not in a:
+                i += 2
+                continue
+            i += 1
+            continue
+        positionals.append(a)
+        i += 1
+    dests: List[str] = []
+    for spec in positionals[1:]:
+        spec = spec.lstrip("+")
+        if ":" in spec:
+            spec = spec.split(":", 1)[1]
+        if spec.startswith("refs/heads/"):
+            spec = spec[len("refs/heads/"):]
+        if spec:
+            dests.append(spec)
+    return dests
 
 
 def write_operands(seg: List[str]) -> List[str]:

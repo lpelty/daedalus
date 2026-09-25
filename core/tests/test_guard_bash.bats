@@ -76,3 +76,77 @@ EOF"; allowed
 it's replaced
 EOF"; denied
 }
+
+# --- The configured trunk (v0.6.1) ------------------------------------------
+# A GitLab deployment whose trunk is `mainline` had a guard that denied `main`
+# and let `mainline` through — the strings were hardcoded. The guard now reads
+# config target.branch through verifylib.target_branch, the same reader the
+# promotion gate uses since PROP-019.
+
+use_mainline() {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF2'
+target:
+  repo: https://example.com/thing.git
+  branch: mainline
+EOF2
+  git -C "$T" branch -m main mainline
+}
+
+@test "trunk from config: pushing mainline is denied in every refspec shape, and the message names mainline" {
+  use_mainline
+  run guard 'git push origin mainline' "$T"; denied; case "$output" in *"not mainline"*) : ;; *) echo "message must name the configured trunk: $output"; return 1 ;; esac
+  run guard 'git push origin HEAD:mainline' "$T"; denied
+  run guard 'git push origin feature:mainline' "$T"; denied
+  run guard 'git push -u origin mainline' "$T"; denied
+  run guard 'git push --set-upstream origin mainline' "$T"; denied
+  run guard 'git push origin +fix/x:refs/heads/mainline' "$T"; denied
+  run guard 'cd target/thing && git push origin mainline'; denied
+  run guard 'git -C target/thing push origin mainline'; denied
+}
+
+@test "trunk from config: pushing a feature branch is allowed, in every refspec shape" {
+  use_mainline
+  run guard 'git push origin fix/x' "$T"; allowed
+  run guard 'git push -u origin fix/x' "$T"; allowed
+  run guard 'git push --set-upstream origin fix/x' "$T"; allowed
+  run guard 'git push origin HEAD:fix/x' "$T"; allowed
+  run guard 'git push origin fix/x:fix/x' "$T"; allowed
+  run guard 'git push origin fix/x:refs/heads/fix/x' "$T"; allowed
+  run guard 'git push -o ci.skip origin fix/x' "$T"; allowed
+  # A branch whose name merely CONTAINS the trunk's name is not the trunk.
+  run guard 'git push origin fix/mainline-guard' "$T"; allowed
+  run guard 'git push origin feature/main' "$T"; allowed
+}
+
+@test "trunk from config: a forced push is denied whatever the branch" {
+  use_mainline
+  run guard 'git push --force origin fix/x' "$T"; denied
+  run guard 'git push -f origin fix/x' "$T"; denied
+  run guard 'git push --force-with-lease origin fix/x' "$T"; denied
+}
+
+@test "trunk from config: a bare git push is denied while on mainline and allowed from a feature branch" {
+  use_mainline
+  run guard 'git push' "$T"; denied
+  git -C "$T" switch -q -c fix/y
+  run guard 'git push' "$T"; allowed
+}
+
+@test "trunk from config: committing on mainline is denied and names the branch; a branch created first is allowed" {
+  use_mainline
+  run guard 'git commit -m x' "$T"; denied; case "$output" in *"on mainline"*) : ;; *) echo "message must name the branch: $output"; return 1 ;; esac
+  run guard 'git -C target/thing commit -m x'; denied
+  run guard 'git switch -c fix/x && git commit -m x' "$T"; allowed
+  git -C "$T" switch -q -c fix/y
+  run guard 'git commit -m x' "$T"; allowed
+}
+
+@test "trunk from config: with target.branch unset the trunk is main; main and master stay denied as defense in depth" {
+  printf 'target:\n  repo: https://example.com/thing.git\n' > "$DAEDALUS_HOME/config.yaml"
+  run guard 'git push origin main' "$T"; denied
+  run guard 'git push origin HEAD:main' "$T"; denied
+  run guard 'git push origin master' "$T"; denied
+  run guard 'git push origin fix/x' "$T"; allowed
+  git -C "$T" branch -m main master
+  run guard 'git commit -m x' "$T"; denied
+}
