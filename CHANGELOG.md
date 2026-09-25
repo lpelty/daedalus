@@ -58,3 +58,36 @@ was inert exactly where it mattered.
 Also: the refuter's local-branch diff fallback is three-dot, so uncommitted
 hunks no longer appear twice in its input; `CHANGELOG.md` joins the
 Edit-deny list.
+
+From the adversarial review of this release, before tagging:
+
+- **The refuter's diff covers nested checkouts and untracked files.** On a
+  deployment whose write surface is a `target.nested` repository the outer
+  `git diff` showed nothing (gitignored) or a `Subproject commit …-dirty`
+  stamp (tracked), so every PASS was reviewed against an empty diff — and
+  default-on made that mandatory. `core/refute.sh` now assembles the diff
+  per repository (target, then each nested path, against its own base),
+  prefixes nested paths so `applies-to: path:` globs match, includes
+  untracked files through a temporary index, and refuses an empty diff as
+  uncertifiable (exit 2) instead of handing it to the model.
+- **A killed review strands nothing.** The watchdog handles SIGTERM/SIGHUP
+  so its process-group kill runs when a tool timeout kills `gates.sh`
+  (claude used to outlive it); `gates.sh` manifests the run's logs before
+  the review and writes the vault summary and `run.json` only after the
+  verdict, so no PASS-labelled, unmanifested evidence is left under a
+  protected path. README and CLAUDE.md say what timeout to run it with.
+- **Guard: the matching refspec and `switch -`.** `git push origin :` (and
+  `+:`) pushes every matching branch, the trunk included, and was allowed
+  from a feature branch; denied. `switch -c fix/x && switch -` (or
+  `checkout -`, `--detach`) kept the branch credit for a commit that lands
+  on the trunk; cancelled.
+- **Guard: the remote's default branch is a trunk name.** The originating
+  shape — config `main`, origin default `mainline`, `main` present at
+  origin too — is a doctor NOTE (indistinguishable from a deliberate
+  non-default trunk) and `push origin HEAD:mainline` was allowed. The guard
+  now reads `refs/remotes/origin/HEAD` and denies pushes and commits to the
+  default branch as well; the NOTE says so.
+- **Boundary hook: the verdict file is the run's own evidence.** In a vault
+  the parent git can see, `<run-id>-review.md` was flagged as protected
+  dirt at Stop (its run-id was read off the file name), which with the
+  refuter on by default blocked every session after a STANDS.

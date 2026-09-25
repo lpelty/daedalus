@@ -204,6 +204,27 @@ told the checkout's absolute path so it can read the touched files. A
 pitfall selector that crashes or is missing makes the run uncertifiable
 (FAIL), never a silent "(none)".
 
+The diff is assembled per repository: the target checkout against
+`origin/<target.branch>`, then each `target.nested` checkout against its
+origin's default branch, every path prefixed with the nested relpath so the
+reviewer and the pitfall globs see target-relative paths; committed work
+since the merge base, then uncommitted and untracked work against `HEAD`
+(through a temporary index — the real index is never touched). A nested
+repo the outer `.gitignore` hides, or one tracked as a gitlink, contributes
+its content, not a `Subproject commit` stamp. An **empty** assembled diff is
+uncertifiable (exit 2, "nothing to review"): the run FAILs rather than
+handing nothing to the reviewer — so the first, arming run of `gates.sh` on
+a clean tree records a FAIL, which still arms the stage.
+
+`core/gates.sh` runs the review inline, and the review can take minutes.
+Invoke it with a timeout of at least the gates' own time plus
+`verify.refute_timeout` (600 s by default) — from the Claude Code Bash tool
+that means its `timeout` parameter, or run it in the background — because
+a tool timeout kills the gate's process group mid-review. The watchdog
+takes the reviewer down with it (nothing outlives it) and the vault summary
+and `run.json` are written only after the verdict, so a killed run leaves
+no PASS-labelled evidence behind; but the run is lost and must be re-done.
+
 The charter lives under `core/` because `claude -p --agent <name>` resolves
 only from `.claude/agents/` of the working directory, which is one of
 Daedalus's write surfaces; `core/` is not. `refute.sh` renders it with
@@ -228,7 +249,12 @@ ends without a verdict is uncertifiable and FAILs the run — never STANDS.
 the target's origin, since every branch-aware guard reads it: a branch origin
 does not have is MISSING; one that exists but is not the remote's default
 branch is a NOTE naming both, because a deployment may guard a trunk that is
-not the default and `setup.sh` must not be blocked by that.
+not the default and `setup.sh` must not be blocked by that. That shape is
+also what a *wrong* `target.branch` looks like (the originating incident:
+config `main`, origin default `mainline`, `main` present too), so the branch
+guard denies pushes and commits to the remote's default branch
+(`refs/remotes/origin/HEAD`) as well as to the configured trunk, `main` and
+`master` — the guard holds even when the config is wrong.
 
 **For the maintainer:** this checkout is also the development site, so a
 plain development session in here fires these same hooks — they don't know
