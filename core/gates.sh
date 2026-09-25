@@ -45,13 +45,35 @@ EOF
 gate_list_count="$(cfg_list gates | grep -c .)" || gate_list_count=0
 [ "$gate_list_count" -gt 0 ] || die "no gates configured — refusing to report success (check the gates: list in config.yaml)"
 
+# The refuter is ON unless the operator says otherwise, in writing. An
+# unset verify.refute means true. `verify.refute: false` is honored only
+# with a non-empty verify.refute_off_reason beside it — an off-switch with
+# no reason is indistinguishable from an off-switch nobody meant to leave
+# on, and a green run nobody reviewed is this repo's founding pitfall.
+# Anything else is a typo, refused. All of it before a run-id exists.
+refute_on=1
+refute_cfg="$(cfg verify.refute 2>/dev/null || true)"
+case "$refute_cfg" in
+  ""|true) refute_on=1 ;;
+  false)
+    refute_off_reason="$(cfg verify.refute_off_reason 2>/dev/null || true)"
+    if [ -z "$refute_off_reason" ]; then
+      die "config verify.refute is false but verify.refute_off_reason is empty — the refuter runs after every PASS unless you say, in verify.refute_off_reason, why it should not; refusing before any gate runs"
+    fi
+    refute_on=0
+    ;;
+  *) die "config verify.refute must be true or false (got: $refute_cfg) — refusing before any gate runs" ;;
+esac
+
 # The refuter's timeout is operator config too. Discovered late — inside
 # refute.sh, after every gate has run — a typo there records a FAIL run.json
 # and vault summary that read, in the evidence, exactly like a real
 # refutation. Refuse it here, with the other config errors, before a run-id
 # exists. refute.sh re-checks (belt to this brace) but should never be the
-# one to find it.
-if [ "$(cfg verify.refute 2>/dev/null || true)" = "true" ]; then
+# one to find it. An ABSENT verify.refute_timeout is fine: lib.sh
+# refute_timeout defaults it to 600 seconds, so default-on needs no
+# timeout line in config.yaml.
+if [ "$refute_on" -eq 1 ]; then
   refute_timeout >/dev/null || die "config verify.refute_timeout is invalid — refusing before any gate runs"
 fi
 
@@ -126,7 +148,7 @@ fi
   done
 } > "$ev_vault/$run_id.md"
 
-if [ "$result" = PASS ] && [ "$(cfg verify.refute 2>/dev/null || true)" = "true" ]; then
+if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
   refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" 2>&1 >/dev/null)"
   refute_code=$?
   if [ "$refute_code" -ne 0 ]; then

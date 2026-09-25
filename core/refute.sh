@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Rung 2: a fresh-context refuter. Receives the target diff against its base,
-# the acceptance criteria (the assignment file named in $2, if any), and the
-# evidence summary — never the narrative. Writes the verdict beside the
-# evidence and prints REFUTED or STANDS. Enabled only by config `verify.refute: true`.
+# Rung 2: a fresh-context refuter. Receives the acceptance criteria (the
+# assignment file named in $2, if any), the evidence summary, the pitfalls
+# that apply to the touched paths, and the target diff against its base —
+# never the narrative. Writes the verdict beside the evidence and prints
+# REFUTED or STANDS. Runs after every PASS unless config says
+# `verify.refute: false` with a `verify.refute_off_reason` (gates.sh owns
+# that switch).
+#
+# The reviewer is the charter at core/agents/refuter.md — a Claude Code
+# subagent definition (Read/Grep/Glob only, no Bash, fresh context, no
+# CLAUDE.md), rendered by core/agentdef.py and passed with `--agents`:
+# `claude -p --agent <name>` resolves only from .claude/agents/ of the cwd,
+# which is a write surface Daedalus could edit; core/ is not. The model is
+# the charter's unless config verify.refute_model overrides it.
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
@@ -18,16 +28,50 @@ command -v python3 >/dev/null 2>&1 || {
   printf 'python3 not found on PATH — cannot run the rung-2 refuter watchdog\n' >&2
   exit 2
 }
+charter="$DAEDALUS_HOME/core/agents/refuter.md"
+[ -f "$charter" ] || {
+  printf 'refuter charter missing at %s — cannot run the rung-2 refuter\n' "$charter" >&2
+  exit 2
+}
+agent_json="$(mktemp)"
+if ! python3 "$DAEDALUS_HOME/core/agentdef.py" "$charter" > "$agent_json" 2>/dev/null; then
+  rm -f "$agent_json"
+  printf 'refuter charter at %s does not render (python3 core/agentdef.py %s) — cannot run the rung-2 refuter\n' "$charter" "$charter" >&2
+  exit 2
+fi
+agent_name="$(python3 -c 'import json,sys; print(next(iter(json.load(open(sys.argv[1])))))' "$agent_json" 2>/dev/null)"
+[ -n "$agent_name" ] || {
+  rm -f "$agent_json"
+  printf 'refuter charter at %s names no agent — cannot run the rung-2 refuter\n' "$charter" >&2
+  exit 2
+}
+refute_model="$(cfg verify.refute_model 2>/dev/null || true)"
+# The paths the diff touches, relative to the target root — the frame the
+# pitfalls' `applies-to: path:` globs are written in. Same two diffs as the
+# prompt's diff section below.
+paths="$(mktemp)"
+{
+  git -C "$target" diff --name-only "origin/$base"...HEAD 2>/dev/null || git -C "$target" diff --name-only "$base"...HEAD 2>/dev/null
+  git -C "$target" diff --name-only HEAD 2>/dev/null
+} | sort -u > "$paths"
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
   printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n\n'
   printf '## Acceptance criteria\n'; [ -f "$criteria" ] && cat "$criteria" || printf '(none supplied)\n'
   printf '\n## Evidence\n'; cat "$ev/$run_id.md"
+  printf '\n## Pitfalls that apply to the touched paths\n'
+  pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$paths" 2>/dev/null)" || pitfalls_text=""
+  if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
   printf '\n## Diff against %s\n' "$base"
-  git -C "$target" diff "origin/$base"...HEAD 2>/dev/null || git -C "$target" diff "$base" 2>/dev/null
+  # Committed work against the base (three-dot: since the merge base), then
+  # the uncommitted work against HEAD. The local-branch fallback is also
+  # three-dot: a two-dot `diff $base` compares the WORKING TREE to the base,
+  # so with HEAD on the base every uncommitted hunk appeared twice.
+  git -C "$target" diff "origin/$base"...HEAD 2>/dev/null || git -C "$target" diff "$base"...HEAD 2>/dev/null
   git -C "$target" diff HEAD
 } > "$prompt"
+rm -f "$paths"
 verdict_file="$ev/$run_id-review.md"
 # The refuter's exit code and output are both load-bearing. A claude that is
 # present but fails (or prints nothing) used to leave an empty verdict body,
@@ -46,11 +90,20 @@ body="$(mktemp)"
 # below. python3 because macOS ships no `timeout` and bash 3.2 has no clean
 # watchdog. The timeout is signalled by a marker file, not an exit code, so
 # a claude that itself exits 124 within the deadline is not misreported.
-timeout_s="$(refute_timeout)" || { rm -f "$prompt" "$body"; exit 2; }
+timeout_s="$(refute_timeout)" || { rm -f "$prompt" "$body" "$agent_json"; exit 2; }
 timed_out="$body.timed-out"
-python3 - "$timeout_s" "$prompt" "$body" "$timed_out" <<'PY'
+python3 - "$timeout_s" "$prompt" "$body" "$timed_out" "$agent_json" "$agent_name" "$refute_model" <<'PY'
 import os, signal, subprocess, sys
 secs, prompt, body, marker = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+agent_json, agent_name, model = sys.argv[5], sys.argv[6], sys.argv[7]
+# The charter is passed as a rendered --agents file and selected with
+# --agent; hooks are off (the refuter is not the builder, and the builder's
+# hooks would snapshot and block around it). --model only when the operator
+# set verify.refute_model; otherwise the charter's model applies.
+argv = ["claude", "-p", "--agent", agent_name, "--agents", agent_json,
+        "--settings", '{"disableAllHooks": true}']
+if model:
+    argv += ["--model", model]
 
 def kill_group(p):
     # TERM, a short grace, then KILL — unconditionally. The direct child is
@@ -69,8 +122,7 @@ def kill_group(p):
             pass
 
 with open(prompt) as i, open(body, "w") as o:
-    p = subprocess.Popen(["claude", "-p", "--settings", '{"disableAllHooks": true}'],
-                         stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True)
+    p = subprocess.Popen(argv, stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True)
 timed_out = False
 try:
     p.wait(timeout=secs)
@@ -91,7 +143,7 @@ rc = p.returncode
 sys.exit(128 - rc if rc < 0 else rc)
 PY
 claude_rc=$?
-rm -f "$prompt"
+rm -f "$prompt" "$agent_json"
 if [ -e "$timed_out" ]; then
   rm -f "$body" "$timed_out"
   printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$timeout_s" >&2
