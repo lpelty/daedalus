@@ -613,3 +613,63 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$(printf '%s\n' "$output" | grep -cF 'code context: check skipped')" -eq 1 ]
 }
+
+# --- target.branch vs the target's default branch (v0.6.1) ------------------
+
+doctor_config_with_branch() {   # doctor_config_with_branch <branch>
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF2
+target:
+  repo: https://example.com/thing.git
+  branch: $1
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF2
+}
+
+clone_target_with_default_branch() {   # clone_target_with_default_branch <branch>
+  # A bare origin whose HEAD points at <branch>, cloned the way
+  # sync-target.sh clones, so refs/remotes/origin/HEAD is recorded.
+  local origin="$BATS_TEST_TMPDIR/origin.git" work="$BATS_TEST_TMPDIR/work"
+  git init -q --bare -b "$1" "$origin"
+  git init -q -b "$1" "$work"
+  printf 'x\n' > "$work/README.md"
+  git -C "$work" add -A
+  git -C "$work" -c user.email=t@x -c user.name=t commit -q -m i
+  git -C "$work" push -q "$origin" "$1"
+  mkdir -p "$DAEDALUS_HOME/target"
+  git clone -q --branch "$1" "$origin" "$DAEDALUS_HOME/target/thing"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+}
+
+@test "doctor turns red with ONE plain-language line when config target.branch is not the target's default branch" {
+  clone_target_with_default_branch mainline
+  doctor_config_with_branch main
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [ "$(printf '%s\n' "$output" | grep -cF 'MISSING  config.yaml says target.branch: main but the target'"'"'s default branch is mainline; change config.yaml to target.branch: mainline')" -eq 1 ]
+  # ONE line about the mismatch — not a MISSING plus a NOTE plus a hint.
+  [ "$(printf '%s\n' "$output" | grep -c 'default branch')" -eq 1 ]
+}
+
+@test "doctor is green when config target.branch matches the target's default branch" {
+  clone_target_with_default_branch mainline
+  doctor_config_with_branch mainline
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -cF 'OK       target.branch: mainline is the target'"'"'s default branch')" -eq 1 ]
+}
+
+@test "doctor says 'cannot determine' rather than guessing when the target records no origin/HEAD, and stays green" {
+  clone_target_with_default_branch mainline
+  git -C "$DAEDALUS_HOME/target/thing" symbolic-ref --delete refs/remotes/origin/HEAD
+  doctor_config_with_branch main
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'NOTE     target.branch: cannot determine')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'MISSING.*target.branch')" -eq 0 ]
+}

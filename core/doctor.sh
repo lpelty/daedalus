@@ -55,6 +55,27 @@ if [ "$target_repo_ok" -eq 1 ]; then
     note_problem "target checkout is not a git repo: $target — run core/sync-target.sh"
   else
     log "OK       target checkout: $target"
+    # The trunk name. Every branch-aware guard (guard-bash's push/commit
+    # deny, the promotion gate) reads config target.branch; a config that
+    # names a branch the target does not use leaves all of them inert while
+    # reporting themselves fine — the Smartsheet deployment ran with
+    # `main` configured against a GitLab trunk called `mainline`. Compare
+    # against the remote's default branch, which `git clone` records as
+    # refs/remotes/origin/HEAD. No network: `git remote show origin` would
+    # answer when origin/HEAD is unset, but it contacts the remote, so an
+    # unset origin/HEAD is reported as undeterminable rather than guessed.
+    configured_branch="$(cfg target.branch 2>/dev/null || true)"
+    if [ -n "$configured_branch" ]; then
+      remote_default="$(git -C "$target" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+      remote_default="${remote_default#origin/}"
+      if [ -z "$remote_default" ]; then
+        log "NOTE     target.branch: cannot determine the target's default branch (origin/HEAD is not recorded in $target), so config.yaml's target.branch: $configured_branch is unchecked"
+      elif [ "$remote_default" = "$configured_branch" ]; then
+        log "OK       target.branch: $configured_branch is the target's default branch"
+      else
+        note_problem "config.yaml says target.branch: $configured_branch but the target's default branch is $remote_default; change config.yaml to target.branch: $remote_default"
+      fi
+    fi
   fi
 else
   note_problem "target checkout — cannot determine path without config: target.repo"
