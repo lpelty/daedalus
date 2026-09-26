@@ -363,3 +363,11 @@ assert h["timeout"]==30, h' "$SRC/../.claude/settings.json"
   [ "$(lease_json prime session_id)" = "sC" ]
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"]=="sA" and h[0]["to"]=="sC" and "previous holder gone" in h[0]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
 }
+
+@test "the SessionStart context carries the board, rendered after binding: a second window sees 'you are window 02' and window 01 on its first read" {
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; start sA startup >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02
+  run start sB startup
+  c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
+  case "$c" in *"Lease board (2 windows; you are window 02):"*"- 02 (you)"*"- 01 — prime"*) : ;; *) echo "$c"; return 1 ;; esac
+}

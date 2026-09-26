@@ -96,16 +96,28 @@ def main() -> int:
             elif b["took_pen"]:
                 bind_notes.append("You hold the pen (prime) now: hot.md, vault commits, promote.")
             if lease_nn is None:
-                # §3.1: an unleased session that is not a visitor is told at start what to run.
-                bind_notes.append("This session holds no lease. If the operator told you your window number, run "
-                                  "`core/lease.sh claim <NN>`; otherwise run `core/lease.sh create` and then `claim` "
-                                  "the number it prints.")
+                # §3.1: an unleased session that is not a visitor is told at start what to run
+                # (the board's own sentence, so the dedup below can recognise it).
+                bind_notes.append(ll.UNLEASED_NAG)
         except ll.Refused as e:
             bind_notes.append(str(e))
         except Exception:
             pass
     elif visitor:
         bind_notes.append("This is a direct-call session; it holds no lease and cannot take the pen.")
+    # The board at start (§4.3), rendered HERE after the bind: an event's hooks
+    # run in parallel, so lease-board.py on SessionStart could not be ordered
+    # after the numbering and might show this window unleased. Same render,
+    # same four duties as every prompt's; lease-board.py is UserPromptSubmit only.
+    board = ""
+    if ll is not None and sid:
+        try:
+            board = ll.board_for(root, sid, visitor)
+        except Exception:
+            board = ""
+    if board:
+        # the board carries the unleased nag and the visitor line itself; say each once
+        bind_notes = [n for n in bind_notes if n not in (ll.UNLEASED_NAG, ll.VISITOR_LINE)]
     mp = v.marker_path(root, sid)
     notes = []
     try:
@@ -209,7 +221,7 @@ def main() -> int:
     except Exception:
         head = "Daedalus session orientation: unleased, %s" % root
     v.emit({"hookSpecificOutput": {"hookEventName": "SessionStart",
-                                   "additionalContext": "\n\n".join([head] + bind_notes + notes)}})
+                                   "additionalContext": "\n\n".join([head] + bind_notes + notes + ([board] if board else []))}})
     return 0
 
 

@@ -740,20 +740,29 @@ def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True) -> dict:
     return fresh
 
 
-def self_rebind(root: Path, sid: str) -> Optional[str]:
+def self_rebind(root: Path, sid: str, leases: Optional[Dict[str, dict]] = None,
+                live: Optional[list] = None) -> Optional[str]:
     """A resumed session keeps its id and gets a new pid (§4.2): refresh pid /
     proc_started / peer_name on the lease that already names sid. The
     compare-and-swap is on session_id, which is unchanged, so no other session
     is displaced. Does nothing while the session is open in two terminals.
-    Caller holds the lock. Returns the window number, None when sid holds none."""
-    leases = read_all(root)
+    Caller holds the lock. Returns the window number, None when sid holds none.
+    The board passes the leases it read and sid's live registry entries from
+    its one registry pass (registry_live_map), so a render is one read per
+    lease and no ps; every other caller lets this read both."""
+    leases = read_all(root) if leases is None else leases
     nn, lease = lease_of_session(leases, sid)
     if nn is None:
         return None
-    try:
-        entry = registry_entry_for(sid)
-    except Refused:
-        return nn                       # two terminals: do nothing (§4.2)
+    if live is None:
+        try:
+            entry = registry_entry_for(sid)
+        except Refused:
+            return nn                   # two terminals: do nothing (§4.2)
+    elif len(live) > 1:
+        return nn
+    else:
+        entry = live[0] if live else None
     if entry and (lease.get("pid") != entry.get("pid") or lease.get("proc_started") != entry.get("startedAt")
                   or lease.get("peer_name") != entry.get("name")):
         lease.update({"pid": entry.get("pid"), "proc_started": entry.get("startedAt"), "peer_name": entry.get("name")})
@@ -1265,6 +1274,217 @@ def prime_take(root: Path, sid: str, reason: Optional[str]) -> str:
     return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
 
 
+# --- The board (§4.3) ---------------------------------------------------------
+
+UNLEASED_NAG = ("This session holds no lease. If the operator told you your window number, run `core/lease.sh claim <NN>`; "
+                "otherwise run `core/lease.sh create` and then `claim` the number it prints.")
+VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take the pen."
+MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
+                "from this board) before changing it.")
+
+
+def _ago(ts: Optional[float], now: float) -> str:
+    if ts is None:
+        return "never"
+    s = int(now - ts)
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return "%d minute%s ago" % (s // 60, "" if s // 60 == 1 else "s")
+    return time.strftime("%H:%M", time.localtime(ts))
+
+
+def last_commit_subject(root: Path, lease: dict, nn: str) -> str:
+    """The subject of the newest commit on the lease branch that origin/<trunk>
+    does not contain — the outer repo first, then each nested one."""
+    base = root / str(lease.get("worktree") or ("worktrees/%s" % nn))
+    for repo, trunk in (lease.get("trunks") or {}).items():
+        if not (base / repo).is_dir():
+            continue
+        code, out, _ = _git(base / repo, "log", "-1", "--format=%s", "origin/%s..HEAD" % trunk)
+        if code == 0 and out.strip():
+            return out.strip().splitlines()[0]
+    return ""
+
+
+def fetched_at(root: Path, lease: dict) -> str:
+    repo = list((lease.get("trunks") or {}).keys())[:1]
+    if not repo:
+        return ""
+    try:
+        return time.strftime("%H:%M", time.localtime((root / "target" / repo[0] / ".git" / "FETCH_HEAD").stat().st_mtime))
+    except OSError:
+        return ""
+
+
+def registry_live_map() -> Dict[str, list]:
+    """session id -> its live registry entries, from ONE pass over sessions/
+    (one ps per registry file). A render reads this once instead of one glob
+    and one ps per lease per entry; the same live-entry rule as
+    registry_live_entries (pid + startedAt, never pid alone)."""
+    out: Dict[str, list] = {}
+    d = registry_dir()
+    if not d.is_dir():
+        return out
+    for p in d.glob("*.json"):
+        try:
+            e = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(e, dict) and e.get("sessionId") and pid_is_recorded_process(e.get("pid"), e.get("startedAt")):
+            out.setdefault(str(e["sessionId"]), []).append(e)
+    return out
+
+
+def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], changed: Dict[str, dict],
+                 waiting: Dict[str, list], states: Dict[str, str], now: float, visitor: bool = False,
+                 live_map: Optional[Dict[str, list]] = None) -> str:
+    """The board text (§4.3). Pure over its inputs except one `git log` per
+    repo of each non-stale lease and one `cfg` for the reader's trunk. states:
+    liveness per number, computed ONCE by the caller (board_for); live_map:
+    the registry read once (registry_live_map) — the peer name on every line
+    comes from it at render time (§4.1 're-read at every board render'), the
+    lease file's stored peer_name only when the registry has no live entry."""
+    numbered = {k: d for k, d in leases.items() if k != "prime"}
+    prime = leases.get("prime") or {}
+    prime_sid = prime.get("session_id")
+    live_map = registry_live_map() if live_map is None else live_map
+    mine, _ = lease_of_session(leases, sid or "")
+    head = "Lease board (%d window%s; %s):" % (len(numbered), "" if len(numbered) == 1 else "s",
+                                                "you are window %s" % mine if mine else "you hold no lease")
+    order = ([mine] if mine else []) + [k for k in sorted(numbered) if k != mine]
+    lines = [head]
+    # §4.8 handover: the displaced holder learns from the board, never from memory.
+    hist = prime.get("history") or []
+    if sid and hist and hist[-1].get("from") == sid and hist[-1].get("to") != sid:
+        tnn, tlease = lease_of_session(leases, str(hist[-1].get("to")))
+        lines.append("You no longer hold the pen; %s took it at %s (reason: '%s')."
+                     % (window_label(tnn, tlease) if tnn else "another session",
+                        str(hist[-1].get("at", ""))[11:16], hist[-1].get("reason", "")))
+    for nn in order:
+        d = numbered[nn]
+        marks = []
+        if nn == mine:
+            marks.append("(you)")
+        if d.get("alias"):
+            marks.append("(%s)" % d["alias"])
+        if d.get("spawned"):
+            marks.append("(spawned)")
+        label = "- %s%s" % (nn, (" " + " ".join(marks)) if marks else "")
+        parts = []
+        state = states.get(nn, "stale")
+        entries = live_map.get(str(d.get("session_id")), []) if d.get("session_id") else []
+        if d.get("released"):
+            parts.append("released — this window is done")
+        elif d.get("finished"):
+            parts.append("FINISHED at %s: %s — promote %s or release %s" % (str(d["finished"])[11:16], d.get("summary", ""), nn, nn))
+        elif len(entries) > 1:
+            parts.append("open in two terminals (pids %s) — close one" % ", ".join(str(e.get("pid")) for e in entries))
+        elif state == "stale":
+            since = _ago(seen_mtime(root, nn), now)
+            parts.append("STALE: no live session since %s; run `core/lease.sh sweep`, or say 'this is window %s' to a new window to continue it." % (since, nn))
+            if d.get("spawned"):
+                # a spawned clone is launched `--name daedalus-<NN>` (spawn), so that is its log's name
+                parts.append("a background clone that never reported — read its log with `claude logs %s` before sweeping"
+                             % (d.get("peer_name") or "daedalus-%s" % nn))
+        else:
+            if d.get("session_id") == prime_sid:
+                parts.append("prime (holds the pen: hot.md, vault commits, promote)")
+            if entries and entries[0].get("kind") == "bg" and not d.get("spawned"):
+                parts.append("background clone")
+            paths = sorted(p for repo in (changed.get(nn) or {}) for p in changed[nn][repo])
+            if paths:
+                shown = ", ".join(paths[:3]) + (", … (+%d)" % (len(paths) - 3) if len(paths) > 3 else "")
+                parts.append("%d changed: %s" % (len(paths), shown))
+            else:
+                parts.append("0 changed")
+            subj = last_commit_subject(root, d, nn)
+            parts.append('last commit "%s"' % subj if subj else "no commits yet")
+            if d.get("note"):
+                parts.append("note: %s" % d["note"])
+            if nn == mine:
+                fetched = fetched_at(root, d)
+                parts.append("based on origin/%s %s" % (v.target_branch(root),
+                                                        ("as fetched %s" % fetched) if fetched else "(never fetched)"))
+            elif state == "quiet":
+                parts.append("quiet since %s — its window is still open" % _ago(seen_mtime(root, nn), now))
+            else:
+                parts.append("last seen %s" % _ago(seen_mtime(root, nn), now))
+        # §4.1: the peer name is RE-READ from the registry at every render (renames,
+        # two-word variants); the stored field is only the fallback.
+        peer = (entries[0].get("name") if entries else None) or d.get("peer_name")
+        if peer and peer != "daedalus-%s" % nn:
+            parts.append("peer name %s (not a window number)" % peer)
+        lines.append("%s — %s" % (label, " — ".join(parts)))
+    for nn in sorted(waiting):
+        subs = waiting[nn]
+        lines.append("- %s — swept, %d unpromoted commit%s waiting (%s): say 'this is window %s' to a window to continue it, or 'delete %s's work'"
+                     % (nn, len(subs), "" if len(subs) == 1 else "s", _quoted(subs), nn, nn))
+    if not registry_present():
+        lines.append("(no session registry on this build: liveness is by heartbeat only, peer names are unknown, no window numbers itself "
+                     "and nobody takes the pen at start — launch each window with DAEDALUS_LEASE=<NN> and run `core/lease.sh prime take` from the one that should hold it)")
+    if visitor:
+        lines.append(VISITOR_LINE)
+    elif mine and numbered[mine].get("released"):
+        lines.append("Window %s is released; this window is done — close it." % mine)
+    elif sid is not None and not mine and numbered:
+        # a session with no lease is nagged; an operator shell (sid None) is not a session
+        lines.append(UNLEASED_NAG)
+    lines.append(MESSAGE_LINE)
+    return "\n".join(lines)
+
+
+def waiting_numbers(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
+    """Swept numbers whose lease/<NN> still carries unpromoted commits (§4.2)."""
+    out: Dict[str, list] = {}
+    target = root / "target" / target_name(root)
+    trunk = v.target_branch(root)
+    _, refs, _ = _git(target, "for-each-ref", "--format=%(refname:short)", "refs/heads/lease/")
+    for ref in refs.splitlines():
+        nn = ref.strip()[len("lease/"):]
+        if valid_id(nn) and nn not in leases:
+            subs = waiting_work(target, trunk, nn)
+            if subs:
+                out[nn] = subs
+    return out
+
+
+def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False) -> str:
+    """The four duties of §4.3 in one call: recompute the reader's changed set
+    (every lease's for `list`/`status` — a shell has no budget), touch the
+    reader's heartbeat, refresh stored pid/proc_started/peer_name from the
+    registry for every lease whose session it shows live (so the file and the
+    board agree, §4.1), then render. Never binds, numbers or takes the pen
+    (§4.2). '' when no numbered lease exists. Never called while the lock is
+    held (it takes the lock itself, twice); the git and ps work runs outside it."""
+    with lock(root, shared=True):
+        leases = read_all(root)
+    if not any(k != "prime" for k in leases):
+        return ""
+    mine, _ = lease_of_session(leases, sid or "")
+    for nn, d in leases.items():
+        if nn == "prime" or not (recompute_all or nn == mine):
+            continue
+        try:
+            recompute_changed(root, nn, d)
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e)     # the last computed set is kept (§4.1)
+    if mine:
+        heartbeat(root, mine)
+    now, quiet_after = time.time(), stale_after_secs(root)
+    states = {nn: liveness(root, nn, d, now, quiet_after) for nn, d in leases.items() if nn != "prime"}   # computed ONCE
+    live_map = registry_live_map()                                                                          # read ONCE
+    with lock(root):
+        leases = read_all(root)
+        for nn, d in leases.items():
+            if nn != "prime" and d.get("session_id"):
+                # a write only on a rename or a resume; nothing while a session is open in two terminals
+                self_rebind(root, str(d["session_id"]), leases=leases, live=live_map.get(str(d["session_id"]), []))
+        leases = read_all(root)
+        changed = {nn: read_changed(root, nn) for nn in leases if nn != "prime"}
+    return render_board(root, sid, leases, changed, waiting_numbers(root, leases), states, now, visitor=visitor, live_map=live_map)
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -1296,6 +1516,15 @@ def main(argv: list) -> int:
             sys.stderr.write("usage: leaselib.py changed <NN>\n"); return 2
         try:
             print(json.dumps(recompute_changed(root, args[0]))); return 0
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+    if cmd in ("list", "status"):
+        # sid is None from an operator shell: the head says "you hold no lease"
+        # and there is no nag (a person at a shell holds no lease by design).
+        try:
+            print(board_for(root, session_id_from_env(), bool(os.environ.get("DIRECT_CALL_ID")), recompute_all=True)
+                  or "No windows are open.")
+            return 0
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
     # §4.1: every lifecycle command recomputes every unswept lease's sidecar (a
