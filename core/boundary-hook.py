@@ -8,14 +8,27 @@ in this session's window that no run produced; and (Stop only) target main
 having moved past where origin/<config target.branch> stood at session start (PROP-019: fail-closed). On Stop, exit 2
 ends nothing until fixed; on PostToolUse, exit 2 is immediate feedback — the
 command already ran.
+
+Since v0.7.0 the same file is also wired on PreToolUse(Edit|Write) — the
+boundary warning (spec §4.6): one locked read of the leases, then a path in
+another live window's changed set is denied ONCE per session (the deny
+reason is the warning; recorded under `warned` in
+state/session-<sid>-boundary.json, pruned with the marker, §4.10) and let
+through with the warning as context on every later attempt; the prime's
+checkout target/<repo> is denied for every window; a released lease's
+worktree is closed; vault/hot.md is the prime's alone (§4.7). A session that
+cannot be bound while lease files exist fails CLOSED under target/ and
+worktrees/ (§4.4). Its two helpers, cross_lease_holder and warning_text, are
+imported by guard-bash.py for Bash write operands.
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
@@ -169,18 +182,142 @@ def deny(reason: str) -> dict:
                                    "permissionDecisionReason": reason}}
 
 
-def check_pretooluse(root: Path, payload: dict):
-    """PreToolUse(Edit|Write): a session that cannot be bound to a lease fails
-    CLOSED (§4.4) — the deny carries the sentence. The cross-lease warning,
-    the prime's-checkout and hot.md rules land here with the boundary
-    warning (§4.6, §4.7); this is the fail-closed floor they build on."""
+# --- PreToolUse(Edit|Write): the boundary warning (§4.6, §4.7, §4.10) ---------
+
+def boundary_file(root: Path, sid: object) -> Path:
+    """state/session-<sid>-boundary.json: {"warned": {"<abs path>": "<stamp>"}, "seen": {...}}.
+    The session-<sid>- prefix puts it under session-start.py's 7-day prune (§4.10)."""
+    return root / "state" / ("session-%s-boundary.json" % v._safe(sid))
+
+
+def load_boundary(root: Path, sid: object) -> dict:
+    try:
+        d = json.loads(boundary_file(root, sid).read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_boundary(root: Path, sid: object, data: dict) -> None:
+    p = boundary_file(root, sid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(p)
+
+
+def repo_key_of(root: Path, tree: Path) -> str:
+    """The changed-sidecar key for a tree repo_relative returned: the repo's
+    path under target/ (\"thing\", \"thing/sub\") — the same key compute_changed
+    writes, for a target checkout, a lease worktree or a promote scratch."""
+    parts = tree.resolve().relative_to(root.resolve()).parts
+    if parts[:1] == ("target",):
+        return "/".join(parts[1:])
+    if parts[:1] == ("worktrees",):
+        return "/".join(parts[2:])
+    if parts[:2] == ("state", "promote"):
+        return "/".join(parts[3:])
+    return "/".join(parts)
+
+
+def cross_lease_holder(root: Path, ctx: dict, tree: Path, rel: str) -> Optional[Tuple[str, dict]]:
+    """The other unswept, not-stale lease whose changed set holds rel in the
+    same repo (§4.6): lowest number first. Reads only ctx — no lock, no git."""
+    repo_key = repo_key_of(root, tree)
+    for nn, d in sorted(ctx["leases"].items()):
+        if nn in ("prime", ctx["mine"]) or d.get("released"):
+            continue
+        if ctx["liveness"].get(nn) == "stale":
+            continue
+        per_repo = ctx["changed"].get(nn, {}).get(repo_key)
+        if isinstance(per_repo, dict) and rel in per_repo:
+            return nn, d
+    return None
+
+
+FIRST_STOP = "This first attempt was stopped so you would read this before changing it. "
+
+
+def warning_text(nn: str, lease: dict, rel: str, background: bool, ago: str) -> str:
+    """The §4.6 warning, verbatim. Never a peer name (§4.1): the alias and the
+    window number, and \"peer name from the board\" for the reader to look up."""
+    alias = ("%s; " % lease["alias"]) if lease.get("alias") else ""
+    first = ("The file %s has been changed in window %s (%speer name from the board; last seen %s) — it is in that "
+             "window's changed set." % (rel, nn, alias, ago))
+    if background:
+        tail = ("That window is a background worker and may not answer a message. Tell the operator what you need "
+                "from this file; if you then still need to change it here, try again and it will go through.")
+    else:
+        tail = ("Send that window a message saying what you need from this file and why, and wait for its answer. "
+                "If it does not answer, tell the operator. If you then still need to change it here, try again and it will go through.")
+    return first + "\n" + FIRST_STOP + tail
+
+
+def _pre(decision: Optional[str], text: str) -> dict:
+    """A PreToolUse output: a deny whose reason IS the text (the reason is shown
+    to Claude) and the same text as context; or context alone (no decision)."""
+    out = {"hookEventName": "PreToolUse", "additionalContext": text}
+    if decision:
+        out["permissionDecision"] = decision
+        out["permissionDecisionReason"] = text
+    return {"hookSpecificOutput": out}
+
+
+def check_pretooluse(root: Path, payload: dict) -> Optional[dict]:
+    """PreToolUse(Edit|Write): one read of the leases (lease_context, §4.6
+    budget rule — no bash seam, no git), then the checks in this order: fail
+    closed under target/ and worktrees/ for a session that cannot be bound
+    (§4.4, ctx['refused']); vault/hot.md for a non-prime (§4.7); the prime's
+    checkout target/<repo> for every window; a released lease's worktree; and
+    the stop-once cross-lease warning (§4.6). None means nothing to say."""
     if payload.get("tool_name") not in ("Edit", "Write"):
         return None
     sid = v.export_session(payload)
+    fp = str((payload.get("tool_input") or {}).get("file_path") or "")
+    if not fp or not os.path.isabs(fp):
+        return None
+    op = Path(fp).resolve()
     ctx = v.lease_context(root, sid)
-    if ctx["refused"]:
-        return deny(ctx["refused"])
-    return None
+    if not ctx["leases"]:
+        return None
+    rroot = root.resolve()
+    under_target = str(op).startswith(str(rroot / "target") + "/")
+    under_wt = str(op).startswith(str(rroot / "worktrees") + "/")
+    if ctx["refused"] and (under_target or under_wt):
+        return _pre("deny", ctx["refused"])
+    if op == rroot / "vault" / "hot.md" and not ctx["prime"]:
+        return _pre("deny", "Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by "
+                            "window %s — ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so."
+                    % (ctx["mine"] or "none", ctx["prime_nn"] or "none"))
+    hit = v.repo_relative(root, op)
+    if hit is None:
+        return None
+    tree, rel = hit
+    repo_key = repo_key_of(root, tree)
+    if under_target:
+        mine_wt = ("worktrees/%s/%s" % (ctx["mine"], repo_key)) if ctx["mine"] else "a numbered window's worktree"
+        return _pre("deny", "This is the prime's checkout (%s). Your work goes in %s. If you meant to change trunk, that is what "
+                            "`promote` is for." % (tree.resolve().relative_to(rroot).as_posix(), mine_wt))
+    if under_wt:
+        wt_nn = tree.resolve().relative_to(rroot / "worktrees").parts[0]
+        if (ctx["leases"].get(wt_nn) or {}).get("released"):
+            return _pre("deny", "this window is released; its worktree is closed")
+    holder = cross_lease_holder(root, ctx, tree, rel)
+    if holder is None:
+        return None
+    import leaselib as ll          # already imported by lease_context once leases exist
+    nn, lease = holder
+    entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
+    background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
+    text = warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
+    b = load_boundary(root, sid)
+    warned = b.setdefault("warned", {})
+    key = str(op)
+    if key in warned:
+        return _pre(None, text.replace(FIRST_STOP, ""))
+    warned[key] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    save_boundary(root, sid, b)
+    return _pre("deny", text)
 
 
 def main() -> int:

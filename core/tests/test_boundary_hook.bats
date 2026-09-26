@@ -1,10 +1,14 @@
 #!/usr/bin/env bats
+# The lease fixture helper is loaded for live_pid / ps_ms / teardown_live only —
+# this suite keeps its own setup() (its own target, vault and marker shape).
+load fixtures/leases/setup.bash
+teardown() { teardown_live; }
 
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault/evidence"
-  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
@@ -272,4 +276,75 @@ EOF
   printf 'b\n' >> "$DAEDALUS_HOME/worktrees/01/thing/a.txt"; git -C "$DAEDALUS_HOME/worktrees/01/thing" -c user.email=t@x -c user.name=t commit -q -am b
   run hook_as Stop sL; [ "$status" -eq 0 ]
   case "$output" in *"does not apply in a lease worktree; trunk is guarded by promote"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- PreToolUse(Edit|Write): the boundary warning (spec §4.6, §4.7 hot.md, §4.10) ---
+
+edit_as() { printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"Edit","tool_input":{"file_path":"%s"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+two_leases() {   # window 01 = sA (prime), window 02 = sB; 02 has changed hooks/capture.py
+  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$DAEDALUS_HOME/core/"
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null; bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  for p in 01:sA 02:sB; do nn="${p%%:*}"; s="${p##*:}"
+    python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write "$nn" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(session_id=sys.argv[2],pid=int(sys.argv[3]),proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/$nn.json" "$s" "$$")"
+    python3 "$DAEDALUS_HOME/core/leaselib.py" heartbeat "$nn"; done
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
+  bash "$DAEDALUS_HOME/core/lease.sh" alias 02 poc-ui >/dev/null
+  printf '{"thing":{"hooks/capture.py":"2026-09-25T10:31:04","tests/test_capture.py":"2026-09-25T10:31:04"}}' > "$DAEDALUS_HOME/state/leases/02.changed"
+  printf '{"hook_event_name":"SessionStart","session_id":"sA","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+}
+# $$ is the bats process: alive for the whole test, but the fixture leases carry proc_started=1, so
+# pid_is_recorded_process sees a re-used pid and liveness reads "stale" — the tests that need LIVE
+# holders rewrite the lease with live_holder (a live pid AND its real start time).
+live_holder() { local pid; pid="$(live_pid)"; python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write "$1" "$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(sys.argv[3])); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/$1.json" "$pid" "$(ps_ms "$pid")")"; }
+
+@test "cross-lease: first Edit of a path in another live lease's changed set is denied with the holder's number and alias and recorded under warned; the second attempt goes through with context; a different path in that set is denied again; a stale lease's sidecar is ignored; own path and empty set are silent" {
+  two_leases; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run edit_as sA "$W/hooks/capture.py"
+  case "$output" in *'"permissionDecision": "deny"'*"The file hooks/capture.py has been changed in window 02 (poc-ui;"*"This first attempt was stopped so you would read this before changing it."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *'"additionalContext"'*) : ;; *) echo "context must ride along: $output"; return 1 ;; esac
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(k.endswith("hooks/capture.py") for k in d["warned"]), d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
+  run edit_as sA "$W/hooks/capture.py"
+  case "$output" in *'"permissionDecision"'*) echo "second attempt must not decide: $output"; return 1 ;; *"window 02 (poc-ui"*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sA "$W/tests/test_capture.py"; case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sA "$W/a.txt"; [ -z "$output" ]
+  printf '{}' > "$DAEDALUS_HOME/state/leases/02.changed"; run edit_as sA "$W/hooks/other.py"; [ -z "$output" ]
+  printf '{"thing":{"hooks/x.py":"2026-09-25T10:31:04"}}' > "$DAEDALUS_HOME/state/leases/02.changed"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(pid=1,proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  run edit_as sA "$W/hooks/x.py"; [ -z "$output" ]
+}
+
+@test "cross-lease: a background (kind bg) or spawned holder changes the last two sentences of the warning" {
+  two_leases; live_holder 02
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["spawned"]=True; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  run edit_as sA "$DAEDALUS_HOME/worktrees/01/thing/hooks/capture.py"
+  case "$output" in *"That window is a background worker and may not answer a message. Tell the operator what you need from this file; if you then still need to change it here, try again and it will go through."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "an Edit or Write into the prime's checkout target/<repo> is denied for every window, the prime included; an unbindable session is denied (fail closed); a released lease's worktree is denied" {
+  two_leases; live_holder 01; live_holder 02
+  for s in sA sB; do run edit_as "$s" "$T/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"This is the prime's checkout (target/thing). Your work goes in worktrees/"*"If you meant to change trunk, that is what \`promote\` is for."*) : ;; *) echo "$s: $output"; return 1 ;; esac; done
+  run edit_as sZ "$T/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["released"]="2026-09-25T12:00:00"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  run edit_as sB "$DAEDALUS_HOME/worktrees/02/thing/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"this window is released; its worktree is closed"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "vault/hot.md: denied for a non-prime window naming the prime's window number; allowed for the prime; other vault files allowed" {
+  two_leases; live_holder 01; live_holder 02
+  run edit_as sB "$DAEDALUS_HOME/vault/hot.md"
+  case "$output" in *'"permissionDecision": "deny"'*"Only the prime window commits the vault and writes hot.md. You are window 02; the pen is held by window 01"*"core/lease.sh prime take"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"daedalus-0"*) echo "never a peer name: $output"; return 1 ;; *) : ;; esac
+  run edit_as sA "$DAEDALUS_HOME/vault/hot.md"; [ -z "$output" ]
+  run edit_as sB "$DAEDALUS_HOME/vault/proposals/PROP-9.md"; [ -z "$output" ]
+}
+
+@test "the Edit check answers in under 1 s with 40 LIVE fixture leases (the live path: a ps per lease and a registry scan, no git), and the tracked settings.json wires boundary-hook.py on PreToolUse Edit|Write with a 5 s timeout" {
+  two_leases; live_holder 01; live_holder 02
+  for i in $(seq 3 42); do nn="$(printf '%02d' "$i")"; python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write "$nn" "{\"lease\":\"$nn\",\"session_id\":\"s$nn\",\"pid\":$$,\"proc_started\":$(ps_ms $$),\"worktree\":\"worktrees/$nn\",\"branch\":\"lease/$nn\",\"trunks\":{\"thing\":\"main\"}}"; python3 "$DAEDALUS_HOME/core/leaselib.py" heartbeat "$nn"; printf '{"thing":{"f%s.py":"2026-01-01T00:00:00"}}' "$i" > "$DAEDALUS_HOME/state/leases/$nn.changed"; done
+  run python3 "$DAEDALUS_HOME/core/leaselib.py" liveness 30; [ "$output" = "live" ]
+  t0="$(python3 -c 'import time; print(time.time())')"; run edit_as sA "$DAEDALUS_HOME/worktrees/01/thing/f10.py"; t1="$(python3 -c 'import time; print(time.time())')"
+  case "$output" in *'"permissionDecision": "deny"'*"window 10"*) : ;; *) echo "a live holder's path must warn: $output"; return 1 ;; esac
+  python3 -c 'import sys; assert float(sys.argv[2])-float(sys.argv[1]) < 1.0' "$t0" "$t1"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(g.get("matcher")=="Edit|Write" and any("boundary-hook.py" in h["command"] and h["timeout"]==5 for h in g["hooks"]) for g in d["hooks"]["PreToolUse"]), d' "$SRC/../.claude/settings.json"
 }
