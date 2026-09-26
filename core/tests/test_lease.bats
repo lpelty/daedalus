@@ -588,3 +588,28 @@ PY
   [ "$status" -ne 0 ]; case "$output" in *"could not start"*"claude"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]
 }
+
+@test "the .changed sidecar reflects committed, staged, unstaged and untracked paths per repo, keeps a path's first-seen stamp across recomputations, and drops a reverted path" {
+  LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'c\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am committed
+  printf 's\n' > "$W/staged.txt"; git -C "$W" add staged.txt
+  printf 'u\n' > "$W/untracked.txt"
+  printf 'n\n' >> "$W/sub/n.txt"
+  run python3 "$LL" changed 01; [ "$status" -eq 0 ]
+  python3 - "$DAEDALUS_HOME/state/leases/01.changed" <<'PY'
+import json,sys; d=json.load(open(sys.argv[1]))
+assert set(d["thing"])=={"a.txt","staged.txt","untracked.txt"}, d
+assert set(d["thing/sub"])=={"n.txt"}, d
+PY
+  first="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["thing"]["a.txt"])' "$DAEDALUS_HOME/state/leases/01.changed")"
+  sleep 1; printf 'again\n' >> "$W/a.txt"
+  python3 "$LL" changed 01 >/dev/null
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["thing"]["a.txt"])' "$DAEDALUS_HOME/state/leases/01.changed")" = "$first" ]
+  rm "$W/untracked.txt"; git -C "$W" checkout -q -- sub/n.txt 2>/dev/null || git -C "$W/sub" checkout -q -- n.txt
+  python3 "$LL" changed 01 >/dev/null
+  python3 - "$DAEDALUS_HOME/state/leases/01.changed" <<'PY'
+import json,sys; d=json.load(open(sys.argv[1]))
+assert "untracked.txt" not in d["thing"], d; assert d.get("thing/sub",{})=={}, d
+PY
+}

@@ -1006,6 +1006,56 @@ def spawn(root: Path, task: str, note: Optional[str]) -> str:
     return "Window %s is a background clone working on %s; it will report on the board when done." % (nn, task)
 
 
+# --- The observed changed set (§4.1) ------------------------------------------
+
+def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
+    """{"<repo>": {"<repo-relative path>": "<first-seen stamp>"}} — per repo of
+    the lease's worktree, the union of committed/staged work on the lease
+    branch (diff against merge-base origin/<trunk>..HEAD), unstaged
+    modifications (diff) and untracked files (ls-files --others). A nested
+    repo's paths never belong to the outer set. A path keeps the stamp it
+    carried in `previous` while it stays changed; a path that left the set
+    is dropped. Takes no lock (three git listings per repo, nothing under
+    state/leases/)."""
+    out: dict = {}
+    stamp = now_stamp()
+    base = root / str(lease.get("worktree") or ("worktrees/%s" % nn))
+    for repo, trunk in (lease.get("trunks") or {}).items():
+        repo_path = base / repo
+        if not repo_path.is_dir():
+            continue
+        paths: set = set()
+        code, mb, _ = _git(repo_path, "merge-base", "origin/" + trunk, "HEAD")
+        if code == 0 and mb.strip():
+            paths.update(_git(repo_path, "diff", "--name-only", mb.strip())[1].splitlines())
+        paths.update(_git(repo_path, "diff", "--name-only")[1].splitlines())
+        paths.update(_git(repo_path, "ls-files", "--others", "--exclude-standard")[1].splitlines())
+        # a nested repo's paths never belong to the outer set
+        nested_prefixes = [r[len(repo) + 1:] + "/" for r in lease.get("trunks", {}) if r.startswith(repo + "/")]
+        prev = previous.get(repo, {}) if isinstance(previous.get(repo), dict) else {}
+        out[repo] = {p: prev.get(p, stamp) for p in sorted(paths)
+                     if p.strip() and not any(p.startswith(pre) for pre in nested_prefixes)}
+    return out
+
+
+def recompute_changed(root: Path, nn: str) -> dict:
+    """Read the sidecar, compute, write (tmp + os.replace). Takes no lock."""
+    lease = read_lease(root, nn) or {}
+    changed = compute_changed(root, nn, lease, read_changed(root, nn))
+    write_changed(root, nn, changed)
+    return changed
+
+
+def recompute_all_changed(root: Path) -> None:
+    """Every unswept lease's sidecar (§4.1: a shell has no budget). Takes and
+    releases LOCK_SH for the one directory read, then works outside it — so
+    it is never called from under another lock (the lock is not re-entrant)."""
+    with lock(root, shared=True):
+        numbers = [k for k in read_all(root) if k != "prime"]
+    for nn in numbers:
+        recompute_changed(root, nn)
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -1032,6 +1082,21 @@ def main(argv: list) -> int:
         print(liveness(root, args[0], lease)); return 0
     if cmd == "stale-after":
         print(stale_after_secs(root)); return 0
+    if cmd == "changed":
+        if not args:
+            sys.stderr.write("usage: leaselib.py changed <NN>\n"); return 2
+        print(json.dumps(recompute_changed(root, args[0]))); return 0
+    # §4.1: every lifecycle command recomputes every unswept lease's sidecar (a
+    # shell has no budget). Before the dispatch and outside any lock — it takes
+    # and releases LOCK_SH itself. list/status do it through the board (Task 8);
+    # create and resolve do not (a spawner's create may run hook-adjacent, and
+    # resolve is on every target_path).
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime"):
+        try:
+            recompute_all_changed(root)
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e)
+            return 1
     if cmd == "registry-pids":
         print(" ".join(str(e.get("pid")) for e in registry_by_session(args[0]))); return 0
     if cmd == "registry-live-pids":
