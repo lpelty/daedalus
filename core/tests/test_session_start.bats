@@ -1,24 +1,13 @@
 #!/usr/bin/env bats
-
-setup() {
-  DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
-  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence" "$DAEDALUS_HOME/vault/proposals" "$DAEDALUS_HOME/.claude"
-  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/session-start.py" "$DAEDALUS_HOME/core/"
-  printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
-  printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
-  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
-target:
-  repo: https://example.com/thing.git
-  branch: main
-EOF
-  git init -q "$DAEDALUS_HOME"; git -C "$DAEDALUS_HOME" add -A
-  git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m init
-  git init -q "$DAEDALUS_HOME/vault"; git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q --allow-empty -m init
-  export DAEDALUS_HOME
-}
-
-start() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"%s"}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/session-start.py"; }
+# SessionStart: the marker (root of trust for every later check) and, since
+# v0.7.0, the binding that precedes it — DAEDALUS_LEASE, self-rebind,
+# auto-numbering of terminal windows, first-up prime (spec §4.2, §4.8).
+bats_require_minimum_version 1.5.0
+load fixtures/leases/setup.bash
+setup() { lease_fixture; }
+teardown() { teardown_live; }
+start() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"%s","transcript_path":"%s/transcripts/%s.jsonl"}' "$1" "$2" "$BATS_TEST_TMPDIR" "$1" | python3 "$DAEDALUS_HOME/core/session-start.py"; }
+first_line() { printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"].splitlines()[0])'; }
 
 @test "startup writes the marker with vault head, config sha, and protected snapshot; compact preserves it" {
   printf 'dirty\n' >> "$DAEDALUS_HOME/CLAUDE.md"
@@ -119,7 +108,9 @@ EOF
 }
 
 @test "startup (PROP-019): records target_branch and target_base from config; announces when origin/<branch> cannot be resolved" {
-  T="$DAEDALUS_HOME/target/thing"; mkdir -p "$DAEDALUS_HOME/target"
+  # lease_fixture already built target/thing with origin/main; this case needs
+  # an origin that has only mainline, so the target is rebuilt from scratch.
+  T="$DAEDALUS_HOME/target/thing"; rm -rf "$T"; mkdir -p "$DAEDALUS_HOME/target"
   git init -q -b mainline "$T"; printf 'a\n' > "$T/a.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m i
   git init -q --bare "$BATS_TEST_TMPDIR/o.git"; git -C "$T" remote add origin "$BATS_TEST_TMPDIR/o.git"; git -C "$T" push -q origin mainline
   # config says main, origin only has mainline: the marker must record the failure by name and the hook must say so at start
@@ -143,4 +134,143 @@ import json, sys
 m = json.load(open(sys.argv[1]))
 assert m["target_branch"] == "mainline" and m["target_base"] == sys.argv[2] and m["target_base_error"] == "", m
 PY
+}
+
+# --- v0.7.0: binding before the marker (spec §4.2 steps 1–7, §4.8, §8.2) -----
+
+@test "an interactive SessionStart with no lease auto-numbers 01, creates the worktree bound to this session, first-ups prime, and its orientation line is the first line" {
+  pid="$(live_pid)"; registry_entry "$pid" sN interactive cli daedalus-01
+  run start sN startup; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
+  case "$output" in *"You are window 01 and you hold the pen (prime): hot.md, vault commits, promote."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"/rename"*) echo "registry name already daedalus-01: no courtesy expected: $output"; return 1 ;; *) : ;; esac
+  [ "$(lease_json 01 session_id)" = "sN" ]; [ "$(lease_json prime session_id)" = "sN" ]
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  python3 - "$DAEDALUS_HOME/state/session-sN.json" "$(git -C "$T" rev-parse origin/main)" <<'PY'
+import json,sys; m=json.load(open(sys.argv[1]))
+assert m["target_base"]==sys.argv[2] and m["target_base_error"]=="" and m["lease"]=="01", m
+assert m["transcript_path"].endswith("/transcripts/sN.jsonl"), m
+PY
+}
+
+@test "a second interactive window numbers 02 and does not take the pen; a derived registry name gets the one-time /rename courtesy" {
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; start sA startup >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-x7
+  run start sB startup
+  [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ]
+  case "$output" in *"You are window 02."*"you may \`/rename daedalus-02\`"*"optional"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+}
+
+@test "03 with 01 present and a swept 02 whose branch has unpromoted commits" {
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/02/thing"; printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am waiting
+  rm -f "$DAEDALUS_HOME/state/leases/02.json"
+  p3="$(live_pid)"; registry_entry "$p3" sC
+  run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 03, $DAEDALUS_HOME" ]
+}
+
+@test "DAEDALUS_LEASE=02 with a null lease binds it and the marker has target_base set and no error; bound to a live other session it is ignored with the message and an interactive window auto-numbers anyway" {
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null; bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  run env DAEDALUS_LEASE=02 bash -c "$(declare -f start); start sH startup"
+  [ "$status" -eq 0 ]; [ "$(lease_json 02 session_id)" = "sH" ]
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"] and not m["target_base_error"], m' "$DAEDALUS_HOME/state/session-sH.json"
+  pid="$(live_pid)"; registry_entry "$pid" sH interactive cli daedalus-02
+  # The lease reads as bind would have written it for a registered session:
+  # pid, proc_started AND peer_name (the refusal names the holder by peer name).
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["pid"]='"$pid"'; d["proc_started"]=json.load(open(sys.argv[2]))["startedAt"]; d["peer_name"]="daedalus-02"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json" "$BATS_TEST_TMPDIR/sessions/$pid.json")"
+  p2="$(live_pid)"; registry_entry "$p2" sJ interactive cli daedalus-03
+  run env DAEDALUS_LEASE=02 bash -c "$(declare -f start); start sJ startup"
+  case "$output" in *"DAEDALUS_LEASE=02\` ignored: window 02 is held by a live session (peer name daedalus-02)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 02 session_id)" = "sH" ]; [ "$(lease_json 03 session_id)" = "sJ" ]
+}
+
+@test "a headless session (entrypoint sdk-cli, and separately kind bg) never auto-numbers or first-ups: state/leases stays empty and the unleased nag is injected; with DAEDALUS_LEASE=02 it binds 02 and nothing else" {
+  # live pids: a dead pid is filtered out before kind/entrypoint are read, which would pass this test for the wrong reason
+  pp="$(live_pid)"; registry_entry "$pp" sP interactive sdk-cli; run start sP startup
+  [ -z "$(ls "$DAEDALUS_HOME/state/leases"/*.json 2>/dev/null)" ]
+  [ "$(first_line)" = "Daedalus session orientation: unleased, $DAEDALUS_HOME" ]
+  case "$output" in *"core/lease.sh create"*"claim"*) : ;; *) echo "$output"; return 1 ;; esac
+  pq="$(live_pid)"; registry_entry "$pq" sQ bg cli; run start sQ startup
+  [ -z "$(ls "$DAEDALUS_HOME/state/leases"/*.json 2>/dev/null)" ]
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null; bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  run env DAEDALUS_LEASE=02 bash -c "$(declare -f start); start sQ startup"
+  [ "$(lease_json 02 session_id)" = "sQ" ]; [ "$(lease_json 01 session_id)" = "None" ]; [ ! -f "$DAEDALUS_HOME/state/leases/prime.json" ]
+}
+
+@test "a visitor (DIRECT_CALL_ID set) with no prime leaves state/leases empty and gets the visitor line" {
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f start); start sV startup"
+  [ -z "$(ls "$DAEDALUS_HOME/state/leases"/*.json 2>/dev/null)" ]
+  [ "$(first_line)" = "Daedalus session orientation: visitor, $DAEDALUS_HOME" ]
+  case "$output" in *"This is a direct-call session; it holds no lease and cannot take the pen."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "with no registry, nothing numbers itself or takes the pen (there is no /dev/tty fallback: hooks cannot open it); DAEDALUS_LEASE binds and no prime.json appears" {
+  # The pen on such a build comes from `core/lease.sh prime take` out of that
+  # window's Bash tool — pinned in test_lease.bats once prime take exists (Task 7).
+  rm -rf "$BATS_TEST_TMPDIR/sessions"
+  run start sT startup
+  [ -z "$(ls "$DAEDALUS_HOME/state/leases"/*.json 2>/dev/null)" ]
+  [ "$(first_line)" = "Daedalus session orientation: unleased, $DAEDALUS_HOME" ]
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  run env DAEDALUS_LEASE=01 bash -c "$(declare -f start); start sT startup"
+  [ "$(lease_json 01 session_id)" = "sT" ]; [ ! -f "$DAEDALUS_HOME/state/leases/prime.json" ]
+  [ "$(first_line)" = "Daedalus session orientation: window 01, $DAEDALUS_HOME" ]
+}
+
+@test "a registry that is present but has no entry for this session id: not numbered, not first-upped, orientation unleased" {
+  run start sM startup; [ "$status" -eq 0 ]
+  [ -z "$(ls "$DAEDALUS_HOME/state/leases"/*.json 2>/dev/null)" ]
+  [ "$(first_line)" = "Daedalus session orientation: unleased, $DAEDALUS_HOME" ]
+}
+
+@test "a second window's SessionStart does not deadlock on the lease lock: it returns in under 5 s" {
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; start sA startup >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02
+  run python3 -c 'import os,subprocess,sys,time
+t=time.time()
+p=subprocess.run(["python3","core/session-start.py"],input=sys.argv[1],cwd=os.environ["DAEDALUS_HOME"],capture_output=True,text=True,timeout=10)
+print(p.returncode, round(time.time()-t,2))' "$(printf '{"hook_event_name":"SessionStart","session_id":"sB","source":"startup","transcript_path":"%s/transcripts/sB.jsonl"}' "$BATS_TEST_TMPDIR")"
+  [ "$status" -eq 0 ]; case "$output" in "0 "*) : ;; *) echo "exit/elapsed: $output"; return 1 ;; esac
+  python3 -c 'import sys; assert float(sys.argv[1].split()[1]) < 5.0, sys.argv[1]' "$output"
+  [ "$(lease_json 02 session_id)" = "sB" ]
+}
+
+@test "self-rebind: this session's id already in a lease with a dead pid and a live registry entry -> rebound, not renumbered" {
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sR"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
+  pid="$(live_pid)"; registry_entry "$pid" sR interactive cli daedalus-01
+  run start sR resume
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
+  [ "$(lease_json 01 pid)" = "$pid" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
+}
+
+@test "two concurrent first-ups leave one prime.json with one session_id; two concurrent auto-numberings leave two numbers" {
+  p1="$(live_pid)"; registry_entry "$p1" sA; p2="$(live_pid)"; registry_entry "$p2" sB
+  ( start sA startup >/dev/null ) & ( start sB startup >/dev/null ) & wait
+  [ "$(ls "$DAEDALUS_HOME/state/leases"/0*.json | wc -l | tr -d ' ')" -eq 2 ]
+  case "$(lease_json prime session_id)" in sA|sB) : ;; *) echo "prime: $(cat "$DAEDALUS_HOME/state/leases/prime.json")"; return 1 ;; esac
+}
+
+@test "a session bound to nothing while leases exist gets target_base_error with the §4.4 sentence and the 'cannot be bound' line" {
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  pu="$(live_pid)"; registry_entry "$pu" sU interactive sdk-cli
+  run start sU startup
+  case "$output" in *"This session cannot be bound to a lease: Several sessions are live and I cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert "cannot tell which tree" in m["target_base_error"] and m["target_base"]=="", m' "$DAEDALUS_HOME/state/session-sU.json"
+}
+
+@test "a worktree add that hangs past the budget leaves worktree_ready false and the session is told to claim" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-slow" "$BATS_TEST_TMPDIR/bin/git"; chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  pid="$(live_pid)"; registry_entry "$pid" sW
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_GIT_SLEEP=3 LEASE_WORKTREE_TIMEOUT=1 run start sW startup
+  [ "$(lease_json 01 worktree_ready)" = "False" ]
+  case "$output" in *"window 01's worktree was not finished at start; run \`core/lease.sh claim 01\` to finish it"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the tracked settings.json gives session-start.py 30 s" {
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); h=[x for g in d["hooks"]["SessionStart"] for x in g["hooks"] if "session-start.py" in x["command"]][0]
+assert h["timeout"]==30, h' "$SRC/../.claude/settings.json"
 }

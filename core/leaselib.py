@@ -690,13 +690,15 @@ def _held_by_live(nn: str, lease: dict, remedy: str) -> Refused:
     return Refused("Window %s is held by a live session (peer name %s). %s" % (nn, peer_of(lease), remedy))
 
 
-def bind(root: Path, nn: str, sid: str) -> dict:
+def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True) -> dict:
     """claim / DAEDALUS_LEASE binding. Caller holds the lock. The same rule the
     hook applies: null or dead holder -> bind; a live (or quiet, or resumed)
     other holder -> refuse with its peer name. A compare-and-swap on the
     session_id read first; pid / proc_started / peer_name come from the
     registry entry for sid (None on a build without one); an unfinished
-    worktree (worktree_ready: false) is completed here (§4.2)."""
+    worktree (worktree_ready: false) is completed here (§4.2) — except when
+    finish_worktree is False: a SessionStart that just spent its add budget
+    in allocate_locked must not spend it twice (§4.6); `claim` finishes it."""
     lease = read_lease(root, nn)
     if lease is None:
         raise Refused("There is no lease file for window %s; run `core/lease.sh create` for a number first." % nn)
@@ -721,7 +723,7 @@ def bind(root: Path, nn: str, sid: str) -> dict:
         # a spawned lease, which keeps spawned: true.
         for key in ("finished", "summary", "spawned"):
             fresh.pop(key, None)
-    if fresh.get("worktree_ready") is False:
+    if finish_worktree and fresh.get("worktree_ready") is False:
         if add_worktrees(root, nn, fresh.get("trunks") or trunks_of(root, root / "target")):
             fresh.pop("worktree_ready", None)
     write_lease(root, nn, fresh)
@@ -1004,6 +1006,103 @@ def spawn(root: Path, task: str, note: Optional[str]) -> str:
             _remove_lease_files(root, nn)   # the worktree stays; the next allocation adopts it
         raise Refused("could not start claude for window %s (%s); the number is free again" % (nn, e.strerror or e))
     return "Window %s is a background clone working on %s; it will report on the board when done." % (nn, task)
+
+
+# --- SessionStart binding (§4.2 steps 1–6, §4.8 first-up) ---------------------
+
+def is_terminal_window(sid: str) -> bool:
+    """The §4.8 test: the registry pair (kind=interactive, entrypoint=cli) for
+    THIS session id. No registry -> False: a hook process has no controlling
+    terminal (Claude Code docs: hooks "can't open /dev/tty"), so there is no
+    weaker test to fall back to; a registry-absent build binds windows with
+    DAEDALUS_LEASE and takes the pen with `core/lease.sh prime take`."""
+    if not registry_present():
+        return False
+    return is_interactive_window(registry_entry_for(sid))
+
+
+def first_up(root: Path, sid: str) -> bool:
+    """Caller holds the lock. O_EXCL prime.json; a stale prime is rebound by CAS."""
+    prime = read_lease(root, "prime")
+    if prime is None:
+        try:
+            write_lease(root, "prime", {"session_id": sid, "bound_at": now_stamp(), "history": []}, exclusive=True)
+            return True
+        except FileExistsError:
+            return False
+    holder = prime.get("session_id")
+    if holder == sid:
+        return True
+    hnn, hlease = lease_of_session(read_all(root), str(holder))
+    if hlease is not None and liveness(root, hnn, hlease) in HELD_BY_LIVE:
+        return False
+    fresh = read_lease(root, "prime") or {}
+    if fresh.get("session_id") != holder:
+        return False
+    fresh["history"] = (fresh.get("history") or []) + [{"from": holder, "to": sid, "at": now_stamp(),
+                                                        "reason": "first-up (previous holder gone)"}]
+    fresh.update({"session_id": sid, "bound_at": now_stamp()})
+    write_lease(root, "prime", fresh)
+    return True
+
+
+def session_start_bind(root: Path, sid: str) -> dict:
+    """Returns {"lease": NN|None, "prime": bool, "took_pen": bool, "numbered": bool, "notes": [..]}.
+    Order per §4.2: hint bind -> self-rebind -> auto-number (terminal windows only) -> first-up.
+    ONE lock around the whole sequence; everything called inside is a *_locked /
+    "caller holds the lock" function (allocate_locked, bind, self_rebind, first_up)."""
+    out = {"lease": None, "prime": False, "took_pen": False, "numbered": False, "notes": []}
+    terminal = is_terminal_window(sid)
+    hint = os.environ.get("DAEDALUS_LEASE", "").strip()
+    with lock(root):
+        if hint:
+            lease = read_lease(root, hint)
+            if lease is None:
+                out["notes"].append("`DAEDALUS_LEASE=%s` names no lease file; run `core/lease.sh create` for a number "
+                                    "and `claim` it." % hint)
+            else:
+                try:
+                    bind(root, hint, sid)
+                    out["lease"] = hint
+                except Refused as e:
+                    # §4.2's exact line: "`DAEDALUS_LEASE=02` ignored: window 02 is held by a live session (peer name …)"
+                    # — bind's sentence starts "Window …"; one source for the sentence, lowercased in the clause.
+                    why = str(e).replace("Say 'release %s' to that window, or close it first." % hint, "").strip()
+                    msg = "`DAEDALUS_LEASE=%s` ignored: %s" % (hint, why[:1].lower() + why[1:])
+                    if not terminal:
+                        msg += " Run `core/lease.sh create` for a new number and `claim` it, or stop the other session."
+                    out["notes"].append(msg)
+        if out["lease"] is None:
+            out["lease"] = self_rebind(root, sid)
+        if out["lease"] is None and terminal:
+            nn, data = allocate_locked(root, sid)      # NOT allocate(): the lock is held here
+            try:
+                bind(root, nn, sid, finish_worktree=False)
+            except Refused:
+                pass
+            out["lease"], out["numbered"] = nn, True
+        if terminal and out["lease"] is not None:
+            was = (read_lease(root, "prime") or {}).get("session_id") == sid
+            out["prime"] = first_up(root, sid)
+            out["took_pen"] = out["prime"] and not was
+        else:
+            out["prime"] = (read_lease(root, "prime") or {}).get("session_id") == sid
+    return out
+
+
+def orientation(root: Path, sid: Optional[str], visitor: bool = False) -> str:
+    """The first line of SessionStart's additionalContext (§8.2)."""
+    if visitor:
+        return "Daedalus session orientation: visitor, %s" % root
+    with lock(root, shared=True):
+        leases = read_all(root)
+    nn, lease = lease_of_session(leases, sid or "")
+    if nn is None:
+        return "Daedalus session orientation: unleased, %s" % root
+    label = window_label(nn, lease)
+    if leases.get("prime", {}).get("session_id") == sid:
+        label += ", prime"
+    return "Daedalus session orientation: %s, %s" % (label, root)
 
 
 # --- The observed changed set (§4.1) ------------------------------------------

@@ -28,6 +28,9 @@ EOF
   git init -q "$V"; git -C "$V" -c user.email=t@x -c user.name=t commit -q --allow-empty -m init
   git init -q "$DAEDALUS_HOME"; git -C "$DAEDALUS_HOME" add -A; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m i
   export DAEDALUS_HOME
+  # Registry isolation: a present, empty session registry, so no hook run from
+  # this fixture reads the developer's real ~/.claude/sessions/.
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"; mkdir -p "$BATS_TEST_TMPDIR/sessions"
   printf '{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
 }
 

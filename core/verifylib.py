@@ -48,9 +48,65 @@ def _lib(root: Path, snippet: str) -> str:
     return out.strip() if code == 0 else ""
 
 
+def _lib_full(root: Path, snippet: str) -> Tuple[int, str, str]:
+    lib = root / "core" / "lib.sh"
+    if not lib.is_file():
+        return 127, "", "no core/lib.sh"
+    return run(["bash", "-c", 'source "$1"; ' + snippet, "_", str(lib)], timeout=5)
+
+
 def target_root(root: Path) -> Optional[Path]:
+    """The pre-lease seam, kept while guard-bash.py and boundary-hook.py still
+    call it (they move to resolve_target in the §4.4 consumer pass). None for
+    Unconfigured AND Refused alike — a caller that must tell them apart uses
+    resolve_target."""
     out = _lib(root, "target_path")
     return Path(out).resolve() if out else None
+
+
+# --- Tri-state target resolution (§4.4) --------------------------------------
+
+class Resolved:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+
+class Unconfigured:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+class Refused:
+    def __init__(self, sentence: str) -> None:
+        self.sentence = sentence
+
+
+def export_session(payload: dict) -> Optional[str]:
+    """Every Python hook: the payload's session_id is the ONLY session identity a
+    hook may use (§4.2). Exported before any lib.sh / fingerprint / gates call."""
+    sid = payload.get("session_id")
+    if sid:
+        os.environ["DAEDALUS_SESSION_ID"] = str(sid)
+    os.environ["DAEDALUS_HOOK_PID"] = str(os.getpid())
+    return str(sid) if sid else None
+
+
+def resolve_target(root: Path, session_id: Optional[str]):
+    """Tri-state, never None (§4.4). The bash seam: lib.sh target_path with the
+    session id exported; a non-zero exit whose stderr carries a `daedalus:`
+    sentence is Refused, any other failure is Unconfigured."""
+    if session_id:
+        os.environ["DAEDALUS_SESSION_ID"] = str(session_id)
+    code, out, err = _lib_full(root, "target_path")
+    if code == 0 and out.strip():
+        return Resolved(Path(out.strip()).resolve())
+    sentence = ""
+    for ln in (err or "").splitlines():
+        if ln.startswith("daedalus: "):
+            sentence = ln[len("daedalus: "):]
+    if code == 3 or (sentence and ("window" in sentence or "sessions are live" in sentence or "DAEDALUS_" in sentence)):
+        return Refused(sentence or "the lease resolution failed without a reason")
+    return Unconfigured(sentence or (err or "").strip() or "target not configured")
 
 
 def target_branch(root: Path) -> str:

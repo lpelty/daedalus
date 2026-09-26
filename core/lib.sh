@@ -169,11 +169,23 @@ target_name() {
   printf '%s\n' "$name"
 }
 
-# target_path — absolute path to the target checkout: target_name under
-# $DAEDALUS_HOME/target/ (the tree rule).
+# target_path — absolute path to the tree this caller builds in: target_name
+# under $DAEDALUS_HOME/target/ (the tree rule), or the caller's lease worktree.
 target_path() {
   local name
   name="$(target_name)" || return 1
+  # Lease resolution (spec §4.4): when any lease file exists, the tree a
+  # session builds in is decided by ONE implementation, core/leaselib.py,
+  # which fails closed for an unbindable session and prints a note for an
+  # operator shell. With no lease files the bash path spawns nothing.
+  # target_name above never consults the leases — allocation depends on that.
+  # (`exit 3` inside a "$(...)" substitution exits only that subshell; callers
+  # already treat a non-zero target_path as failure. Never call this from
+  # under the lease lock: the child takes LOCK_SH and would wait forever.)
+  if [ -n "$(ls "$DAEDALUS_HOME/state/leases"/*.json 2>/dev/null)" ] || [ -n "${DAEDALUS_TARGET_OVERRIDE:-}" ]; then
+    python3 "$DAEDALUS_HOME/core/leaselib.py" resolve "$name" || exit 3
+    return 0
+  fi
   printf '%s\n' "$DAEDALUS_HOME/target/$name"
 }
 

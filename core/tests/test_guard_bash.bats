@@ -16,6 +16,9 @@ EOF
   git init -q -b main "$T"; printf 'x\n' > "$T/CLAUDE.md"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m i
   git init -q -b main "$DAEDALUS_HOME/vault"; git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q --allow-empty -m i
   export DAEDALUS_HOME
+  # Registry isolation: a present, empty session registry, so no hook run from
+  # this fixture reads the developer's real ~/.claude/sessions/.
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"; mkdir -p "$BATS_TEST_TMPDIR/sessions"
 }
 
 guard() {  # guard <command> [cwd]
