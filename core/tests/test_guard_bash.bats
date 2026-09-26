@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+load fixtures/leases/setup.bash
 
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
@@ -25,6 +26,11 @@ guard() {  # guard <command> [cwd]
   local cwd="${2:-$DAEDALUS_HOME}"
   printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"%s","tool_input":{"command":%s}}' \
     "$cwd" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1")" | python3 "$DAEDALUS_HOME/core/guard-bash.py"
+}
+guard_as() {  # guard_as <session-id> <command> [cwd] — the hook payload carries the session id (spec §4.2)
+  local cwd="${3:-$DAEDALUS_HOME}"
+  printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":%s}}' \
+    "$1" "$cwd" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2")" | python3 "$DAEDALUS_HOME/core/guard-bash.py"
 }
 denied() { case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "expected deny: $output"; return 1 ;; esac; }
 allowed() { [ -z "$output" ]; }
@@ -244,4 +250,26 @@ EOF2
   done
   run guard 'env FOO=1 ls' "$T"; allowed
   run guard 'CLAUDE_CODE_USE_BEDROCK=1 ls' "$T"; allowed
+}
+
+@test "a bound session whose lease resolution is refused cannot push or commit trunk from its worktree or the target, and the denial names the real reason (spec §4.4 tri-state: not-known fails closed)" {
+  # The in-process read of state/leases/ binds sA cleanly; only the bash seam
+  # sees the bad override. Before the fix that Refused was dropped to
+  # target=None: the push from the worktree went through, and the one from
+  # target/ was denied with the "config.yaml cannot be read" sentence.
+  lease_fixture
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  CLAUDE_CODE_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" claim 01 >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"; [ -d "$W" ]
+  run guard_as sA 'git push origin HEAD:feat/x' "$W"; allowed
+  export DAEDALUS_TARGET_OVERRIDE=/tmp
+  for cwd in "$W" "$T"; do
+    for c in 'git push origin HEAD:main' 'git commit -m x'; do
+      run guard_as sA "$c" "$cwd"; denied
+      case "$output" in *'`DAEDALUS_TARGET_OVERRIDE` must point under state/promote/'*) : ;; *) echo "wrong reason for '$c' in $cwd: $output"; return 1 ;; esac
+      case "$output" in *"config.yaml cannot be read"*) echo "misleading reason for '$c' in $cwd: $output"; return 1 ;; *) : ;; esac
+    done
+    run guard_as sA 'git status' "$cwd"; allowed
+  done
+  unset DAEDALUS_TARGET_OVERRIDE
 }

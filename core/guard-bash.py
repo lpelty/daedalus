@@ -291,13 +291,28 @@ def main() -> int:
     sid = v.export_session(payload)
     try:
         ctx = v.lease_context(root, sid)             # one locked read; the refusal is in-process (§4.6)
-    except Exception:
-        ctx = v._empty_lease_context()               # the guard's own errors fail open, as ever
+    except Exception as e:
+        # The read itself broke (lock file unwritable, a liveness probe raising):
+        # say so, and fall through to the bash seam, which answers Refused
+        # for the same breakage (lib.sh maps a leaselib failure to exit 3).
+        ctx = v._empty_lease_context()
+        print("daedalus: the guard could not read the lease files (%s); asking the lease resolution directly." % e,
+              file=sys.stderr)
     refused = ctx["refused"] or ""
     target = None
     if not refused:
         r = v.resolve_target(root, sid)             # the tree path for check_git's trunk rules (one bash spawn, as before)
-        target = r.path if isinstance(r, v.Resolved) else None
+        if isinstance(r, v.Resolved):
+            target = r.path
+        elif isinstance(r, v.Refused):
+            # §4.4: what the in-process read did not refuse, the seam still can
+            # (a DAEDALUS_TARGET_OVERRIDE outside state/promote/, a lock wait
+            # that ran out, a leaselib crash). Not-known fails CLOSED for push
+            # and commit under this deployment, with the seam's own sentence —
+            # dropping it to target=None was the fail-open the tri-state removes.
+            refused = r.sentence
+        # Unconfigured (config.yaml unreadable) keeps target=None: check_git's
+        # target/ rule fails closed there with the config sentence.
     try:
         tokens = shlex.split(cmd, posix=True)
     except ValueError:
