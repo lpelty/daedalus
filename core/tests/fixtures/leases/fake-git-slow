@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# A git that sleeps FAKE_GIT_SLEEP seconds on `worktree add`, then delegates
+# to the real git. Every other subcommand delegates immediately.
+#
+# The real git is the first `git` on PATH outside this file's own directory.
+# Not `command -v -p git`: bash 3.2 (macOS /usr/bin/env bash) ignores -p and
+# returns this file, and `exec` of itself then spins forever on one pid.
+self="$(cd "$(dirname "$0")" && pwd -P)"
+real=""
+IFS=: ; for d in $PATH; do
+  [ -n "$d" ] || continue
+  [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$self" ] && continue
+  if [ -x "$d/git" ]; then real="$d/git"; break; fi
+done
+unset IFS
+[ -n "$real" ] || { echo "fake-git-slow: no real git on PATH" >&2; exit 127; }
+for a in "$@"; do [ "$a" = "worktree" ] && saw_wt=1; [ "$a" = "add" ] && [ -n "${saw_wt:-}" ] && sleep "${FAKE_GIT_SLEEP:-0}"; done
+exec "$real" "$@"

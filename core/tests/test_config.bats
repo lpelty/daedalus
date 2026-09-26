@@ -233,3 +233,23 @@ EOF
   run target_path
   [ "$status" -ne 0 ]
 }
+
+@test "target_name is the checkout's directory name from config alone: repo basename, or target.dir under the same single-segment rule" {
+  run target_name; [ "$status" -eq 0 ]; [ "$output" = "thing" ]
+  cat > "$TESTCFG" <<'EOF'
+target:
+  repo: https://github.com/example/thing.git
+  dir: other
+  branch: main
+vault:
+  repo: https://github.com/example/thing-kb.git
+gates:
+  - echo one
+proposals:
+  budget: 5
+EOF
+  run target_name; [ "$output" = "other" ]
+  run target_path; [ "$output" = "$DAEDALUS_HOME/target/other" ]
+  sed -i '' 's#  dir: other#  dir: a/b#' "$TESTCFG"
+  run target_name; [ "$status" -ne 0 ]; case "$output" in *"must be a single directory name"*) : ;; *) echo "$output"; return 1 ;; esac
+}

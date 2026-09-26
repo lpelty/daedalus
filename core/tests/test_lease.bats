@@ -213,3 +213,96 @@ teardown() { teardown_live; }
   DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/no-leases.yaml" run bash -c "source '$SRC/lib.sh'; cfg leases.stale_after"
   [ "$status" -ne 0 ]
 }
+
+# --- Allocation (spec §4.2 Numbering / Allocation / Re-use or refuse), lease.sh create ---
+
+LS() { bash "$DAEDALUS_HOME/core/lease.sh" "$@"; }
+
+@test "create allocates 01 on an empty directory with session_id null, worktrees for main and nested at mirrored paths on lease/01 from origin/main, scaffold dirs, an empty .changed, and prints the launch line" {
+  # target.scaffold must sit inside the target: block (cfg's block parser),
+  # so it is inserted after target.nested rather than appended to the file.
+  python3 - "$DAEDALUS_HOME/config.yaml" <<'PY'
+import sys; p=sys.argv[1]; s=open(p).read()
+s=s.replace("  nested: sub=https://example.com/sub.git\n", "  nested: sub=https://example.com/sub.git\n  scaffold: vaults/a=https://example.com/v.git\n")
+open(p,"w").write(s)
+PY
+  run LS create --note "first thing"
+  [ "$status" -eq 0 ]
+  case "$output" in *"Window 01 is ready (not bound to any session yet)."*"DAEDALUS_LEASE=01 claude --bg --name daedalus-01"*"DAEDALUS_LEASE=01 claude --name daedalus-01"*) : ;; *) echo "launch line: $output"; return 1 ;; esac
+  [ "$(lease_json 01 session_id)" = "None" ]
+  [ "$(lease_json 01 note)" = "first thing" ]
+  [ "$(lease_json 01 worktree)" = "worktrees/01" ]
+  [ "$(lease_json 01 branch)" = "lease/01" ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse --abbrev-ref HEAD)" = "lease/01" ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse HEAD)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing/sub" rev-parse --abbrev-ref HEAD)" = "lease/01" ]
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing/vaults/a" ]
+  [ "$(cat "$DAEDALUS_HOME/state/leases/01.changed")" = "{}" ]
+  python3 - "$DAEDALUS_HOME/state/leases/01.json" <<'PY'
+import json,sys; d=json.load(open(sys.argv[1]))
+assert d["repos"]==["thing","thing/sub"], d; assert d["trunks"]=={"thing":"main","thing/sub":"main"}, d
+assert d["created"] and d["promoted"]==[], d
+PY
+}
+
+@test "the launch line's closing sentence depends on the registry: present -> 'numbers itself'; absent -> 'every terminal window needs the line above'" {
+  run LS create; case "$output" in *"a plain \`claude\` window numbers itself"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  rm -rf "$BATS_TEST_TMPDIR/sessions"
+  run LS create; case "$output" in *"This build has no session registry: every terminal window needs the line above."*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+}
+
+@test "numbering: 03 with 01 live and 02 stale-but-unswept; 03 with 01 live and a swept 02 whose lease/02 has unpromoted commits (the number is not free); a swept, merged 02 is re-used and fast-forwarded" {
+  LS create >/dev/null; LS create >/dev/null           # 01, 02
+  W="$DAEDALUS_HOME/worktrees/02/thing"
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "capture: read error before error_message"
+  rm -f "$DAEDALUS_HOME/state/leases/02.json"          # "swept": work waits under lease/02
+  run LS create; case "$output" in *"Window 03 is ready"*) : ;; *) echo "expected 03: $output"; return 1 ;; esac
+  run python3 "$LL" waiting-work 02; case "$output" in *"capture: read error before error_message"*) : ;; *) echo "waiting: $output"; return 1 ;; esac
+  # now 04 is next; make lease/03 merged (it already equals trunk) and sweep it -> 03 is re-used, in place
+  rm -f "$DAEDALUS_HOME/state/leases/03.json"
+  run LS create; case "$output" in *"Window 03 is ready"*) : ;; *) echo "expected 03 re-used: $output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/03/thing" rev-parse --abbrev-ref HEAD)" = "lease/03" ]
+  # a hand-deleted directory that git still registers is pruned and adopted
+  rm -rf "$DAEDALUS_HOME/worktrees/03"; rm -f "$DAEDALUS_HOME/state/leases/03.json"
+  run LS create; [ "$status" -eq 0 ]; case "$output" in *"Window 03 is ready"*) : ;; *) echo "prune+adopt: $output"; return 1 ;; esac
+  [ -f "$DAEDALUS_HOME/worktrees/03/thing/a.txt" ]
+}
+
+@test "a directory at worktrees/<NN>/<repo> that git does not know is refused by name" {
+  mkdir -p "$DAEDALUS_HOME/worktrees/01/thing"; printf 'stray\n' > "$DAEDALUS_HOME/worktrees/01/thing/x"
+  run LS create; [ "$status" -ne 0 ]
+  case "$output" in *"worktrees/01/thing exists but is not a worktree of target/thing; move it aside."*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]
+}
+
+@test "allocation fails closed when a nested repo has no origin/HEAD" {
+  git -C "$T/sub" symbolic-ref --delete refs/remotes/origin/HEAD
+  run LS create; [ "$status" -ne 0 ]
+  case "$output" in *"sub has no origin/HEAD"*"remote set-head origin -a"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+}
+
+@test "two concurrent allocations that computed one number leave two leases with two numbers (O_EXCL + recompute)" {
+  ( LS create >/dev/null ) & ( LS create >/dev/null ) & wait
+  [ -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  [ "$(ls "$DAEDALUS_HOME/state/leases"/*.json | wc -l | tr -d ' ')" -eq 2 ]
+}
+
+@test "a worktree add that hangs past the budget leaves the lease with worktree_ready false; claim finishes it" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-slow" "$BATS_TEST_TMPDIR/bin/git"; chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_GIT_SLEEP=3 LEASE_WORKTREE_TIMEOUT=1 run LS create
+  [ "$status" -eq 0 ]
+  [ "$(lease_json 01 worktree_ready)" = "False" ]
+  case "$output" in *"worktree was not finished"*"claim 01"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+}
+
+@test "allocation never consults the leases for the target's name: an UNBOUND session (a session id that holds no lease, with 01 bound to another session and the pen held) can still create 02, and its worktree lands at worktrees/02/thing" {
+  LS create >/dev/null
+  python3 "$LL" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sA"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
+  python3 "$LL" _test-write prime '{"session_id":"sA","history":[]}'
+  # LS is a shell function, so the variable is set on the run, not through env(1).
+  DAEDALUS_SESSION_ID=sZ run LS create              # sZ would be Refused by target_path; create must not care
+  [ "$status" -eq 0 ]; case "$output" in *"Window 02 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]; [ "$(lease_json 02 worktree)" = "worktrees/02" ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["repos"]==["thing","thing/sub"], d' "$DAEDALUS_HOME/state/leases/02.json"
+  DAEDALUS_SESSION_ID=sZ run LS create; case "$output" in *"Window 03 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+}

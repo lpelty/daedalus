@@ -409,6 +409,188 @@ def liveness(root: Path, nn: str, lease: dict, now: Optional[float] = None, quie
     return "stale"
 
 
+# --- Allocation (§4.2) --------------------------------------------------------
+
+_TARGET_NAME: Dict[str, str] = {}
+
+
+def target_name(root: Path) -> str:
+    """The checkout's directory name from config alone (lib.sh target_name),
+    cached per process. NEVER target_path: that consults the leases and fails
+    closed for the session being numbered (and would take LOCK_SH from a child
+    process while the allocator holds LOCK_EX)."""
+    key = str(root)
+    if key not in _TARGET_NAME:
+        _TARGET_NAME[key] = v._lib(root, "target_name 2>/dev/null").strip()
+    return _TARGET_NAME[key]
+
+
+def repos_of(root: Path) -> list:
+    """['<name>', '<name>/<nested rel>', ...] — the main repo and each nested
+    repo at its mirrored relative path (config target.nested)."""
+    name = target_name(root)
+    return [name] + ["%s/%s" % (name, rel) for rel in v.nested_relpaths(root)]
+
+
+def trunks_of(root: Path, target_base: Path) -> Dict[str, str]:
+    """repo -> trunk branch. The main repo's trunk is config target.branch; a
+    nested repo's is its origin/HEAD, and a nested repo without one fails
+    closed (cutting its lease branch from a guessed trunk is worse than a
+    refusal that names the remedy)."""
+    trunk = v.target_branch(root)
+    out: Dict[str, str] = {}
+    for repo in repos_of(root):
+        if "/" not in repo:
+            out[repo] = trunk
+            continue
+        code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        head = head.strip()
+        if code != 0 or not head.startswith("origin/"):
+            raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
+                          % (repo.split("/", 1)[1], repo))
+        out[repo] = head[len("origin/"):]
+    return out
+
+
+def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
+    """Subjects of commits on lease/<NN> that origin/<trunk> does not contain;
+    [] when there are none or the branch is absent (§4.2 'Numbering')."""
+    branch = "lease/%s" % nn
+    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", branch])
+    if code != 0:
+        return []
+    code, _, _ = v.run(["git", "-C", str(target_repo), "merge-base", "--is-ancestor", branch, "origin/" + trunk])
+    if code == 0:
+        return []
+    _, out, _ = v.run(["git", "-C", str(target_repo), "log", "--format=%s", "origin/%s..%s" % (trunk, branch)])
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: Dict[str, str]) -> str:
+    """The lowest number 01–99 that no lease file holds and no swept lease's
+    unpromoted work is waiting under. Caller holds the lock."""
+    for i in range(1, 100):
+        nn = "%02d" % i
+        if nn in leases:
+            continue
+        if any(waiting_work(target_base / repo, trunks[repo], nn) for repo in trunks):
+            continue
+        return nn
+    raise Refused("no free window number: 01–99 are all held; run `core/lease.sh sweep`")
+
+
+def _git(repo: Path, *args: str, timeout: int = 20) -> Tuple[int, str, str]:
+    return v.run(["git", "-C", str(repo)] + list(args), timeout=timeout)
+
+
+def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20) -> bool:
+    """§4.2 'Re-use or refuse': prune; adopt a registered worktree in place;
+    check out an existing merged lease/<NN>; else cut it from origin/<trunk>;
+    fast-forward an adopted one; recreate target.scaffold dirs empty. Returns
+    False only when a worktree add timed out (the lease is then written
+    worktree_ready: false and `claim` finishes it). Caller holds the lock."""
+    base = root / "worktrees" / nn
+    branch = "lease/%s" % nn
+    for repo, trunk in trunks.items():
+        src = root / "target" / repo
+        dest = base / repo
+        _git(src, "worktree", "prune")
+        registered = False
+        if dest.exists():
+            listed = _git(src, "worktree", "list", "--porcelain")[1]
+            registered = any(ln.strip() == "worktree " + str(dest.resolve())
+                             for ln in listed.splitlines() if ln.startswith("worktree "))
+            if not registered:
+                raise Refused("worktrees/%s/%s exists but is not a worktree of target/%s; move it aside." % (nn, repo, repo))
+        has_branch = _git(src, "rev-parse", "--verify", "-q", branch)[0] == 0
+        if not registered:
+            if has_branch:
+                code, _, err = v.run(["git", "-C", str(src), "worktree", "add", str(dest), branch], timeout=timeout)
+            else:
+                code, _, err = v.run(["git", "-C", str(src), "worktree", "add", str(dest), "-b", branch, "origin/" + trunk],
+                                     timeout=timeout)
+            if code == 127:
+                return False   # v.run's code for a timeout or an OS failure
+            if code != 0:
+                last = err.strip().splitlines()[-1:] or ["no output"]
+                raise Refused("git worktree add for window %s (%s) failed: %s" % (nn, repo, last[0]))
+        if has_branch or registered:
+            _git(dest, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+    # scaffold dirs, empty, inside the outer worktree (config target.scaffold)
+    for ln in v._lib(root, "cfg target.scaffold >/dev/null 2>&1 && cfg_pairs target.scaffold | cut -f1").splitlines():
+        if ln.strip():
+            (base / list(trunks)[0] / ln.strip()).mkdir(parents=True, exist_ok=True)
+    return True
+
+
+def now_stamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
+                    spawned: bool = False, timeout: Optional[int] = None) -> Tuple[str, dict]:
+    """§4.2 'Allocation': lowest free number; prune; re-use or refuse; worktree
+    add; lease O_EXCL; empty .changed. CALLER HOLDS THE LOCK (session_start_bind
+    and claim call this from inside theirs; the lock is not re-entrant)."""
+    timeout = int(os.environ.get("LEASE_WORKTREE_TIMEOUT") or (timeout or 20))
+    target_base = root / "target"
+    trunks = trunks_of(root, target_base)
+    while True:
+        leases = read_all(root)
+        nn = free_number(root, leases, target_base, trunks)
+        data = {"lease": nn, "session_id": sid, "peer_name": None, "pid": None, "proc_started": None,
+                "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn,
+                "repos": list(trunks), "trunks": trunks, "created": now_stamp(),
+                "bound_at": now_stamp() if sid else None, "promoted": []}
+        if note:
+            data["note"] = note
+        if criteria:
+            data["criteria"] = criteria
+        if spawned:
+            data["spawned"] = True
+        try:
+            write_lease(root, nn, data, exclusive=True)
+        except FileExistsError:
+            continue               # another allocator took this number: recompute under the same lock
+        break
+    try:
+        ready = add_worktrees(root, nn, trunks, timeout=timeout)
+    except BaseException:
+        # A refused or failed add must not leave the number held by a lease
+        # that has no tree: the next allocation would skip it forever.
+        try:
+            os.unlink(str(lease_path(root, nn)))
+        except OSError:
+            pass
+        raise
+    if not ready:
+        data["worktree_ready"] = False
+        write_lease(root, nn, data)
+    write_changed(root, nn, {})
+    heartbeat(root, nn)
+    return nn, data
+
+
+def allocate(root: Path, sid: Optional[str], **kw) -> Tuple[str, dict]:
+    """create / spawn: take the lock, then allocate_locked."""
+    with lock(root):
+        return allocate_locked(root, sid, **kw)
+
+
+def launch_line(root: Path, nn: str) -> str:
+    home = str(root)
+    lines = ["Window %s is ready (not bound to any session yet)." % nn,
+             "For a headless clone, run:",
+             "  cd %s && DAEDALUS_LEASE=%s claude --bg --name daedalus-%s \"<task>\"" % (home, nn, nn),
+             "For a terminal on a build without the session registry:",
+             "  cd %s && DAEDALUS_LEASE=%s claude --name daedalus-%s" % (home, nn, nn)]
+    if registry_present():
+        lines.append("On this build a plain `claude` window numbers itself; you only need this line for the two cases above.")
+    else:
+        lines.append("This build has no session registry: every terminal window needs the line above.")
+    return "\n".join(lines)
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -441,6 +623,24 @@ def main(argv: list) -> int:
         print(" ".join(str(e.get("pid")) for e in registry_live_entries(args[0]))); return 0
     if cmd == "pid-alive":
         return 0 if pid_alive(args[0]) else 1
+    if cmd == "create":
+        note = args[args.index("--note") + 1] if "--note" in args else None
+        crit = args[args.index("--criteria") + 1] if "--criteria" in args else None
+        try:
+            # a spawner/operator path: fetch first (no network only inside a hook — §4.2)
+            v.run(["git", "-C", str(root / "target" / target_name(root)), "fetch", "--quiet", "origin"], timeout=60)
+            nn, data = allocate(root, None, note=note, criteria=crit, spawned="--spawned" in args)
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+        print(launch_line(root, nn))
+        if data.get("worktree_ready") is False:
+            print("Window %s's worktree was not finished inside the budget; run `core/lease.sh claim %s` to finish it." % (nn, nn))
+        return 0
+    if cmd == "waiting-work":
+        trunk = v.target_branch(root)
+        for s in waiting_work(root / "target" / target_name(root), trunk, args[0]):
+            print(s)
+        return 0
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)

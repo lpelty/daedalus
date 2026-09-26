@@ -135,7 +135,10 @@ repo_name() {
   printf '%s\n' "${base%.git}"
 }
 
-# target_path — absolute path to the target checkout.
+# target_name — the checkout's directory name, from config ALONE (target.repo
+# basename, or target.dir). Lease-agnostic on purpose: allocating a window
+# needs the name before that window has a lease, and must never go through
+# target_path (which, once leases exist, fails closed for exactly that session).
 #
 # The directory name defaults to the repo URL's basename, but a deployment
 # whose checkout directory differs from its repo name can override it with
@@ -152,7 +155,7 @@ repo_name() {
 # contain a path separator: it names one directory, not a location. A bare
 # "." or ".." has no "/" but is still a traversal (target/.. resolves to
 # $DAEDALUS_HOME itself), so it is checked separately.
-target_path() {
+target_name() {
   local url name dir
   url="$(cfg target.repo)" || die "config: target.repo is required"
   name="$(repo_name "$url")"
@@ -163,6 +166,14 @@ target_path() {
     esac
     name="$dir"
   fi
+  printf '%s\n' "$name"
+}
+
+# target_path — absolute path to the target checkout: target_name under
+# $DAEDALUS_HOME/target/ (the tree rule).
+target_path() {
+  local name
+  name="$(target_name)" || return 1
   printf '%s\n' "$DAEDALUS_HOME/target/$name"
 }
 
