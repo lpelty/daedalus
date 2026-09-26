@@ -418,10 +418,32 @@ def target_name(root: Path) -> str:
     """The checkout's directory name from config alone (lib.sh target_name),
     cached per process. NEVER target_path: that consults the leases and fails
     closed for the session being numbered (and would take LOCK_SH from a child
-    process while the allocator holds LOCK_EX)."""
+    process while the allocator holds LOCK_EX).
+
+    Fails CLOSED (§4.4): an empty name would make target/ + "" the product's
+    own tree, and git would cut worktrees/NN from it and report success. So
+    lib.sh's exit code and stderr are kept, not swallowed through v._lib: a
+    die there (an invalid target.dir) is re-raised with its own sentence, and
+    no answer at all (timeout, no lib.sh) is a refusal too."""
     key = str(root)
     if key not in _TARGET_NAME:
-        _TARGET_NAME[key] = v._lib(root, "target_name 2>/dev/null").strip()
+        lib = root / "core" / "lib.sh"
+        silent = Refused("could not read the target's name from config (lib.sh target_name did not answer)")
+        if not lib.is_file():
+            raise silent
+        code, out, err = v.run(["bash", "-c", 'source "$1"; target_name', "_", str(lib)], timeout=5)
+        name = out.strip()
+        if code == 127 and not err.strip().startswith("daedalus:"):
+            raise silent           # v.run's code for a timeout or an OS failure
+        if code != 0:
+            last = [ln for ln in err.strip().splitlines() if ln.strip()][-1:]
+            if last:
+                msg = last[0]
+                raise Refused(msg[len("daedalus: "):] if msg.startswith("daedalus: ") else msg)
+            raise silent
+        if not name or "/" in name or name in (".", ".."):
+            raise silent
+        _TARGET_NAME[key] = name
     return _TARGET_NAME[key]
 
 
@@ -442,14 +464,26 @@ def trunks_of(root: Path, target_base: Path) -> Dict[str, str]:
     for repo in repos_of(root):
         if "/" not in repo:
             out[repo] = trunk
-            continue
-        code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        head = head.strip()
-        if code != 0 or not head.startswith("origin/"):
-            raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
-                          % (repo.split("/", 1)[1], repo))
-        out[repo] = head[len("origin/"):]
+        else:
+            code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            head = head.strip()
+            if code != 0 or not head.startswith("origin/"):
+                raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
+                              % (repo.split("/", 1)[1], repo))
+            out[repo] = head[len("origin/"):]
+        require_trunk_ref(target_base / repo, repo, out[repo])
     return out
+
+
+def require_trunk_ref(target_repo: Path, repo: str, trunk: str) -> None:
+    """origin/<trunk> must resolve before any number is judged or cut. Without
+    it, `merge-base --is-ancestor` exits 128 and `git log origin/x..lease/NN`
+    prints nothing — which read as "nothing waiting", and a swept window's
+    unpromoted commits were silently adopted by the next session (§4.2)."""
+    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", "origin/" + trunk])
+    if code != 0:
+        raise Refused("target/%s has no origin/%s — check config target.branch, or run git -C target/%s fetch origin"
+                      % (repo, trunk, repo))
 
 
 def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
@@ -459,10 +493,20 @@ def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
     code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", branch])
     if code != 0:
         return []
-    code, _, _ = v.run(["git", "-C", str(target_repo), "merge-base", "--is-ancestor", branch, "origin/" + trunk])
+    code, _, err = v.run(["git", "-C", str(target_repo), "merge-base", "--is-ancestor", branch, "origin/" + trunk])
     if code == 0:
         return []
-    _, out, _ = v.run(["git", "-C", str(target_repo), "log", "--format=%s", "origin/%s..%s" % (trunk, branch)])
+    if code != 1:
+        # 128 (a missing ref) and everything else is an ANSWER WE DO NOT HAVE,
+        # never "not an ancestor" and never "nothing waiting".
+        last = err.strip().splitlines()[-1:] or ["no output"]
+        raise Refused("cannot tell whether %s has unpromoted work in %s (git merge-base against origin/%s failed: %s)"
+                      % (branch, target_repo.name, trunk, last[0]))
+    code, out, err = v.run(["git", "-C", str(target_repo), "log", "--format=%s", "origin/%s..%s" % (trunk, branch)])
+    if code != 0:
+        last = err.strip().splitlines()[-1:] or ["no output"]
+        raise Refused("cannot list %s's unpromoted work in %s (git log origin/%s..%s failed: %s)"
+                      % (branch, target_repo.name, trunk, branch, last[0]))
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
@@ -515,7 +559,12 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
                 last = err.strip().splitlines()[-1:] or ["no output"]
                 raise Refused("git worktree add for window %s (%s) failed: %s" % (nn, repo, last[0]))
         if has_branch or registered:
-            _git(dest, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+            code, _, err = _git(dest, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+            if code != 0:
+                last = err.strip().splitlines()[-1:] or ["no output"]
+                sys.stderr.write("daedalus: window %s: %s could not be fast-forwarded to origin/%s (%s); "
+                                 "the tree is usable but behind trunk — rebase it before promoting.\n"
+                                 % (nn, repo, trunk, last[0]))
     # scaffold dirs, empty, inside the outer worktree (config target.scaffold)
     for ln in v._lib(root, "cfg target.scaffold >/dev/null 2>&1 && cfg_pairs target.scaffold | cut -f1").splitlines():
         if ln.strip():
@@ -637,9 +686,14 @@ def main(argv: list) -> int:
             print("Window %s's worktree was not finished inside the budget; run `core/lease.sh claim %s` to finish it." % (nn, nn))
         return 0
     if cmd == "waiting-work":
-        trunk = v.target_branch(root)
-        for s in waiting_work(root / "target" / target_name(root), trunk, args[0]):
-            print(s)
+        try:
+            trunk = v.target_branch(root)
+            repo = root / "target" / target_name(root)
+            require_trunk_ref(repo, repo.name, trunk)
+            for s in waiting_work(repo, trunk, args[0]):
+                print(s)
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
         return 0
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:

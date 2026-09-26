@@ -306,3 +306,74 @@ PY
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["repos"]==["thing","thing/sub"], d' "$DAEDALUS_HOME/state/leases/02.json"
   DAEDALUS_SESSION_ID=sZ run LS create; case "$output" in *"Window 03 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "allocation fails closed when lib.sh target_name cannot answer: an invalid target.dir refuses with lib.sh's own sentence, writes no lease, creates no worktrees/, and never cuts a worktree of the PRODUCT repo (the empty-name fallback would allocate against target/ itself)" {
+  # No nested repo: with the name empty, target/ + "" is the product's own
+  # tree, and git would happily cut worktrees/01 from it and report success.
+  python3 - "$DAEDALUS_HOME/config.yaml" <<'PY'
+import sys; p=sys.argv[1]; s=open(p).read()
+s=s.replace("  nested: sub=https://example.com/sub.git\n", "  dir: a/b\n")
+open(p,"w").write(s)
+PY
+  git -C "$DAEDALUS_HOME" remote add origin "$BATS_TEST_TMPDIR/origin.git"   # so a product-repo worktree add could succeed
+  run LS create; [ "$status" -ne 0 ] || { echo "create succeeded: $output"; return 1; }
+  case "$output" in *"config target.dir: a/b must be a single directory name, not a path"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ ! -d "$DAEDALUS_HOME/worktrees" ]
+  [ "$(git -C "$DAEDALUS_HOME" worktree list | wc -l | tr -d ' ')" -eq 1 ]
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" -eq 1 ]
+  # The same misconfiguration with the nested repo present must name the
+  # config problem, not send the operator to fix the nested repo's origin/HEAD.
+  sed -i '' 's|^  dir: a/b$|  dir: a/b\n  nested: sub=https://example.com/sub.git|' "$DAEDALUS_HOME/config.yaml"
+  run LS create; [ "$status" -ne 0 ]
+  case "$output" in *"origin/HEAD"*) echo "wrong diagnosis: $output"; return 1 ;; *"config target.dir: a/b must be a single directory name"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  # waiting-work goes through the same wrapper and must not fall through to a traceback or target/.
+  run python3 "$LL" waiting-work 01; [ "$status" -ne 0 ]; case "$output" in *"config target.dir: a/b"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+}
+
+@test "allocation fails closed when lib.sh target_name answers nothing or does not answer in time: an empty name and a 5 s timeout both refuse in plain words, and nothing is allocated" {
+  cp "$DAEDALUS_HOME/core/lib.sh" "$BATS_TEST_TMPDIR/lib.sh.orig"
+  printf '\ntarget_name() { :; }\n' >> "$DAEDALUS_HOME/core/lib.sh"          # exit 0, prints nothing
+  run LS create; [ "$status" -ne 0 ] || { echo "create succeeded on an empty name: $output"; return 1; }
+  case "$output" in *"could not read the target's name from config"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -d "$DAEDALUS_HOME/worktrees" ]
+  cp "$BATS_TEST_TMPDIR/lib.sh.orig" "$DAEDALUS_HOME/core/lib.sh"
+  printf '\ntarget_name() { sleep 7; printf "thing\\n"; }\n' >> "$DAEDALUS_HOME/core/lib.sh"   # past the 5 s budget
+  run LS create; [ "$status" -ne 0 ] || { echo "create succeeded on a timeout: $output"; return 1; }
+  case "$output" in *"could not read the target's name from config"*"did not answer"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -d "$DAEDALUS_HOME/worktrees" ]
+}
+
+@test "numbering fails closed when origin/<trunk> cannot be resolved: a swept number with unpromoted commits is NOT re-used over them, and a fresh number is not cut from a guessed ref — both refuse naming target.branch, and no lease is written" {
+  LS create >/dev/null                                  # 01
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unpromoted work on 01"
+  rm -f "$DAEDALUS_HOME/state/leases/01.json"           # swept; work waits under lease/01
+  run LS create; case "$output" in *"Window 02 is ready"*) : ;; *) echo "control: $output"; return 1 ;; esac
+  rm -rf "$DAEDALUS_HOME/worktrees/02" "$DAEDALUS_HOME/state/leases/02.json"
+  git -C "$T" worktree prune; git -C "$T" branch -D lease/02 -q; git -C "$T/sub" worktree prune; git -C "$T/sub" branch -D lease/02 -q
+  sed -i '' 's/^  branch: main$/  branch: trunk-x/' "$DAEDALUS_HOME/config.yaml"
+  run LS create; [ "$status" -ne 0 ] || { echo "create succeeded with no origin/trunk-x: $output"; return 1; }
+  case "$output" in *"target/thing has no origin/trunk-x"*"target.branch"*"fetch origin"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  case "$output" in *"fatal: invalid reference"*) echo "raw git fatal leaked: $output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  [ "$(git -C "$W" log --format=%s -1)" = "unpromoted work on 01" ]
+  # The helper itself refuses rather than answering "nothing waiting".
+  run python3 "$LL" waiting-work 01; [ "$status" -ne 0 ]; case "$output" in *"no origin/trunk-x"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  # A dangling origin/HEAD on the nested repo (points at a branch that is gone) is the same hole on the other repo kind.
+  sed -i '' 's/^  branch: trunk-x$/  branch: main/' "$DAEDALUS_HOME/config.yaml"
+  git -C "$T/sub" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/gone
+  run LS create; [ "$status" -ne 0 ]
+  case "$output" in *"target/thing/sub has no origin/gone"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+}
+
+@test "an adopted lease branch whose fast-forward to origin/<trunk> fails says so on stderr instead of staying silently behind" {
+  LS create >/dev/null                                  # 01 at origin/main; lease/01 stays an ancestor (merged), so 01 is free once swept
+  printf 'trunk\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am "trunk moved"; git -C "$T" push -q origin main
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'local edit\n' >> "$W/a.txt"                  # uncommitted, on the same file: ff-only refuses to overwrite it
+  rm -f "$DAEDALUS_HOME/state/leases/01.json"
+  run --separate-stderr LS create; [ "$status" -eq 0 ]; case "$output" in *"Window 01 is ready"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  case "$stderr" in *"window 01: thing could not be fast-forwarded to origin/main"*"rebase it before promoting"*) : ;; *) echo "no ff note: $stderr"; return 1 ;; esac
+  [ "$(git -C "$W" rev-parse HEAD)" != "$(git -C "$T" rev-parse origin/main)" ]
+}
