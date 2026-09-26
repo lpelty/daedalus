@@ -4,13 +4,18 @@
 # policy, module-name derivation, and a CLI that touches no state.
 # Assertions use [ ] only.
 
+load fixtures/leases/setup.bash
+
 setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   T="$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" \
            "$T/pkg/sub" "$T/.hidden" "$T/fakevenv/sub"
-  cp "$SRC/lib.sh" "$SRC/code-context.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/code-context.py" "$DAEDALUS_HOME/core/"
+  # Registry isolation: a present, empty session registry, so no hook run from
+  # this fixture reads the developer's real ~/.claude/sessions/.
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"; mkdir -p "$BATS_TEST_TMPDIR/sessions"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
   repo: https://example.com/thing.git
@@ -60,6 +65,7 @@ count() { printf '%s\n' "$output" | grep -cF -- "$1"; }
   [ "$(count 'fakevenv')" -eq 0 ]
   [ "$(count '.hidden')" -eq 0 ]
   [ ! -f "$DAEDALUS_HOME/state/code-context-seen.json" ]
+  [ -z "$(ls "$DAEDALUS_HOME/state"/session-*-code-context-seen.json 2>/dev/null)" ]
 }
 
 @test "CLI: leaf file prints nothing; file outside the roots prints nothing" {
@@ -239,4 +245,14 @@ EOF
   run hook "$(edit_call "$T/pkg/core.py" scapx)"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "dependents banner for an edit in a lease worktree scans that worktree, not target/; per-session seen file" {
+  cp "$SRC/verifylib.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  mkdir -p "$DAEDALUS_HOME/state/leases"; cp -R "$T" "$DAEDALUS_HOME/worktrees_tmp"; mkdir -p "$DAEDALUS_HOME/worktrees/02"; mv "$DAEDALUS_HOME/worktrees_tmp" "$DAEDALUS_HOME/worktrees/02/thing"
+  printf 'import pkg.core\n' > "$DAEDALUS_HOME/worktrees/02/thing/extra_user.py"
+  printf '{"lease":"02","session_id":"s2","worktree":"worktrees/02","branch":"lease/02"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  run hook "$(edit_call "$DAEDALUS_HOME/worktrees/02/thing/pkg/core.py" s2)"
+  [ "$(count '6 files import pkg.core')" -eq 1 ]
+  [ -f "$DAEDALUS_HOME/state/session-s2-code-context-seen.json" ]; [ ! -f "$DAEDALUS_HOME/state/code-context-seen.json" ]
 }

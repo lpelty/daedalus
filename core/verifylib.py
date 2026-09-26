@@ -58,15 +58,6 @@ def _lib_full(root: Path, snippet: str, timeout: int = 5) -> Tuple[int, str, str
     return run(["bash", "-c", 'source "$1"; ' + snippet, "_", str(lib)], timeout=timeout)
 
 
-def target_root(root: Path) -> Optional[Path]:
-    """The pre-lease seam, kept while guard-bash.py and boundary-hook.py still
-    call it (they move to resolve_target in the §4.4 consumer pass). None for
-    Unconfigured AND Refused alike — a caller that must tell them apart uses
-    resolve_target."""
-    out = _lib(root, "target_path")
-    return Path(out).resolve() if out else None
-
-
 # --- Tri-state target resolution (§4.4) --------------------------------------
 
 class Resolved:
@@ -436,3 +427,72 @@ def block(reason: str) -> None:
     sys.stderr.write(reason.rstrip() + "\n")
     sys.stderr.flush()
     sys.exit(2)
+
+
+# --- Trees and the per-hook lease read (§4.4, §4.6) --------------------------
+
+def repo_relative(root: Path, path: Path):
+    """(tree_root, rel) for an absolute operand under target/<repo>/,
+    worktrees/<NN>/<repo>/ or state/promote/<id>/<repo>/ — the deepest
+    repository the operand lies in (a nested repo wins over its outer). None
+    when the operand is outside every tree. Lexical: needs no lease (§4.4)."""
+    try:
+        rel = Path(path).resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    parts = rel.split("/")
+    if parts[:1] == ["target"] and len(parts) >= 2:
+        base, rest = parts[:2], parts[2:]
+    elif parts[:1] == ["worktrees"] and len(parts) >= 3 and re.fullmatch(r"[0-9]{2}", parts[1]):
+        base, rest = parts[:3], parts[3:]
+    elif parts[:2] == ["state", "promote"] and len(parts) >= 4:
+        base, rest = parts[:4], parts[4:]
+    else:
+        return None
+    for n in nested_relpaths(root):
+        npart = n.split("/")
+        if rest[:len(npart)] == npart:
+            base, rest = base + npart, rest[len(npart):]
+            break
+    return root.resolve().joinpath(*base), "/".join(rest)
+
+
+def _empty_lease_context() -> dict:
+    return {"leases": {}, "changed": {}, "mine": None, "prime": False, "prime_nn": None,
+            "liveness": {}, "refused": None}
+
+
+def lease_context(root: Path, session_id: Optional[str]) -> dict:
+    """One locked read of state/leases/ and every .changed sidecar (§4.6 budget
+    rule); liveness with stale_after read once; the §4.4 refusal computed
+    in-process from the same read — no bash, no second python. A deployment
+    with no state/leases/ directory yet gets the empty context without
+    importing leaselib or creating the lock file. A lease file that cannot be
+    read is the same refusal lease.sh gives (fail closed for a session)."""
+    if not (root / "state" / "leases").is_dir():
+        return _empty_lease_context()
+    import leaselib as ll
+    ctx = _empty_lease_context()
+    try:
+        with ll.lock(root, shared=True):
+            leases = ll.read_all(root)
+            changed = {nn: ll.read_changed(root, nn) for nn in leases if nn != "prime"}
+    except ll.Refused as e:
+        if session_id:
+            ctx["refused"] = str(e)
+        return ctx
+    mine, _ = ll.lease_of_session(leases, session_id or "")
+    prime_sid = (leases.get("prime") or {}).get("session_id")
+    prime_nn, _ = ll.lease_of_session(leases, str(prime_sid)) if prime_sid else (None, None)
+    now, quiet_after = time.time(), ll.stale_after_secs(root)
+    live = {nn: ll.liveness(root, nn, d, now, quiet_after) for nn, d in leases.items() if nn != "prime"}
+    refused = None
+    if session_id and leases:
+        try:
+            ll.resolve_lease(leases, session_id)
+        except ll.Refused as e:
+            refused = str(e)
+    ctx.update({"leases": leases, "changed": changed, "mine": mine,
+                "prime": bool(session_id) and prime_sid == session_id,
+                "prime_nn": prime_nn, "liveness": live, "refused": refused})
+    return ctx

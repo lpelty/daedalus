@@ -125,8 +125,17 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
     so in those words. Every other state in which the comparison cannot be made is a
     refusal that names what could not be determined, never a note that reads like
     "nothing to check"."""
-    t = v.target_root(root)
-    if t is None:
+    sid = marker.get("session_id")
+    r = v.resolve_target(root, sid)
+    if isinstance(r, v.Refused):
+        reasons.append("Promotion check could not evaluate: %s" % r.sentence)
+        return
+    if not isinstance(r, v.Resolved):
+        return
+    t = r.path
+    hit = v.repo_relative(root, t)
+    if hit is not None and str(hit[0]).startswith(str((root / "worktrees").resolve()) + "/"):
+        notes.append("Promotion check does not apply in a lease worktree; trunk is guarded by promote.")
         return
     if "target_branch" not in marker:
         reasons.append("Promotion check could not evaluate: this session's marker predates the branch-aware gate "
@@ -155,6 +164,25 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
                        "merges; work on a branch.%s" % (branch, out.strip(), branch, RESTART))
 
 
+def deny(reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def check_pretooluse(root: Path, payload: dict):
+    """PreToolUse(Edit|Write): a session that cannot be bound to a lease fails
+    CLOSED (§4.4) — the deny carries the sentence. The cross-lease warning,
+    the prime's-checkout and hot.md rules land here with the boundary
+    warning (§4.6, §4.7); this is the fail-closed floor they build on."""
+    if payload.get("tool_name") not in ("Edit", "Write"):
+        return None
+    sid = v.export_session(payload)
+    ctx = v.lease_context(root, sid)
+    if ctx["refused"]:
+        return deny(ctx["refused"])
+    return None
+
+
 def main() -> int:
     root = v.ROOT
     try:
@@ -164,12 +192,21 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
     event = payload.get("hook_event_name", "Stop")
-    marker = v.read_marker(root, payload.get("session_id"))
+    if event == "PreToolUse":
+        try:
+            out = check_pretooluse(root, payload)
+        except Exception:
+            return 0
+        if out is not None:
+            v.emit(out)
+        return 0
+    sid = v.export_session(payload)                  # every Python hook: the payload's session_id (§4.4 step 1)
+    marker = v.read_marker(root, sid)
     reasons: List[str] = []
     notes: List[str] = []
     try:
         if marker is None:
-            marker = {"protected_status": [], "config_sha": v.sha256_file(root / "config.yaml"),
+            marker = {"session_id": sid, "protected_status": [], "config_sha": v.sha256_file(root / "config.yaml"),
                       "local_settings_sha": v.local_settings_sha(root), "started": "",
                       "target_branch": v.target_branch(root), "target_base": "",
                       "target_base_error": "session-start hook did not run, so origin/<branch> was never recorded"}

@@ -32,7 +32,7 @@ EOF
 # the hook module it imports.
 install_refuter() {
   mkdir -p "$DAEDALUS_HOME/core/agents"
-  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" "$SRC/verifylib.py" "$DAEDALUS_HOME/core/"
   cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
 }
 

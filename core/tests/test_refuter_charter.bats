@@ -14,7 +14,7 @@ setup() {
   FIX="$BATS_TEST_DIRNAME/fixtures/pitfalls"
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/vault/pitfalls"
-  cp "$SRC/lib.sh" "$SRC/pitfall-inject.py" "$SRC/refute-pitfalls.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/pitfall-inject.py" "$SRC/refute-pitfalls.py" "$DAEDALUS_HOME/core/"
   cat > "$DAEDALUS_HOME/config.yaml" <<'CFG'
 target:
   repo: https://example.com/thing.git

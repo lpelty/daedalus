@@ -26,12 +26,14 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verifylib as v  # noqa: E402
 
 ENFORCE = ("inject", "warn", "block")
 MAX_INJECT = 3
@@ -229,38 +231,19 @@ def daedalus_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def target_root(root: Path) -> Optional[Path]:
-    """The product's one source for the target checkout: lib.sh target_path."""
-    lib = root / "core" / "lib.sh"
-    if not lib.is_file():
-        return None
-    try:
-        r = subprocess.run(
-            ["bash", "-c", 'source "$1"; target_path', "_", str(lib)],
-            capture_output=True, text=True, timeout=3,
-            env=dict(os.environ, DAEDALUS_HOME=str(root)),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    return Path(r.stdout.strip()).resolve()
-
-
-def rel_path(file_path: str, target: Optional[Path], root: Path) -> Optional[str]:
-    """Path relative to the target checkout if under it, else relative to the
-    Daedalus root, else None. Both sides resolved."""
+def rel_path(file_path: str, root: Path) -> Optional[str]:
+    """Path relative to the tree it lies in — target/<repo>, a lease worktree
+    or a promote scratch (verifylib.repo_relative, lexical: needs no lease,
+    §4.4) — else relative to the Daedalus root, else None. Both sides resolved."""
     if not file_path or not os.path.isabs(file_path):
         return None
-    p = Path(file_path).resolve()
-    for base in (target, root):
-        if base is None:
-            continue
-        try:
-            return p.relative_to(base).as_posix()
-        except ValueError:
-            continue
-    return None
+    hit = v.repo_relative(root, Path(file_path))
+    if hit is not None:
+        return hit[1]
+    try:
+        return Path(file_path).resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
 
 
 # --- Loading and matching ---------------------------------------------------
@@ -358,19 +341,21 @@ def match_pitfall(p: dict, tool: str, tool_input: dict, rel: Optional[str]) -> T
 
 # --- Seen-state -------------------------------------------------------------
 
-def _seen_path(root: Path) -> Path:
-    return root / "state" / "pitfall-seen.json"
+def _seen_path(root: Path, sid: object) -> Path:
+    """Per session (§4.10): the session-<sid>- prefix is what session-start.py
+    prunes, so the file ages out with the marker; no shared file, no lock."""
+    return root / "state" / ("session-%s-pitfall-seen.json" % _sanitize(sid))
 
 
-def load_seen(root: Path) -> dict:
+def load_seen(root: Path, sid: object) -> dict:
     try:
-        data = json.loads(_seen_path(root).read_text())
+        data = json.loads(_seen_path(root, sid).read_text())
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def save_seen(root: Path, data: dict) -> bool:
+def save_seen(root: Path, sid: object, data: dict) -> bool:
     """Atomic write with pruning. False when state cannot be written."""
     cutoff = time.time() - PRUNE_DAYS * 86400
     for key in list(data):
@@ -388,12 +373,12 @@ def save_seen(root: Path, data: dict) -> bool:
         if not entries:
             del data[key]
     try:
-        d = _seen_path(root).parent
+        d = _seen_path(root, sid).parent
         d.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".seen-", suffix=".json")
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
-        os.replace(tmp, str(_seen_path(root)))
+        os.replace(tmp, str(_seen_path(root, sid)))
         return True
     except OSError:
         return False
@@ -441,17 +426,25 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
     tool_input = payload.get("tool_input")
     if not isinstance(tool, str) or not isinstance(tool_input, dict):
         return None
+    sid = v.export_session(payload)                  # the payload's session_id is the only identity (§4.2)
     pitfalls, skipped = load_pitfalls(root)
     rel = None
     if tool in ("Edit", "Write", "NotebookEdit"):
         fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         try:
-            rel = rel_path(str(fp), target_root(root), root)
+            rel = rel_path(str(fp), root)
         except Exception:
             rel = None          # unresolvable path (e.g. an embedded NUL): path patterns
                                  # simply won't match it; bash-pattern blocks still run
 
     announce: List[str] = []
+    try:
+        r = v.resolve_target(root, sid)
+    except Exception:
+        r = None
+    if isinstance(r, v.Refused):
+        # §4.4: the path patterns still fire (rel is lexical); the session is told why it is unbound
+        announce.append("Note: this session cannot be bound to a lease: %s" % r.sentence)
     for f, reason, raw in skipped:
         if raw:
             announce.append("Pitfall %s is unparseable (%s) and would %s; fix its frontmatter." % (f, reason, raw))
@@ -480,7 +473,7 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
         return None
 
     key = "%s:%s" % (_sanitize(payload.get("session_id")), _sanitize(payload.get("agent_id") or "main"))
-    seen = load_seen(root)
+    seen = load_seen(root, payload.get("session_id"))
     mine = seen.setdefault(key, {})
     if not isinstance(mine, dict):
         mine = seen[key] = {}
@@ -493,7 +486,7 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
         # Announcements riding a deny are deliberately not recorded here: the
         # deny paths stay state-free and may repeat until an inject records
         # them.
-        if save_seen(root, seen):
+        if save_seen(root, payload.get("session_id"), seen):
             reason = "\n\n---\n\n".join(_reason(p) for p in fresh_warns) + "\n\n" + WARN_TRAILER
             if announce:
                 reason += "\n\n" + "\n".join("Note: " + a for a in announce)
@@ -516,7 +509,7 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
         mine[ann_key] = {"stage": "injected", "touched": _now(), "items": sorted(already | set(new_ann))}
     if not blocks:
         return None
-    save_seen(root, seen)          # failure here is the enhancement half: emit anyway
+    save_seen(root, payload.get("session_id"), seen)   # failure here is the enhancement half: emit anyway
     return _context("\n\n".join(blocks))
 
 
@@ -546,9 +539,11 @@ def check(root: Path) -> List[str]:
         lines.append("  %s: %s" % (Path(f).name, why))
     for f, why, _raw in skipped:
         lines.append("  %s: %s" % (Path(f).name, why))
-    tp = target_root(root)
-    if tp is None and (root / "core" / "lib.sh").is_file():
-        lines.append("  target root: lib.sh target_path did not resolve; path patterns cannot fire")
+    r = v.resolve_target(root, os.environ.get("DAEDALUS_SESSION_ID"))
+    if isinstance(r, v.Refused):
+        lines.append("  target root: %s" % r.sentence)
+    elif isinstance(r, v.Unconfigured) and (root / "core" / "lib.sh").is_file():
+        lines.append("  target root: lib.sh target_path did not resolve (%s); path patterns cannot fire" % r.reason)
     probe = root / "state"
     if not probe.is_dir():
         lines.append("  state/ absent — run core/setup.sh")
@@ -605,7 +600,7 @@ def main(argv: List[str]) -> int:
         return 0
     if len(argv) >= 3 and argv[1] == "--match-path":
         root = daedalus_root()
-        rel = rel_path(argv[2], target_root(root), root)
+        rel = rel_path(argv[2], root)
         print(rel if rel is not None else "outside")
         return 0
     if len(argv) >= 2 and argv[1] == "--check":
@@ -621,12 +616,7 @@ def main(argv: List[str]) -> int:
         return 0
     if payload.get("hook_event_name") == "PreCompact":
         try:
-            root = daedalus_root()
-            seen = load_seen(root)
-            sid = _sanitize(payload.get("session_id"))
-            for key in [k for k in seen if k.startswith(sid + ":")]:
-                del seen[key]
-            save_seen(root, seen)
+            save_seen(daedalus_root(), payload.get("session_id"), {})   # only this session's file (§4.10)
         except Exception:
             pass
         return 0

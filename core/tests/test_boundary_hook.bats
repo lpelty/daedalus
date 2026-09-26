@@ -263,3 +263,13 @@ EOF
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sA\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 0 ]
 }
+
+@test "promotion backstop in a lease worktree reports 'does not apply' and moves on" {
+  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$DAEDALUS_HOME/core/"
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  printf '{"lease":"01","session_id":"sL","worktree":"worktrees/01","branch":"lease/01","trunks":{"thing":"main"}}' > "$DAEDALUS_HOME/state/leases/01.json"
+  printf '{"hook_event_name":"SessionStart","session_id":"sL","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  printf 'b\n' >> "$DAEDALUS_HOME/worktrees/01/thing/a.txt"; git -C "$DAEDALUS_HOME/worktrees/01/thing" -c user.email=t@x -c user.name=t commit -q -am b
+  run hook_as Stop sL; [ "$status" -eq 0 ]
+  case "$output" in *"does not apply in a lease worktree; trunk is guarded by promote"*) : ;; *) echo "$output"; return 1 ;; esac
+}

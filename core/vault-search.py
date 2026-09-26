@@ -13,6 +13,7 @@ every failure exits 0 and prints nothing. Python 3.9, stdlib only.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -22,11 +23,16 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verifylib as v  # noqa: E402
+
 QUERY_TIMEOUT = 10
 INDEX_TIMEOUT = 120
 CFG_TIMEOUT = 3
 MAX_RESULTS = 8
 STAMP_REL = "state/recall-last-index"
+LOCK_REL = "state/recall-index.lock"
+PRIME_ONLY = "The document index is rebuilt by the prime; ask it to reindex"
 COUNT_RE = re.compile(r"^indexed=(\d+) purged=(\d+)$")
 
 
@@ -146,7 +152,41 @@ def cmd_query(text: str, root: Path) -> int:
     return 0
 
 
+def _session() -> Optional[str]:
+    return os.environ.get("DAEDALUS_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
+def is_clone(root: Path) -> bool:
+    """A session that holds a lease but not the pen (§4.10). An operator shell
+    (no session) is never a clone."""
+    sid = _session()
+    if not sid:
+        return False
+    ctx = v.lease_context(root, sid)
+    return bool(ctx["leases"]) and not ctx["prime"]
+
+
 def cmd_index(root: Path) -> int:
+    # §4.10: the index is a vault-derived artifact and follows the hot.md rule —
+    # prime-only, and one writer at a time (two sqlite writers is "database is locked").
+    if is_clone(root):
+        print(PRIME_ONLY)
+        return 0
+    lock_path = root / LOCK_REL
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("index already running")
+            return 0
+        return _index_locked(root)
+    finally:
+        os.close(fd)                                  # releases the flock
+
+
+def _index_locked(root: Path) -> int:
     cmd = read_cfg("recall.vault-index", root)
     if not cmd or looks_corrupted(cmd):
         sys.stderr.write("vault-search: recall.vault-index unset or corrupted\n")
@@ -234,7 +274,10 @@ def cmd_check(root: Path) -> int:
             print("document recall: no index stamp — run indexing through "
                   "vault-search.py index")
         elif _newest_vault_md(root) > stamp.stat().st_mtime:
-            print("document recall: index run older than newest vault change")
+            if is_clone(root):
+                print("document recall: index older than the vault — ask the prime to reindex")
+            else:
+                print("document recall: index run older than newest vault change")
     if not read_cfg("recall.vault-index", root):
         print("document recall: reindex command unconfigured")
     return 0

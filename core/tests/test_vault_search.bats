@@ -8,7 +8,7 @@ setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault"
-  cp "$SRC/lib.sh" "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
   export DAEDALUS_HOME
   # The runner resolves the home; on macOS /var -> /private/var, so every
   # comparison against a runner-resolved path uses RHOME, never DAEDALUS_HOME.
@@ -316,4 +316,32 @@ EOF
   [ "$v" = 'state/chroma' ]
   v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.ruff')"
   [ "$v" = 'uvx ruff@0.16.5' ]
+}
+
+@test "index refuses from a non-prime session, runs for the prime under a non-blocking lock, and says 'already running' when held; --check for a clone names the prime" {
+  cp "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  # the query engine (the fixture script) and an index engine that creates the store and prints the count line
+  cat > "$BATS_TEST_TMPDIR/eng.sh" <<'EOF'
+#!/bin/bash
+mkdir -p "$DAEDALUS_RECALL_STORE"
+echo "indexed=1 purged=0"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "$(printf "  vault-index: '%s'\n  store: state/chroma" "$BATS_TEST_TMPDIR/eng.sh")"
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  printf '{"session_id":"sP","history":[]}' > "$DAEDALUS_HOME/state/leases/prime.json"
+  printf '{"lease":"02","session_id":"s2","worktree":"worktrees/02"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  run env DAEDALUS_SESSION_ID=s2 python3 "$SCRIPT" index
+  case "$output" in *"The document index is rebuilt by the prime; ask it to reindex"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  run env DAEDALUS_SESSION_ID=sP python3 "$SCRIPT" index; [ "$status" -eq 0 ]
+  [ "$(count 'indexed=1 purged=0')" -eq 1 ]; [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  python3 -c "import fcntl,os,time; fd=os.open('$DAEDALUS_HOME/state/recall-index.lock',os.O_RDWR|os.O_CREAT); fcntl.flock(fd,fcntl.LOCK_EX); time.sleep(3)" 3>&- </dev/null >/dev/null 2>&1 &
+  sleep 0.5; run env DAEDALUS_SESSION_ID=sP python3 "$SCRIPT" index; [ "$status" -eq 0 ]; case "$output" in *"index already running"*) : ;; *) echo "$output"; return 1 ;; esac
+  wait
+  mkdir -p "$DAEDALUS_HOME/vault/specs"; sleep 1; printf 'new\n' > "$DAEDALUS_HOME/vault/specs/new.md"
+  printf '[]' > "$RESULTS"
+  run env DAEDALUS_SESSION_ID=s2 python3 "$SCRIPT" --check; case "$output" in *"document recall: index older than the vault — ask the prime to reindex"*) : ;; *) echo "$output"; return 1 ;; esac
+  # an operator shell: none of the session variables (the Bash tool that runs this suite injects CLAUDE_CODE_SESSION_ID)
+  run env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID python3 "$SCRIPT" --check; case "$output" in *"document recall: index run older than newest vault change"*) : ;; *) echo "operator shell keeps the plain line: $output"; return 1 ;; esac
 }

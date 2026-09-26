@@ -25,6 +25,9 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verifylib as v  # noqa: E402
+
 DEADLINE_SECS = 4.0
 RESERVE_SECS = 1.0
 RUFF_CAP_SECS = 2.0
@@ -68,11 +71,6 @@ def _bash(root: Path, snippet: str, timeout: float) -> Optional[str]:
     if r.returncode != 0 or not r.stdout.strip():
         return None
     return r.stdout.strip()
-
-
-def target_root(root: Path) -> Optional[Path]:
-    out = _bash(root, "target_path", _sub_timeout(CFG_CAP_SECS))
-    return Path(out).resolve() if out else None
 
 
 def ruff_cmd(root: Path) -> Optional[str]:
@@ -232,23 +230,25 @@ def dependents_for(rel: str, root: Path, ruff: Optional[str]) -> Optional[List[s
 
 # --- Seen-state (pattern of pitfall-inject) ---------------------------------
 
-def _seen_path(root: Path) -> Path:
-    return root / "state" / "code-context-seen.json"
+def _seen_path(root: Path, sid: object) -> Path:
+    """Per session (§4.10): the session-<sid>- prefix is what session-start.py
+    prunes, so the file ages out with the marker; no shared file, no lock."""
+    return root / "state" / ("session-%s-code-context-seen.json" % _sanitize(sid))
 
 
 def _sanitize(s: object) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", str(s or "")) or "none"
 
 
-def load_seen(root: Path) -> dict:
+def load_seen(root: Path, sid: object) -> dict:
     try:
-        data = json.loads(_seen_path(root).read_text())
+        data = json.loads(_seen_path(root, sid).read_text())
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def save_seen(root: Path, data: dict) -> None:
+def save_seen(root: Path, sid: object, data: dict) -> None:
     cutoff = time.time() - PRUNE_DAYS * 86400
     for key in list(data):
         entries = data[key]
@@ -266,12 +266,12 @@ def save_seen(root: Path, data: dict) -> None:
         if not entries:
             del data[key]
     try:
-        d = _seen_path(root).parent
+        d = _seen_path(root, sid).parent
         d.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".ccseen-", suffix=".json")
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh)
-        os.replace(tmp, str(_seen_path(root)))
+        os.replace(tmp, str(_seen_path(root, sid)))
     except OSError:
         pass          # unwritable state: dedup degrades to repetition (B-4)
 
@@ -303,16 +303,14 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
     fp = str(tool_input.get("file_path") or "")
     if not fp.endswith(".py") or not os.path.isabs(fp):
         return None
-    troot = target_root(root)
-    if troot is None:
+    v.export_session(payload)                        # the payload's session_id is the only identity (§4.2)
+    hit = v.repo_relative(root, Path(fp))            # the tree the operand lies in — lexical, no lease (§4.4)
+    if hit is None:
         return None
-    try:
-        rel = Path(fp).resolve().relative_to(troot).as_posix()
-    except ValueError:
-        return None
+    troot, rel = hit
     key = "%s:%s" % (_sanitize(payload.get("session_id")),
                      _sanitize(payload.get("agent_id") or "main"))
-    seen = load_seen(root)
+    seen = load_seen(root, payload.get("session_id"))
     mine = seen.setdefault(key, {})
     if not isinstance(mine, dict):
         mine = seen[key] = {}
@@ -334,7 +332,7 @@ def run_hook(payload: dict, root: Path) -> Optional[dict]:
     # by PreCompact.
     signal.alarm(0)
     mine[rel] = {"touched": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    save_seen(root, seen)
+    save_seen(root, payload.get("session_id"), seen)
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                    "additionalContext": text}}
 
@@ -351,15 +349,22 @@ def _count_py(root: Path) -> int:
 
 def check(root: Path) -> List[str]:
     lines: List[str] = []
-    troot = target_root(root)
+    r = v.resolve_target(root, os.environ.get("DAEDALUS_SESSION_ID"))
     ruff = ruff_cmd(root)
     engine = "ruff" if ruff else "ast fallback"
-    if troot is None:
+    if isinstance(r, v.Refused):
+        # the session this check runs for cannot be bound (§4.4): say the sentence
+        lines.append("code context: target root: %s" % r.sentence)
+        if not ruff:
+            lines.append("code context: ast fallback (no recall.ruff configured)")
+        return lines
+    if not isinstance(r, v.Resolved):
         # distinct diagnosis — an unresolved target root is not "over cap"
         lines.append("code context: target root unresolved — hook inert")
         if not ruff:
             lines.append("code context: ast fallback (no recall.ruff configured)")
         return lines
+    troot = r.path
     files = _walk_py(troot)
     if files is None:
         total = _count_py(troot)
@@ -413,18 +418,16 @@ def main(argv: List[str]) -> int:
         # CLI: no deadline, no state.
         _deadline = time.monotonic() + 3600
         fp = os.path.abspath(argv[1])
-        troot = target_root(root)
-        for base in (troot, root):
-            if base is None:
-                continue
+        hit = v.repo_relative(root, Path(fp))
+        if hit is None:
             try:
-                rel = Path(fp).resolve().relative_to(base).as_posix()
+                hit = (root, Path(fp).resolve().relative_to(root).as_posix())
             except ValueError:
-                continue
-            deps = dependents_for(rel, base, ruff_cmd(root))
-            for d in deps or []:
-                print(d)
-            return 0
+                return 0
+        base, rel = hit
+        deps = dependents_for(rel, base, ruff_cmd(root))
+        for d in deps or []:
+            print(d)
         return 0
     # Hook mode.
     _deadline = time.monotonic() + DEADLINE_SECS
@@ -436,11 +439,7 @@ def main(argv: List[str]) -> int:
         return 0
     if payload.get("hook_event_name") == "PreCompact":
         try:
-            seen = load_seen(root)
-            sid = _sanitize(payload.get("session_id"))
-            for key in [k for k in seen if k.startswith(sid + ":")]:
-                del seen[key]
-            save_seen(root, seen)
+            save_seen(root, payload.get("session_id"), {})   # only this session's file (§4.10)
         except Exception:
             pass
         return 0

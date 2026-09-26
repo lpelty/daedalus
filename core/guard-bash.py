@@ -38,6 +38,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 
 SEPARATORS = {"&&", "||", ";", "|", "&"}
+# Scripts learn which session runs them from these variables (spec §4.4 step 1);
+# a prefix that strips or blanks one makes a session look like an operator shell.
+STRIP_VARS = re.compile(r"^(CLAUDE[A-Z_]*|DAEDALUS_SESSION_ID)$")
+STRIP_REASON = "scripts learn which session runs them from these variables; do not strip them"
 DESTRUCTIVE = [("reset", "--hard"), ("checkout", "--"), ("restore", "."), ("clean", "-f"), ("stash", "drop")]
 WRITE_IN_STRING = re.compile(r"(?:>>?|\btee\b|open\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][wa]|\.write_text\(|\bwrite\()")
 PATHISH = re.compile(r"[A-Za-z0-9_./~-]*[A-Za-z0-9_-]+(?:\.[A-Za-z0-9]+)?")
@@ -93,12 +97,17 @@ def branch_of(repo: Path) -> str:
     return out.strip() if code == 0 else ""
 
 
-def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created: bool) -> Optional[str]:
+def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created: bool,
+              refused: str = "") -> Optional[str]:
     repo, args = git_repo_and_args(seg, cwd)
     if not args:
         return None
     sub = args[0]
     rest = args[1:]
+    if refused and sub in ("push", "commit") and under(repo, v.ROOT):
+        # §4.4: a session no lease names, while leases exist, fails closed —
+        # the tree it would push or commit from is not known.
+        return refused
     for a, b in DESTRUCTIVE:
         if sub == a and (b in rest or (b == "-f" and any(r.startswith("-f") for r in rest))):
             if not (sub == "checkout" and rest and rest[-1] != "."):
@@ -248,6 +257,29 @@ def write_operands(seg: List[str]) -> List[str]:
     return ops
 
 
+def strips_session_variable(seg: List[str]) -> bool:
+    """`env -u VAR`, `env -i`, `unset VAR`, `VAR=` / `VAR=""` prefixes over a
+    session variable (spec §4.4 step 4 — the speed bump)."""
+    if not seg:
+        return False
+    if seg[0] == "env":
+        for i, a in enumerate(seg):
+            if a in ("-i", "--ignore-environment"):
+                return True
+            if a in ("-u", "--unset") and i + 1 < len(seg) and STRIP_VARS.match(seg[i + 1]):
+                return True
+            if a.startswith("-u") and len(a) > 2 and STRIP_VARS.match(a[2:]):
+                return True
+        return False
+    # shlex keeps a glued `;` on the word (`unset CLAUDECODE; ls` -> `CLAUDECODE;`)
+    if seg[0] == "unset":
+        return any(STRIP_VARS.match(a.rstrip(";")) for a in seg[1:])
+    if "=" in seg[0]:
+        name, val = seg[0].split("=", 1)
+        return bool(STRIP_VARS.match(name)) and val.rstrip(";") in ("", '""', "''")
+    return False
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -256,7 +288,16 @@ def main() -> int:
     except Exception:
         return 0
     root = v.ROOT
-    target = v.target_root(root)
+    sid = v.export_session(payload)
+    try:
+        ctx = v.lease_context(root, sid)             # one locked read; the refusal is in-process (§4.6)
+    except Exception:
+        ctx = v._empty_lease_context()               # the guard's own errors fail open, as ever
+    refused = ctx["refused"] or ""
+    target = None
+    if not refused:
+        r = v.resolve_target(root, sid)             # the tree path for check_git's trunk rules (one bash spawn, as before)
+        target = r.path if isinstance(r, v.Resolved) else None
     try:
         tokens = shlex.split(cmd, posix=True)
     except ValueError:
@@ -273,6 +314,9 @@ def main() -> int:
         for seg in segments(tokens):
             if not seg:
                 continue
+            if strips_session_variable(seg):
+                deny(STRIP_REASON)
+                return 0
             if seg[0] == "cd" and len(seg) >= 2:
                 here = resolve(here, seg[1])
                 continue
@@ -288,7 +332,7 @@ def main() -> int:
                     # trunk, right after `switch -c`), not an option, and
                     # `--detach` leaves the new branch too.
                     branch_created = False
-                reason = check_git(seg, here, target, branch_created)
+                reason = check_git(seg, here, target, branch_created, refused)
                 if reason:
                     deny(reason)
                     return 0

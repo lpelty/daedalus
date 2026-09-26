@@ -237,3 +237,11 @@ EOF2
   git -C "$T" branch -m main master
   run guard 'git commit -m x' "$T"; denied
 }
+
+@test "a prefix that strips a session variable is denied: env -u, env -i, unset, VAR= (spec §4.4 step 4)" {
+  for c in 'env -u CLAUDE_CODE_SESSION_ID git status' 'env -i bash -c ls' 'unset CLAUDECODE; ls' 'CLAUDE_PID= ls' 'DAEDALUS_SESSION_ID="" ls'; do
+    run guard "$c" "$T"; denied; case "$output" in *"scripts learn which session runs them from these variables; do not strip them"*) : ;; *) echo "wrong reason for '$c': $output"; return 1 ;; esac
+  done
+  run guard 'env FOO=1 ls' "$T"; allowed
+  run guard 'CLAUDE_CODE_USE_BEDROCK=1 ls' "$T"; allowed
+}

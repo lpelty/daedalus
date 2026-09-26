@@ -5,12 +5,17 @@
 # paired with a positive control so a crashed hook cannot pass as precision.
 # Assertions use [ ] only — a non-final [[ ]] is decorative under bash 3.2.
 
+load fixtures/leases/setup.bash
+
 setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/vault/pitfalls" \
            "$DAEDALUS_HOME/target/thing/sub" "$DAEDALUS_HOME/state"
-  cp "$SRC/lib.sh" "$SRC/pitfall-inject.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/pitfall-inject.py" "$DAEDALUS_HOME/core/"
+  # Registry isolation: a present, empty session registry, so no hook run from
+  # this fixture reads the developer's real ~/.claude/sessions/.
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"; mkdir -p "$BATS_TEST_TMPDIR/sessions"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
   repo: https://example.com/thing.git
@@ -202,7 +207,7 @@ EOF
   f="$DAEDALUS_HOME/vault/pitfalls/ee-block.md"
   for stage in injected warned; do
     printf '{"s1:main": {"%s": {"stage": "%s", "touched": "2026-01-01T00:00:00"}}}' "$f" "$stage" \
-      > "$DAEDALUS_HOME/state/pitfall-seen.json"
+      > "$DAEDALUS_HOME/state/session-s1-pitfall-seen.json"
     run hook "$(bash_call 'rm -rf /')"
     denied
     [ "$(count 'Never remove the root')" -gt 0 ]
@@ -527,4 +532,27 @@ EOF
   use_fixture aa-bad-timeout
   run hook "$(bash_call 'timeout 30 x')"
   denied
+}
+
+@test "no private target_root wrapper: neither hook shells to target_path on its own; a path pitfall fires under worktrees/02 for a bound session and for an unbound one (the banner carries the §4.4 sentence); --check under Refused prints the sentence" {
+  run grep -c "source \"\$1\"; target_path" "$SRC/pitfall-inject.py" "$SRC/code-context.py"; [ "$(printf '%s\n' "$output" | awk -F: '{s+=$2} END {print s}')" -eq 0 ]
+  cp "$SRC/verifylib.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  use_fixture bb-bats-brackets
+  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees/02/thing" "$DAEDALUS_HOME/worktrees/03/thing"
+  printf '{"lease":"02","session_id":"s2","worktree":"worktrees/02","branch":"lease/02"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  printf '{"lease":"03","session_id":"s3","worktree":"worktrees/03","branch":"lease/03"}' > "$DAEDALUS_HOME/state/leases/03.json"
+  run hook "$(edit_call "$DAEDALUS_HOME/worktrees/02/thing/t.bats" s2)"; case "$output" in *"bats"*) : ;; *) echo "bound: $output"; return 1 ;; esac
+  run hook "$(edit_call "$DAEDALUS_HOME/worktrees/02/thing/t.bats" sZ)"; case "$output" in *"bats"*"cannot tell which tree is mine"*) : ;; *) echo "unbound: $output"; return 1 ;; esac
+  run env DAEDALUS_SESSION_ID=sZ python3 "$SCRIPT" --check
+  case "$output" in *"target root: Several sessions are live"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"did not resolve"*) echo "old line must be gone: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "per-session seen file: state/session-<sid>-pitfall-seen.json, never the shared file; PreCompact resets only its own" {
+  use_fixture aa-bad-timeout
+  run hook "$(bash_call 'timeout 30 x' sA)"; run hook "$(bash_call 'timeout 30 x' sB)"
+  [ -f "$DAEDALUS_HOME/state/session-sA-pitfall-seen.json" ]; [ -f "$DAEDALUS_HOME/state/session-sB-pitfall-seen.json" ]; [ ! -f "$DAEDALUS_HOME/state/pitfall-seen.json" ]
+  run hook '{"hook_event_name":"PreCompact","session_id":"sA","trigger":"auto"}'
+  [ ! -s "$DAEDALUS_HOME/state/session-sA-pitfall-seen.json" ] || [ "$(cat "$DAEDALUS_HOME/state/session-sA-pitfall-seen.json")" = "{}" ]
+  [ -s "$DAEDALUS_HOME/state/session-sB-pitfall-seen.json" ]
 }
