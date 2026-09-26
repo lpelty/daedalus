@@ -613,3 +613,60 @@ import json,sys; d=json.load(open(sys.argv[1]))
 assert "untracked.txt" not in d["thing"], d; assert d.get("thing/sub",{})=={}, d
 PY
 }
+
+@test "the .changed sidecar keys non-ASCII, quoted and backslashed paths literally — never git's C-quoted form — so the boundary check can match them" {
+  LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'x\n' > "$W/café.txt"; printf 'x\n' > "$W/say \"hi\".txt"; printf 'x\n' > "$W/back\\slash.txt"
+  printf 'x\n' > "$W/naïve — dash.txt"; git -C "$W" add "naïve — dash.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m accents
+  printf 'x\n' > "$W/sub/résumé.txt"
+  run python3 "$LL" changed 01; [ "$status" -eq 0 ]
+  python3 - "$DAEDALUS_HOME/state/leases/01.changed" <<'PY'
+import json,sys; d=json.load(open(sys.argv[1]))
+assert set(d["thing"])=={"café.txt", 'say "hi".txt', "back\\slash.txt", "naïve — dash.txt"}, d
+assert set(d["thing/sub"])=={"résumé.txt"}, d
+PY
+}
+
+@test "a git listing that fails never empties a sidecar: the direct recompute refuses in plain words and keeps the last set; a lifecycle command keeps it, says so, and still runs" {
+  LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'c\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am committed
+  printf 'u\n' > "$W/untracked.txt"
+  python3 "$LL" changed 01 >/dev/null
+  before="$(cat "$DAEDALUS_HOME/state/leases/01.changed")"
+  case "$before" in *'"a.txt"'*'"untracked.txt"'*) : ;; *) echo "$before"; return 1 ;; esac
+  # The trunk ref vanishes: merge-base has no answer, and "no committed work" would be a guess.
+  git -C "$W" update-ref -d refs/remotes/origin/main
+  run python3 "$LL" changed 01; [ "$status" -ne 0 ]
+  case "$output" in *"window 01's changed set could not be recomputed"*"git merge-base origin/main HEAD failed"*"the last computed set is kept"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/leases/01.changed")" = "$before" ]
+  # When git recovers, the paths carry the stamps they had before the outage.
+  git -C "$W" fetch -q origin
+  run python3 "$LL" changed 01; [ "$status" -eq 0 ]
+  [ "$(cat "$DAEDALUS_HOME/state/leases/01.changed")" = "$before" ]
+  # Every git call fails (a held index lock): `note` still records the note, names the window it could not read, and wipes nothing.
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-fail" "$BATS_TEST_TMPDIR/bin/git"; chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run LS note 01 x
+  [ "$status" -eq 0 ]
+  case "$output" in *"Noted for window 01."*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  case "$output" in *"window 01's changed set could not be recomputed"*"index.lock"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/leases/01.changed")" = "$before" ]
+  [ "$(lease_json 01 note)" = "x" ]
+}
+
+@test "every lifecycle command recomputes every unswept window's sidecar, and a lease file that cannot be read stops the command before it changes anything" {
+  LS create >/dev/null; LS create >/dev/null
+  printf 'one\n' > "$DAEDALUS_HOME/worktrees/01/thing/one.txt"
+  printf 'two\n' > "$DAEDALUS_HOME/worktrees/02/thing/two.txt"
+  run LS note 01 x; [ "$status" -eq 0 ]
+  python3 - "$DAEDALUS_HOME/state/leases" <<'PY'
+import json,sys,os; L=sys.argv[1]
+one=json.load(open(os.path.join(L,"01.changed"))); two=json.load(open(os.path.join(L,"02.changed")))
+assert set(one["thing"])=={"one.txt"}, one; assert set(two["thing"])=={"two.txt"}, two
+PY
+  printf '{' > "$DAEDALUS_HOME/state/leases/02.json"
+  run LS note 01 y; [ "$status" -eq 1 ]
+  case "$output" in *"The lease file for window 02 cannot be read"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  [ "$(lease_json 01 note)" = "x" ]
+}

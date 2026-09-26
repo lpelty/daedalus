@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# A git that fails every invocation the way a held index lock does: one
+# fatal line on stderr, exit 128, nothing on stdout. For pinning that a
+# listing which cannot be read is never treated as "nothing changed".
+echo "fatal: Unable to create '$PWD/.git/index.lock': File exists." >&2
+exit 128

@@ -1008,6 +1008,21 @@ def spawn(root: Path, task: str, note: Optional[str]) -> str:
 
 # --- The observed changed set (§4.1) ------------------------------------------
 
+def _listing(repo_path: Path, repo: str, nn: str, *args: str) -> list:
+    """One NUL-separated git listing as a list of literal repo-relative paths.
+    -z keeps a path with accents, quotes, backslashes or control characters
+    literal (core.quotePath would C-quote it, and the boundary check could
+    never match it against another window's set). A listing that fails is
+    an answer we do not have, never an empty set: refuse, naming the window
+    and the command, so the caller keeps the last computed set."""
+    code, out, err = _git(repo_path, *args)
+    if code != 0:
+        last = (err.strip().splitlines() or ["no output"])[-1]
+        raise Refused("window %s's changed set could not be recomputed (git %s failed in %s: %s); "
+                      "the last computed set is kept." % (nn, " ".join(args), repo, last))
+    return [p for p in out.split("\0") if p]
+
+
 def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
     """{"<repo>": {"<repo-relative path>": "<first-seen stamp>"}} — per repo of
     the lease's worktree, the union of committed/staged work on the lease
@@ -1015,8 +1030,11 @@ def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
     modifications (diff) and untracked files (ls-files --others). A nested
     repo's paths never belong to the outer set. A path keeps the stamp it
     carried in `previous` while it stays changed; a path that left the set
-    is dropped. Takes no lock (three git listings per repo, nothing under
-    state/leases/)."""
+    is dropped. Any listing that fails — merge-base included: a missing
+    origin/<trunk> is not "no committed work" — raises Refused, and the
+    caller leaves the sidecar as it was (§4.1: an empty set claims nothing,
+    so a wiped set would silence every warning for the window). Takes no
+    lock (four git commands per repo, nothing under state/leases/)."""
     out: dict = {}
     stamp = now_stamp()
     base = root / str(lease.get("worktree") or ("worktrees/%s" % nn))
@@ -1025,11 +1043,10 @@ def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
         if not repo_path.is_dir():
             continue
         paths: set = set()
-        code, mb, _ = _git(repo_path, "merge-base", "origin/" + trunk, "HEAD")
-        if code == 0 and mb.strip():
-            paths.update(_git(repo_path, "diff", "--name-only", mb.strip())[1].splitlines())
-        paths.update(_git(repo_path, "diff", "--name-only")[1].splitlines())
-        paths.update(_git(repo_path, "ls-files", "--others", "--exclude-standard")[1].splitlines())
+        mb = _listing(repo_path, repo, nn, "merge-base", "origin/" + trunk, "HEAD")
+        paths.update(_listing(repo_path, repo, nn, "diff", "--name-only", "-z", mb[0].strip()))
+        paths.update(_listing(repo_path, repo, nn, "diff", "--name-only", "-z"))
+        paths.update(_listing(repo_path, repo, nn, "ls-files", "--others", "--exclude-standard", "-z"))
         # a nested repo's paths never belong to the outer set
         nested_prefixes = [r[len(repo) + 1:] + "/" for r in lease.get("trunks", {}) if r.startswith(repo + "/")]
         prev = previous.get(repo, {}) if isinstance(previous.get(repo), dict) else {}
@@ -1038,9 +1055,12 @@ def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
     return out
 
 
-def recompute_changed(root: Path, nn: str) -> dict:
-    """Read the sidecar, compute, write (tmp + os.replace). Takes no lock."""
-    lease = read_lease(root, nn) or {}
+def recompute_changed(root: Path, nn: str, lease: Optional[dict] = None) -> dict:
+    """Read the sidecar, compute, write (tmp + os.replace). Takes no lock. A
+    Refused from the listings propagates before the write, so the sidecar
+    on disk is untouched."""
+    if lease is None:
+        lease = read_lease(root, nn) or {}
     changed = compute_changed(root, nn, lease, read_changed(root, nn))
     write_changed(root, nn, changed)
     return changed
@@ -1049,11 +1069,19 @@ def recompute_changed(root: Path, nn: str) -> dict:
 def recompute_all_changed(root: Path) -> None:
     """Every unswept lease's sidecar (§4.1: a shell has no budget). Takes and
     releases LOCK_SH for the one directory read, then works outside it — so
-    it is never called from under another lock (the lock is not re-entrant)."""
+    it is never called from under another lock (the lock is not re-entrant).
+    A lease file that cannot be read refuses the whole command (read_all).
+    One window whose git cannot answer must not block another window's
+    command: its sidecar is left as it was and the reason goes to stderr."""
     with lock(root, shared=True):
-        numbers = [k for k in read_all(root) if k != "prime"]
-    for nn in numbers:
-        recompute_changed(root, nn)
+        leases = read_all(root)
+    for nn, lease in leases.items():
+        if nn == "prime":
+            continue
+        try:
+            recompute_changed(root, nn, lease)
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e)
 
 
 # --- CLI ----------------------------------------------------------------------
@@ -1085,7 +1113,10 @@ def main(argv: list) -> int:
     if cmd == "changed":
         if not args:
             sys.stderr.write("usage: leaselib.py changed <NN>\n"); return 2
-        print(json.dumps(recompute_changed(root, args[0]))); return 0
+        try:
+            print(json.dumps(recompute_changed(root, args[0]))); return 0
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
     # §4.1: every lifecycle command recomputes every unswept lease's sidecar (a
     # shell has no budget). Before the dispatch and outside any lock — it takes
     # and releases LOCK_SH itself. list/status do it through the board (Task 8);
