@@ -48,11 +48,14 @@ def _lib(root: Path, snippet: str) -> str:
     return out.strip() if code == 0 else ""
 
 
-def _lib_full(root: Path, snippet: str) -> Tuple[int, str, str]:
+NO_LIB = "no core/lib.sh"
+
+
+def _lib_full(root: Path, snippet: str, timeout: int = 5) -> Tuple[int, str, str]:
     lib = root / "core" / "lib.sh"
     if not lib.is_file():
-        return 127, "", "no core/lib.sh"
-    return run(["bash", "-c", 'source "$1"; ' + snippet, "_", str(lib)], timeout=5)
+        return 127, "", NO_LIB
+    return run(["bash", "-c", 'source "$1"; ' + snippet, "_", str(lib)], timeout=timeout)
 
 
 def target_root(root: Path) -> Optional[Path]:
@@ -91,15 +94,31 @@ def export_session(payload: dict) -> Optional[str]:
     return str(sid) if sid else None
 
 
-def resolve_target(root: Path, session_id: Optional[str]):
+def resolve_target(root: Path, session_id: Optional[str], timeout: int = 5):
     """Tri-state, never None (§4.4). The bash seam: lib.sh target_path with the
     session id exported; a non-zero exit whose stderr carries a `daedalus:`
-    sentence is Refused, any other failure is Unconfigured."""
+    sentence is Refused, any other failure is Unconfigured — except a seam
+    that never answered. `leaselib.py resolve` takes LOCK_SH, so while a
+    neighbour's SessionStart holds LOCK_EX through its worktree adds this
+    call waits; when it runs out of `timeout` (v.run's 127) the tree is
+    simply not known, and not-known fails CLOSED: Refused, with a sentence
+    that says so. Mapping it to Unconfigured would write a marker with
+    neither target_base nor target_base_error — the silent fail-open the
+    tri-state exists to remove (Task 6 review). session-start.py passes the
+    budget it has left; every other consumer keeps the 5 s default."""
     if session_id:
         os.environ["DAEDALUS_SESSION_ID"] = str(session_id)
-    code, out, err = _lib_full(root, "target_path")
+    code, out, err = _lib_full(root, "target_path", timeout=timeout)
     if code == 0 and out.strip():
         return Resolved(Path(out.strip()).resolve())
+    if code == 127 and err != NO_LIB:
+        if "timed out" in (err or ""):
+            return Refused("the lease resolution did not answer within %d s (another window was probably being "
+                           "set up at the same moment), so the tree this session builds in is not known. Start a "
+                           "fresh window; if this line comes back, check for a stuck `git worktree add` and run "
+                           "`core/lease.sh sweep`." % timeout)
+        return Refused("the lease resolution could not be run (%s), so the tree this session builds in is not known."
+                       % ((err or "").strip() or "no reason given"))
     sentence = ""
     for ln in (err or "").splitlines():
         if ln.startswith("daedalus: "):

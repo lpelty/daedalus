@@ -68,6 +68,16 @@ teardown() { teardown_live; }
   [ "$status" -eq 3 ]; case "$output" in *"window 02's worktree was not finished at start"*"core/lease.sh claim 02"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
 }
 
+@test "resolve refuses a DAEDALUS_LEASE that is not a window number by name — prime, an alias, a path — never as 'the lease file for window ../x is gone' (Task 6 review)" {
+  python3 "$LL" _test-write 02 '{"lease":"02","session_id":"sA","worktree":"worktrees/02","branch":"lease/02"}'
+  for bad in prime ../x poc-ui 00; do
+    run bash -c "DAEDALUS_SESSION_ID=sA DAEDALUS_LEASE=$bad python3 '$LL' resolve thing 2>&1 >/dev/null"
+    [ "$status" -eq 3 ]
+    case "$output" in *"\`DAEDALUS_LEASE=$bad\` is not a window number (two digits, 01–99)"*) : ;; *) echo "$bad: $output"; return 1 ;; esac
+    case "$output" in *"is gone"*|*"this session is window"*) echo "$bad: wrong sentence: $output"; return 1 ;; *) : ;; esac
+  done
+}
+
 @test "resolve fails closed on a lease file that exists but cannot be read: the holder and an unbound session both die naming the file, never target/<name>" {
   L="$DAEDALUS_HOME/state/leases"
   # A truncated file — the only lease on disk. Silently skipping it would

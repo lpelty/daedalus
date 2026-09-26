@@ -28,6 +28,14 @@ import sys
 import time
 from pathlib import Path
 
+# The tracked .claude/settings.json gives this hook 30 s (pinned in
+# test_session_start.bats). Allocation may spend most of it on worktree adds;
+# the target resolution that follows gets what is left, less a tail for the
+# marker's own git calls, and never less than the 5 s every other hook uses.
+HOOK_BUDGET_SECS = 30
+MARKER_TAIL_SECS = 5
+MIN_RESOLVE_SECS = 5
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import verifylib as v
@@ -49,7 +57,13 @@ def unverified(root: Path, marker: dict) -> list:
     return out
 
 
+def resolve_budget(started_at: float) -> int:
+    left = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - (time.time() - started_at)
+    return max(MIN_RESOLVE_SECS, int(left))
+
+
 def main() -> int:
+    started_at = time.time()
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
@@ -100,10 +114,21 @@ def main() -> int:
             # PROP-019: resolve origin/<config target.branch>, and when that fails record WHY,
             # so the boundary hook can refuse by name instead of skipping by silence.
             branch, base, base_err = v.target_branch(root), "", ""
-            r = v.resolve_target(root, sid)
+            # The seam waits on the lease lock while a neighbour's SessionStart
+            # adds its worktrees (§4.2: seconds, not milliseconds), so it gets
+            # the budget this hook has left rather than the 5 s default; a seam
+            # that still does not answer is Refused, and recorded as such.
+            r = v.resolve_target(root, sid, timeout=resolve_budget(started_at))
             if isinstance(r, v.Refused):
                 base_err = r.sentence
                 notes.append("This session cannot be bound to a lease: %s" % r.sentence)
+            elif isinstance(r, v.Unconfigured):
+                # No target yet (no config, no lib.sh): notes, never denials —
+                # but the marker still says WHY it holds no base, so it is never
+                # a silent empty pair that a later Stop reads as "not recorded".
+                base_err = r.reason
+                notes.append("The target did not resolve (%s); the promotion gate has nothing to compare until it does."
+                             % r.reason)
             elif isinstance(r, v.Resolved):
                 t = r.path
                 rcode, _, _ = v.run(["git", "-C", str(t), "remote", "get-url", "origin"])

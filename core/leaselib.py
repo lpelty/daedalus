@@ -220,6 +220,10 @@ def _override(root: Path) -> Optional[Path]:
     return p
 
 
+def bad_hint_sentence(hint: str) -> str:
+    return "`DAEDALUS_LEASE=%s` is not a window number (two digits, 01–99)" % hint
+
+
 def resolve_lease(leases: Dict[str, dict], sid: str) -> Tuple[Optional[str], Optional[dict]]:
     """§4.4 steps 2–3 over an already-read lease dict. Pure: no I/O, no lock.
     (nn, lease) when the session is bound; (None, None) when no lease file
@@ -231,6 +235,11 @@ def resolve_lease(leases: Dict[str, dict], sid: str) -> Tuple[Optional[str], Opt
     nn, lease = lease_of_session(leases, sid)
     hint = os.environ.get("DAEDALUS_LEASE", "").strip()
     if hint:
+        if not valid_id(hint):
+            # Refused by name: 'prime', an alias, or a path in this position
+            # must never reach read_lease (state/leases/<hint>.json) — Task 6 review.
+            raise Refused(bad_hint_sentence(hint) + ". Unset the variable, or set it to the number `core/lease.sh "
+                          "create` printed.")
         # A bound session's own lease file outranks the hint, whether the
         # hinted file exists or not: telling window 02 to "claim 03" because
         # 03 is missing would be the wrong remedy. Only an unbound session
@@ -1054,7 +1063,24 @@ def session_start_bind(root: Path, sid: str) -> dict:
     out = {"lease": None, "prime": False, "took_pen": False, "numbered": False, "notes": []}
     terminal = is_terminal_window(sid)
     hint = os.environ.get("DAEDALUS_LEASE", "").strip()
+    if hint and not valid_id(hint):
+        # Every command that takes a lease takes its NUMBER (§4.2). Unvalidated,
+        # `DAEDALUS_LEASE=prime` bound prime.json as a lease — the pen moved
+        # without `prime take` (§4.8) — and a path rewrote whatever JSON it
+        # named under the home (Task 6 review).
+        out["notes"].append(bad_hint_sentence(hint) + "; it was ignored.")
+        hint = ""
     with lock(root):
+        held, _ = lease_of_session(read_all(root), sid)
+        if hint and held is not None and held != hint:
+            # One lease per session, the rule claim() enforces, holds on the
+            # hook path too: a `claude --resume` from a shell that still
+            # exports an older window's number must not make this session the
+            # holder of two numbers (Task 6 review). self_rebind below keeps it
+            # on the window it already is.
+            out["notes"].append("`DAEDALUS_LEASE=%s` ignored: this session is already window %s (the lease files are "
+                                "the truth)." % (hint, held))
+            hint = ""
         if hint:
             lease = read_lease(root, hint)
             if lease is None:

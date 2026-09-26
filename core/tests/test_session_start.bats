@@ -269,6 +269,80 @@ print(p.returncode, round(time.time()-t,2))' "$(printf '{"hook_event_name":"Sess
   case "$output" in *"window 01's worktree was not finished at start; run \`core/lease.sh claim 01\` to finish it"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "a SessionStart whose lease resolution overlaps a neighbour's worktree add still records target_base: the seam waits inside the hook's budget instead of timing out at 5 s (Task 6 review)" {
+  # Two registered windows 0.5 s apart under a slow git: A allocates (~2 s),
+  # releases the lock, then resolves its target while B holds LOCK_EX for
+  # ~6 s adding two worktrees. With a 5 s seam A's marker used to come out
+  # with neither target_base nor target_base_error — the silent fail-open
+  # §4.4 exists to remove — and every Stop then blocked with the wrong sentence.
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-slow" "$BATS_TEST_TMPDIR/bin/git"; chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  p1="$(live_pid)"; registry_entry "$p1" sA; p2="$(live_pid)"; registry_entry "$p2" sB
+  ( PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_GIT_SLEEP=1 start sA startup > "$BATS_TEST_TMPDIR/outA" ) &
+  sleep 0.5
+  ( PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_GIT_SLEEP=3 start sB startup > "$BATS_TEST_TMPDIR/outB" ) &
+  wait
+  base="$(git -C "$T" rev-parse origin/main)"
+  for s in sA sB; do
+    python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"]==sys.argv[2] and m["target_base_error"]=="", (sys.argv[1], m)' "$DAEDALUS_HOME/state/session-$s.json" "$base"
+  done
+  case "$(cat "$BATS_TEST_TMPDIR/outA")" in *"cannot be bound"*|*"Promotion gate"*) echo "A: $(cat "$BATS_TEST_TMPDIR/outA")"; return 1 ;; *) : ;; esac
+}
+
+@test "a lease resolution that does not answer in time is Refused (fail-closed), never Unconfigured: the sentence says it did not answer" {
+  # The seam's timeout is v.run's 127; before the Task 6 review it fell into
+  # the Unconfigured branch, which plan 3 turns into 'notes, never denials'.
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  python3 -c 'import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT); fcntl.flock(fd,fcntl.LOCK_EX); time.sleep(6)' "$DAEDALUS_HOME/state/leases/.lock" 3>&- </dev/null >/dev/null 2>&1 &
+  holder=$!; echo "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
+  sleep 0.3
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import verifylib as v
+from pathlib import Path
+r = v.resolve_target(Path(sys.argv[2]), "sX", timeout=1)
+print(type(r).__name__); print(getattr(r, "sentence", getattr(r, "reason", "")))' "$DAEDALUS_HOME/core" "$DAEDALUS_HOME"
+  [ "$status" -eq 0 ]
+  case "$output" in "Refused"*"did not answer within 1 s"*) : ;; *) echo "$output"; return 1 ;; esac
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+}
+
+@test "an unconfigured target is recorded in the marker as its reason and said at start — the marker is never a silent empty pair" {
+  sed -i.bak '/^  repo: /d' "$DAEDALUS_HOME/config.yaml"; rm -f "$DAEDALUS_HOME/config.yaml.bak"
+  run start sN startup; [ "$status" -eq 0 ]
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"]=="" and "target.repo is required" in m["target_base_error"], m' "$DAEDALUS_HOME/state/session-sN.json"
+  case "$output" in *"The target did not resolve"*"target.repo is required"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Promotion gate"*) echo "an unconfigured target is not a promotion-gate refusal: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "DAEDALUS_LEASE=prime is not a window number: prime.json is untouched and the line says it was ignored; a traversal value writes nothing outside state/leases/ (Task 6 review)" {
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  [ "$(lease_json prime session_id)" = "sA" ]
+  before="$(cat "$DAEDALUS_HOME/state/leases/prime.json")"
+  run env DAEDALUS_LEASE=prime bash -c "$(declare -f start); start sZ startup"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$DAEDALUS_HOME/state/leases/prime.json")" = "$before" ]
+  # the hook's output is JSON, where the en dash in "01–99" is escaped: match around it
+  case "$output" in *"\`DAEDALUS_LEASE=prime\` is not a window number (two digits, 01"*"99); it was ignored."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lease file for window prime"*) echo "the bad hint must be refused by name, not reported as a missing file: $output"; return 1 ;; *) : ;; esac
+  # state/leases/../x.json is state/x.json — a valid lease body there used to be bound and rewritten.
+  printf '{"lease":"x","session_id":null}' > "$DAEDALUS_HOME/state/x.json"
+  run env DAEDALUS_LEASE=../x bash -c "$(declare -f start); start sY startup"
+  [ "$(cat "$DAEDALUS_HOME/state/x.json")" = '{"lease":"x","session_id":null}' ]
+  case "$output" in *"\`DAEDALUS_LEASE=../x\` is not a window number"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["lease"] is None and "not a window number" in m["target_base_error"], m' "$DAEDALUS_HOME/state/session-sY.json"
+}
+
+@test "a resumed session that already holds a window ignores a different DAEDALUS_LEASE: one lease, orientation and marker agree (Task 6 review)" {
+  for i in 1 2 3; do bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null; done
+  run env DAEDALUS_LEASE=02 bash -c "$(declare -f start); start sR startup"
+  [ "$(lease_json 02 session_id)" = "sR" ]
+  rm "$DAEDALUS_HOME/state/session-sR.json"       # a fresh marker, as after a restart with the variable still exported
+  run env DAEDALUS_LEASE=03 bash -c "$(declare -f start); start sR resume"
+  [ "$status" -eq 0 ]
+  [ "$(lease_json 02 session_id)" = "sR" ]; [ "$(lease_json 03 session_id)" = "None" ]
+  [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ]
+  case "$output" in *"\`DAEDALUS_LEASE=03\` ignored: this session is already window 02 (the lease files are the truth)."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lease"])' "$DAEDALUS_HOME/state/session-sR.json")" = "02" ]
+}
+
 @test "the tracked settings.json gives session-start.py 30 s" {
   python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); h=[x for g in d["hooks"]["SessionStart"] for x in g["hooks"] if "session-start.py" in x["command"]][0]
