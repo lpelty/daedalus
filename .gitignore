@@ -33,3 +33,7 @@ __pycache__/
 
 # Linked worktrees for feature branches (superpowers:using-git-worktrees).
 .worktrees/
+
+# Lease worktrees (spec §4.2): one checkout of the target per window, cut from
+# target/<repo>. Untracked noise in every boundary-hook status otherwise.
+worktrees/
