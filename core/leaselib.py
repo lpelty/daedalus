@@ -79,16 +79,34 @@ def lease_path(root: Path, nn: str) -> Path:
     return leases_dir(root) / ("%s.json" % nn)
 
 
+def _unreadable(nn: str, reason: str) -> Refused:
+    what = "The prime file (state/leases/prime.json)" if nn == "prime" else "The lease file for window %s" % nn
+    return Refused("%s cannot be read (%s). Fix it or run `core/lease.sh sweep` before building." % (what, reason))
+
+
 def read_lease(root: Path, nn: str) -> Optional[dict]:
+    """None only when the file does not exist. A file that exists but cannot
+    be opened or parsed, or is not a JSON object, raises Refused: treating it
+    as absent would resolve its holder (and every unbound session) to the
+    prime's checkout with exit 0 — the fail-open §4.4 exists to prevent."""
     try:
-        d = json.loads(lease_path(root, nn).read_text())
-        return d if isinstance(d, dict) else None
-    except (OSError, ValueError):
+        text = lease_path(root, nn).read_text()
+    except FileNotFoundError:
         return None
+    except OSError as e:
+        raise _unreadable(nn, e.strerror or str(e))
+    try:
+        d = json.loads(text)
+    except ValueError as e:
+        raise _unreadable(nn, "not valid JSON: %s" % e)
+    if not isinstance(d, dict):
+        raise _unreadable(nn, "not a JSON object")
+    return d
 
 
 def read_all(root: Path) -> Dict[str, dict]:
-    """Every lease file, keyed by number ('prime' for prime.json). Caller holds the lock."""
+    """Every lease file, keyed by number ('prime' for prime.json). Caller holds
+    the lock. Raises Refused on the first file that exists but cannot be read."""
     out: Dict[str, dict] = {}
     d = leases_dir(root)
     if not d.is_dir():
@@ -242,7 +260,15 @@ def resolve(root: Path, sid: Optional[str], name: str) -> Path:
         return ov
     default = root / "target" / name
     with lock(root, shared=True):
-        leases = read_all(root)
+        try:
+            leases = read_all(root)
+        except Refused as e:
+            if sid is not None:
+                raise
+            # An operator shell is not a session and always gets the prime's
+            # checkout; the live-window count is a courtesy, so say why it is missing.
+            sys.stderr.write("daedalus: no session — using the prime's checkout target/%s (%s)\n" % (name, e))
+            return default
     if sid is None:
         live = sum(1 for k, d in leases.items() if k != "prime" and not d.get("released"))
         sys.stderr.write("daedalus: no session — using the prime's checkout target/%s (%d windows live)\n" % (name, live))
