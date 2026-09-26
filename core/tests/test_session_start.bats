@@ -348,3 +348,18 @@ print(type(r).__name__); print(getattr(r, "sentence", getattr(r, "reason", "")))
 d=json.load(open(sys.argv[1])); h=[x for g in d["hooks"]["SessionStart"] for x in g["hooks"] if "session-start.py" in x["command"]][0]
 assert h["timeout"]==30, h' "$SRC/../.claude/settings.json"
 }
+
+@test "first-up never rebinds a prime whose holder is live in the registry but holds only the pen (released its number): the new window numbers itself without the pen; once that holder's process is gone, the next window first-ups with 'previous holder gone'" {
+  pa="$(live_pid)"; registry_entry "$pa" sA interactive cli daedalus-01
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  pb="$(live_pid)"; registry_entry "$pb" sB interactive cli daedalus-02
+  run start sB startup; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 01, $DAEDALUS_HOME" ]
+  [ "$(lease_json 01 session_id)" = "sB" ]; [ "$(lease_json prime session_id)" = "sA" ]
+  kill "$pa"; wait "$pa" 2>/dev/null || true
+  pc="$(live_pid)"; registry_entry "$pc" sC interactive cli daedalus-03
+  run start sC startup; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ]
+  [ "$(lease_json prime session_id)" = "sC" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"]=="sA" and h[0]["to"]=="sC" and "previous holder gone" in h[0]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
+}

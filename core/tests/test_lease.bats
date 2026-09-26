@@ -719,3 +719,35 @@ PY
   case "$output" in *"Window 01 holds the pen now (prime)"*) : ;; *) echo "$output"; return 1 ;; esac
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"] is None and h[0]["to"]=="sA", h' "$DAEDALUS_HOME/state/leases/prime.json"
 }
+
+@test "prime take refuses while the registry shows the taker's session id in two terminals, even with a reason; prime.json is unchanged (§4.5 names prime take beside claim)" {
+  LS create >/dev/null; LS create >/dev/null
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sB LS claim 02 >/dev/null
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  p3="$(live_pid)"; registry_entry "$p3" sB interactive cli daedalus-02     # the same session id, open in a second terminal
+  run python3 "$LL" registry-live-pids sB; [ "$(printf '%s\n' $output | wc -l | tr -d ' ')" -eq 2 ]
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "hand it over"
+  [ "$status" -ne 0 ]; case "$output" in *"open in two terminals at once (pids"*"close one"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert h==[], h' "$DAEDALUS_HOME/state/leases/prime.json"
+}
+
+@test "prime take over a holder that is live in the registry but holds only the pen (released its number, §4.4) needs --reason like any live holder; 'previous holder gone' is recorded only when neither a live lease nor a live registry entry exists" {
+  LS create >/dev/null
+  pa="$(live_pid)"; registry_entry "$pa" sA interactive cli daedalus-01
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  pb="$(live_pid)"; registry_entry "$pb" sB interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sB LS claim 01 >/dev/null
+  run python3 "$LL" registry-live-pids sA; [ "$output" = "$pa" ]
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"held by a live session"*"holds no window"*"daedalus-01"*"--reason"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "the operator asked for the pen"
+  [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"]=="sA" and "asked for the pen" in h[0]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
+  # Now the prime-only holder's process is gone: no lease, no live registry entry — the take needs no reason.
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  kill "$pa"; wait "$pa" 2>/dev/null || true
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert h[-1]["reason"]=="previous holder gone", h' "$DAEDALUS_HOME/state/leases/prime.json"
+}

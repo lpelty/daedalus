@@ -1030,6 +1030,22 @@ def is_terminal_window(sid: str) -> bool:
     return is_interactive_window(registry_entry_for(sid))
 
 
+def prime_holder_live(root: Path, leases: Dict[str, dict], holder: str) -> Tuple[bool, Optional[str], Optional[dict]]:
+    """Is the pen's holder still a live session? (live, hnn, hlease). Two legs,
+    both required (§4.8 'refuses when the current holder is live'): the
+    holder's numbered lease, when it has one, judged by liveness(); and,
+    when it holds ONLY the pen — reachable because `release <NN>` keeps the
+    pen (§4.4) and sweep removes a released lease before it looks at
+    liveness — the registry, through the same live-entry check liveness()
+    uses for "resumed". Judging by the lease alone called a live prime-only
+    holder "gone", and both prime take and first-up rebound the pen under
+    it with no reason recorded (Task 7 review)."""
+    hnn, hlease = lease_of_session(leases, holder)
+    if hlease is not None:
+        return liveness(root, hnn, hlease) in HELD_BY_LIVE, hnn, hlease
+    return bool(registry_live_entries(holder)), None, None
+
+
 def first_up(root: Path, sid: str) -> bool:
     """Caller holds the lock. O_EXCL prime.json; a stale prime is rebound by CAS."""
     prime = read_lease(root, "prime")
@@ -1042,8 +1058,7 @@ def first_up(root: Path, sid: str) -> bool:
     holder = prime.get("session_id")
     if holder == sid:
         return True
-    hnn, hlease = lease_of_session(read_all(root), str(holder))
-    if hlease is not None and liveness(root, hnn, hlease) in HELD_BY_LIVE:
+    if prime_holder_live(root, read_all(root), str(holder))[0]:
         return False
     fresh = read_lease(root, "prime") or {}
     if fresh.get("session_id") != holder:
@@ -1227,14 +1242,19 @@ def prime_take(root: Path, sid: str, reason: Optional[str]) -> str:
         mine, _ = lease_of_session(leases, sid)
         if mine is None:
             raise Refused("This session holds no window, so it cannot take the pen; claim a number first.")
+        registry_entry_for(sid)   # §4.5: a session open in two terminals cannot take the pen either (Refused)
         prime = leases.get("prime") or {}
         holder = prime.get("session_id")
         expect = os.environ.get("LEASE_TEST_CAS_EXPECT", holder)   # test knob: simulate a stale read
-        hnn, hlease = lease_of_session(leases, str(holder)) if holder else (None, None)
-        if holder and holder != sid and hlease is not None and liveness(root, hnn, hlease) in HELD_BY_LIVE:
-            if not reason:
+        if holder and holder != sid and not reason:
+            live, hnn, hlease = prime_holder_live(root, leases, str(holder))
+            if live and hlease is not None:
                 raise Refused("The pen is held by a live session, %s. Taking it needs --reason \"<the operator's words>\"."
                               % window_label(hnn, hlease))
+            if live:
+                names = [e.get("name") for e in registry_live_entries(str(holder)) if e.get("name")]
+                raise Refused("The pen is held by a live session that holds no window now (peer name %s). "
+                              "Taking it needs --reason \"<the operator's words>\"." % (names[0] if names else "unknown"))
         fresh = read_lease(root, "prime") or {}
         if fresh.get("session_id") != expect:
             raise Refused("`prime` changed under you — re-read the board and try again")
