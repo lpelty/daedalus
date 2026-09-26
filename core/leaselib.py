@@ -712,6 +712,15 @@ def bind(root: Path, nn: str, sid: str) -> dict:
                   "proc_started": entry.get("startedAt") if entry else None,
                   "peer_name": entry.get("name") if entry else None})
     fresh.pop("released", None)
+    if expect and expect != sid:
+        # A takeover from a dead holder: the old holder's report (`done`) and
+        # its spawned mark describe THAT session, not this one — an interactive
+        # takeover is not a spawned clone and has not reported. Left in place
+        # they render a live window FINISHED and keep sweep from ever clearing
+        # it (Task 4 review). A null holder is the clone's own first binding of
+        # a spawned lease, which keeps spawned: true.
+        for key in ("finished", "summary", "spawned"):
+            fresh.pop(key, None)
     if fresh.get("worktree_ready") is False:
         if add_worktrees(root, nn, fresh.get("trunks") or trunks_of(root, root / "target")):
             fresh.pop("worktree_ready", None)
@@ -748,9 +757,22 @@ def claim(root: Path, token: str, sid: str) -> str:
     with lock(root):
         leases = read_all(root)
         nn = number_of(leases, token, "claim")
+        held, held_lease = lease_of_session(leases, sid)
+        if held and held != nn:
+            # One lease per session id: resolve, the board, self_rebind and
+            # done's prime lookup all read the ONE lease that names a session.
+            if held_lease.get("released"):
+                raise Refused("This session was window %s and released it; this window is done — close it and open a "
+                              "new terminal for a fresh number." % held)
+            raise Refused("This session is already window %s; say 'release %s' first." % (held, held))
         if nn in leases:
+            before = leases[nn]
             lease = bind(root, nn, sid)
-            return "This is %s." % window_label(nn, lease)
+            line = "This is %s." % window_label(nn, lease)
+            if before.get("finished") and before.get("session_id") != sid:
+                line += (" An earlier session finished it (%s); that report is cleared — this window continues the work."
+                         % (before.get("summary") or "no summary"))
+            return line
         trunks = trunks_of(root, root / "target")
         subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
         data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
@@ -800,6 +822,19 @@ def set_field(root: Path, token: str, cmd: str, key: str, value: object) -> str:
         return nn
 
 
+def dirty_files(worktree: Path) -> list:
+    """Paths `git status` reports in a lease worktree — modified, staged and
+    untracked alike; [] for a clean tree or a path that is not there. A
+    failing status is an answer we do not have, never 'clean'."""
+    if not worktree.is_dir():
+        return []
+    code, out, err = _git(worktree, "status", "--porcelain", "--untracked-files=all")
+    if code != 0:
+        last = err.strip().splitlines()[-1:] or ["no output"]
+        raise Refused("cannot tell whether %s has uncommitted changes (git status failed: %s)" % (worktree, last[0]))
+    return [ln[3:].split(" -> ")[-1] for ln in out.splitlines() if len(ln) > 3]
+
+
 def _remove_lease_files(root: Path, nn: str) -> None:
     for p in (lease_path(root, nn), leases_dir(root) / (nn + ".seen"), leases_dir(root) / (nn + ".changed")):
         try:
@@ -813,8 +848,9 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
     sweep, so the holder's own hooks can still read the state). Any other
     session is refused while the holder is live; a stale lease may be released
     from anywhere, and an operator shell (sid None) may release anything.
-    --remove deletes worktree and branch, refusing unpromoted commits without
-    --force and repeating their subjects before deleting them (§4.2)."""
+    --remove deletes worktree and branch, refusing unpromoted commits and
+    uncommitted changes without --force and naming them (subjects, file
+    paths) before deleting them (§4.2, §4.5)."""
     with lock(root):
         leases = read_all(root)
         nn = number_of(leases, token, "release")
@@ -830,12 +866,28 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
             return "Window %s released; this window is done — close it." % nn
         trunks = lease.get("trunks") or {}
         subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
-        if subjects and not force:
-            raise Refused("Window %s has %d unpromoted commit%s: %s. Add --force to delete them."
-                          % (nn, len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects)))
+        # Uncommitted work is work too (§4.5): `git worktree remove` refuses a
+        # dirty tree on its own, and the --force below would bypass that
+        # refusal silently, so it is gated and named here first (Task 4 review).
+        dirty = []
+        for repo in trunks:
+            files = dirty_files(root / "worktrees" / nn / repo)
+            if files:
+                dirty.append((repo, files))
+        problems = []
+        if subjects:
+            problems.append("has %d unpromoted commit%s: %s"
+                            % (len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects)))
+        for repo, files in dirty:
+            problems.append("has uncommitted changes in worktrees/%s/%s (%d file%s: %s)"
+                            % (nn, repo, len(files), "" if len(files) == 1 else "s", ", ".join(files)))
+        if problems and not force:
+            raise Refused("Window %s %s. Add --force to delete them." % (nn, ", and ".join(problems)))
         out = []
         if subjects:
             out.append("Deleting window %s's unpromoted commits: %s" % (nn, _quoted(subjects)))
+        for repo, files in dirty:
+            out.append("Deleting window %s's uncommitted changes in worktrees/%s/%s: %s" % (nn, nn, repo, ", ".join(files)))
         for repo in reversed(list(trunks)):          # nested repos first: they sit inside the outer worktree
             src = root / "target" / repo
             dest = root / "worktrees" / nn / repo
@@ -890,6 +942,13 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
     lines = []
     with lock(root):
         leases = read_all(root)
+        if force_nn is not None:
+            # --force takes a number like every other lease position (§4.1):
+            # an alias is refused naming the number; a number with no lease is
+            # refused, never ignored with a clean exit (Task 4 review).
+            force_nn = number_of(leases, force_nn, "sweep --force")
+            if force_nn not in leases:
+                raise Refused("There is no window %s." % force_nn)
         now = time.time()
         quiet_after = stale_after_secs(root)
         for nn in sorted(k for k in leases if k != "prime"):

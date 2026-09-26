@@ -390,6 +390,11 @@ PY
   [ "$(lease_json 01 session_id)" = "sA" ]; [ "$(lease_json 01 pid)" = "$pid" ]; [ "$(lease_json 01 peer_name)" = "daedalus-01" ]
   [ "$(lease_json 01 proc_started)" = "$(ps_ms "$pid")" ]
   CLAUDE_CODE_SESSION_ID=sA run LS claim 01; [ "$status" -eq 0 ]
+  # One lease per session id (§4.2 — a lease names one session, resolve/board/done assume it): the holder of 01 cannot take 02 too.
+  LS create >/dev/null
+  CLAUDE_CODE_SESSION_ID=sA run LS claim 02
+  [ "$status" -ne 0 ]; case "$output" in *"This session is already window 01; say 'release 01' first."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 02 session_id)" = "None" ]; [ "$(lease_json 01 session_id)" = "sA" ]
   CLAUDE_CODE_SESSION_ID=sB run LS claim 01
   [ "$status" -ne 0 ]; case "$output" in *"Window 01 is held by a live session (peer name daedalus-01)"*) : ;; *) echo "$output"; return 1 ;; esac
   # A dead recorded pid whose session id is still live in the registry is a
@@ -401,6 +406,27 @@ PY
   rm -f "$BATS_TEST_TMPDIR/sessions/$pid.json"
   CLAUDE_CODE_SESSION_ID=sB run LS claim 01; [ "$status" -eq 0 ]; [ "$(lease_json 01 session_id)" = "sB" ]
   [ "$(lease_json 01 pid)" = "None" ]
+}
+
+@test "claim over a finished window whose clone has exited takes it over with the clone's report cleared: finished, summary and spawned are gone, the takeover names the old report, and a later sweep sees a plain lease instead of FINISHED forever" {
+  LS create >/dev/null
+  CLAUDE_CODE_SESSION_ID=sE LS claim 01 >/dev/null; CLAUDE_CODE_SESSION_ID=sE LS done 01 --summary "did the thing" >/dev/null
+  python3 "$LL" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["spawned"]=True; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
+  CLAUDE_CODE_SESSION_ID=sB run LS claim 01
+  [ "$status" -eq 0 ]; case "$output" in *"This is window 01."*"finished"*"did the thing"*"cleared"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 01 session_id)" = "sB" ]
+  [ "$(lease_json 01 finished)" = "None" ]; [ "$(lease_json 01 summary)" = "None" ]; [ "$(lease_json 01 spawned)" = "None" ]
+  # A released-but-unswept finished lease whose holder is gone is taken over the same way.
+  CLAUDE_CODE_SESSION_ID=sB LS done 01 --summary "again" >/dev/null; CLAUDE_CODE_SESSION_ID=sB LS release 01 >/dev/null
+  python3 "$LL" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
+  CLAUDE_CODE_SESSION_ID=sC run LS claim 01; [ "$status" -eq 0 ]
+  [ "$(lease_json 01 finished)" = "None" ]; [ "$(lease_json 01 released)" = "None" ]; [ "$(lease_json 01 session_id)" = "sC" ]
+  # The clone's OWN binding of a spawned lease (session_id null -> the clone) keeps spawned: true.
+  LS create --spawned >/dev/null
+  CLAUDE_CODE_SESSION_ID=sD run LS claim 02; [ "$status" -eq 0 ]; [ "$(lease_json 02 spawned)" = "True" ]
+  # Re-claiming one's own finished window (idempotent claim) keeps the report.
+  CLAUDE_CODE_SESSION_ID=sD LS done 02 --summary "mine" >/dev/null
+  CLAUDE_CODE_SESSION_ID=sD run LS claim 02; [ "$status" -eq 0 ]; [ "$(lease_json 02 summary)" = "mine" ]
 }
 
 @test "claim needs a session: an operator shell is refused naming DAEDALUS_SESSION_ID" {
@@ -466,13 +492,27 @@ PY
   CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove
   [ "$status" -ne 0 ]; case "$output" in *"unmerged work"*"--force"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  # Uncommitted work (a modified tracked file and an untracked one) is refused
+  # the same way, named by path — git's own refusal is never bypassed silently
+  # (§4.5: work is never deleted by a cleanup; --remove is the explicit path).
+  printf 'd\n' >> "$W/a.txt"; printf 'u\n' > "$W/untracked.txt"
+  CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove
+  [ "$status" -ne 0 ]; case "$output" in *"unmerged work"*"has uncommitted changes in worktrees/02/thing (2 files: a.txt, untracked.txt)"*"Add --force to delete them."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ -f "$W/untracked.txt" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
   CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove --force
   [ "$status" -eq 0 ]; case "$output" in *"unmerged work"*) : ;; *) echo "must repeat the subjects: $output"; return 1 ;; esac
+  case "$output" in *"Deleting window 02's uncommitted changes in worktrees/02/thing: a.txt, untracked.txt"*) : ;; *) echo "must name the files being deleted: $output"; return 1 ;; esac
   [ ! -d "$W" ]; run git -C "$T" rev-parse --verify -q lease/02; [ "$status" -ne 0 ]
   run git -C "$T/sub" rev-parse --verify -q lease/02; [ "$status" -ne 0 ]
   [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.seen" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.changed" ]
-  # An operator shell (no session) may release a stale lease too.
-  run LS release 01 --remove; [ "$status" -eq 0 ]; [ ! -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  # An operator shell (no session) may release a stale lease too — and a dirty
+  # NESTED worktree with no commits at all is still refused without --force.
+  printf 'z\n' >> "$DAEDALUS_HOME/worktrees/01/thing/sub/n.txt"
+  run LS release 01 --remove
+  [ "$status" -ne 0 ]; case "$output" in *"Window 01 has uncommitted changes in worktrees/01/thing/sub (1 file: n.txt). Add --force to delete them."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; [ -f "$DAEDALUS_HOME/state/leases/01.json" ]
+  run LS release 01 --remove --force; [ "$status" -eq 0 ]; [ ! -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  case "$output" in *"uncommitted changes in worktrees/01/thing/sub: n.txt"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "done: from the holder writes finished and summary; from another session refused" {
@@ -517,6 +557,15 @@ PY
   case "$output" in *"window 02 is live in pid $pid"*"not removed"*"release 02"*) : ;; *) echo "$output"; return 1 ;; esac
   run LS sweep; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]; [ "$(lease_json 02 pid)" = "$pid" ]   # rebound once: now plainly live, left alone
   case "$output" in *"window 02"*) echo "a live lease should be silent: $output"; return 1 ;; *) : ;; esac
+  # --force takes a NUMBER like every other lease position (§4.2, §4.1): an
+  # alias is refused naming the number, a number with no lease is refused —
+  # never silently ignored with exit 0.
+  LS alias 02 poc-ui >/dev/null
+  run LS sweep --force poc-ui; [ "$status" -ne 0 ]
+  case "$output" in *"poc-ui is an alias; window 02 carries it — say \`sweep --force 02\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  run LS sweep --force 07; [ "$status" -ne 0 ]; case "$output" in *"There is no window 07."*) : ;; *) echo "$output"; return 1 ;; esac
+  run LS sweep --force 7; [ "$status" -ne 0 ]; case "$output" in *"7 is not a window number"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
 }
 
 @test "spawn allocates the next free number marked spawned and launches claude --bg with DAEDALUS_LEASE and a task ending in the done instruction" {
