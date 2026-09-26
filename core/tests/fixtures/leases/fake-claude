@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Records how it was launched; never runs anything.
+{ printf 'ARGV: %s\n' "$*"; env | grep -E '^(DAEDALUS_LEASE|CLAUDE_CODE_SESSION_KIND)=' ; } >> "${FAKE_CLAUDE_LOG:?}"
+exit 0

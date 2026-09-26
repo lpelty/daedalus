@@ -640,6 +640,313 @@ def launch_line(root: Path, nn: str) -> str:
     return "\n".join(lines)
 
 
+# --- Binding and the lifecycle commands (§4.2) ---------------------------------
+
+HELD_BY_LIVE = ("live", "quiet", "resumed")   # a window in any of these states is held (§4.2, §4.5)
+
+
+def peer_of(lease: dict) -> str:
+    return str(lease.get("peer_name") or "unknown — the registry is not available on this build")
+
+
+def window_label(nn: str, lease: Optional[dict]) -> str:
+    """'window 02 (poc-ui)' — number first, alias in parentheses when there is one (§4.2)."""
+    alias = (lease or {}).get("alias")
+    return "window %s (%s)" % (nn, alias) if alias else "window %s" % nn
+
+
+def number_of(leases: Dict[str, dict], token: str, cmd: str) -> str:
+    """Every command that takes a lease takes its NUMBER; an alias in that
+    position is refused with the number it maps to (§4.1)."""
+    if valid_id(token):
+        return token
+    for nn, d in leases.items():
+        if nn != "prime" and d.get("alias") == token:
+            raise Refused("%s is an alias; window %s carries it — say `%s %s`" % (token, nn, cmd, nn))
+    raise Refused("%s is not a window number (two digits, 01–99)" % token)
+
+
+def require_session(sid: Optional[str], what: str) -> str:
+    if sid is None:
+        raise Refused("%s needs a session: run it from a Daedalus window (or set DAEDALUS_SESSION_ID)" % what)
+    return sid
+
+
+def _quoted(subjects: list) -> str:
+    return ", ".join('"%s"' % s for s in subjects)
+
+
+def registry_entry_for(sid: str) -> Optional[dict]:
+    """The one live registry entry for sid, None when the registry has none;
+    Refused when it shows the session open in two terminals (§4.2)."""
+    live = registry_live_entries(sid)     # pid + startedAt, never pid alone (Task 2 review, deviation 19c)
+    if len(live) > 1:
+        raise Refused("This session is open in two terminals at once (pids %s); close one before it can hold a lease."
+                      % " and ".join(str(e.get("pid")) for e in live))
+    return live[0] if live else None
+
+
+def _held_by_live(nn: str, lease: dict, remedy: str) -> Refused:
+    return Refused("Window %s is held by a live session (peer name %s). %s" % (nn, peer_of(lease), remedy))
+
+
+def bind(root: Path, nn: str, sid: str) -> dict:
+    """claim / DAEDALUS_LEASE binding. Caller holds the lock. The same rule the
+    hook applies: null or dead holder -> bind; a live (or quiet, or resumed)
+    other holder -> refuse with its peer name. A compare-and-swap on the
+    session_id read first; pid / proc_started / peer_name come from the
+    registry entry for sid (None on a build without one); an unfinished
+    worktree (worktree_ready: false) is completed here (§4.2)."""
+    lease = read_lease(root, nn)
+    if lease is None:
+        raise Refused("There is no lease file for window %s; run `core/lease.sh create` for a number first." % nn)
+    expect = lease.get("session_id")
+    if expect and expect != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+        raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
+    entry = registry_entry_for(sid)
+    fresh = read_lease(root, nn) or {}
+    if fresh.get("session_id") != expect:
+        raise Refused("window %s changed under you — re-read the board and try again" % nn)
+    fresh.update({"session_id": sid, "bound_at": now_stamp(),
+                  "pid": entry.get("pid") if entry else None,
+                  "proc_started": entry.get("startedAt") if entry else None,
+                  "peer_name": entry.get("name") if entry else None})
+    fresh.pop("released", None)
+    if fresh.get("worktree_ready") is False:
+        if add_worktrees(root, nn, fresh.get("trunks") or trunks_of(root, root / "target")):
+            fresh.pop("worktree_ready", None)
+    write_lease(root, nn, fresh)
+    heartbeat(root, nn)
+    return fresh
+
+
+def self_rebind(root: Path, sid: str) -> Optional[str]:
+    """A resumed session keeps its id and gets a new pid (§4.2): refresh pid /
+    proc_started / peer_name on the lease that already names sid. The
+    compare-and-swap is on session_id, which is unchanged, so no other session
+    is displaced. Does nothing while the session is open in two terminals.
+    Caller holds the lock. Returns the window number, None when sid holds none."""
+    leases = read_all(root)
+    nn, lease = lease_of_session(leases, sid)
+    if nn is None:
+        return None
+    try:
+        entry = registry_entry_for(sid)
+    except Refused:
+        return nn                       # two terminals: do nothing (§4.2)
+    if entry and (lease.get("pid") != entry.get("pid") or lease.get("proc_started") != entry.get("startedAt")
+                  or lease.get("peer_name") != entry.get("name")):
+        lease.update({"pid": entry.get("pid"), "proc_started": entry.get("startedAt"), "peer_name": entry.get("name")})
+        write_lease(root, nn, lease)
+    return nn
+
+
+def claim(root: Path, token: str, sid: str) -> str:
+    """Bind this session to window NN. A swept number (no lease file) whose
+    lease/<NN> still carries unpromoted commits is adopted as-is and its
+    subjects are named — the one path that continues such work (§4.2)."""
+    with lock(root):
+        leases = read_all(root)
+        nn = number_of(leases, token, "claim")
+        if nn in leases:
+            lease = bind(root, nn, sid)
+            return "This is %s." % window_label(nn, lease)
+        trunks = trunks_of(root, root / "target")
+        subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
+        data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
+                "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn,
+                "repos": list(trunks), "trunks": trunks, "created": now_stamp(), "bound_at": None, "promoted": []}
+        write_lease(root, nn, data, exclusive=True)
+        try:
+            add_worktrees(root, nn, trunks)
+            write_changed(root, nn, {})
+            lease = bind(root, nn, sid)
+        except BaseException:
+            # as allocate_locked: a number held by a lease with no tree or no
+            # holder would be skipped by every later allocation
+            try:
+                os.unlink(str(lease_path(root, nn)))
+            except OSError:
+                pass
+            raise
+    if subjects:
+        return "Window %s continues %d unpromoted commit%s from an earlier session (%s)." % (
+            nn, len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects))
+    return "This is %s." % window_label(nn, lease)
+
+
+def set_field(root: Path, token: str, cmd: str, key: str, value: object) -> str:
+    """alias / note / update --criteria: one field, under the lock. An alias
+    must pass valid_alias and be unique among the leases on disk (§4.1);
+    value None removes the field (`alias --clear`). Returns the number."""
+    with lock(root):
+        leases = read_all(root)
+        nn = number_of(leases, token, cmd)
+        lease = leases.get(nn)
+        if lease is None:
+            raise Refused("There is no window %s." % nn)
+        if key == "alias" and value is not None:
+            if not valid_alias(value, root):
+                raise Refused("%s cannot be an alias: lowercase letters, digits and dashes, 2–32 characters, and not a "
+                              "role or branch name (prime, main, master, the trunk, target, vault, state)." % value)
+            for other, d in leases.items():
+                if other != nn and other != "prime" and d.get("alias") == value:
+                    raise Refused("%s is already the alias of window %s; pick another." % (value, other))
+        if value is None:
+            lease.pop(key, None)
+        else:
+            lease[key] = value
+        write_lease(root, nn, lease)
+        return nn
+
+
+def _remove_lease_files(root: Path, nn: str) -> None:
+    for p in (lease_path(root, nn), leases_dir(root) / (nn + ".seen"), leases_dir(root) / (nn + ".changed")):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def release(root: Path, token: str, sid: Optional[str], remove: bool = False, force: bool = False) -> str:
+    """The holder ends its lease: released: <time> (removed at the next
+    sweep, so the holder's own hooks can still read the state). Any other
+    session is refused while the holder is live; a stale lease may be released
+    from anywhere, and an operator shell (sid None) may release anything.
+    --remove deletes worktree and branch, refusing unpromoted commits without
+    --force and repeating their subjects before deleting them (§4.2)."""
+    with lock(root):
+        leases = read_all(root)
+        nn = number_of(leases, token, "release")
+        lease = leases.get(nn)
+        if lease is None:
+            raise Refused("There is no window %s." % nn)
+        holder = lease.get("session_id")
+        if sid is not None and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+            raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
+        if not remove:
+            lease["released"] = now_stamp()
+            write_lease(root, nn, lease)
+            return "Window %s released; this window is done — close it." % nn
+        trunks = lease.get("trunks") or {}
+        subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
+        if subjects and not force:
+            raise Refused("Window %s has %d unpromoted commit%s: %s. Add --force to delete them."
+                          % (nn, len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects)))
+        out = []
+        if subjects:
+            out.append("Deleting window %s's unpromoted commits: %s" % (nn, _quoted(subjects)))
+        for repo in reversed(list(trunks)):          # nested repos first: they sit inside the outer worktree
+            src = root / "target" / repo
+            dest = root / "worktrees" / nn / repo
+            if dest.exists():
+                code, _, err = _git(src, "worktree", "remove", "--force", str(dest))
+                if code != 0:
+                    last = err.strip().splitlines()[-1:] or ["no output"]
+                    raise Refused("could not remove worktrees/%s/%s (git worktree remove: %s); nothing was deleted from the lease"
+                                  % (nn, repo, last[0]))
+            else:
+                _git(src, "worktree", "prune")
+            if _git(src, "rev-parse", "--verify", "-q", "lease/%s" % nn)[0] == 0:
+                code, _, err = _git(src, "branch", "-D", "lease/%s" % nn)
+                if code != 0:
+                    last = err.strip().splitlines()[-1:] or ["no output"]
+                    raise Refused("could not delete branch lease/%s in target/%s (%s)" % (nn, repo, last[0]))
+        _remove_lease_files(root, nn)
+        out.append("Window %s released; its worktree and branch are deleted." % nn)
+        return "\n".join(out)
+
+
+def mark_done(root: Path, token: str, sid: str, summary: str) -> str:
+    """A spawned clone reports completion: finished: <time> and summary: in
+    the lease, holder only, under the lock. The board renders FINISHED from
+    those fields and sweep spares the lease until promote or release (§4.2).
+    Recorded deviation: SendMessage is a tool the model calls, not a script,
+    so this prints the line to send and the prime's peer name."""
+    with lock(root):
+        leases = read_all(root)
+        nn = number_of(leases, token, "done")
+        lease = leases.get(nn)
+        if lease is None or lease.get("session_id") != sid:
+            raise Refused("Only window %s's own session may mark it done." % nn)
+        lease["finished"] = now_stamp()
+        lease["summary"] = summary
+        write_lease(root, nn, lease)
+        prime = leases.get("prime") or {}
+    _, prime_lease = lease_of_session(leases, str(prime.get("session_id")))
+    prime_peer = peer_of(prime_lease) if prime_lease else "unknown"
+    what = "%s (a spawned clone)" % window_label(nn, lease) if lease.get("spawned") else window_label(nn, lease)
+    return ("This is %s, finished: %s. Promote or release it.\n"
+            "(Send that line to the prime — peer name %s — with SendMessage if the board shows it live.)"
+            % (what, summary, prime_peer))
+
+
+def sweep(root: Path, force_nn: Optional[str] = None) -> list:
+    """Remove stale and released lease files. A quiet one only as --force <NN>
+    (the operator's word); a finished one waits for promote or release (or
+    --force); a resumed one (dead recorded pid, session id live in the
+    registry) is rebound, never removed; a plainly live one is refused even
+    forced. Worktrees and branches are always kept (§4.5). Returns the lines."""
+    lines = []
+    with lock(root):
+        leases = read_all(root)
+        now = time.time()
+        quiet_after = stale_after_secs(root)
+        for nn in sorted(k for k in leases if k != "prime"):
+            lease = leases[nn]
+            state = liveness(root, nn, lease, now=now, quiet_after=quiet_after)
+            forced = force_nn == nn
+            if state == "resumed":
+                self_rebind(root, str(lease.get("session_id")))
+                pids = [e.get("pid") for e in registry_live_entries(str(lease.get("session_id")))]
+                lines.append("window %s: resumed in pid %s; rebinding instead" % (nn, pids[0] if pids else "?"))
+                continue
+            if lease.get("released"):
+                why = "released"
+            elif forced and state == "live":
+                lines.append("window %s is live in pid %s — not removed; say 'release %s' to that window, or close it first"
+                             % (nn, lease.get("pid"), nn))
+                continue
+            elif forced:
+                why = "%s, removed on --force" % state
+            elif lease.get("finished"):
+                lines.append("window %s finished (%s) — kept until you promote %s or release %s"
+                             % (nn, lease.get("summary") or "no summary", nn, nn))
+                continue
+            elif state == "stale":
+                why = "stale"
+            elif state == "quiet":
+                lines.append("window %s is quiet (its window is still open) — not swept; use `sweep --force %s` "
+                             "if the operator says so" % (nn, nn))
+                continue
+            else:
+                continue
+            _remove_lease_files(root, nn)
+            lines.append("removed the lease of window %s (%s); its worktree and branch are kept" % (nn, why))
+    return lines
+
+
+def spawn(root: Path, task: str, note: Optional[str]) -> str:
+    """create + launch a --bg clone on the next free number, spawned: true;
+    the number reaches the clone as DAEDALUS_LEASE and its task always ends
+    with the `done` instruction, so it is never hand-typed (§4.2)."""
+    import subprocess
+    target = root / "target" / target_name(root)
+    v.run(["git", "-C", str(target), "fetch", "--quiet", "origin"], timeout=60)
+    nn, _ = allocate(root, None, note=note, spawned=True)
+    full = ('%s\n\nWhen the work is done or you are stuck, run `core/lease.sh done %s --summary "<one paragraph: what changed, '
+            'what is untested, what you need>"` as your final action.' % (task, nn))
+    env = dict(os.environ, DAEDALUS_LEASE=nn)
+    try:
+        subprocess.Popen(["claude", "--bg", "--name", "daedalus-%s" % nn, full], cwd=str(root), env=env,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        with lock(root):
+            _remove_lease_files(root, nn)   # the worktree stays; the next allocation adopts it
+        raise Refused("could not start claude for window %s (%s); the number is free again" % (nn, e.strerror or e))
+    return "Window %s is a background clone working on %s; it will report on the board when done." % (nn, task)
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -695,6 +1002,50 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
         return 0
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn"):
+        def _refused(fn):
+            try:
+                out = fn()
+                if out:
+                    print(out)
+                return 0
+            except Refused as e:
+                sys.stderr.write("daedalus: %s\n" % e)
+                return 1
+
+        def _after(flag: str) -> str:
+            if flag not in args or args.index(flag) + 1 >= len(args):
+                raise Refused("%s needs %s <value>" % (cmd, flag))
+            return args[args.index(flag) + 1]
+
+        if not args and cmd != "sweep":
+            sys.stderr.write("usage: core/lease.sh %s <NN> ...\n" % cmd)
+            return 2
+        sid = session_id_from_env()
+        if cmd == "claim":
+            return _refused(lambda: claim(root, args[0], require_session(sid, "claim")))
+        if cmd == "alias":
+            if "--clear" in args:
+                return _refused(lambda: "Window %s has no alias now." % set_field(root, args[0], "alias", "alias", None))
+            if len(args) < 2:
+                sys.stderr.write("usage: core/lease.sh alias <NN> <word> | alias <NN> --clear\n"); return 2
+            return _refused(lambda: "Window %s is now shown as %s on the board."
+                            % (set_field(root, args[0], "alias", "alias", args[1]), args[1]))
+        if cmd == "note":
+            if len(args) < 2:
+                sys.stderr.write('usage: core/lease.sh note <NN> "..."\n'); return 2
+            return _refused(lambda: "Noted for window %s." % set_field(root, args[0], "note", "note", args[1]))
+        if cmd == "update":
+            return _refused(lambda: "Window %s's criteria file is %s."
+                            % (set_field(root, args[0], "update", "criteria", _after("--criteria")), _after("--criteria")))
+        if cmd == "release":
+            return _refused(lambda: release(root, args[0], sid, remove="--remove" in args, force="--force" in args))
+        if cmd == "done":
+            return _refused(lambda: mark_done(root, args[0], require_session(sid, "done"), _after("--summary")))
+        if cmd == "sweep":
+            return _refused(lambda: "\n".join(sweep(root, _after("--force") if "--force" in args else None)) or "nothing to sweep")
+        if cmd == "spawn":
+            return _refused(lambda: spawn(root, args[0], _after("--note") if "--note" in args else None))
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)
