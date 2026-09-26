@@ -58,9 +58,24 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out el
 }
 
 # live_pid — a process that outlives the test step (a sleep in the background);
-# every pid is recorded in $LIVE_PIDS and killed by teardown_live.
-live_pid() { sleep 300 & LIVE_PID=$!; LIVE_PIDS="${LIVE_PIDS:-} $LIVE_PID"; printf '%s\n' "$LIVE_PID"; }
-teardown_live() { for p in ${LIVE_PIDS:-}; do kill "$p" 2>/dev/null; done; true; }
+# every pid is recorded in $BATS_TEST_TMPDIR/live-pids and killed by
+# teardown_live. A file, not a variable: callers run it as "$(live_pid)", a
+# subshell, where an assignment to LIVE_PIDS would be lost — and bats waits
+# at the end of the file for every sleep nobody killed (measured: a leaked
+# sleep 300 held the suite for the full five minutes). The sleep's
+# stdin/stdout/stderr and bats's fd 3 are detached too: a sleep holding the
+# substitution pipe makes the caller wait for EOF, one holding fd 3 makes
+# bats wait at test end.
+live_pid() {
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & LIVE_PID=$!
+  printf '%s\n' "$LIVE_PID" >> "$BATS_TEST_TMPDIR/live-pids"
+  printf '%s\n' "$LIVE_PID"
+}
+teardown_live() {
+  [ -f "$BATS_TEST_TMPDIR/live-pids" ] || return 0
+  while read -r p; do kill "$p" 2>/dev/null; done < "$BATS_TEST_TMPDIR/live-pids"
+  true
+}
 
 # ps_ms <pid> — the epoch-millisecond start time of a live pid, exactly as
 # leaselib.proc_started_of computes it; a lease whose proc_started carries this

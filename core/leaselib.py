@@ -279,6 +279,121 @@ def resolve(root: Path, sid: Optional[str], name: str) -> Path:
     return root / str(lease.get("worktree") or ("worktrees/%s" % nn)) / name
 
 
+# --- Liveness (§4.5) ---------------------------------------------------------
+
+def registry_present() -> bool:
+    return registry_dir().is_dir()
+
+
+def registry_by_session(sid: str) -> list:
+    """Every sessions/*.json whose sessionId is sid — a resumed session has a
+    new pid and a new file, so the lookup is by session id, never by pid."""
+    out = []
+    d = registry_dir()
+    if not d.is_dir():
+        return out
+    for p in d.glob("*.json"):
+        try:
+            e = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(e, dict) and e.get("sessionId") == sid:
+            out.append(e)
+    return out
+
+
+def is_interactive_window(entry: Optional[dict]) -> bool:
+    """§4.8: a terminal a person sits at is kind=interactive AND entrypoint=cli
+    (claude -p registers interactive/sdk-cli; --bg registers bg/cli)."""
+    return bool(entry) and entry.get("kind") == "interactive" and entry.get("entrypoint") == "cli"
+
+
+def pid_alive(pid: object) -> bool:
+    """A process that exists. kill(pid, 0) raises PermissionError for another
+    user's process (pid 1, root) — that process EXISTS; only ESRCH is dead.
+    Reporting EPERM as dead would make a live lease sweepable."""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def proc_started_of(pid: object) -> Optional[int]:
+    """Epoch milliseconds from `ps -o lstart=` (local time; the registry's
+    procStart string is UTC, so never compare strings — §4.5)."""
+    code, out, _ = v.run(["ps", "-o", "lstart=", "-p", str(pid)], timeout=5)
+    out = out.strip()
+    if code != 0 or not out:
+        return None
+    try:
+        return int(time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) * 1000)
+    except ValueError:
+        return None
+
+
+def pid_is_recorded_process(pid: object, proc_started: object) -> bool:
+    """The pid is alive AND is the process the lease was bound to: its start
+    time is within 2 s of the recorded proc_started (a recycled pid fails
+    here), or — when ps cannot be parsed — its command is claude."""
+    if not pid_alive(pid):
+        return False
+    started = proc_started_of(pid)
+    if started is None:
+        code, out, _ = v.run(["ps", "-o", "comm=", "-p", str(pid)], timeout=5)
+        return code == 0 and out.strip().endswith("claude")
+    try:
+        return abs(int(started) - int(proc_started)) <= 2000
+    except (TypeError, ValueError):
+        return False
+
+
+_STALE_AFTER: Dict[str, int] = {}
+
+
+def stale_after_secs(root: Path) -> int:
+    """config leases.stale_after: an integer with an m, h or d suffix; default
+    4h; anything else is the default plus a stderr note. Memoized per process
+    keyed on root: one bash spawn per hook or board render, not one per lease."""
+    key = str(root)
+    if key in _STALE_AFTER:
+        return _STALE_AFTER[key]
+    raw = v._lib(root, "cfg leases.stale_after 2>/dev/null || true").strip()
+    secs = 4 * 3600
+    if raw:
+        m = re.fullmatch(r"([0-9]+)([mhd])", raw)
+        if m:
+            secs = int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400}[m.group(2)]
+        else:
+            sys.stderr.write("daedalus: config leases.stale_after must be an integer with an m, h or d suffix "
+                             "(got: %s); using 4h\n" % raw)
+    _STALE_AFTER[key] = secs
+    return secs
+
+
+def liveness(root: Path, nn: str, lease: dict, now: Optional[float] = None, quiet_after: Optional[int] = None) -> str:
+    """live | quiet | stale | resumed (dead recorded pid, same session id live
+    in the registry under another pid — §4.2 'A resumed session'). Callers
+    that walk every lease compute now and quiet_after once and pass them in."""
+    now = time.time() if now is None else now
+    hb = seen_mtime(root, nn)
+    quiet_after = stale_after_secs(root) if quiet_after is None else quiet_after
+    pid = lease.get("pid")
+    if pid is None:
+        # registry-absent build, or never bound: heartbeat alone (§4.5)
+        if hb is None or now - hb > quiet_after:
+            return "stale"
+        return "live"
+    if pid_is_recorded_process(pid, lease.get("proc_started")):
+        return "quiet" if (hb is not None and now - hb > quiet_after) else "live"
+    sid = lease.get("session_id")
+    if sid and any(pid_alive(e.get("pid")) for e in registry_by_session(str(sid))):
+        return "resumed"
+    return "stale"
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -300,6 +415,15 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e)
             return 3
+    if cmd == "liveness":
+        lease = read_lease(root, args[0]) or {}
+        print(liveness(root, args[0], lease)); return 0
+    if cmd == "stale-after":
+        print(stale_after_secs(root)); return 0
+    if cmd == "registry-pids":
+        print(" ".join(str(e.get("pid")) for e in registry_by_session(args[0]))); return 0
+    if cmd == "pid-alive":
+        return 0 if pid_alive(args[0]) else 1
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)

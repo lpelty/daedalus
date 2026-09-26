@@ -130,3 +130,60 @@ teardown() { teardown_live; }
 @test "the product .gitignore lists worktrees/" {
   grep -qx 'worktrees/' "$SRC/../.gitignore"
 }
+
+# --- Liveness (spec §4.5), registry lookup (§4.8), leases.stale_after (§8.1) ---
+
+@test "liveness: a live pid with matching proc_started is live; a dead pid is stale; a LIVE pid with a non-matching proc_started is stale (pid reuse — the mismatch branch, not the dead-pid branch); pid 1 (another user's process: kill(1,0) is EPERM) counts as alive; a stale heartbeat with a live pid is quiet" {
+  pid="$(live_pid)"
+  python3 "$LL" _test-write 02 "{\"lease\":\"02\",\"session_id\":\"sA\",\"pid\":$pid,\"proc_started\":$(ps_ms "$pid")}"
+  python3 "$LL" heartbeat 02
+  run python3 "$LL" liveness 02; [ "$output" = "live" ]
+  pidr="$(live_pid)"     # alive, but the lease says it started at epoch 1: a re-used pid
+  python3 "$LL" _test-write 03 "{\"lease\":\"03\",\"session_id\":\"sB\",\"pid\":$pidr,\"proc_started\":1}"
+  python3 "$LL" heartbeat 03
+  run python3 "$LL" liveness 03; [ "$output" = "stale" ]
+  run python3 "$LL" pid-alive 1; [ "$status" -eq 0 ]          # EPERM is "exists", never "dead"
+  run python3 "$LL" pid-alive 4194304; [ "$status" -ne 0 ]    # past pid_max on macOS: ESRCH
+  kill "$pid"; wait "$pid" 2>/dev/null || true
+  run python3 "$LL" liveness 02; [ "$output" = "stale" ]
+  pid2="$(live_pid)"
+  python3 "$LL" _test-write 04 "{\"lease\":\"04\",\"session_id\":\"sC\",\"pid\":$pid2,\"proc_started\":$(ps_ms "$pid2")}"
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/04.seen"
+  run python3 "$LL" liveness 04; [ "$output" = "quiet" ]
+}
+
+@test "liveness: a recorded pid that is no longer that process, whose session id is live in the registry under a new pid, is 'resumed', never stale; two registry entries for one session id are reported" {
+  pid="$(live_pid)"
+  registry_entry "$pid" sA
+  python3 "$LL" _test-write 02 '{"lease":"02","session_id":"sA","pid":1,"proc_started":1}'
+  run python3 "$LL" liveness 02; [ "$output" = "resumed" ]
+  registry_entry 99999 sA
+  run python3 "$LL" registry-pids sA
+  case "$output" in *"$pid"*99999*|*99999*"$pid"*) : ;; *) echo "expected both pids: $output"; return 1 ;; esac
+}
+
+@test "liveness with no registry and no recorded pid falls back to the heartbeat alone" {
+  rm -rf "$BATS_TEST_TMPDIR/sessions"
+  python3 "$LL" _test-write 02 '{"lease":"02","session_id":"sA"}'
+  python3 "$LL" heartbeat 02
+  run python3 "$LL" liveness 02; [ "$output" = "live" ]
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/02.seen"
+  run python3 "$LL" liveness 02; [ "$output" = "stale" ]
+}
+
+@test "stale_after: default 4h; m/h/d suffixes; anything else falls back to the default with a note" {
+  run python3 "$LL" stale-after; [ "$output" = "14400" ]
+  printf 'leases:\n  stale_after: 90m\n' >> "$DAEDALUS_HOME/config.yaml"
+  run python3 "$LL" stale-after; [ "$output" = "5400" ]
+  sed -i '' 's/90m/2d/' "$DAEDALUS_HOME/config.yaml"
+  run python3 "$LL" stale-after; [ "$output" = "172800" ]
+  sed -i '' 's/2d/soon/' "$DAEDALUS_HOME/config.yaml"
+  # --separate-stderr: the note goes to stderr, which run merges into $output by default.
+  run --separate-stderr python3 "$LL" stale-after; [ "$output" = "14400" ]
+  run bash -c "python3 '$LL' stale-after 2>&1 >/dev/null"; case "$output" in *"stale_after"*"soon"*) : ;; *) echo "no note: $output"; return 1 ;; esac
+}
+
+@test "the real config.example.yaml carries a leases: block whose stale_after parses" {
+  DAEDALUS_CONFIG="$SRC/../config.example.yaml" run python3 "$LL" stale-after
+  [ "$output" = "14400" ]
+}

@@ -99,3 +99,9 @@ recall:
   # Code context engine (optional). Pin the version: an unpinned uvx ruff
   # floats to latest and un-certifies the JSON shape the hook parses.
   ruff: 'uvx ruff@0.16.5'
+
+leases:
+  # How long a window may go without a prompt before the board calls it
+  # "quiet" (a live terminal the operator left open). Never swept without
+  # --force. An integer with an m, h or d suffix; default 4h.
+  stale_after: 4h
