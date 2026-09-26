@@ -45,12 +45,14 @@ EOF
   unset DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID DAEDALUS_LEASE DIRECT_CALL_ID
 }
 
-# registry_entry <pid> <session-id> [kind] [entrypoint] [name] — a Claude Code
-# session registry file as observed on 2.1.282 (spec §4.8, A11). startedAt is
-# epoch ms; procStart is the ps -o lstart= string of that pid.
+# registry_entry <pid> <session-id> [kind] [entrypoint] [name] [startedAt] — a
+# Claude Code session registry file as observed on 2.1.282 (spec §4.8, A11).
+# startedAt is epoch ms, by default that pid's real start time from ps (a real
+# entry lags lstart by under a second: 936 ms measured on 2.1.282); pass a
+# sixth argument to fake a left-behind entry whose pid another process now holds.
 registry_entry() {
-  local pid="$1" sid="$2" kind="${3:-interactive}" ep="${4:-cli}" name="${5:-daedalus-xx}" started
-  started="$(python3 -c 'import subprocess,sys,time
+  local pid="$1" sid="$2" kind="${3:-interactive}" ep="${4:-cli}" name="${5:-daedalus-xx}" started="${6:-}"
+  [ -n "$started" ] || started="$(python3 -c 'import subprocess,sys,time
 out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
 print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$pid")"
   printf '{"pid":%s,"sessionId":"%s","startedAt":%s,"kind":"%s","entrypoint":"%s","name":"%s","nameSource":"derived"}\n' \

@@ -302,6 +302,17 @@ def registry_by_session(sid: str) -> list:
     return out
 
 
+def registry_live_entries(sid: str) -> list:
+    """The registry entries for sid whose pid is still the process that wrote
+    them (startedAt against ps, the same check a lease's pid gets). This is
+    what 'a live registry entry' means everywhere — liveness, sweep, the
+    two-terminals refusal, the board — never pid_alive alone: a crashed
+    session leaves its sessions/<pid>.json behind, and a pid-only check would
+    call that entry live as soon as any long-lived process reused the pid,
+    making a dead lease read "resumed" and therefore never sweepable."""
+    return [e for e in registry_by_session(sid) if pid_is_recorded_process(e.get("pid"), e.get("startedAt"))]
+
+
 def is_interactive_window(entry: Optional[dict]) -> bool:
     """§4.8: a terminal a person sits at is kind=interactive AND entrypoint=cli
     (claude -p registers interactive/sdk-cli; --bg registers bg/cli)."""
@@ -335,9 +346,13 @@ def proc_started_of(pid: object) -> Optional[int]:
 
 
 def pid_is_recorded_process(pid: object, proc_started: object) -> bool:
-    """The pid is alive AND is the process the lease was bound to: its start
-    time is within 2 s of the recorded proc_started (a recycled pid fails
-    here), or — when ps cannot be parsed — its command is claude."""
+    """The pid is alive AND is the process the record was made for: its start
+    time is within 2 s of the recorded start (a recycled pid fails here), or —
+    when ps cannot be parsed — its command is claude. The record is a lease's
+    (pid, proc_started) or a registry entry's (pid, startedAt): the registry
+    writes startedAt under a second after the process starts (936 ms measured
+    on 2.1.282), so one predicate serves both, and a left-behind
+    sessions/<pid>.json whose pid another process now holds is not "live"."""
     if not pid_alive(pid):
         return False
     started = proc_started_of(pid)
@@ -389,7 +404,7 @@ def liveness(root: Path, nn: str, lease: dict, now: Optional[float] = None, quie
     if pid_is_recorded_process(pid, lease.get("proc_started")):
         return "quiet" if (hb is not None and now - hb > quiet_after) else "live"
     sid = lease.get("session_id")
-    if sid and any(pid_alive(e.get("pid")) for e in registry_by_session(str(sid))):
+    if sid and registry_live_entries(str(sid)):
         return "resumed"
     return "stale"
 
@@ -422,6 +437,8 @@ def main(argv: list) -> int:
         print(stale_after_secs(root)); return 0
     if cmd == "registry-pids":
         print(" ".join(str(e.get("pid")) for e in registry_by_session(args[0]))); return 0
+    if cmd == "registry-live-pids":
+        print(" ".join(str(e.get("pid")) for e in registry_live_entries(args[0]))); return 0
     if cmd == "pid-alive":
         return 0 if pid_alive(args[0]) else 1
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook

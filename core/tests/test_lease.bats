@@ -162,6 +162,23 @@ teardown() { teardown_live; }
   case "$output" in *"$pid"*99999*|*99999*"$pid"*) : ;; *) echo "expected both pids: $output"; return 1 ;; esac
 }
 
+@test "liveness: a registry entry is 'live' only when its pid is still the process it recorded (startedAt within 2 s of ps lstart) — a left-behind sessions/<pid>.json whose pid was recycled by another process does not make a dead lease 'resumed'" {
+  # The lease's own pid check closes the pid-recycling hole (§4.5); the
+  # registry-side check must close the same hole, or a crashed session's
+  # stale registry file plus one long-lived process on that pid would keep
+  # a dead lease unsweepable forever (sweep never removes a "resumed" lease).
+  rm -f "$BATS_TEST_TMPDIR/sessions"/*.json
+  pid="$(live_pid)"
+  registry_entry "$pid" sA interactive cli daedalus-xx 1      # alive, but startedAt says epoch 1: a re-used pid
+  python3 "$LL" _test-write 02 '{"lease":"02","session_id":"sA","pid":4194304,"proc_started":1}'
+  run python3 "$LL" liveness 02; [ "$output" = "stale" ] || { echo "recycled registry pid read as: $output"; return 1; }
+  registry_entry "$pid" sA                                    # the same pid with its real start time: resumed
+  run python3 "$LL" liveness 02; [ "$output" = "resumed" ]
+  run python3 "$LL" registry-live-pids sA; [ "$output" = "$pid" ]
+  registry_entry 99999 sA                                     # a dead pid beside it changes nothing
+  run python3 "$LL" registry-live-pids sA; [ "$output" = "$pid" ]
+}
+
 @test "liveness with no registry and no recorded pid falls back to the heartbeat alone" {
   rm -rf "$BATS_TEST_TMPDIR/sessions"
   python3 "$LL" _test-write 02 '{"lease":"02","session_id":"sA"}'
@@ -184,6 +201,15 @@ teardown() { teardown_live; }
 }
 
 @test "the real config.example.yaml carries a leases: block whose stale_after parses" {
-  DAEDALUS_CONFIG="$SRC/../config.example.yaml" run python3 "$LL" stale-after
-  [ "$output" = "14400" ]
+  # The default is also 4h, so "prints 14400" alone would pass with the block
+  # deleted or the file unreadable (the cfg failure is swallowed). Pin the raw
+  # value through cfg first, with the file's own path, then the parse.
+  DAEDALUS_CONFIG="$SRC/../config.example.yaml" run bash -c "source '$SRC/lib.sh'; cfg leases.stale_after"
+  [ "$status" -eq 0 ]; [ "$output" = "4h" ] || { echo "cfg leases.stale_after from config.example.yaml: '$output'"; return 1; }
+  DAEDALUS_CONFIG="$SRC/../config.example.yaml" run --separate-stderr python3 "$LL" stale-after
+  [ "$output" = "14400" ]; [ -z "$stderr" ]
+  # And the guard itself: with the block gone the cfg leg fails, so the test would.
+  sed '/^leases:/,$d' "$SRC/../config.example.yaml" > "$BATS_TEST_TMPDIR/no-leases.yaml"
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/no-leases.yaml" run bash -c "source '$SRC/lib.sh'; cfg leases.stale_after"
+  [ "$status" -ne 0 ]
 }
