@@ -680,3 +680,42 @@ PY
   case "$output" in *"The lease file for window 02 cannot be read"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
   [ "$(lease_json 01 note)" = "x" ]
 }
+
+@test "prime take: refuses a live holder without a reason, succeeds with one and appends history; a stale holder needs no reason; a take whose read session_id is stale is refused (CAS)" {
+  LS create >/dev/null; LS create >/dev/null
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sB LS claim 02 >/dev/null
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  # LS is a shell function: the session id is set on the run, not through env(1).
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"window 01"*"--reason"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "the operator asked window 02 to close out the day"
+  [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
+  case "$output" in *"Window 02 holds the pen now (prime)"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[-1]["from"]=="sA" and h[-1]["to"]=="sB" and "close out the day" in h[-1]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
+  # The holder's process is gone: its lease reads stale, so the take needs no reason and history grows, never shrinks.
+  kill "$p2"; wait "$p2" 2>/dev/null || true
+  CLAUDE_CODE_SESSION_ID=sA run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sA" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==2 and h[0]["to"]=="sB" and h[-1]["from"]=="sB" and h[-1]["to"]=="sA", h' "$DAEDALUS_HOME/state/leases/prime.json"
+  # CAS: the session_id the taker read (simulated by the test knob) is not what the file holds now.
+  CLAUDE_CODE_SESSION_ID=sB LEASE_TEST_CAS_EXPECT=sZ run LS prime take --reason x
+  [ "$status" -ne 0 ]; case "$output" in *"prime\` changed under you — re-read the board"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+}
+
+@test "prime take from a session that holds no numbered lease is refused (every prime is a window)" {
+  LS create >/dev/null; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  CLAUDE_CODE_SESSION_ID=sQ run LS prime take --reason x
+  [ "$status" -ne 0 ]; case "$output" in *"holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/prime.json" ]
+}
+
+@test "prime take with no prime.json (registry-absent path): a window takes the pen and the file is created with one history entry" {
+  LS create >/dev/null; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  [ ! -f "$DAEDALUS_HOME/state/leases/prime.json" ]
+  CLAUDE_CODE_SESSION_ID=sA run LS prime take
+  [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sA" ]
+  case "$output" in *"Window 01 holds the pen now (prime)"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"] is None and h[0]["to"]=="sA", h' "$DAEDALUS_HOME/state/leases/prime.json"
+}

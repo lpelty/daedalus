@@ -1209,6 +1209,42 @@ def recompute_all_changed(root: Path) -> None:
             sys.stderr.write("daedalus: %s\n" % e)
 
 
+# --- The pen (§4.8) -----------------------------------------------------------
+
+def prime_take(root: Path, sid: str, reason: Optional[str]) -> str:
+    """`lease.sh prime take [--reason "..."]` from the TAKING session. Every
+    prime is a window (§4.8), so a session with no numbered lease is refused.
+    A live holder (live, quiet or resumed — HELD_BY_LIVE) needs --reason, the
+    operator's words, recorded in prime.json's append-only history; a stale
+    holder, or no prime.json at all (a registry-absent build that never
+    first-upped), needs none. The take is a compare-and-swap on the
+    session_id the taker read (§4.1); LEASE_TEST_CAS_EXPECT lets a test
+    simulate a stale read. The transcribed-mode check of --reason against
+    the taker's transcript is plan 4 (it needs the promote transcript parser);
+    this release records the reason as given."""
+    with lock(root):
+        leases = read_all(root)
+        mine, _ = lease_of_session(leases, sid)
+        if mine is None:
+            raise Refused("This session holds no window, so it cannot take the pen; claim a number first.")
+        prime = leases.get("prime") or {}
+        holder = prime.get("session_id")
+        expect = os.environ.get("LEASE_TEST_CAS_EXPECT", holder)   # test knob: simulate a stale read
+        hnn, hlease = lease_of_session(leases, str(holder)) if holder else (None, None)
+        if holder and holder != sid and hlease is not None and liveness(root, hnn, hlease) in HELD_BY_LIVE:
+            if not reason:
+                raise Refused("The pen is held by a live session, %s. Taking it needs --reason \"<the operator's words>\"."
+                              % window_label(hnn, hlease))
+        fresh = read_lease(root, "prime") or {}
+        if fresh.get("session_id") != expect:
+            raise Refused("`prime` changed under you — re-read the board and try again")
+        fresh["history"] = (fresh.get("history") or []) + [{"from": holder, "to": sid, "at": now_stamp(),
+                                                            "reason": reason or "previous holder gone"}]
+        fresh.update({"session_id": sid, "bound_at": now_stamp()})
+        write_lease(root, "prime", fresh)
+    return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -1282,7 +1318,7 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
         return 0
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn"):
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime"):
         def _refused(fn):
             try:
                 out = fn()
@@ -1326,6 +1362,11 @@ def main(argv: list) -> int:
             return _refused(lambda: "\n".join(sweep(root, _after("--force") if "--force" in args else None)) or "nothing to sweep")
         if cmd == "spawn":
             return _refused(lambda: spawn(root, args[0], _after("--note") if "--note" in args else None))
+        if cmd == "prime":
+            if args[:1] != ["take"]:
+                sys.stderr.write('usage: core/lease.sh prime take [--reason "..."]\n'); return 2
+            return _refused(lambda: prime_take(root, require_session(sid, "prime take"),
+                                               _after("--reason") if "--reason" in args else None))
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)
