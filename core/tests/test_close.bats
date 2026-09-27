@@ -178,3 +178,16 @@ stop_stub() {
   wait "$STUB_PID" 2>/dev/null || true
   STUB_PID=""
 }
+
+@test "close.sh --commit runs core/vault-commit.sh after a successful capture, and not when capture fails" {
+  cp "$SRC/vault-commit.sh" "$DAEDALUS_HOME/core/"
+  printf '#!/usr/bin/env bash\necho VAULT-COMMIT-RAN\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
+  configure_capture; start_stub
+  run bash "$CLOSE" --commit; [ "$status" -eq 0 ]; case "$output" in *VAULT-COMMIT-RAN*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"phase 1/2"*"phase 2/2"*) : ;; *) echo "expected two phases: $output"; return 1 ;; esac
+  stop_stub
+  # New transcript bytes past the stored offset: with nothing new, capture.py
+  # never touches the backend and exits 0, and the failure leg would prove nothing.
+  printf '{"type":"user","message":{"role":"user","content":"one more turn"}}\n' >> "$TRANSCRIPT_DIR/session-a.jsonl"
+  run bash "$CLOSE" --commit; [ "$status" -ne 0 ]; case "$output" in *VAULT-COMMIT-RAN*) echo "must not commit after a failed capture: $output"; return 1 ;; *) : ;; esac
+}

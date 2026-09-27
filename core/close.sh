@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End a working session: flush episodic capture explicitly.
+# End a working session: flush episodic capture explicitly; with --commit,
+# then run the one sanctioned vault commit (core/vault-commit.sh, spec §4.7).
 #
 # The SessionEnd hook runs capture too, and capture is offset-tracked, so
 # running both is safe and never double-captures. This exists because a
@@ -17,7 +18,15 @@ for v in TENANT_HOME TENANT_BANK TRANSCRIPT_DIR; do
   [ -n "${!v:-}" ] || die "episodic capture needs $v — see the capture section of README.md"
 done
 
-log "phase 1/1: episodic capture"
+commit=0
+case "${1:-}" in
+  --commit) commit=1 ;;
+  "") : ;;
+  *) die "usage: core/close.sh [--commit]" ;;
+esac
+phases=1; [ "$commit" -eq 1 ] && phases=2
+
+log "phase 1/$phases: episodic capture"
 # PROP-002: verify extraction, do not just queue it. The server returns 202 on
 # acceptance and extracts afterwards; without this, a failed extraction left
 # the offset advanced past the lost span and this script still printed
@@ -26,4 +35,10 @@ log "phase 1/1: episodic capture"
 CAPTURE_VERIFY_EXTRACTION=1 \
 python3 "$DAEDALUS_HOME/core/capture.py" capture \
   || die "capture failed — the session is unrecorded"
+# --commit: the prime's vault commit (spec §4.7) runs only after the capture
+# succeeded — a failed capture stops the close before anything is committed.
+if [ "$commit" -eq 1 ]; then
+  log "phase 2/2: vault commit"
+  bash "$DAEDALUS_HOME/core/vault-commit.sh" || die "vault commit failed"
+fi
 log "close complete"

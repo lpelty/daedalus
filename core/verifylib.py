@@ -548,3 +548,54 @@ def lease_context(root: Path, session_id: Optional[str]) -> dict:
                 "prime": bool(session_id) and prime_sid == session_id,
                 "prime_nn": prime_nn, "liveness": live, "refused": refused})
     return ctx
+
+
+# --- The prime's vault commit (§4.7) ------------------------------------------
+
+def vault_claim_report(root: Path) -> List[dict]:
+    """Every claim-shaped changed/untracked vault *.md, whatever `lease:` it
+    carries, with the lease's liveness and the plain-language problem an
+    unverified claim has (§4.7 rules 3–4). `live` is judged from one locked
+    read of state/leases/ (lease_context): a lease with no file, or a stale
+    one, is not live — its claim is the prime's to answer for. `own` marks
+    the caller's own lease (its claim is judged, never left out). May raise
+    VaultLocked (§3.3)."""
+    ctx = lease_context(root, session_id_of_caller())
+    out: List[dict] = []
+    for p, fm in claims(root, vault_head(root), None, lease="*"):
+        rid = fm.get("evidence-run", "")
+        rec = run_record(root, rid) if rid else None
+        problem = None
+        if not rid:
+            problem = ("%s claims IMPLEMENTED with no evidence-run: run core/gates.sh and cite the run-id, "
+                       "or change the status." % p.name)
+        elif rec is None:
+            problem = "%s cites evidence-run %s, which does not exist." % (p.name, rid)
+        elif rec.get("result") != "PASS":
+            problem = "%s cites evidence-run %s, whose result is %s." % (p.name, rid, rec.get("result"))
+        lease = doc_lease(fm)
+        out.append({"path": str(p), "lease": lease,
+                    "live": ctx["liveness"].get(lease) in ("live", "quiet", "resumed"),
+                    "own": bool(lease) and lease == ctx["mine"], "problem": problem})
+    return out
+
+
+def session_id_of_caller() -> Optional[str]:
+    """A script's session identity (§4.2): DAEDALUS_SESSION_ID, else
+    CLAUDE_CODE_SESSION_ID, else CLAUDE_PID through the registry; None is an
+    operator shell. The one implementation lives in leaselib."""
+    import leaselib as ll
+    return ll.session_id_from_env()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--vault-claims"]:
+        try:
+            for row in vault_claim_report(ROOT):
+                print(json.dumps(row))
+        except VaultLocked as e:
+            sys.stderr.write("daedalus: %s\n" % e)
+            sys.exit(1)
+        sys.exit(0)
+    sys.stderr.write("usage: verifylib.py --vault-claims\n")
+    sys.exit(2)
