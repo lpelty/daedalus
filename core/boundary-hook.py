@@ -19,8 +19,15 @@ checkout target/<repo> is denied for every window; a released lease's
 worktree is closed; another window's worktree is denied every time (§3.1);
 vault/hot.md is the prime's alone (§4.7). A session that cannot be bound
 while lease files exist — or a lease file that cannot be read — fails
-CLOSED under target/, worktrees/ and hot.md (§4.4). Its two helpers, cross_lease_holder and warning_text, are
-imported by guard-bash.py for Bash write operands.
+CLOSED under target/, worktrees/ and hot.md (§4.4). The whole check is
+write_check, which guard-bash.py runs on every Bash write operand too, so
+the Edit and Bash legs are one function and say the same sentences.
+Ownership of a tree is judged from the PATH alone (tree_deny), before any
+repository is looked for under the operand: `rm -rf worktrees/02` names
+no file inside a repository and was allowed while a file inside it was
+denied (Task 11 review). A warning that cannot be recorded (state/ not
+writable) is still a deny — the stop repeats, and one line on stderr says
+why — never a silent allow.
 """
 from __future__ import annotations
 
@@ -183,6 +190,17 @@ def deny(reason: str) -> dict:
                                    "permissionDecisionReason": reason}}
 
 
+def under(p: Path, base: Optional[Path]) -> bool:
+    """p is base or lies under it (both resolved). base None is never matched."""
+    if base is None:
+        return False
+    try:
+        p.resolve().relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
 # --- PreToolUse(Edit|Write): the boundary warning (§4.6, §4.7, §4.10) ---------
 
 def boundary_file(root: Path, sid: object) -> Path:
@@ -205,6 +223,27 @@ def save_boundary(root: Path, sid: object, data: dict) -> None:
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(data))
     tmp.replace(p)
+
+
+RECORD_FAILED = "daedalus: could not record the boundary warning in state/ (%s); the stop will repeat until it can be recorded."
+
+
+def first_warning(root: Path, sid: object, key: str) -> bool:
+    """True when this path has not been warned this session — and it is recorded now, so the
+    next attempt goes through with context. When the record cannot be written the answer is
+    still True: a stop that repeats is the safe failure, and one line on stderr says why. The
+    alternative — the OSError climbing to the hook's outer except — was a silent allow on every
+    attempt (Task 11 review)."""
+    b = load_boundary(root, sid)
+    warned = b.setdefault("warned", {})
+    if key in warned:
+        return False
+    warned[key] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        save_boundary(root, sid, b)
+    except OSError as e:
+        print(RECORD_FAILED % e, file=sys.stderr)
+    return True
 
 
 def repo_key_of(root: Path, tree: Path) -> str:
@@ -254,6 +293,85 @@ def warning_text(nn: str, lease: dict, rel: str, background: bool, ago: str) -> 
     return first + "\n" + FIRST_STOP + tail
 
 
+NOT_PRIME = ("Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by window %s — "
+             "ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so.")
+WORKTREES_ROOT = "worktrees/ holds every window's worktree; nothing writes or removes it as a whole. Your work goes in %s."
+
+
+def tree_deny(root: Path, ctx: dict, p: Path) -> Optional[str]:
+    """§3.1, §4.2, §4.6 judged from the PATH alone, before repo_relative — which is None for
+    target/ itself, worktrees/ itself and worktrees/<NN> itself, exactly the operands `rm -rf`
+    names (Task 11 review). The prime's checkout is target/ and everything under it, for every
+    window; another window's worktree is worktrees/<NN> and everything under it, for clone and
+    prime alike — a deny every time, never the stop-once warning; a released window's own
+    worktree is closed. The repository under the operand, when there is one, only sharpens the
+    sentence. None means the path is nobody else's."""
+    rroot = root.resolve()
+    hit = v.repo_relative(root, p)
+    repo_key = repo_key_of(root, hit[0]) if hit is not None else ""
+    mine = ctx["mine"]
+    if mine and repo_key:
+        mine_wt = "worktrees/%s/%s" % (mine, repo_key)
+    elif mine:
+        mine_wt = "worktrees/%s" % mine
+    else:
+        mine_wt = "a numbered window's worktree"
+    if under(p, rroot / "target"):
+        shown = (hit[0] if hit is not None else p).resolve().relative_to(rroot).as_posix()
+        return ("This is the prime's checkout (%s). Your work goes in %s. If you meant to change trunk, that is what "
+                "`promote` is for." % (shown, mine_wt))
+    wts = rroot / "worktrees"
+    if under(p, wts):
+        parts = p.resolve().relative_to(wts).parts
+        if not parts:
+            return WORKTREES_ROOT % mine_wt
+        wt_nn = parts[0]
+        if mine and wt_nn != mine:
+            theirs = ("worktrees/%s/%s" % (wt_nn, repo_key)) if repo_key else ("worktrees/%s" % wt_nn)
+            return ("This is window %s's worktree (%s). Your work goes in %s. If you need something from that "
+                    "window's tree, send it a message." % (wt_nn, theirs, mine_wt))
+        if (ctx["leases"].get(wt_nn) or {}).get("released"):
+            return "this window is released; its worktree is closed"
+    return None
+
+
+def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """The lease-era checks for one resolved write path — the Edit/Write leg and every Bash
+    write operand run this same function. In order: fail closed under target/, worktrees/ and
+    hot.md for a session that cannot be bound or a lease file that cannot be read (§4.4 —
+    judged BEFORE the empty-leases return, which is what a read failure leaves; `refused` is
+    the caller's, since the guard's may also come from the bash seam); vault/hot.md for a
+    non-prime (§4.7); the trees (tree_deny); the stop-once cross-lease warning (§4.6).
+    Returns (deny reason, context): a deny; or context alone for a cross-lease path already
+    warned this session; or (None, None)."""
+    rroot = root.resolve()
+    is_hot = p == rroot / "vault" / "hot.md"
+    if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees") or is_hot):
+        return refused, None
+    if not ctx["leases"]:
+        return None, None
+    if is_hot and not ctx["prime"]:
+        return NOT_PRIME % (ctx["mine"] or "none", ctx["prime_nn"] or "none"), None
+    reason = tree_deny(root, ctx, p)
+    if reason:
+        return reason, None
+    hit = v.repo_relative(root, p)
+    if hit is None:
+        return None, None
+    tree, rel = hit
+    holder = cross_lease_holder(root, ctx, tree, rel)
+    if holder is None:
+        return None, None
+    import leaselib as ll          # already imported by lease_context once leases exist
+    nn, lease = holder
+    entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
+    background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
+    text = warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
+    if first_warning(root, sid, str(p.resolve())):
+        return text, None
+    return None, text.replace(FIRST_STOP, "")
+
+
 def _pre(decision: Optional[str], text: str) -> dict:
     """A PreToolUse output: a deny whose reason IS the text (the reason is shown
     to Claude) and the same text as context; or context alone (no decision)."""
@@ -266,14 +384,8 @@ def _pre(decision: Optional[str], text: str) -> dict:
 
 def check_pretooluse(root: Path, payload: dict) -> Optional[dict]:
     """PreToolUse(Edit|Write): one read of the leases (lease_context, §4.6
-    budget rule — no bash seam, no git), then the checks in this order: fail
-    closed under target/, worktrees/ and hot.md for a session that cannot be
-    bound or a lease file that cannot be read (§4.4, ctx['refused'] — judged
-    before the empty-leases return, which is what a read failure leaves);
-    vault/hot.md for a non-prime (§4.7); the prime's checkout target/<repo>
-    for every window; another window's worktree (§3.1); a released lease's
-    worktree; and the stop-once cross-lease warning (§4.6). None means
-    nothing to say."""
+    budget rule — no bash seam, no git), then write_check on the path. None
+    means nothing to say."""
     if payload.get("tool_name") not in ("Edit", "Write"):
         return None
     sid = v.export_session(payload)
@@ -282,56 +394,12 @@ def check_pretooluse(root: Path, payload: dict) -> Optional[dict]:
         return None
     op = Path(fp).resolve()
     ctx = v.lease_context(root, sid)
-    rroot = root.resolve()
-    under_target = str(op).startswith(str(rroot / "target") + "/")
-    under_wt = str(op).startswith(str(rroot / "worktrees") + "/")
-    # The refusal is judged BEFORE the empty-leases return: a lease file that cannot be read
-    # comes back as refused with an EMPTY leases dict, and testing `leases` first turned that
-    # refusal into silence (Task 10 review). hot.md is included — an unreadable lease set means
-    # the pen-holder is unknown too.
-    if ctx["refused"] and (under_target or under_wt or op == rroot / "vault" / "hot.md"):
-        return _pre("deny", ctx["refused"])
-    if not ctx["leases"]:
-        return None
-    if op == rroot / "vault" / "hot.md" and not ctx["prime"]:
-        return _pre("deny", "Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by "
-                            "window %s — ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so."
-                    % (ctx["mine"] or "none", ctx["prime_nn"] or "none"))
-    hit = v.repo_relative(root, op)
-    if hit is None:
-        return None
-    tree, rel = hit
-    repo_key = repo_key_of(root, tree)
-    if under_target:
-        mine_wt = ("worktrees/%s/%s" % (ctx["mine"], repo_key)) if ctx["mine"] else "a numbered window's worktree"
-        return _pre("deny", "This is the prime's checkout (%s). Your work goes in %s. If you meant to change trunk, that is what "
-                            "`promote` is for." % (tree.resolve().relative_to(rroot).as_posix(), mine_wt))
-    if under_wt:
-        wt_nn = tree.resolve().relative_to(rroot / "worktrees").parts[0]
-        if ctx["mine"] and wt_nn != ctx["mine"]:
-            # §3.1: a clone never writes any other lease's worktree, the prime never writes
-            # another lease's worktree — a deny every time, never the stop-once warning.
-            return _pre("deny", "This is window %s's worktree (worktrees/%s/%s). Your work goes in worktrees/%s/%s. If you need "
-                                "something from that window's tree, send it a message."
-                        % (wt_nn, wt_nn, repo_key, ctx["mine"], repo_key))
-        if (ctx["leases"].get(wt_nn) or {}).get("released"):
-            return _pre("deny", "this window is released; its worktree is closed")
-    holder = cross_lease_holder(root, ctx, tree, rel)
-    if holder is None:
-        return None
-    import leaselib as ll          # already imported by lease_context once leases exist
-    nn, lease = holder
-    entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
-    background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
-    text = warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
-    b = load_boundary(root, sid)
-    warned = b.setdefault("warned", {})
-    key = str(op)
-    if key in warned:
-        return _pre(None, text.replace(FIRST_STOP, ""))
-    warned[key] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    save_boundary(root, sid, b)
-    return _pre("deny", text)
+    reason, context = write_check(root, ctx, op, sid, ctx["refused"])
+    if reason:
+        return _pre("deny", reason)
+    if context:
+        return _pre(None, context)
+    return None
 
 
 def main() -> int:

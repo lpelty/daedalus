@@ -20,21 +20,28 @@ out. Relative paths resolve against the hook's `cwd`, then any
 `||`, `|`, `&`, `;` and newlines — tokenized with shlex's punctuation
 mode, because plain shlex.split keeps a glued `;` on the word (`vault;`)
 and `cd vault; git commit -m x` was one cd segment whose git command was
-never examined (Task 11 review; the gap is v0.6.1's). Fails open on its own errors,
-except that an unparseable command is still checked for redirect and `-i`
-operands that resolve to protected paths, and that an unreadable config
+never examined (Task 11 review). Heredoc bodies are removed before
+tokenizing: a body is prose, and an apostrophe in it ("it's") is what
+made shlex raise. Fails open on its own errors, except that a command
+that is still unparseable is checked for redirect and `-i` operands
+with the full write check, and that an unreadable config
 fails CLOSED for git inside `target/`: with no trunk to compare against,
 a push or commit there is denied rather than waved through (the same rule
 boundary-hook.py applies since PROP-019). Everything this guard can be
 routed around is caught by boundary-hook.py from git state.
 
 Since v0.7.0 the guard also carries the lease-era checks for Bash operands
-(spec §4.6, §4.7, §3.1), sharing boundary-hook.py's helpers so the Edit
-and Bash legs say the same sentences: a write operand in another live
-window's changed set is denied ONCE per session with the warning, then let
-through with the warning as context; the prime's checkout target/<repo>
-is denied for every window; another window's worktree is denied every
-time, and so is `git worktree remove` of it; a released window's own
+(spec §4.6, §4.7, §3.1) — boundary-hook.write_check, the same function the
+Edit/Write leg runs, so both legs say the same sentences: a write operand
+in another live window's changed set is denied ONCE per session with the
+warning, then let through with the warning as context; the prime's
+checkout (target/ and everything under it) is denied for every window;
+another window's worktree (worktrees/<NN> and everything under it, the
+directory itself included) is denied every time, and so is `git worktree
+remove` of it — resolved against the `-C` directory git runs in, and also
+matched the way git itself matches a relative operand, as a path suffix of
+every registered worktree (`git worktree remove 01/thing` from window 02's
+worktree removes window 01's); a released window's own
 worktree is closed; vault/hot.md is the prime's alone; raw `git add`,
 `commit` and `stash` under vault/ are denied from EVERY session, prime
 included, naming core/vault-commit.sh; a non-prime's `commit` or `push`
@@ -50,7 +57,6 @@ import os
 import re
 import shlex
 import sys
-import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -62,13 +68,14 @@ bh = importlib.import_module("boundary-hook")  # noqa: E402  (the file name has 
 # newline): a token made only of these characters (`&&`, `||`, `|`, `|&`, `&`, `;`, `;;`, a
 # newline, or a run such as `;\n`) ends a segment.
 PUNCT = ";&|\n"
+# A heredoc opener: `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`, `<<\WORD` — never `<<<`.
+HEREDOC = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|(\\?[A-Za-z0-9_][A-Za-z0-9_.-]*))(?!<)")
 # Scripts learn which session runs them from these variables (spec §4.4 step 1);
 # a prefix that strips or blanks one makes a session look like an operator shell.
 STRIP_VARS = re.compile(r"^(CLAUDE[A-Z_]*|DAEDALUS_SESSION_ID)$")
 STRIP_REASON = "scripts learn which session runs them from these variables; do not strip them"
 # §4.7: the prime's number is read from prime.json at denial time, never hard-coded; never a peer name (§4.1).
-NOT_PRIME = ("Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by window %s — "
-             "ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so.")
+NOT_PRIME = bh.NOT_PRIME
 VAULT_RULE = "The vault is committed by `core/vault-commit.sh`, which checks every claim first."
 DESTRUCTIVE = [("reset", "--hard"), ("checkout", "--"), ("restore", "."), ("clean", "-f"), ("stash", "drop")]
 WRITE_IN_STRING = re.compile(r"(?:>>?|\btee\b|open\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][wa]|\.write_text\(|\bwrite\()")
@@ -94,11 +101,32 @@ def segments(tokens: List[str]) -> List[List[str]]:
     return [s for s in out if s]
 
 
+def strip_heredocs(cmd: str) -> str:
+    """Every heredoc's body lines removed; the `<<WORD` word stays on its line. Bodies run from
+    the line after their opener to the terminator line, in the order the openers appear;
+    `<<-` lets the terminator carry leading tabs. An unterminated body swallows the rest, as
+    it does in bash."""
+    out: List[str] = []
+    pending: List[Tuple[str, bool]] = []
+    for line in cmd.split("\n"):
+        if pending:
+            term, tabs = pending[0]
+            if (line.lstrip("\t") if tabs else line) == term:
+                pending.pop(0)
+            continue
+        out.append(line)
+        for m in HEREDOC.finditer(line):
+            word = m.group(1) if m.group(1) is not None else m.group(2) if m.group(2) is not None else m.group(3).lstrip("\\")
+            pending.append((word, m.group(0).startswith("<<-")))
+    return "\n".join(out)
+
+
 def tokenize(cmd: str) -> List[str]:
-    """shlex in punctuation mode: `;`, `&`, `|` and newlines come out as their own tokens
-    (runs merged: `&&`, `||`), quotes and escapes as in posix mode, `#` never a comment.
-    Raises ValueError as shlex.split does for a quote left open."""
-    lex = shlex.shlex(cmd, posix=True, punctuation_chars=PUNCT)
+    """shlex in punctuation mode over the command with its heredoc bodies removed: `;`, `&`,
+    `|` and newlines come out as their own tokens (runs merged: `&&`, `||`), quotes and
+    escapes as in posix mode, `#` never a comment. Raises ValueError only for a quote the
+    shell itself leaves open."""
+    lex = shlex.shlex(strip_heredocs(cmd), posix=True, punctuation_chars=PUNCT)
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
     lex.commenters = ""
@@ -125,14 +153,7 @@ def git_repo_and_args(seg: List[str], cwd: Path) -> Tuple[Path, List[str]]:
     return repo, seg[i:]
 
 
-def under(p: Path, base: Optional[Path]) -> bool:
-    if base is None:
-        return False
-    try:
-        p.resolve().relative_to(base)
-        return True
-    except ValueError:
-        return False
+under = bh.under
 
 
 def branch_of(repo: Path) -> str:
@@ -340,73 +361,54 @@ def check_vault_git(args: List[str], repo: Path, vault: Path, ctx: dict) -> Opti
     return None
 
 
-def check_worktree_remove(args: List[str], here: Path, root: Path, ctx: dict) -> Optional[str]:
-    """§3.1: `git worktree remove <path>` of another window's worktree is denied."""
+REMOVE_OTHER = "That is window %s's worktree; only that window (or `core/lease.sh release --remove`) may remove it."
+
+
+def other_worktrees(root: Path, ctx: dict) -> List[Tuple[str, Path]]:
+    """Every other window's worktree directory on disk — worktrees/<NN>/<repo> and each nested
+    repo under it — as (NN, path). No git: a listing of worktrees/<NN>/ per lease."""
+    wts = (root / "worktrees").resolve()
+    out: List[Tuple[str, Path]] = []
+    for nn in sorted(ctx["leases"]):
+        if nn in ("prime", ctx["mine"]):
+            continue
+        try:
+            children = sorted(c for c in (wts / nn).iterdir() if c.is_dir())
+        except OSError:
+            continue
+        for c in children:
+            out.append((nn, c))
+            out.extend((nn, c / n) for n in v.nested_relpaths(root) if (c / n).is_dir())
+    return out
+
+
+def check_worktree_remove(args: List[str], repo_dir: Path, root: Path, ctx: dict) -> Optional[str]:
+    """§3.1: `git worktree remove <path>` of another window's worktree is denied. The operand
+    is resolved against repo_dir — the `-C` directory git runs in, not the shell's cwd — and
+    a relative operand is ALSO matched the way git matches it first: as a path suffix of every
+    registered worktree (worktree.c find_worktree_by_suffix; measured 2026-09-26: `git -C
+    worktrees/01/thing worktree remove 02/thing` removed window 02's worktree while the path
+    it resolves to does not exist)."""
     if args[:2] != ["worktree", "remove"] or not ctx["mine"]:
         return None
     wts = (root / "worktrees").resolve()
+    others: Optional[List[Tuple[str, Path]]] = None
     for a in args[2:]:
         if a.startswith("-"):
             continue
-        p = resolve(here, a)
+        p = resolve(repo_dir, a)
         if under(p, wts):
-            wt_nn = p.relative_to(wts).parts[0]
-            if wt_nn != ctx["mine"]:
-                return ("That is window %s's worktree; only that window (or `core/lease.sh release --remove`) may remove it."
-                        % wt_nn)
+            parts = p.relative_to(wts).parts
+            if parts and parts[0] != ctx["mine"]:
+                return REMOVE_OTHER % parts[0]
+        if not os.path.isabs(os.path.expanduser(a)):
+            if others is None:
+                others = other_worktrees(root, ctx)
+            suffix = "/" + a.rstrip("/")
+            for nn, wp in others:
+                if str(wp).endswith(suffix):
+                    return REMOVE_OTHER % nn
     return None
-
-
-def check_write_operand(p: Path, root: Path, ctx: dict, refused: str, sid: object) -> Tuple[Optional[str], Optional[str]]:
-    """The lease-era checks for one resolved write operand (§4.6, §4.7, §3.1),
-    in boundary-hook.check_pretooluse's order. Returns (deny reason, context):
-    a deny, or context alone for a cross-lease path already warned this
-    session, or (None, None)."""
-    rroot = root.resolve()
-    wts = rroot / "worktrees"
-    under_target = under(p, rroot / "target")
-    under_wt = under(p, wts)
-    is_hot = p == rroot / "vault" / "hot.md"
-    # The refusal is judged BEFORE the empty-leases return (Task 10 review): an unreadable
-    # lease file leaves an empty leases dict with the refusal set.
-    if refused and (under_target or under_wt or is_hot):
-        return refused, None
-    if not ctx["leases"]:
-        return None, None
-    if is_hot and not ctx["prime"]:
-        return NOT_PRIME % (ctx["mine"] or "none", ctx["prime_nn"] or "none"), None
-    hit = v.repo_relative(root, p)
-    if hit is None:
-        return None, None
-    tree, rel = hit
-    repo_key = bh.repo_key_of(root, tree)
-    if under_target:
-        mine_wt = ("worktrees/%s/%s" % (ctx["mine"], repo_key)) if ctx["mine"] else "a numbered window's worktree"
-        return ("This is the prime's checkout (%s). Your work goes in %s. If you meant to change trunk, that is what "
-                "`promote` is for." % (tree.resolve().relative_to(rroot).as_posix(), mine_wt)), None
-    if under_wt:
-        wt_nn = tree.resolve().relative_to(wts).parts[0]
-        if ctx["mine"] and wt_nn != ctx["mine"]:
-            return ("This is window %s's worktree (worktrees/%s/%s). Your work goes in worktrees/%s/%s. If you need "
-                    "something from that window's tree, send it a message." % (wt_nn, wt_nn, repo_key, ctx["mine"], repo_key)), None
-        if (ctx["leases"].get(wt_nn) or {}).get("released"):
-            return "this window is released; its worktree is closed", None
-    holder = bh.cross_lease_holder(root, ctx, tree, rel)
-    if holder is None:
-        return None, None
-    import leaselib as ll          # already imported by lease_context once leases exist
-    nn, lease = holder
-    entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
-    background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
-    text = bh.warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
-    b = bh.load_boundary(root, sid)
-    warned = b.setdefault("warned", {})
-    key = str(p)
-    if key in warned:
-        return None, text.replace(bh.FIRST_STOP, "")
-    warned[key] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    bh.save_boundary(root, sid, b)
-    return text, None
 
 
 def main() -> int:
@@ -445,12 +447,21 @@ def main() -> int:
     try:
         tokens = tokenize(cmd)
     except ValueError:
-        # Unparseable (a heredoc with an apostrophe): check only redirect / -i operands.
-        for m in re.finditer(r"(?:>>?|\s-i(?:\s+\S+)?\s)\s*([A-Za-z0-9_./~-]+)", cmd):
-            p = resolve(cwd, m.group(1))
-            if v.is_protected(root, p):
-                deny("%s is distribution code; write a proposal instead of editing it." % p)
-                return 0
+        # Still unparseable with the heredoc bodies gone (a quote the shell leaves open): the
+        # redirect / -i operands the regex finds get the FULL write check, not is_protected
+        # alone — the lease-era denials have no Stop backstop for hot.md or the prime's checkout.
+        try:
+            for m in re.finditer(r"(?:>>?|\s-i(?:\s+\S+)?\s)\s*([A-Za-z0-9_./~-]+)", cmd):
+                p = resolve(cwd, m.group(1))
+                reason, _ = bh.write_check(root, ctx, p, sid, refused)
+                if reason:
+                    deny(reason)
+                    return 0
+                if v.is_protected(root, p):
+                    deny("%s is distribution code; write a proposal instead of editing it." % p)
+                    return 0
+        except Exception:
+            return 0
         return 0
     try:
         branch_created = False
@@ -482,13 +493,13 @@ def main() -> int:
                 if reason:
                     deny(reason)
                     return 0
-                reason = check_vault_git(args, repo_dir, vault, ctx) or check_worktree_remove(args, here, root, ctx)
+                reason = check_vault_git(args, repo_dir, vault, ctx) or check_worktree_remove(args, repo_dir, root, ctx)
                 if reason:
                     deny(reason)
                     return 0
             for op in write_operands(seg):
                 p = resolve(here, op)
-                reason, context = check_write_operand(p, root, ctx, refused, sid)
+                reason, context = bh.write_check(root, ctx, p, sid, refused)
                 if reason:
                     deny(reason)
                     return 0

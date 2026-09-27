@@ -2,7 +2,7 @@
 # The lease fixture helper is loaded for live_pid / ps_ms / teardown_live only —
 # this suite keeps its own setup() (its own target, vault and marker shape).
 load fixtures/leases/setup.bash
-teardown() { teardown_live; }
+teardown() { teardown_live; chmod -R u+w "$DAEDALUS_HOME/state" 2>/dev/null || true; }
 
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
@@ -375,4 +375,24 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   done
   [ ! -f "$DAEDALUS_HOME/state/session-sA-boundary.json" ] || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert not d.get("warned"), d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
   run edit_as sB "$DAEDALUS_HOME/worktrees/02/thing/a.txt"; [ -z "$output" ]   # its own worktree is still its own
+  # Ownership is judged from the path alone (Task 11 review): a directory path — the worktree's own directory,
+  # worktrees/ itself, target/ itself — is denied whether or not a repository is found under it.
+  run edit_as sB "$DAEDALUS_HOME/worktrees/01"; case "$output" in *'"permissionDecision": "deny"'*"This is window 01's worktree (worktrees/01). Your work goes in worktrees/02."*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sB "$DAEDALUS_HOME/worktrees"; case "$output" in *'"permissionDecision": "deny"'*"worktrees/ holds every window's worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sA "$DAEDALUS_HOME/target"; case "$output" in *'"permissionDecision": "deny"'*"This is the prime's checkout (target)."*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sB "$DAEDALUS_HOME/target/notes.md"; case "$output" in *'"permissionDecision": "deny"'*"This is the prime's checkout (target/notes.md)."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "when state/ cannot be written the first cross-lease Edit is still denied with the warning and stderr names the cause; the stop repeats until it can be recorded" {
+  two_leases; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  chmod 500 "$DAEDALUS_HOME/state"
+  for i in 1 2; do
+    run edit_as sA "$W/hooks/capture.py"
+    case "$output" in *'"permissionDecision": "deny"'*"changed in window 02"*"This first attempt was stopped"*) : ;; *) echo "attempt $i: $output"; return 1 ;; esac
+    case "$output" in *"daedalus: could not record the boundary warning in state/"*"the stop will repeat"*) : ;; *) echo "attempt $i, stderr must name the cause: $output"; return 1 ;; esac
+  done
+  chmod 755 "$DAEDALUS_HOME/state"
+  run edit_as sA "$W/hooks/capture.py"; case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sA "$W/hooks/capture.py"; case "$output" in *'"permissionDecision"'*) echo "recorded: the next attempt must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
 }

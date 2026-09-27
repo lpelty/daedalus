@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 load fixtures/leases/setup.bash
-teardown() { teardown_live; }
+teardown() { teardown_live; chmod -R u+w "$DAEDALUS_HOME/state" 2>/dev/null || true; }
 
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
@@ -34,6 +34,9 @@ guard_as() {  # guard_as <session-id> <command> [cwd] — the hook payload carri
   local cwd="${3:-$DAEDALUS_HOME}"
   printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":%s}}' \
     "$1" "$cwd" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2")" | python3 "$DAEDALUS_HOME/core/guard-bash.py"
+}
+write_as() {  # write_as <session-id> <abs path> — the Edit/Write leg (boundary-hook.py) on the same fixture
+  printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"Write","tool_input":{"file_path":"%s"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"
 }
 denied() { case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "expected deny: $output"; return 1 ;; esac; }
 allowed() { [ -z "$output" ]; }
@@ -302,8 +305,27 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   guard_leases
   run guard_as sA 'echo x > a.txt' "$T"; denied; case "$output" in *"This is the prime's checkout (target/thing). Your work goes in worktrees/01/thing."*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sB 'cp x a.txt' "$T"; denied
-  run guard_as sB 'git -C target/thing worktree remove worktrees/01'; denied; case "$output" in *"window 01's worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  # `git worktree remove` resolves a relative operand against the `-C` directory, and git tries the operand as a
+  # path SUFFIX of every registered worktree before the path it resolves to (worktree.c find_worktree_by_suffix):
+  # measured 2026-09-26, `git -C worktrees/01/thing worktree remove 02/thing` removed window 02's worktree.
+  run guard_as sB 'git -C worktrees/02/thing worktree remove ../../01/thing'; denied; case "$output" in *"window 01's worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git -C worktrees/02/thing worktree remove --force ../../01/thing'; denied
+  run guard_as sB 'git worktree remove 01/thing' "$DAEDALUS_HOME/worktrees/02/thing"; denied; case "$output" in *"window 01's worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git worktree remove ../../02/thing' "$DAEDALUS_HOME/worktrees/02/thing"; allowed   # its own
   run guard_as sB 'rm -rf worktrees/01/thing/a.txt'; denied
+  # Ownership is judged from the PATH, not from whether a repository sits under the operand: the directory that
+  # holds another window's worktree, worktrees/ itself and target/ itself were allowed while a file inside was denied.
+  run guard_as sA 'rm -rf worktrees/02'; denied; case "$output" in *"This is window 02's worktree (worktrees/02). Your work goes in worktrees/01."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA 'rm -rf worktrees/02/'; denied
+  run guard_as sA 'rm -rf worktrees'; denied; case "$output" in *"worktrees/ holds every window's worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA 'rm -rf target'; denied; case "$output" in *"This is the prime's checkout (target)."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'rm -rf target/thing'; denied; case "$output" in *"This is the prime's checkout (target/thing)."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'echo x > target/notes.txt'; denied
+  run guard_as sA 'rm -rf worktrees/01/scratch'; allowed   # its own window's directory
+  # the Edit/Write leg says the same for a directory path (parity)
+  run write_as sA "$DAEDALUS_HOME/worktrees/02"; denied; case "$output" in *"This is window 02's worktree (worktrees/02). Your work goes in worktrees/01."*) : ;; *) echo "$output"; return 1 ;; esac
+  run write_as sA "$DAEDALUS_HOME/worktrees"; denied
+  run write_as sB "$DAEDALUS_HOME/target"; denied; case "$output" in *"This is the prime's checkout (target)."*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sZ 'git push origin HEAD:main' "$T"; denied; case "$output" in *"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
   # a released window's OWN worktree is closed to its Bash tool too (§4.2 "edits under it are denied")
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["released"]="2026-09-25T12:00:00"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
@@ -330,6 +352,39 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   run guard 'git -C vault push origin main'; allowed
 }
 
+@test "a heredoc whose body shlex cannot tokenize (an apostrophe) is checked like a plain redirect: the prime's checkout, hot.md for a non-prime, the stop-once cross-lease warning; a body that only mentions a guarded path is allowed" {
+  # Before: the ValueError fallback ran is_protected alone, so every lease-era rule was waved through for
+  # one of the most common Bash shapes Claude Code emits.
+  guard_leases; W="$DAEDALUS_HOME/worktrees/01/thing"
+  run guard_as sB "cat > a.txt <<'EOF2'
+it's
+EOF2" "$T"; denied; case "$output" in *"This is the prime's checkout (target/thing)."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB "cat > hot.md <<'EOF2'
+don't
+EOF2" "$DAEDALUS_HOME/vault"; denied; case "$output" in *"Only the prime window commits the vault and writes hot.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "cat > hooks/capture.py <<'EOF2'
+it's
+EOF2" "$W"; denied; case "$output" in *"changed in window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(k.endswith("hooks/capture.py") for k in d["warned"]), d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
+  run guard_as sA "cat > hooks/capture.py <<'EOF2'
+it's
+EOF2" "$W"; case "$output" in *'"permissionDecision"'*) echo "second must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB "cat > hot.md <<'EOF2'
+it's
+EOF2" "$DAEDALUS_HOME/vault"; denied
+  # a `<<-` heredoc, and a heredoc followed by another command on the next line
+  run guard_as sB "cat > a.txt <<-EOF2
+	it's
+	EOF2
+echo done" "$T"; denied
+  run guard_as sB "cat <<'EOF2'
+the prime's checkout target/thing/a.txt and hot.md are mentioned, not written
+EOF2" "$T"; allowed
+  run guard_as sA "cat > notes.txt <<'EOF2'
+it's fine here
+EOF2" "$W"; allowed
+}
+
 @test "a semicolon with no space before it, and a newline, separate commands the way && does: trunk push, vault commit and cd target/thing; ... are all denied; a quoted semicolon does not split" {
   # shlex.split keeps a glued `;` on the word (`vault;`), so `cd vault; git commit -m x` was one cd segment
   # and the git command was never examined — every rule in the guard was bypassed by the commonest spelling.
@@ -349,4 +404,21 @@ git push origin main"; denied
   run guard_as sB 'cd vault; echo x > hot.md'; denied
   run guard_as sB 'cd worktrees/02/thing; git worktree remove ../../01/thing'; denied
   run guard_as sA 'cd worktrees/01/thing; echo x > hooks/capture.py'; denied; case "$output" in *"changed in window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "when state/ cannot be written the first cross-lease Bash write and Edit are still denied with the warning, and stderr names the cause" {
+  # Before: save_boundary raised, the hook's outer except swallowed it, and the write went through with no
+  # output at all — on every attempt, not once. The safe failure is a stop that repeats.
+  guard_leases; W="$DAEDALUS_HOME/worktrees/01/thing"
+  chmod 500 "$DAEDALUS_HOME/state"
+  run guard_as sA 'echo x > hooks/capture.py' "$W"; denied
+  case "$output" in *"changed in window 02"*"This first attempt was stopped"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"daedalus: could not record the boundary warning in state/"*"the stop will repeat"*) : ;; *) echo "stderr must name the cause: $output"; return 1 ;; esac
+  run guard_as sA 'echo x > hooks/capture.py' "$W"; denied   # repeats, since nothing was recorded
+  run write_as sA "$W/hooks/capture.py"; denied   # (bats merges stderr ahead of stdout: two patterns, no order)
+  case "$output" in *"changed in window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"daedalus: could not record the boundary warning in state/"*) : ;; *) echo "stderr must name the cause: $output"; return 1 ;; esac
+  chmod 755 "$DAEDALUS_HOME/state"
+  run guard_as sA 'echo x > hooks/capture.py' "$W"; denied   # first RECORDED stop
+  run guard_as sA 'echo x > hooks/capture.py' "$W"; case "$output" in *'"permissionDecision"'*) echo "after the record the second must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
 }
