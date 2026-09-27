@@ -45,10 +45,17 @@ if [ "$target_repo_ok" -eq 1 ]; then
   # the operator at a remedy that cannot possibly help: sync-target calls this
   # same function and hits the same rejection. Keep stderr so the real cause
   # can be reported, and keep going — doctor names every problem in one run.
-  target_err="$(target_path 2>&1 >/dev/null || true)"
+  #
+  # The exit code decides, not whether stderr is empty: with lease files
+  # present, target_path resolves through leaselib.py, which prints an exit-0
+  # courtesy note for an operator shell ("no session — using the prime's
+  # checkout"). Reading that note as a rejection turned every doctor run from
+  # a shell red the moment a window was open. A note with exit 0 is a NOTE.
+  target_err="$(target_path 2>&1 >/dev/null)"; target_rc=$?
   target="$(target_path 2>/dev/null || true)"
-  if [ -n "$target_err" ]; then
-    note_problem "${target_err#daedalus: }"
+  if [ "$target_rc" -ne 0 ]; then
+    target_err="${target_err#daedalus: }"
+    note_problem "${target_err:-target checkout — cannot resolve the target path (target_path exited $target_rc)}"
   elif [ -z "$target" ] || [ ! -d "$target" ]; then
     note_problem "target checkout — run core/sync-target.sh"
   elif ! is_work_tree_root "$target"; then
@@ -58,6 +65,7 @@ if [ "$target_repo_ok" -eq 1 ]; then
     # inside an outer repository is broken even though git answers there.
     note_problem "target checkout is not a git repo: $target — run core/sync-target.sh"
   else
+    [ -n "$target_err" ] && log "NOTE     ${target_err#daedalus: }"
     log "OK       target checkout: $target"
     # The trunk name. Every branch-aware guard (guard-bash's push/commit
     # deny, the promotion gate) reads config target.branch; a config that
@@ -99,6 +107,54 @@ if [ "$target_repo_ok" -eq 1 ]; then
   fi
 else
   note_problem "target checkout — cannot determine path without config: target.repo"
+fi
+
+# Leases (spec §15). Every line is plain language: "03 (electron; no live
+# session since 09:40)", never a bare token. The counting and the staleness
+# call live in leaselib.py (doctor-lines) so doctor and the board can never
+# disagree; it decides each line's kind and this block counts the MISSING
+# ones. Guarded on leaselib.py existing so a fixture without it skips the
+# block, visibly. Skipped when state/leases/ is absent: leaselib takes its
+# lock inside that directory and would create it as a side effect of a
+# diagnostic. The here-string loop keeps note_problem in this shell — a pipe
+# would put it in a subshell and lose the count (see the unverified-claims
+# block below).
+if [ -f "$DAEDALUS_HOME/core/leaselib.py" ]; then
+  for d in state/leases worktrees; do
+    if [ ! -d "$DAEDALUS_HOME/$d" ]; then
+      note_problem "$d/ — start a session (the upgrade runs at SessionStart) or run core/setup.sh"
+    fi
+  done
+  if [ -d "$DAEDALUS_HOME/state/leases" ]; then
+    lease_out="$(python3 "$DAEDALUS_HOME/core/leaselib.py" doctor-lines 2>/dev/null)"
+    lease_rc=$?
+    if [ "$lease_rc" -ne 0 ]; then
+      note_problem "leases: check failed (core/leaselib.py doctor-lines exited $lease_rc)"
+    else
+      while IFS= read -r line; do
+        case "$line" in
+          "") ;;
+          "MISSING  "*) note_problem "${line#MISSING  }" ;;
+          *) log "$line" ;;
+        esac
+      done <<EOF
+$lease_out
+EOF
+    fi
+  fi
+  registry="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+  if [ -d "$registry" ]; then
+    n="$(ls "$registry"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+    log "OK       session registry: $registry/ present ($n entries)"
+  else
+    # Deviates from §15's exact line ("first-up by terminal check"): hooks
+    # cannot open /dev/tty (Task 6), so the line says what a registry-absent
+    # build actually does instead of promising a check that never runs.
+    log "NOTE     session registry absent — liveness by heartbeat only on this build; peer names unknown; no window numbers itself and nobody takes the pen at start (launch each window with DAEDALUS_LEASE=<NN>; core/lease.sh prime take gives one the pen)"
+  fi
+  for old in pitfall-seen.json code-context-seen.json; do
+    [ -f "$DAEDALUS_HOME/state/$old" ] && log "NOTE     state/$old is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"
+  done
 fi
 
 # A healthy vault is either its own git repo (vault/.git exists — the

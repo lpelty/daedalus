@@ -762,3 +762,76 @@ clone_target_with_default_branch() {   # clone_target_with_default_branch <defau
   [ "$(printf '%s\n' "$output" | grep -c 'NOTE     target.branch: mainline exists at origin; cannot tell')" -eq 1 ]
   [ "$(printf '%s\n' "$output" | grep -c 'MISSING.*target.branch')" -eq 0 ]
 }
+
+# --- Leases (spec §15, plan-1 rows) -------------------------------------------
+# The default fixture copies neither leaselib.py nor a real target repo, so the
+# leases block is skipped there (guard: core/leaselib.py present) and the older
+# green-path tests stay green. These tests add both.
+doctor_leases_fixture() {
+  cp "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  T="$DAEDALUS_HOME/target/thing"; git init -q -b main "$T"; printf 'a\n' > "$T/a.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m i
+  git init -q --bare "$BATS_TEST_TMPDIR/o.git"; git -C "$T" remote add origin "$BATS_TEST_TMPDIR/o.git"; git -C "$T" push -q -u origin main; git -C "$T" remote set-head origin main
+  mkdir -p "$DAEDALUS_HOME/vault/.git"; for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"; mkdir -p "$BATS_TEST_TMPDIR/sessions"
+  # These tests model an operator shell. Run from inside a Claude Code session
+  # (its Bash tool exports CLAUDE_CODE_SESSION_ID and CLAUDE_PID), doctor would
+  # instead resolve as an unleased SESSION and fail closed (§4.4) — correct,
+  # but not what these cases test. The isolation must not depend on who runs bats.
+  unset DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID
+}
+
+@test "doctor: missing state/leases and worktrees are MISSING lines naming the fix; present is OK with the live/stale counts" {
+  doctor_leases_fixture
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  state/leases/ — start a session (the upgrade runs at SessionStart) or run core/setup.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"MISSING  worktrees/"*) : ;; *) echo "$output"; return 1 ;; esac
+  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees"
+  # a genuinely LIVE lease: the bats pid with its real start time (proc_started 1 would read as a re-used pid -> stale)
+  ms="$(python3 -c 'import subprocess,sys,time
+out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
+print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
+  printf '{"lease":"01","session_id":"sA","pid":%s,"proc_started":%s}' "$$" "$ms" > "$DAEDALUS_HOME/state/leases/01.json"; touch "$DAEDALUS_HOME/state/leases/01.seen"
+  printf '{"lease":"03","session_id":"sC","alias":"electron","pid":1,"proc_started":1}' > "$DAEDALUS_HOME/state/leases/03.json"; touch -t 202001010940 "$DAEDALUS_HOME/state/leases/03.seen"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
+  case "$output" in *"OK       leases: state/leases/ (1 window live, 1 stale)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     leases: 1 stale — 03 (electron; no live session since"*"run core/lease.sh sweep"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: released and finished leases, swept numbers with waiting work, the registry, old shared dedup files — each a NOTE, none turns doctor red" {
+  doctor_leases_fixture; mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees"
+  printf '{"lease":"02","session_id":"sB","released":"2026-09-25T12:00:00"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  printf '{"lease":"04","session_id":"sD","spawned":true,"finished":"2026-09-25T11:42:00","summary":"done"}' > "$DAEDALUS_HOME/state/leases/04.json"
+  git -C "$T" branch lease/05; git -C "$T" worktree add -q "$DAEDALUS_HOME/worktrees/05/thing" lease/05
+  printf 'w\n' >> "$DAEDALUS_HOME/worktrees/05/thing/a.txt"; git -C "$DAEDALUS_HOME/worktrees/05/thing" -c user.email=t@x -c user.name=t commit -q -am "waiting one"
+  printf '{}' > "$DAEDALUS_HOME/state/pitfall-seen.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
+  case "$output" in *"NOTE     leases: 04 (spawned) FINISHED (promote 04 or release 04); 02 released (swept at next sweep)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     leases: 05 swept with 1 unpromoted commit waiting — say \"this is window 05\" to a window to continue it, or \"delete 05's work\""*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       session registry: "*"sessions/ present (0 entries)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     state/pitfall-seen.json is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -rf "$BATS_TEST_TMPDIR/sessions"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"NOTE     session registry absent — liveness by heartbeat only on this build; peer names unknown; no window numbers itself and nobody takes the pen at start (launch each window with DAEDALUS_LEASE=<NN>; core/lease.sh prime take gives one the pen)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor from an operator shell with leases present runs to the end and reports the target checkout OK" {
+  doctor_leases_fixture; mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees"
+  printf '{"lease":"01","session_id":"sA","worktree":"worktrees/01"}' > "$DAEDALUS_HOME/state/leases/01.json"
+  run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID bash '$DAEDALUS_HOME/core/doctor.sh'"
+  # With lease files present the path comes from leaselib.py resolve, whose root
+  # is realpath'd (verifylib.root_dir) — on macOS the bats tmpdir is under /var,
+  # a symlink to /private/var — so compare against the physical path.
+  real_home="$(cd "$DAEDALUS_HOME" && pwd -P)"
+  case "$output" in *"OK       target checkout: $real_home/target/thing"*"deployment is wired correctly"*) : ;; *) echo "$output"; return 1 ;; esac
+}

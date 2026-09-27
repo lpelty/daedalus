@@ -1485,6 +1485,68 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     return render_board(root, sid, leases, changed, waiting_numbers(root, leases), states, now, visitor=visitor, live_map=live_map)
 
 
+def _since(ts: Optional[float], now: float) -> str:
+    """When a window was last seen, for an operator: the clock time today,
+    the date and time when older — a heartbeat from last month must not read
+    as "since 09:40" this morning."""
+    if ts is None:
+        return "never seen"
+    fmt = "%H:%M" if time.localtime(ts)[:3] == time.localtime(now)[:3] else "%Y-%m-%d %H:%M"
+    return "no live session since " + time.strftime(fmt, time.localtime(ts))
+
+
+def doctor_lines(root: Path) -> list:
+    """The doctor's lease lines (spec §15), from ONE LOCK_SH read, with the
+    same liveness call the board makes so doctor and the board never
+    disagree. Each line carries its kind ("OK       ", "NOTE     ",
+    "MISSING  ") and doctor.sh counts the MISSING ones. Plain language
+    throughout: "03 (electron; no live session since 09:40)", never a bare
+    token. Released and finished windows are neither live nor stale — they
+    have their own line — so the counts describe windows someone might be
+    sitting at."""
+    try:
+        with lock(root, shared=True):
+            leases = read_all(root)
+    except Refused as e:
+        return ["MISSING  leases: %s" % e]
+    numbered = {k: d for k, d in sorted(leases.items()) if k != "prime"}
+    now, quiet_after = time.time(), stale_after_secs(root)
+    live, stale, finished, released = [], [], [], []
+    for nn, d in numbered.items():
+        if d.get("released"):
+            released.append(nn)
+        elif d.get("finished"):
+            finished.append(nn)
+        elif liveness(root, nn, d, now, quiet_after) == "stale":
+            stale.append(nn)
+        else:
+            live.append(nn)
+    lines = ["OK       leases: state/leases/ (%d window%s live, %d stale)"
+             % (len(live), "" if len(live) == 1 else "s", len(stale))]
+    if stale:
+        parts = []
+        for nn in stale:
+            alias = numbered[nn].get("alias")
+            when = _since(seen_mtime(root, nn), now)
+            parts.append("%s (%s; %s)" % (nn, alias, when) if alias else "%s (%s)" % (nn, when))
+        lines.append("NOTE     leases: %d stale — %s; run core/lease.sh sweep" % (len(stale), ", ".join(parts)))
+    if finished or released:
+        parts = ["%s%s FINISHED (promote %s or release %s)" % (nn, " (spawned)" if numbered[nn].get("spawned") else "", nn, nn)
+                 for nn in finished]
+        parts += ["%s released (swept at next sweep)" % nn for nn in released]
+        lines.append("NOTE     leases: %s" % "; ".join(parts))
+    try:
+        waiting = waiting_numbers(root, leases)
+    except Refused as e:
+        waiting = {}
+        lines.append("NOTE     leases: cannot tell whether a swept number still has unpromoted work (%s)" % e)
+    for nn in sorted(waiting):
+        k = len(waiting[nn])
+        lines.append("NOTE     leases: %s swept with %d unpromoted commit%s waiting — say \"this is window %s\" to a window "
+                     "to continue it, or \"delete %s's work\"" % (nn, k, "" if k == 1 else "s", nn, nn))
+    return lines
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -1576,6 +1638,11 @@ def main(argv: list) -> int:
             print(json.dumps(recompute_changed(root, args[0]))); return 0
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
+    if cmd == "doctor-lines":
+        # doctor.sh: one line per §15 lease row; MISSING lines are counted there.
+        for line in doctor_lines(root):
+            print(line)
+        return 0
     if cmd in ("list", "status"):
         # sid is None from an operator shell: the head says "you hold no lease"
         # and there is no nag (a person at a shell holds no lease by design).
