@@ -1,6 +1,6 @@
 ---
 type: rolling-state
-session: NNN        # mirrors the last session log written; never sets it
+leases:             # a copy of the lease board when the prime last wrote this: which windows are open and why (intent, not status)
 author: <who wrote this>
 created: YYYY-MM-DD
 updated-by: <who last modified this>

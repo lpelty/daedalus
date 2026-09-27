@@ -1,6 +1,8 @@
 ---
 type: session
-session: NNN
+lease: NN
+alias:
+lease-created: YYYY-MM-DDTHH:MM:SS
 author: <who wrote this>
 created: YYYY-MM-DD
 updated-by: <who last modified this>
@@ -11,12 +13,13 @@ findings: 0
 status: open
 ---
 
-<!-- File: vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md — NNN is a global running
-     count (not per-day), and the log files are the sole authority for it:
-     highest NNN across all logs, plus one. YYYY/MM is the month the session
-     OPENED. See the session-logs section of CLAUDE.md. -->
+<!-- File: vault/sessions/YYYY/MM/YYYY-MM-DD-NN.md — NN is your window number
+     (the lease this session holds); one file per window per day. A restart
+     under the same lease instance (same lease-created) appends a
+     "## Continued HH:MM" section here. See the session-logs section of
+     CLAUDE.md. -->
 
-# Session YYYY-MM-DD-NNN — <what this session was about>
+# Session YYYY-MM-DD, window NN — <what this session was about>
 
 <!-- The reader of this log is you, retrieving. Retrieval surfaces one
      fragment without its neighbours, so every entry must stand alone: name

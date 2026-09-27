@@ -274,3 +274,18 @@ _run_scan_in_fixture() {
   done
   [ -z "$bad" ] || { echo "PEP 604 unions without the future import:$bad"; return 1; }
 }
+
+# Spec §4.7 "Logs", D7: a session log is named by window number and date
+# (YYYY-MM-DD-<NN>.md), never by the retired global running count. The
+# templates carry the lease fields the log's frontmatter needs, and hot.md
+# holds a copy of the lease board (leases:) rather than mirroring a session
+# number that no longer exists.
+@test "CLAUDE.md names session logs by window number and date, and the templates carry lease fields" {
+  run grep -q 'YYYY-MM-DD-<NN>.md' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -q 'global running count' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -ne 0 ]
+  run grep -q '## Continued HH:MM' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -q '^lease: ' "$DAEDALUS_HOME/core/templates/session.md"; [ "$status" -eq 0 ]
+  run grep -q '^lease-created: ' "$DAEDALUS_HOME/core/templates/session.md"; [ "$status" -eq 0 ]
+  run grep -q '^leases: ' "$DAEDALUS_HOME/core/templates/hot.md"; [ "$status" -eq 0 ]
+  run grep -q '^session: ' "$DAEDALUS_HOME/core/templates/hot.md"; [ "$status" -ne 0 ]
+}

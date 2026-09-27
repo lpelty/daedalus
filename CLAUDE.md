@@ -169,30 +169,41 @@ verification pass moves `verified-against-live:`.
 
 ## Session logs
 
-One log per working session, in the vault:
+One log per window per day, in the vault:
 
 ```
-vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md
+vault/sessions/YYYY/MM/YYYY-MM-DD-<NN>.md
 ```
 
-`NNN` is a **global running count**, zero-padded to three digits — not a
-per-day or per-month counter. `YYYY/MM` is keyed to the date the session
-**opened**, so a session that runs past midnight stays in the month it began.
+`<NN>` is your **window number** — the two-digit lease the session took at
+start (the orientation line at the top of your context says it: "window 02").
+`YYYY/MM` is keyed to the date the session **opened**, so a session that runs
+past midnight stays in the month it began. A session that holds only the pen
+and no window (rare) logs as `YYYY-MM-DD-prime.md`.
 
-**The log files are the sole authority for the next number.** Take the highest
-`NNN` across every existing log and add one:
+**Restarted under the same window on the same day?** Append a dated
+`## Continued HH:MM` section to the same file instead of opening a second.
+"Same window" means the same lease *instance*: the log's frontmatter records
+the lease file's `created` stamp as `lease-created:`, and a number re-issued
+the same day to a new window (02 swept, then a new terminal allocated 02) has
+a new stamp — it opens `YYYY-MM-DD-02-2.md` rather than continuing another
+window's record.
 
-```
-ls vault/sessions/**/*.md    # highest -NNN.md, increment
-```
+The frontmatter carries `lease:` (the number), `alias:` (the display alias,
+if the operator gave one — display only, never the filename, because an alias
+can change mid-day and the file must not) and `lease-created:`.
 
-`hot.md` mirrors that number after the log is written; it never sets it. If the
-two disagree, the log wins and `hot.md` is corrected down to match. A gap that
-already exists stays — history is append-only and is never renumbered.
+Holding the pen is a line in the log, not a second file. `hot.md`'s `leases:`
+field is a copy of the lease board at the time the prime wrote it — intent
+(which windows are open and why), not status. Only the prime writes `hot.md`,
+and only through `core/vault-commit.sh` does the vault get committed.
 
-A descriptive slug in the filename looks helpful and costs retrieval: it makes
-ordering lexical instead of sequential, and it invites a summary in the one
-place that cannot hold one. The title inside the file carries the description.
+Logs written before this release used a global counter
+(`YYYY-MM-DD-NNN.md`). They stay as they are — history is append-only and is
+never renumbered.
+
+A descriptive slug in the filename looks helpful and costs retrieval: the
+title inside the file carries the description.
 
 Template: `vault/sessions/_template.md`. Never overwrite a past log — a
 correction goes in the current session's log, not into history.
