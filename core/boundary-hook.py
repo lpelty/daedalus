@@ -28,6 +28,18 @@ no file inside a repository and was allowed while a file inside it was
 denied (Task 11 review). A warning that cannot be recorded (state/ not
 writable) is still a deny — the stop repeats, and one line on stderr says
 why — never a silent allow.
+
+A timed-out PreToolUse hook is fail-OPEN (Claude Code treats it as no
+decision), so the Stop hook carries the backstop (§4.6 "Budget, and what a
+timeout costs"): at every Stop it records under `seen` every other live
+lease's changed set as it stands; at the next Stop a path of this
+session's own changed set that was in the PREVIOUS snapshot and has no
+`warned` entry blocks with "the warning never fired". A visitor — a
+session with DIRECT_CALL_ID in its environment (§4.8, §8.5) — is
+read-only and cannot have caused any Stop-time dirt: the backstop does
+not run for it and every Stop reason becomes a "(visitor, not blocking)"
+note, exit 0. Its PreToolUse denials are unchanged (a denial costs a
+read-only session nothing).
 """
 from __future__ import annotations
 
@@ -183,6 +195,52 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
     if out.strip() not in ("", "0"):
         reasons.append("Target %s moved this session (%s commit(s) past origin/%s at session start) — the operator "
                        "merges; work on a branch.%s" % (branch, out.strip(), branch, RESTART))
+
+
+NEVER_FIRED = ("you changed %s, which window %s%s had already changed, and the warning never fired "
+               "(the pre-write hook timed out?). Message that window before you go on.")
+
+
+def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]) -> None:
+    """§4.6: the Stop-time backstop for a pre-write warning that never fired. This
+    session's own changed set is recomputed here (the one place git runs for the
+    lease on the Stop side); each of its paths is looked up in the PREVIOUS Stop's
+    `seen` snapshot of the other live windows' sets, keyed the way first_warning
+    keys `warned` (the resolved absolute path). A path both windows changed in the
+    same interval was in nobody's snapshot — not a false positive here; the
+    pre-write hook catches it in whichever window touches it next. Then the
+    snapshot is replaced with the other live leases' sets as they stand now. A set
+    that cannot be recomputed (git failed in the worktree) keeps the last computed
+    set, and the Refused sentence rides along as a note — never a silent pass."""
+    import leaselib as ll
+    ctx = v.lease_context(root, str(sid) if sid else None)
+    if not ctx["leases"] or not ctx["mine"]:
+        return
+    mine_nn = ctx["mine"]
+    lease = ctx["leases"][mine_nn]
+    b = load_boundary(root, sid)
+    previous = b.get("seen") or {}
+    warned = b.get("warned") or {}
+    try:
+        mine = ll.recompute_changed(root, mine_nn, lease)
+    except ll.Refused as e:
+        notes.append(str(e))
+        mine = ctx["changed"].get(mine_nn) or {}
+    wt = root / str(lease.get("worktree") or ("worktrees/%s" % mine_nn))
+    for repo, paths in mine.items():
+        for rel in paths:
+            key = str((wt / repo / rel).resolve())
+            if key in warned:
+                continue
+            for nn, snap in sorted(previous.items()):
+                if isinstance(snap, dict) and rel in (snap.get(repo) or {}):
+                    other = ctx["leases"].get(nn) or {}
+                    alias = (" (%s)" % other["alias"]) if other.get("alias") else ""
+                    reasons.append(NEVER_FIRED % (rel, nn, alias))
+    b["seen"] = {nn: ctx["changed"].get(nn, {}) for nn in ctx["leases"]
+                 if nn not in ("prime", mine_nn) and ctx["liveness"].get(nn) != "stale"
+                 and not ctx["leases"][nn].get("released")}
+    save_boundary(root, sid, b)
 
 
 def deny(reason: str) -> dict:
@@ -420,6 +478,7 @@ def main() -> int:
             v.emit(out)
         return 0
     sid = v.export_session(payload)                  # every Python hook: the payload's session_id (§4.4 step 1)
+    visitor = bool(os.environ.get("DIRECT_CALL_ID"))  # §4.8: the one signal that makes a visitor
     marker = v.read_marker(root, sid)
     reasons: List[str] = []
     notes: List[str] = []
@@ -435,9 +494,16 @@ def main() -> int:
         check_config(root, marker, reasons)
         check_evidence(root, marker, reasons)
         if event == "Stop":
+            if not visitor:
+                check_backstop(root, sid, reasons, notes)
             check_promotion(root, marker, reasons, notes)
     except Exception:
         return 0
+    if visitor and reasons:
+        # §8.5: a direct-call session is read-only and cannot have caused any of this — say
+        # it, never block (a blocked Stop in a -p session spins until max_turns).
+        notes.extend("(visitor, not blocking) " + r for r in reasons)
+        reasons = []
     if reasons:
         v.block("\n".join(reasons + notes))
     if notes and event == "Stop":

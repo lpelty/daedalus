@@ -5,7 +5,9 @@ load fixtures/leases/setup.bash
 teardown() { teardown_live; chmod -R u+w "$DAEDALUS_HOME/state" 2>/dev/null || true; }
 
 setup() {
-  DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
+  # pwd -P: the bats temp dir sits behind /var -> /private/var, and every path a
+  # Python hook prints or keys on is resolved (verifylib.ROOT), so the home must be too.
+  DAEDALUS_HOME="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault/evidence"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
@@ -395,4 +397,29 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   chmod 755 "$DAEDALUS_HOME/state"
   run edit_as sA "$W/hooks/capture.py"; case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "$output"; return 1 ;; esac
   run edit_as sA "$W/hooks/capture.py"; case "$output" in *'"permissionDecision"'*) echo "recorded: the next attempt must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "Stop backstop: a Stop records other live leases' changed sets as seen; at the next Stop a path of this session's that was in that snapshot with no warned entry blocks with 'the warning never fired'; with a warned entry it passes; absent from the snapshot it passes" {
+  two_leases; live_holder 01; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "hooks/capture.py" in d["seen"]["02"]["thing"], d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"     # this session changes it without the pre-write hook firing
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py, which window 02 (poc-ui) had already changed, and the warning never fired (the pre-write hook timed out?). Message that window before you go on."*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.setdefault("warned",{})[sys.argv[2]]="x"; open(p,"w").write(json.dumps(d))' "$DAEDALUS_HOME/state/session-sA-boundary.json" "$W/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  printf 'new\n' > "$W/brand-new.py"; run hook_as Stop sA; [ "$status" -eq 0 ]
+}
+
+@test "a visitor (DIRECT_CALL_ID set) is never blocked at Stop: stray evidence, an unbindable session and a backstop hit all become notes, exit 0; its PreToolUse denials still apply" {
+  two_leases; live_holder 01; live_holder 02
+  mkdir -p "$DAEDALUS_HOME/state/evidence/x"; printf 'x\n' > "$DAEDALUS_HOME/state/evidence/x/gate.log"   # unmanifested: stray
+  run hook_as Stop sA; [ "$status" -eq 2 ]                                   # a window IS blocked by the stray file
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f hook_as); hook_as Stop sA"; [ "$status" -eq 0 ]
+  case "$output" in *"(visitor, not blocking)"*"gate.log"*) : ;; *) echo "the reason must survive as a note: $output"; return 1 ;; esac
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f hook_as); hook_as Stop sZ"; [ "$status" -eq 0 ]   # unbindable: a note, not a block
+  case "$output" in *"(visitor, not blocking)"*) : ;; *) echo "the unbindable reason must survive as a note: $output"; return 1 ;; esac
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f edit_as); edit_as sZ '$T/a.txt'"
+  case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "PreToolUse still denies a visitor: $output"; return 1 ;; esac
 }
