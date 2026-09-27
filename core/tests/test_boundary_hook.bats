@@ -348,3 +348,31 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   python3 -c 'import sys; assert float(sys.argv[2])-float(sys.argv[1]) < 1.0' "$t0" "$t1"
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(g.get("matcher")=="Edit|Write" and any("boundary-hook.py" in h["command"] and h["timeout"]==5 for h in g["hooks"]) for g in d["hooks"]["PreToolUse"]), d' "$SRC/../.claude/settings.json"
 }
+
+@test "a lease file that cannot be read fails CLOSED for Edit/Write under target/, worktrees/ and vault/hot.md — the lease.sh sentence, not silence; a path outside every tree is untouched" {
+  # Review of Task 10: lease_context returns refused with an EMPTY leases dict when a
+  # lease file is unreadable, and the hook returned None at `if not ctx["leases"]`
+  # before it looked at the refusal — every write under the guarded trees went through.
+  two_leases; live_holder 01; live_holder 02
+  printf 'not json' > "$DAEDALUS_HOME/state/leases/02.json"
+  for c in "sA $T/a.txt" "sB $DAEDALUS_HOME/worktrees/01/thing/a.txt" "sB $DAEDALUS_HOME/vault/hot.md" "sZ $T/a.txt"; do set -- $c
+    run edit_as "$1" "$2"
+    case "$output" in *'"permissionDecision": "deny"'*"The lease file for window 02 cannot be read"*"core/lease.sh sweep"*) : ;; *) echo "$1 $2 must fail closed: $output"; return 1 ;; esac
+  done
+  run edit_as sA "$DAEDALUS_HOME/vault/proposals/PROP-9.md"; [ -z "$output" ]
+}
+
+@test "an Edit or Write into ANOTHER window's worktree is denied for a clone and for the prime, naming both worktrees — never the stop-once warning, never recorded under warned" {
+  # Spec §3.1: a clone never writes any other lease's worktree; the prime never writes
+  # another lease's worktree. Task 11 covers the Bash leg; this is the Edit/Write leg.
+  two_leases; live_holder 01; live_holder 02
+  run edit_as sB "$DAEDALUS_HOME/worktrees/01/thing/a.txt"
+  case "$output" in *'"permissionDecision": "deny"'*"This is window 01's worktree (worktrees/01/thing). Your work goes in worktrees/02/thing."*"send it a message"*) : ;; *) echo "clone: $output"; return 1 ;; esac
+  for i in 1 2; do   # the prime, twice: a cross-window write is a deny every time, not a stop-once
+    run edit_as sA "$DAEDALUS_HOME/worktrees/02/thing/hooks/capture.py"
+    case "$output" in *'"permissionDecision": "deny"'*"This is window 02's worktree (worktrees/02/thing). Your work goes in worktrees/01/thing."*) : ;; *) echo "prime attempt $i: $output"; return 1 ;; esac
+    case "$output" in *"This first attempt was stopped"*) echo "must not be the stop-once warning: $output"; return 1 ;; *) : ;; esac
+  done
+  [ ! -f "$DAEDALUS_HOME/state/session-sA-boundary.json" ] || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert not d.get("warned"), d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
+  run edit_as sB "$DAEDALUS_HOME/worktrees/02/thing/a.txt"; [ -z "$output" ]   # its own worktree is still its own
+}
