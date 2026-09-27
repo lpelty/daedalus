@@ -9,7 +9,32 @@ url="$(cfg target.repo)" || die "config: target.repo is required"
 branch="$(cfg target.branch)" || branch="main"
 dest="$(target_path)"
 
-if [ -d "$dest/.git" ]; then
+# A lease worktree is never synced here: its branch is lease/<NN>, and the
+# trunk cannot be checked out twice. `leaselib.py resolve` prints the
+# physical path (DAEDALUS_HOME resolved), so match both spellings of the
+# home — /var vs /private/var on macOS — with `pwd -P` (no realpath on base
+# macOS, bash-3.2-safe), as the nested guard below does.
+home_p="$(cd "$DAEDALUS_HOME" && pwd -P)"
+case "$dest" in
+  "$DAEDALUS_HOME"/worktrees/*|"$home_p"/worktrees/*)
+    nn="${dest#"$DAEDALUS_HOME"/worktrees/}"; nn="${nn#"$home_p"/worktrees/}"; nn="${nn%%/*}"
+    die "sync-target updates the prime's checkout; a lease worktree is brought forward by \`core/lease.sh rebase $nn\`, which rebases lease/$nn onto origin/$branch"
+    ;;
+esac
+
+# A linked worktree's .git is a FILE, not a directory (spec §4.4): ask git
+# whether this is a work tree rather than testing for the directory, or a
+# worktree would be `git clone`d over. "Is a work tree" means "is the ROOT
+# of one": `--is-inside-work-tree` alone is true for any subdirectory of a
+# repository, and a real deployment's DAEDALUS_HOME is itself one — an
+# empty target/<name> would then be fetched as the outer repo instead of
+# cloned. `--show-toplevel` prints the physical path, so compare with pwd -P.
+is_work_tree_root() {                # $1 = directory
+  local top
+  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ -n "$top" ] && [ "$top" = "$(cd "$1" 2>/dev/null && pwd -P)" ]   # a missing dir prints "" on both sides
+}
+if is_work_tree_root "$dest"; then
   log "updating $(basename "$dest") ($branch)"
   git -C "$dest" fetch --quiet origin "$branch"
   git -C "$dest" checkout --quiet "$branch"
@@ -83,7 +108,7 @@ if cfg target.nested >/dev/null 2>&1; then
         die "config target.nested: path $rel resolves outside the target checkout"
         ;;
     esac
-    if [ -d "$ndest/.git" ]; then
+    if is_work_tree_root "$ndest"; then
       log "updating nested $rel"
       git -C "$ndest" fetch --quiet origin
       git -C "$ndest" merge --ff-only --quiet "@{u}"

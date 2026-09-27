@@ -17,12 +17,27 @@ start=$(date +%s)
 
 fp_repo() {                          # $1 = repo; $2… = nested relpaths to exclude
   local repo="$1"; shift
-  local idx n
+  local idx n lock top
   local ex=()
   idx="$(mktemp -u)" || return 1     # -u: git must create the index itself
   for n in "$@"; do ex+=(":(exclude)$n"); done
-  [ -d "$repo/.git" ] || return 1
-  [ -e "$repo/.git/index.lock" ] && return 1
+  # A linked worktree's .git is a FILE (gitdir: …/.git/worktrees/<name>), so
+  # `-d "$repo/.git"` nulled every fingerprint outside target/ (spec §4.4).
+  # Ask git instead — but `--is-inside-work-tree` alone is true for ANY
+  # subdirectory of a repository, and a real deployment's DAEDALUS_HOME is
+  # itself one: a target that lost its .git would then hash the outer
+  # repo's subtree, non-null and wrong. So require this directory to be the
+  # work tree's own root: `--show-toplevel` prints the physical path
+  # (measured: equal to `pwd -P` for a main checkout, a linked worktree,
+  # and through a symlink; the outer root for a mere subdirectory).
+  top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ -n "$top" ] && [ "$top" = "$(cd "$repo" 2>/dev/null && pwd -P)" ] || return 1   # a missing dir prints "" on both sides
+  # The index lock of a worktree lives under .git/worktrees/<name>/; git
+  # prints it RELATIVE to the repo for a main checkout and absolute for a
+  # worktree (measured), so prefix the relative form.
+  lock="$(git -C "$repo" rev-parse --git-path index.lock 2>/dev/null)" || return 1
+  case "$lock" in /*) : ;; *) lock="$repo/$lock" ;; esac
+  [ -e "$lock" ] && return 1
   GIT_INDEX_FILE="$idx" git -C "$repo" -c advice.addEmbeddedRepo=false \
       add -A -- . ${ex[@]+"${ex[@]}"} >/dev/null 2>&1 || { rm -f "$idx"; return 1; }
   GIT_INDEX_FILE="$idx" git -C "$repo" write-tree 2>/dev/null || { rm -f "$idx"; return 1; }

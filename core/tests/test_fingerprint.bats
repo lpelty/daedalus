@@ -146,3 +146,42 @@ CFG
     grep -q "must stay inside the target checkout" "$BATS_TEST_TMPDIR/err" || { echo "no reason on stderr for '$bad'"; return 1; }
   done
 }
+
+# --- linked worktrees (spec §4.4, plan 1 Task 13) ---
+
+@test "fingerprints a linked worktree and a detached scratch worktree: non-null, equal to the main checkout's for the same tree, HEAD-independent; null while the worktree's own index.lock exists" {
+  # target_path honours DAEDALUS_TARGET_OVERRIDE by shelling to leaselib.py
+  # resolve (Task 6), so the fixture needs it — and verifylib, which it imports.
+  cp "$SRC/leaselib.py" "$SRC/verifylib.py" "$DAEDALUS_HOME/core/"
+  main="$(fp)"; [ "$main" != "null" ]
+  git -C "$T" worktree add -q "$BATS_TEST_TMPDIR/wt" -b lease/01 HEAD
+  git -C "$T/sub" worktree add -q "$BATS_TEST_TMPDIR/wt/sub" -b lease/01 HEAD
+  git -C "$T" worktree add -q --detach "$BATS_TEST_TMPDIR/scratch" HEAD
+  git -C "$T/sub" worktree add -q --detach "$BATS_TEST_TMPDIR/scratch/sub" HEAD
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: https://example.com/thing.git
+  branch: main
+  nested: sub=https://example.com/sub.git
+EOF
+  [ -f "$BATS_TEST_TMPDIR/wt/.git" ]      # a FILE, not a directory
+  # the override must point under state/promote; so stage the worktree there for the test
+  mkdir -p "$DAEDALUS_HOME/state/promote/p1"; git -C "$T" worktree move "$BATS_TEST_TMPDIR/wt" "$DAEDALUS_HOME/state/promote/p1/thing"
+  git -C "$T/sub" worktree repair "$DAEDALUS_HOME/state/promote/p1/thing/sub" 2>/dev/null || true
+  w="$(DAEDALUS_TARGET_OVERRIDE="$DAEDALUS_HOME/state/promote/p1/thing" fp)"
+  [ "$w" != "null" ]; [ "$w" = "$main" ]
+  git -C "$DAEDALUS_HOME/state/promote/p1/thing" -c user.email=t@x -c user.name=t commit -q --allow-empty -m e
+  [ "$(DAEDALUS_TARGET_OVERRIDE="$DAEDALUS_HOME/state/promote/p1/thing" fp)" = "$main" ]
+  lock="$(git -C "$DAEDALUS_HOME/state/promote/p1/thing" rev-parse --git-path index.lock)"
+  case "$lock" in /*) : ;; *) lock="$DAEDALUS_HOME/state/promote/p1/thing/$lock" ;; esac
+  touch "$lock"; [ "$(DAEDALUS_TARGET_OVERRIDE="$DAEDALUS_HOME/state/promote/p1/thing" fp)" = "null" ]; rm -f "$lock"
+  git -C "$T" worktree move "$BATS_TEST_TMPDIR/scratch" "$DAEDALUS_HOME/state/promote/p2"
+  mkdir -p "$DAEDALUS_HOME/state/promote/p2"; s="$(DAEDALUS_TARGET_OVERRIDE="$DAEDALUS_HOME/state/promote/p2" fp)"
+  [ "$s" != "null" ]
+}
+
+@test "a target that lost its .git but sits inside an outer repository (DAEDALUS_HOME is one on a real deployment) is null, never the outer repo's hash" {
+  git init -q "$BATS_TEST_TMPDIR"          # the deployment root is itself a repository
+  rm -rf "$T/.git"
+  [ "$(fp)" = "null" ]
+}

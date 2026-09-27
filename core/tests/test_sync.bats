@@ -214,3 +214,24 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$DAEDALUS_HOME/target/upstream-harness/a/b/c/DEEP.md" ]
 }
+
+@test "sync-target recognises a checkout whose .git is a file (a linked worktree) as a repository, and refuses to sync a lease worktree" {
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  D="$DAEDALUS_HOME/target/upstream-harness"
+  git -C "$D" worktree add -q "$DAEDALUS_HOME/worktrees/01/upstream-harness" -b lease/01 origin/main
+  cp "$(cd "$BATS_TEST_DIRNAME/.." && pwd)/leaselib.py" "$(cd "$BATS_TEST_DIRNAME/.." && pwd)/verifylib.py" "$DAEDALUS_HOME/core/"
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  printf '{"lease":"01","session_id":"s1","worktree":"worktrees/01","branch":"lease/01"}' > "$DAEDALUS_HOME/state/leases/01.json"
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"sync-target updates the prime's checkout; a lease worktree is brought forward by \`core/lease.sh rebase 01\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/worktrees/01/upstream-harness/.git" ]   # never `git clone`d over
+}
+
+@test "sync-target clones into an existing empty target directory inside an outer repository instead of fetching the outer repo" {
+  git init -q "$BATS_TEST_TMPDIR"          # the deployment root is itself a repository
+  mkdir -p "$DAEDALUS_HOME/target/upstream-harness"
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/target/upstream-harness/file.txt" ]
+}
