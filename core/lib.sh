@@ -128,6 +128,29 @@ $(printf '%s\n' "$raw" | tr ',' '\n')
 EOF
 }
 
+# is_work_tree_root <dir> — true when <dir> is the ROOT of a git work tree:
+# a main checkout, a linked worktree (whose .git is a FILE, so `-d .git` says
+# no), or a nested repository. False for a subdirectory of a repository, for
+# an empty directory that merely sits inside an outer repository (a real
+# deployment's DAEDALUS_HOME is one), for a missing path, for a bare
+# repository and for a .git directory itself.
+#
+# Ask git for both facts in one call and compare the whole answer:
+# `--is-inside-work-tree` prints true/false, `--show-prefix` prints the
+# path from the work tree's root to <dir> — empty at the root. Output of
+# exactly `true` means inside AND at the root. Never compare paths: the
+# earlier form matched `--show-toplevel` against `pwd -P`, and on macOS's
+# case-insensitive volume git prints the on-disk spelling while /bin/bash
+# 3.2's `pwd -P` keeps the caller's — a DAEDALUS_HOME reached through a
+# differently-cased path nulled every fingerprint and made sync-target
+# `git clone` over its own checkout (Task 13 review). Verified against git
+# 2.50 for each case listed above before writing.
+is_work_tree_root() {
+  local answer
+  answer="$(git -C "$1" rev-parse --is-inside-work-tree --show-prefix 2>/dev/null)" || return 1
+  [ "$answer" = true ]
+}
+
 # repo_name <url> — basename of a git URL, without .git
 repo_name() {
   local url="$1" base

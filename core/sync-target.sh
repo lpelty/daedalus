@@ -28,12 +28,8 @@ esac
 # of one": `--is-inside-work-tree` alone is true for any subdirectory of a
 # repository, and a real deployment's DAEDALUS_HOME is itself one — an
 # empty target/<name> would then be fetched as the outer repo instead of
-# cloned. `--show-toplevel` prints the physical path, so compare with pwd -P.
-is_work_tree_root() {                # $1 = directory
-  local top
-  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
-  [ -n "$top" ] && [ "$top" = "$(cd "$1" 2>/dev/null && pwd -P)" ]   # a missing dir prints "" on both sides
-}
+# cloned. lib.sh is_work_tree_root is git's own answer to both questions;
+# it never compares paths (a case-swapped home spelling once failed that).
 if is_work_tree_root "$dest"; then
   log "updating $(basename "$dest") ($branch)"
   git -C "$dest" fetch --quiet origin "$branch"

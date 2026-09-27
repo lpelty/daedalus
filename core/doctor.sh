@@ -51,7 +51,11 @@ if [ "$target_repo_ok" -eq 1 ]; then
     note_problem "${target_err#daedalus: }"
   elif [ -z "$target" ] || [ ! -d "$target" ]; then
     note_problem "target checkout — run core/sync-target.sh"
-  elif [ ! -d "$target/.git" ]; then
+  elif ! is_work_tree_root "$target"; then
+    # The same predicate fingerprint.sh and sync-target.sh use (lib.sh), so
+    # doctor and the fingerprint never disagree: a linked worktree's .git is
+    # a file (`-d .git` called it broken), and a target that lost its .git
+    # inside an outer repository is broken even though git answers there.
     note_problem "target checkout is not a git repo: $target — run core/sync-target.sh"
   else
     log "OK       target checkout: $target"

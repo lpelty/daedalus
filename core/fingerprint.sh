@@ -17,7 +17,7 @@ start=$(date +%s)
 
 fp_repo() {                          # $1 = repo; $2… = nested relpaths to exclude
   local repo="$1"; shift
-  local idx n lock top
+  local idx n lock
   local ex=()
   idx="$(mktemp -u)" || return 1     # -u: git must create the index itself
   for n in "$@"; do ex+=(":(exclude)$n"); done
@@ -27,11 +27,14 @@ fp_repo() {                          # $1 = repo; $2… = nested relpaths to exc
   # subdirectory of a repository, and a real deployment's DAEDALUS_HOME is
   # itself one: a target that lost its .git would then hash the outer
   # repo's subtree, non-null and wrong. So require this directory to be the
-  # work tree's own root: `--show-toplevel` prints the physical path
-  # (measured: equal to `pwd -P` for a main checkout, a linked worktree,
-  # and through a symlink; the outer root for a mere subdirectory).
-  top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || return 1
-  [ -n "$top" ] && [ "$top" = "$(cd "$repo" 2>/dev/null && pwd -P)" ] || return 1   # a missing dir prints "" on both sides
+  # work tree's own root (lib.sh is_work_tree_root — git's own answer, no
+  # path comparison: a case-swapped spelling of the home nulled everything
+  # here once). Name the reason on stderr: a silent null is undiagnosable
+  # from a gate's fingerprint.err.
+  if ! is_work_tree_root "$repo"; then
+    printf 'fingerprint: %s is not the root of a git work tree\n' "$repo" >&2
+    return 1
+  fi
   # The index lock of a worktree lives under .git/worktrees/<name>/; git
   # prints it RELATIVE to the repo for a main checkout and absolute for a
   # worktree (measured), so prefix the relative form.

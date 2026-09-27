@@ -215,7 +215,7 @@ EOF
   [ -f "$DAEDALUS_HOME/target/upstream-harness/a/b/c/DEEP.md" ]
 }
 
-@test "sync-target recognises a checkout whose .git is a file (a linked worktree) as a repository, and refuses to sync a lease worktree" {
+@test "sync-target refuses to sync a lease worktree — the prime's checkout is what it updates; lease.sh rebase brings a lease forward" {
   bash "$DAEDALUS_HOME/core/sync-target.sh"
   D="$DAEDALUS_HOME/target/upstream-harness"
   git -C "$D" worktree add -q "$DAEDALUS_HOME/worktrees/01/upstream-harness" -b lease/01 origin/main
@@ -226,6 +226,34 @@ EOF
   [ "$status" -ne 0 ]
   case "$output" in *"sync-target updates the prime's checkout; a lease worktree is brought forward by \`core/lease.sh rebase 01\`"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -d "$DAEDALUS_HOME/worktrees/01/upstream-harness/.git" ]   # never `git clone`d over
+}
+
+@test "sync-target updates a nested checkout whose .git is a file (a linked worktree) instead of trying to clone over it" {
+  NESTED="$BATS_TEST_TMPDIR/upstream-sub"
+  git init -q -b main "$NESTED"
+  echo "sub content" > "$NESTED/SUB.md"
+  git -C "$NESTED" add SUB.md
+  git -C "$NESTED" -c user.email=t@t -c user.name=t commit -q -m init
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: sub=$NESTED
+EOF
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  D="$DAEDALUS_HOME/target/upstream-harness"
+  [ -d "$D/sub/.git" ]
+  # Replace the nested clone with a linked worktree of another clone of the
+  # same upstream: same content, but .git is now a FILE (gitdir: …).
+  git clone -q "$NESTED" "$BATS_TEST_TMPDIR/subclone"
+  rm -rf "$D/sub"
+  git -C "$BATS_TEST_TMPDIR/subclone" worktree add -q "$D/sub" -b lease/01 origin/main
+  [ -f "$D/sub/.git" ]
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+  case "$output" in *"updating nested sub"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"cloning nested sub"*) echo "$output"; return 1 ;; esac   # `-d .git` cloned here and died: "already exists and is not an empty directory"
+  [ -f "$D/sub/.git" ]                                                          # still the worktree, untouched
 }
 
 @test "sync-target clones into an existing empty target directory inside an outer repository instead of fetching the outer repo" {

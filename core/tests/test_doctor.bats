@@ -1,5 +1,11 @@
 #!/usr/bin/env bats
 
+# The target checkout in these fixtures is a real (empty, origin-less) `git
+# init` repository, never a faked `mkdir target/thing/.git`: doctor asks git
+# whether the directory is a work tree's root (lib.sh is_work_tree_root, the
+# predicate fingerprint.sh and sync-target.sh use), and a bare directory named
+# .git is not one. An origin-less repo makes the branch check a NOTE, not a
+# problem, so the green fixtures stay green.
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core"
@@ -42,7 +48,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -68,7 +74,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -112,7 +118,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -134,7 +140,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -183,6 +189,47 @@ EOF
   [[ "$output" == *"MISSING"*"not a git repo"* ]]
 }
 
+@test "doctor accepts a target checkout whose .git is a file (a linked worktree) — the same root predicate as fingerprint.sh and sync-target.sh" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  git init -q -b main "$BATS_TEST_TMPDIR/main-checkout"
+  git -C "$BATS_TEST_TMPDIR/main-checkout" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  mkdir -p "$DAEDALUS_HOME/target"
+  git -C "$BATS_TEST_TMPDIR/main-checkout" worktree add -q "$DAEDALUS_HOME/target/thing" -b lease/01 HEAD
+  [ -f "$DAEDALUS_HOME/target/thing/.git" ]
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [[ "$output" == *"OK       target checkout: $DAEDALUS_HOME/target/thing"* ]]
+  [[ "$output" != *"target checkout is not a git repo"* ]]
+}
+
+@test "doctor reports a target that lost its .git as MISSING even when the deployment root is itself a repository (git would answer there, but it is not the target)" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  git init -q "$BATS_TEST_TMPDIR"          # the deployment root is itself a repository
+  mkdir -p "$DAEDALUS_HOME/target/thing"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING"*"target checkout is not a git repo"* ]]
+}
+
 @test "cfg accepts proposals.budget: 0 as present (empty is not the same as falsy)" {
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:
@@ -212,7 +259,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
     touch "$DAEDALUS_HOME/vault/$d/.keep"
@@ -240,7 +287,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   # DAEDALUS_HOME is a git repo, but vault/ was never created or tracked.
   git -C "$DAEDALUS_HOME" init --quiet
   run bash "$DAEDALUS_HOME/core/doctor.sh"
@@ -260,7 +307,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
   done
@@ -295,7 +342,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -407,7 +454,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -472,7 +519,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"
   mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do
     mkdir -p "$DAEDALUS_HOME/vault/$d"
@@ -517,7 +564,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git" "$DAEDALUS_HOME/vault/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"; mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ]
@@ -536,7 +583,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git" "$DAEDALUS_HOME/vault/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"; mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
   cp "$SRC/pitfall-inject.py" "$DAEDALUS_HOME/core/"
   printf -- '---\ntype: pitfall\n---\n# No trigger\n\nB.\n' > "$DAEDALUS_HOME/vault/pitfalls/nn.md"
@@ -560,7 +607,7 @@ gates:
 proposals:
   budget: 5
 EOF
-  mkdir -p "$DAEDALUS_HOME/target/thing/.git" "$DAEDALUS_HOME/vault/.git"
+  git init -q "$DAEDALUS_HOME/target/thing"; mkdir -p "$DAEDALUS_HOME/vault/.git"
   for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
   cat > "$DAEDALUS_HOME/core/pitfall-inject.py" <<'EOF'
 import sys

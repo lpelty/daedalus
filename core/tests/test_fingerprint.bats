@@ -180,8 +180,23 @@ EOF
   [ "$s" != "null" ]
 }
 
-@test "a target that lost its .git but sits inside an outer repository (DAEDALUS_HOME is one on a real deployment) is null, never the outer repo's hash" {
+@test "a target that lost its .git but sits inside an outer repository (DAEDALUS_HOME is one on a real deployment) is null, never the outer repo's hash — and stderr names the reason" {
   git init -q "$BATS_TEST_TMPDIR"          # the deployment root is itself a repository
   rm -rf "$T/.git"
-  [ "$(fp)" = "null" ]
+  run bash "$DAEDALUS_HOME/core/fingerprint.sh"          # stdout and stderr, interleaved
+  printf '%s\n' "$output" | grep -qx null
+  # A gate keeps fingerprint.err; a silent null there is undiagnosable.
+  case "$output" in *"fingerprint: $T is not the root of a git work tree"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a case-swapped spelling of DAEDALUS_HOME (a mis-cased launch or hook path on macOS's case-insensitive volume) fingerprints the same tree, not null" {
+  # git prints the on-disk spelling of the work tree root; /bin/bash 3.2's
+  # `pwd -P` keeps the caller's. Comparing the two nulled every fingerprint
+  # reached through the other spelling (Task 13 review). The guard must be
+  # git's own answer, never a path comparison.
+  swapped="$BATS_TEST_TMPDIR/DAE"
+  [ -d "$swapped" ] || skip "case-sensitive volume: the two spellings are different paths"
+  a="$(fp)"; [ "$a" != "null" ]
+  b="$(DAEDALUS_HOME="$swapped" bash "$swapped/core/fingerprint.sh" 2>/dev/null)"
+  [ "$b" = "$a" ]
 }
