@@ -7,7 +7,7 @@ setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target"
-  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   # Refuter off with a reason (v0.6.1 default-on): this suite is about the
   # Stop gate, and a real claude must never run in tests.
@@ -135,4 +135,46 @@ claim() {  # claim <file> <status> <updated-by> <created> [evidence-run]
   claim PROP-1.md IMPLEMENTED daedalus 2026-12-01
   run python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor
   case "$output" in *"PROP-1.md"*) : ;; *) echo "not listed: $output"; return 1 ;; esac
+}
+
+# --- Claim attribution (spec §4.9) and the vault index.lock (spec §3.3) ------
+
+lease_pair() {   # 01=sA, 02=sB, both live under $$; s1's marker already written by setup
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  for p in 01:sA 02:sB; do nn="${p%%:*}"; s="${p##*:}"; printf '{"lease":"%s","session_id":"%s","worktree":"worktrees/%s","branch":"lease/%s","pid":%s,"proc_started":1}' "$nn" "$s" "$nn" "$nn" "$$" > "$DAEDALUS_HOME/state/leases/$nn.json"; touch "$DAEDALUS_HOME/state/leases/$nn.seen"; done
+  for s in sA sB; do printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"startup"}' "$s" | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null; done
+}
+claim_l() {  # claim_l <file> <lease-or-empty>
+  { printf -- '---\ntype: proposal\nstatus: IMPLEMENTED\nupdated-by: daedalus\ncreated: 2026-12-01\n'; [ -n "$2" ] && printf 'lease: %s\n' "$2"; printf -- '---\n# P\n'; } > "$DAEDALUS_HOME/vault/proposals/$1"
+}
+
+@test "a claim with another lease's lease: does not block this session; its own does; an unleased session with live leases is refused on any claim with the plain-language reason" {
+  id="$(gate)"     # claims() is armed only once the deployment has evidence (first_evidence_date)
+  lease_pair
+  claim_l PROP-A.md 02
+  run stop sA; [ "$status" -eq 0 ]
+  claim_l PROP-B.md 01
+  run stop sA; [ "$status" -eq 2 ]; case "$output" in *"PROP-B.md"*"no evidence-run"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"PROP-A.md"*) echo "window 02's claim is not this session's: $output"; return 1 ;; *) : ;; esac
+  run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"This session holds no lease, so its claims cannot be attributed. Claim a lease and restart."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a vault git status that meets index.lock is retried (a lock held 1 s, then released) and proceeds; one held for the whole run blocks with 'the vault index is locked', never a silent pass" {
+  id="$(gate)"
+  claim_l PROP-C.md ""
+  ( touch "$DAEDALUS_HOME/vault/.git/index.lock"; sleep 1; rm -f "$DAEDALUS_HOME/vault/.git/index.lock" ) &
+  run stop; [ "$status" -eq 2 ]; case "$output" in *"PROP-C.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  wait
+  touch "$DAEDALUS_HOME/vault/.git/index.lock"
+  run stop; [ "$status" -eq 2 ]; case "$output" in *"the vault index is locked (another session is committing); try again"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$DAEDALUS_HOME/vault/.git/index.lock"
+}
+
+@test "the proposal template carries a lease: field" { grep -q '^lease:' "$SRC/templates/proposal.md"; }
+
+@test "--doctor is a whole-vault sweep: a claim carrying another window's lease: is still listed" {
+  id="$(gate)"
+  claim_l PROP-L.md 02
+  run python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor; [ "$status" -eq 0 ]
+  case "$output" in *"PROP-L.md"*) : ;; *) echo "leased claim dropped from the sweep: $output"; return 1 ;; esac
 }

@@ -8,10 +8,17 @@ whose config hash matches the session's, and whose fingerprint matches the
 target now. Never exits early on `stop_hook_active`. Fails closed only when a
 claim exists and the evidence cannot be read. `--doctor` runs the same check
 over the whole vault and prints one line per problem.
+
+Since v0.7.0 a session answers only for claims carrying its own `lease:`
+(§4.9): another window's half-written document never blocks this Stop; an
+unleased session with live leases is refused on any claim; `--doctor` still
+sweeps every claim. A vault `index.lock` met at Stop is retried three times a
+second apart, then blocks (§3.3) — never a silent "no claims found".
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -19,10 +26,13 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 
+UNLEASED_CLAIMS = "This session holds no lease, so its claims cannot be attributed. Claim a lease and restart."
 
-def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], marker: Optional[dict], live: bool) -> List[str]:
+
+def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], marker: Optional[dict], live: bool,
+             lease: Optional[str] = "*") -> List[str]:
     out: List[str] = []
-    found = v.claims(root, since_sha, since_time)
+    found = v.claims(root, since_sha, since_time, lease=lease)
     if not found:
         return out
     fp_now = v.fingerprint(root) if live else None
@@ -66,16 +76,30 @@ def main(argv: List[str]) -> int:
         return 0
     if not isinstance(payload, dict):
         return 0
-    marker = v.read_marker(root, payload.get("session_id"))
+    sid = v.export_session(payload)
+    marker = v.read_marker(root, sid)
     since_sha = marker.get("vault_head") if marker else None
     since_time = None if marker else v.transcript_first_ts(payload.get("transcript_path", ""))
+    # §4.9: a session answers only for its own window's claims. An unleased
+    # session in a deployment with live leases cannot attribute anything, so
+    # any claim at all refuses its Stop; a visitor (DIRECT_CALL_ID) holds no
+    # lease by design and is not refused — it answers for lease-less claims.
+    ctx = v.lease_context(root, sid)
+    numbered = [nn for nn in ctx["leases"] if nn != "prime"]
     try:
-        bad = problems(root, since_sha, since_time, marker, live=True)
+        if numbered and ctx["mine"] is None and not os.environ.get("DIRECT_CALL_ID"):
+            if v.claims(root, since_sha, since_time, lease="*"):
+                v.block(UNLEASED_CLAIMS)
+        bad = problems(root, since_sha, since_time, marker, live=True, lease=ctx["mine"])
+    except v.VaultLocked as e:
+        v.block(str(e))
     except Exception as e:
         # Fail closed only if a claim exists at all; otherwise stay out of the way.
         try:
-            if v.claims(root, since_sha, since_time):
+            if v.claims(root, since_sha, since_time, lease=ctx["mine"]):
                 v.block("verify-hook could not read the evidence: %s" % e)
+        except v.VaultLocked as e2:
+            v.block(str(e2))
         except Exception:
             pass
         return 0

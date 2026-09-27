@@ -306,6 +306,42 @@ def vault_head(root: Path) -> Optional[str]:
     return out.strip() if code == 0 and out.strip() else None
 
 
+class VaultLocked(Exception):
+    """vault/.git/index.lock held for three retries a second apart (§3.3);
+    str(e) is the operator sentence."""
+
+
+VAULT_LOCKED = "the vault index is locked (another session is committing); try again"
+VAULT_STATUS_RETRIES = 3
+
+
+def _vault_index_lock(g: List[str]) -> Optional[Path]:
+    """The index.lock path of the repository `g` addresses (git's own answer, so a
+    linked worktree's private git dir is honoured); None when git cannot say."""
+    code, out, _ = run(g + ["rev-parse", "--absolute-git-dir"], timeout=5)
+    return Path(out.strip()) / "index.lock" if code == 0 and out.strip() else None
+
+
+def _vault_status(g: List[str], spec: List[str]) -> str:
+    """`git status --porcelain` of the vault, retried three times a second apart
+    while another session is committing (§3.3), then VaultLocked — fail closed,
+    never a silent "no claims found". Two signals count as meeting the lock:
+    git refusing with "index.lock" on stderr, and the lock file itself being
+    present — `git status` (2.50) exits 0 under a held index.lock (it merely
+    skips its opportunistic index refresh), so the exit code alone would never
+    see the commit in flight."""
+    lock = _vault_index_lock(g)
+    for attempt in range(VAULT_STATUS_RETRIES):
+        code, out, err = run(g + ["status", "--porcelain", "--untracked-files=all"] + spec)
+        if code == 0 and not (lock is not None and lock.exists()):
+            return out
+        if code != 0 and "index.lock" not in (err or ""):
+            return ""
+        if attempt < VAULT_STATUS_RETRIES - 1:
+            time.sleep(1)
+    raise VaultLocked(VAULT_LOCKED)
+
+
 def changed_vault_docs(root: Path, since_sha: Optional[str], since_time: Optional[float]) -> List[Path]:
     """Three modes, selected by which of since_sha/since_time is given:
     whole-vault (both None) — every *.md under vault/, recursive, committed
@@ -330,11 +366,9 @@ def changed_vault_docs(root: Path, since_sha: Optional[str], since_time: Optiona
         code, out, _ = run(g + ["log", "--since=" + stamp, "--name-only", "--pretty=format:"] + spec)
         if code == 0:
             names.update(out.splitlines())
-    code, out, _ = run(g + ["status", "--porcelain", "--untracked-files=all"] + spec)
-    if code == 0:
-        for ln in out.splitlines():
-            if len(ln) > 3:
-                names.add(ln[3:].split(" -> ")[-1])
+    for ln in _vault_status(g, spec).splitlines():
+        if len(ln) > 3:
+            names.add(ln[3:].split(" -> ")[-1])
     docs: List[Path] = []
     for n in sorted(n for n in names if n.strip().endswith(".md")):
         p = base / n
@@ -343,7 +377,19 @@ def changed_vault_docs(root: Path, since_sha: Optional[str], since_time: Optiona
     return docs
 
 
-def claims(root: Path, since_sha: Optional[str], since_time: Optional[float]) -> List[Tuple[Path, Dict[str, str]]]:
+def doc_lease(fm: Dict[str, str]) -> str:
+    """The `lease:` a claim document carries, two digits or empty; a trailing
+    `# comment` (the template's own hint) is not a value."""
+    return fm.get("lease", "").split("#", 1)[0].strip()
+
+
+def claims(root: Path, since_sha: Optional[str], since_time: Optional[float],
+           lease: Optional[str] = None) -> List[Tuple[Path, Dict[str, str]]]:
+    """Claim-shaped documents of Daedalus's in the window, attributed by their
+    `lease:` field (§4.9): lease="*" answers for every claim (the prime's
+    commit, --doctor, the offline sweep); a window's number answers only for
+    claims carrying that number; None — an unleased or visiting caller —
+    answers only for claims that carry no lease. May raise VaultLocked (§3.3)."""
     first = first_evidence_date(root)
     if first is None:
         return []
@@ -354,6 +400,8 @@ def claims(root: Path, since_sha: Optional[str], since_time: Optional[float]) ->
         except OSError:
             continue
         if not is_claim_shaped(fm) or not is_own(fm):
+            continue
+        if lease != "*" and doc_lease(fm) != (lease or ""):
             continue
         created = fm.get("created", "")[:19]
         if created and created < first:

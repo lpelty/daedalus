@@ -45,7 +45,7 @@ except Exception:  # pragma: no cover
 
 def unverified(root: Path, marker: dict) -> list:
     out = []
-    for p, fm in v.claims(root, None, None):          # whole vault: this is the offline check
+    for p, fm in v.claims(root, None, None, lease="*"):  # whole vault, every window's: the offline sweep
         rid = fm.get("evidence-run", "")
         rec = v.run_record(root, rid) if rid else None
         if not rid:
