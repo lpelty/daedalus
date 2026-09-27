@@ -139,9 +139,15 @@ claim() {  # claim <file> <status> <updated-by> <created> [evidence-run]
 
 # --- Claim attribution (spec §4.9) and the vault index.lock (spec §3.3) ------
 
+# ps_ms <pid> — the epoch-millisecond start time of a live pid, as leaselib.proc_started_of computes it.
+# $$ is the bats process, alive for the whole test; a lease recording ITS real start time reads "live"
+# (one recording proc_started 1 reads "stale": pid reuse), which is what the §4.9 refusal keys on.
+ps_ms() { python3 -c 'import subprocess,sys,time
+out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
+print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
 lease_pair() {   # 01=sA, 02=sB, both live under $$; s1's marker already written by setup
-  mkdir -p "$DAEDALUS_HOME/state/leases"
-  for p in 01:sA 02:sB; do nn="${p%%:*}"; s="${p##*:}"; printf '{"lease":"%s","session_id":"%s","worktree":"worktrees/%s","branch":"lease/%s","pid":%s,"proc_started":1}' "$nn" "$s" "$nn" "$nn" "$$" > "$DAEDALUS_HOME/state/leases/$nn.json"; touch "$DAEDALUS_HOME/state/leases/$nn.seen"; done
+  mkdir -p "$DAEDALUS_HOME/state/leases"; local st; st="$(ps_ms $$)"
+  for p in 01:sA 02:sB; do nn="${p%%:*}"; s="${p##*:}"; printf '{"lease":"%s","session_id":"%s","worktree":"worktrees/%s","branch":"lease/%s","pid":%s,"proc_started":%s}' "$nn" "$s" "$nn" "$nn" "$$" "$st" > "$DAEDALUS_HOME/state/leases/$nn.json"; touch "$DAEDALUS_HOME/state/leases/$nn.seen"; done
   for s in sA sB; do printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"startup"}' "$s" | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null; done
 }
 claim_l() {  # claim_l <file> <lease-or-empty>
@@ -157,6 +163,28 @@ claim_l() {  # claim_l <file> <lease-or-empty>
   run stop sA; [ "$status" -eq 2 ]; case "$output" in *"PROP-B.md"*"no evidence-run"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"PROP-A.md"*) echo "window 02's claim is not this session's: $output"; return 1 ;; *) : ;; esac
   run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"This session holds no lease, so its claims cannot be attributed. Claim a lease and restart."*) : ;; *) echo "$output"; return 1 ;; esac
+  # Only stale leases (their sessions are gone, not yet swept) are not "live leases" (§4.9): an
+  # unleased session is not refused — it answers for lease-less claims as it would with no leases.
+  for nn in 01 02; do sed -i.bak "s/\"pid\":$$/\"pid\":999999/" "$DAEDALUS_HOME/state/leases/$nn.json"; rm -f "$DAEDALUS_HOME/state/leases/$nn.json.bak"; touch -t 202001010000 "$DAEDALUS_HOME/state/leases/$nn.seen"; done
+  run stop sZ; [ "$status" -eq 0 ]
+  claim_l PROP-Z.md ""
+  run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"PROP-Z.md"*"no evidence-run"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"holds no lease"*) echo "a dead lease refused the session with a remedy that cannot clear it: $output"; return 1 ;; *) : ;; esac
+  # One live lease alongside the dead ones brings the refusal back.
+  printf '{"lease":"03","session_id":"sC","worktree":"worktrees/03","branch":"lease/03","pid":%s,"proc_started":%s}' "$$" "$(ps_ms $$)" > "$DAEDALUS_HOME/state/leases/03.json"; touch "$DAEDALUS_HOME/state/leases/03.seen"
+  run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"holds no lease"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a lease file that cannot be read fails closed on any claim: a leased session's own unverified claim is blocked with the file named, an unleased session is blocked the same way, and a claim-free Stop still passes" {
+  id="$(gate)"
+  lease_pair
+  claim_l PROP-B.md 01
+  run stop sA; [ "$status" -eq 2 ]
+  printf 'not json' > "$DAEDALUS_HOME/state/leases/02.json"
+  run stop sA; [ "$status" -eq 2 ]; case "$output" in *"cannot be attributed"*"The lease file for window 02 cannot be read"*"lease.sh sweep"*) : ;; *) echo "silent pass or wrong reason: status=$status output=$output"; return 1 ;; esac
+  run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"cannot be attributed"*"window 02"*) : ;; *) echo "silent pass or wrong reason: status=$status output=$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/vault/proposals/PROP-B.md"
+  run stop sA; [ "$status" -eq 0 ]
 }
 
 @test "a vault git status that meets index.lock is retried (a lock held 1 s, then released) and proceeds; one held for the whole run blocks with 'the vault index is locked', never a silent pass" {

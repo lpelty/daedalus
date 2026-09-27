@@ -11,9 +11,12 @@ over the whole vault and prints one line per problem.
 
 Since v0.7.0 a session answers only for claims carrying its own `lease:`
 (§4.9): another window's half-written document never blocks this Stop; an
-unleased session with live leases is refused on any claim; `--doctor` still
-sweeps every claim. A vault `index.lock` met at Stop is retried three times a
-second apart, then blocks (§3.3) — never a silent "no claims found".
+unleased session with live leases (live, quiet or resumed — a stale lease's
+session is gone and holds nothing) is refused on any claim; a lease file that
+cannot be read blocks any claim at all, since nothing can be attributed until
+it is fixed or swept; `--doctor` still sweeps every claim. A vault
+`index.lock` met at Stop is retried three times a second apart, then blocks
+(§3.3) — never a silent "no claims found".
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 
 UNLEASED_CLAIMS = "This session holds no lease, so its claims cannot be attributed. Claim a lease and restart."
+UNREADABLE_CLAIMS = "A lease file cannot be read, so this session's claims cannot be attributed. "
 
 
 def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], marker: Optional[dict], live: bool,
@@ -84,10 +88,20 @@ def main(argv: List[str]) -> int:
     # session in a deployment with live leases cannot attribute anything, so
     # any claim at all refuses its Stop; a visitor (DIRECT_CALL_ID) holds no
     # lease by design and is not refused — it answers for lease-less claims.
+    # "Live" is liveness, not a file's existence: a stale lease (dead pid, its
+    # session gone from the registry) holds nothing, and refusing on it would
+    # point at the wrong remedy ("claim a lease" cannot clear a dead file;
+    # `lease.sh sweep` can) — so only stale leases fall through to lease-less
+    # attribution. A lease file that cannot be read leaves `mine` unknown; the
+    # empty context vouches for nothing, so any claim blocks, whoever stops
+    # (the leaselib sentence names the file and the fix).
     ctx = v.lease_context(root, sid)
-    numbered = [nn for nn in ctx["leases"] if nn != "prime"]
+    held = [nn for nn in ctx["leases"] if nn != "prime" and ctx["liveness"].get(nn) != "stale"]
     try:
-        if numbered and ctx["mine"] is None and not os.environ.get("DIRECT_CALL_ID"):
+        if ctx["unreadable"]:
+            if v.claims(root, since_sha, since_time, lease="*"):
+                v.block(UNREADABLE_CLAIMS + ctx["unreadable"])
+        elif held and ctx["mine"] is None and not os.environ.get("DIRECT_CALL_ID"):
             if v.claims(root, since_sha, since_time, lease="*"):
                 v.block(UNLEASED_CLAIMS)
         bad = problems(root, since_sha, since_time, marker, live=True, lease=ctx["mine"])
