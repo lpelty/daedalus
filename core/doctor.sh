@@ -49,8 +49,13 @@ if [ "$target_repo_ok" -eq 1 ]; then
   # The exit code decides, not whether stderr is empty: with lease files
   # present, target_path resolves through leaselib.py, which prints an exit-0
   # courtesy note for an operator shell ("no session — using the prime's
-  # checkout"). Reading that note as a rejection turned every doctor run from
-  # a shell red the moment a window was open. A note with exit 0 is a NOTE.
+  # checkout (N windows live)"). Reading that note as a rejection turned every
+  # doctor run from a shell red the moment a window was open. Exit-0 stderr is
+  # dropped, not echoed: that note counts every unreleased lease, while the
+  # leases line below counts by liveness, and printing both put "2 windows
+  # live" and "1 window live, 1 stale" three lines apart in one run. The
+  # leases line is the one count; an unreadable lease file, the note's other
+  # content, is already a MISSING line there.
   target_err="$(target_path 2>&1 >/dev/null)"; target_rc=$?
   target="$(target_path 2>/dev/null || true)"
   if [ "$target_rc" -ne 0 ]; then
@@ -65,7 +70,6 @@ if [ "$target_repo_ok" -eq 1 ]; then
     # inside an outer repository is broken even though git answers there.
     note_problem "target checkout is not a git repo: $target — run core/sync-target.sh"
   else
-    [ -n "$target_err" ] && log "NOTE     ${target_err#daedalus: }"
     log "OK       target checkout: $target"
     # The trunk name. Every branch-aware guard (guard-bash's push/commit
     # deny, the promotion gate) reads config target.branch; a config that

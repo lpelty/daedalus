@@ -806,6 +806,12 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
   case "$output" in *"OK       leases: state/leases/ (1 window live, 1 stale)"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"NOTE     leases: 1 stale — 03 (electron; no live session since"*"run core/lease.sh sweep"*) : ;; *) echo "$output"; return 1 ;; esac
+  # ONE live-window count per run. resolve's operator-shell courtesy note counts
+  # every unreleased lease ("2 windows live" here, stale 03 included); the leases
+  # line counts by liveness. Echoing the note as a NOTE put both in front of the
+  # operator three lines apart (Task 18 review). The leases line is the only count.
+  case "$output" in *"no session — using the prime's checkout"*) echo "resolve's courtesy note must not be a doctor line: $output"; return 1 ;; esac
+  case "$output" in *"windows live)"*) echo "a second live-window count: $output"; return 1 ;; esac
 }
 
 @test "doctor: released and finished leases, swept numbers with waiting work, the registry, old shared dedup files — each a NOTE, none turns doctor red" {
@@ -834,4 +840,5 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
   # a symlink to /private/var — so compare against the physical path.
   real_home="$(cd "$DAEDALUS_HOME" && pwd -P)"
   case "$output" in *"OK       target checkout: $real_home/target/thing"*"deployment is wired correctly"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"no session — using the prime's checkout"*) echo "resolve's courtesy note must not be a doctor line: $output"; return 1 ;; esac
 }

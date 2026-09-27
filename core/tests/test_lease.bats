@@ -127,6 +127,11 @@ teardown() { teardown_live; }
   run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u DAEDALUS_LEASE python3 '$LL' resolve thing 2>'$BATS_TEST_TMPDIR/err'"
   [ "$status" -eq 0 ]; [ "$output" = "$DAEDALUS_HOME/target/thing" ]
   grep -q "no session — using the prime's checkout target/thing (2 windows live)" "$BATS_TEST_TMPDIR/err"
+  # Plain language: one window is "1 window live", never "1 windows" (Task 18 review).
+  rm "$DAEDALUS_HOME/state/leases/03.json"
+  run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u DAEDALUS_LEASE python3 '$LL' resolve thing 2>'$BATS_TEST_TMPDIR/err'"
+  [ "$status" -eq 0 ]
+  grep -q "no session — using the prime's checkout target/thing (1 window live)" "$BATS_TEST_TMPDIR/err"
 }
 
 @test "resolve: DAEDALUS_TARGET_OVERRIDE wins only under state/promote/" {

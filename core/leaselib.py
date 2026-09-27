@@ -280,7 +280,8 @@ def resolve(root: Path, sid: Optional[str], name: str) -> Path:
             return default
     if sid is None:
         live = sum(1 for k, d in leases.items() if k != "prime" and not d.get("released"))
-        sys.stderr.write("daedalus: no session — using the prime's checkout target/%s (%d windows live)\n" % (name, live))
+        sys.stderr.write("daedalus: no session — using the prime's checkout target/%s (%d window%s live)\n"
+                         % (name, live, "" if live == 1 else "s"))
         return default
     nn, lease = resolve_lease(leases, sid)
     if lease is None:
