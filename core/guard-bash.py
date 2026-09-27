@@ -23,25 +23,46 @@ fails CLOSED for git inside `target/`: with no trunk to compare against,
 a push or commit there is denied rather than waved through (the same rule
 boundary-hook.py applies since PROP-019). Everything this guard can be
 routed around is caught by boundary-hook.py from git state.
+
+Since v0.7.0 the guard also carries the lease-era checks for Bash operands
+(spec §4.6, §4.7, §3.1), sharing boundary-hook.py's helpers so the Edit
+and Bash legs say the same sentences: a write operand in another live
+window's changed set is denied ONCE per session with the warning, then let
+through with the warning as context; the prime's checkout target/<repo>
+is denied for every window; another window's worktree is denied every
+time, and so is `git worktree remove` of it; a released window's own
+worktree is closed; vault/hot.md is the prime's alone; raw `git add`,
+`commit` and `stash` under vault/ are denied from EVERY session, prime
+included, naming core/vault-commit.sh; a non-prime's `commit` or `push`
+under vault/ is denied naming the prime's window number, read from
+prime.json at denial time. A session that cannot be bound while lease
+files exist fails CLOSED under target/, worktrees/ and hot.md (§4.4).
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
+bh = importlib.import_module("boundary-hook")  # noqa: E402  (the file name has a dash)
 
 SEPARATORS = {"&&", "||", ";", "|", "&"}
 # Scripts learn which session runs them from these variables (spec §4.4 step 1);
 # a prefix that strips or blanks one makes a session look like an operator shell.
 STRIP_VARS = re.compile(r"^(CLAUDE[A-Z_]*|DAEDALUS_SESSION_ID)$")
 STRIP_REASON = "scripts learn which session runs them from these variables; do not strip them"
+# §4.7: the prime's number is read from prime.json at denial time, never hard-coded; never a peer name (§4.1).
+NOT_PRIME = ("Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by window %s — "
+             "ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so.")
+VAULT_RULE = "The vault is committed by `core/vault-commit.sh`, which checks every claim first."
 DESTRUCTIVE = [("reset", "--hard"), ("checkout", "--"), ("restore", "."), ("clean", "-f"), ("stash", "drop")]
 WRITE_IN_STRING = re.compile(r"(?:>>?|\btee\b|open\(\s*['\"][^'\"]+['\"]\s*,\s*['\"][wa]|\.write_text\(|\bwrite\()")
 PATHISH = re.compile(r"[A-Za-z0-9_./~-]*[A-Za-z0-9_-]+(?:\.[A-Za-z0-9]+)?")
@@ -280,6 +301,92 @@ def strips_session_variable(seg: List[str]) -> bool:
     return False
 
 
+def check_vault_git(args: List[str], repo: Path, vault: Path, ctx: dict) -> Optional[str]:
+    """§4.7, in this order: a non-prime's `commit`/`push` under vault/ names the
+    prime's window number (and, for commit, the vault-commit.sh rule); then raw
+    `add`/`commit`/`stash` under vault/ from every session, prime included and
+    with no lease files at all, names core/vault-commit.sh."""
+    if not args or not under(repo, vault):
+        return None
+    sub = args[0]
+    non_prime = bool(ctx["leases"]) and not ctx["prime"]
+    if sub in ("commit", "push") and non_prime:
+        text = NOT_PRIME % (ctx["mine"] or "none", ctx["prime_nn"] or "none")
+        return text + " " + VAULT_RULE if sub == "commit" else text
+    if sub in ("add", "commit", "stash"):
+        return VAULT_RULE
+    return None
+
+
+def check_worktree_remove(args: List[str], here: Path, root: Path, ctx: dict) -> Optional[str]:
+    """§3.1: `git worktree remove <path>` of another window's worktree is denied."""
+    if args[:2] != ["worktree", "remove"] or not ctx["mine"]:
+        return None
+    wts = (root / "worktrees").resolve()
+    for a in args[2:]:
+        if a.startswith("-"):
+            continue
+        p = resolve(here, a)
+        if under(p, wts):
+            wt_nn = p.relative_to(wts).parts[0]
+            if wt_nn != ctx["mine"]:
+                return ("That is window %s's worktree; only that window (or `core/lease.sh release --remove`) may remove it."
+                        % wt_nn)
+    return None
+
+
+def check_write_operand(p: Path, root: Path, ctx: dict, refused: str, sid: object) -> Tuple[Optional[str], Optional[str]]:
+    """The lease-era checks for one resolved write operand (§4.6, §4.7, §3.1),
+    in boundary-hook.check_pretooluse's order. Returns (deny reason, context):
+    a deny, or context alone for a cross-lease path already warned this
+    session, or (None, None)."""
+    rroot = root.resolve()
+    wts = rroot / "worktrees"
+    under_target = under(p, rroot / "target")
+    under_wt = under(p, wts)
+    is_hot = p == rroot / "vault" / "hot.md"
+    # The refusal is judged BEFORE the empty-leases return (Task 10 review): an unreadable
+    # lease file leaves an empty leases dict with the refusal set.
+    if refused and (under_target or under_wt or is_hot):
+        return refused, None
+    if not ctx["leases"]:
+        return None, None
+    if is_hot and not ctx["prime"]:
+        return NOT_PRIME % (ctx["mine"] or "none", ctx["prime_nn"] or "none"), None
+    hit = v.repo_relative(root, p)
+    if hit is None:
+        return None, None
+    tree, rel = hit
+    repo_key = bh.repo_key_of(root, tree)
+    if under_target:
+        mine_wt = ("worktrees/%s/%s" % (ctx["mine"], repo_key)) if ctx["mine"] else "a numbered window's worktree"
+        return ("This is the prime's checkout (%s). Your work goes in %s. If you meant to change trunk, that is what "
+                "`promote` is for." % (tree.resolve().relative_to(rroot).as_posix(), mine_wt)), None
+    if under_wt:
+        wt_nn = tree.resolve().relative_to(wts).parts[0]
+        if ctx["mine"] and wt_nn != ctx["mine"]:
+            return ("This is window %s's worktree (worktrees/%s/%s). Your work goes in worktrees/%s/%s. If you need "
+                    "something from that window's tree, send it a message." % (wt_nn, wt_nn, repo_key, ctx["mine"], repo_key)), None
+        if (ctx["leases"].get(wt_nn) or {}).get("released"):
+            return "this window is released; its worktree is closed", None
+    holder = bh.cross_lease_holder(root, ctx, tree, rel)
+    if holder is None:
+        return None, None
+    import leaselib as ll          # already imported by lease_context once leases exist
+    nn, lease = holder
+    entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
+    background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
+    text = bh.warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
+    b = bh.load_boundary(root, sid)
+    warned = b.setdefault("warned", {})
+    key = str(p)
+    if key in warned:
+        return None, text.replace(bh.FIRST_STOP, "")
+    warned[key] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    bh.save_boundary(root, sid, b)
+    return text, None
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -326,6 +433,8 @@ def main() -> int:
     try:
         branch_created = False
         here = cwd
+        vault = (root / "vault").resolve()
+        contexts: List[str] = []          # cross-lease warnings already given this session (§4.6 second attempt)
         for seg in segments(tokens):
             if not seg:
                 continue
@@ -336,7 +445,7 @@ def main() -> int:
                 here = resolve(here, seg[1])
                 continue
             if seg[0] == "git":
-                _, args = git_repo_and_args(seg, here)
+                repo_dir, args = git_repo_and_args(seg, here)
                 if args[:2] in (["switch", "-c"], ["checkout", "-b"]):
                     branch_created = True
                 elif args[:1] in (["switch"], ["checkout"]) and len(args) == 2 \
@@ -351,11 +460,24 @@ def main() -> int:
                 if reason:
                     deny(reason)
                     return 0
+                reason = check_vault_git(args, repo_dir, vault, ctx) or check_worktree_remove(args, here, root, ctx)
+                if reason:
+                    deny(reason)
+                    return 0
             for op in write_operands(seg):
                 p = resolve(here, op)
+                reason, context = check_write_operand(p, root, ctx, refused, sid)
+                if reason:
+                    deny(reason)
+                    return 0
+                if context:
+                    contexts.append(context)
                 if v.is_protected(root, p):
                     deny("%s is distribution code (or evidence); write a proposal instead of editing it." % p)
                     return 0
+        if contexts:
+            # Every operand was checked; the warning(s) go through as context with the write (§4.6).
+            v.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(contexts)}})
     except Exception:
         return 0
     return 0

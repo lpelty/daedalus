@@ -1,11 +1,14 @@
 #!/usr/bin/env bats
 load fixtures/leases/setup.bash
+teardown() { teardown_live; }
 
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/state"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
+  # the guard imports boundary-hook.py for the cross-lease helpers and leaselib for the leases (Task 11)
+  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
@@ -43,12 +46,12 @@ allowed() { [ -z "$output" ]; }
   run guard 'git -C vault push origin main'; allowed
 }
 
-@test "commit on target main denied unless a branch is created first; vault commit allowed" {
+@test "commit on target main denied unless a branch is created first; a raw vault commit is denied (§4.7)" {
   run guard 'git commit -m x' "$T"; denied
   run guard 'git -C target/thing commit -m x'; denied
   run guard 'git switch -c fix/x && git commit -m x' "$T"; allowed
   run guard 'git checkout -b fix/x && git commit -m x' "$T"; allowed
-  run guard 'git -C vault commit -m x'; allowed
+  run guard 'git -C vault commit -m x'; denied
   git -C "$T" switch -q -c fix/y
   run guard 'git commit -m x' "$T"; allowed
 }
@@ -197,7 +200,7 @@ EOF2
   run guard 'git push origin mainline' "$T"; denied; case "$output" in *"config.yaml cannot be read"*) : ;; *) echo "message must name the cause: $output"; return 1 ;; esac
   run guard 'git push origin fix/x' "$T"; denied
   run guard 'git commit -m x' "$T"; denied
-  run guard 'git -C vault commit -m x'; allowed
+  run guard 'git -C vault commit -m x'; denied
   run guard 'git -C vault push origin main'; allowed
   chmod 644 "$DAEDALUS_HOME/config.yaml"
   run guard 'git push origin fix/x' "$T"; allowed
@@ -272,4 +275,57 @@ EOF2
     run guard_as sA 'git status' "$cwd"; allowed
   done
   unset DAEDALUS_TARGET_OVERRIDE
+}
+
+# --- Bash write operands, other windows' worktrees, the vault rules (spec §4.6, §4.7, §3.1; Task 11) ---
+# guard_as is defined above (Task 9). The lease fixture is what gives target/thing an origin/<trunk>
+# ref for `lease.sh create` to cut worktrees from; it re-homes DAEDALUS_HOME (pwd -P) and T.
+
+guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
+  lease_fixture
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null; bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  for p in 01:sA 02:sB; do nn="${p%%:*}"; s="${p##*:}"; pid="$(live_pid)"; registry_entry "$pid" "$s" interactive cli "daedalus-$nn"
+    env CLAUDE_CODE_SESSION_ID="$s" bash "$DAEDALUS_HOME/core/lease.sh" claim "$nn" >/dev/null; done
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
+  printf '{"thing":{"hooks/capture.py":"2026-09-25T10:31:04"}}' > "$DAEDALUS_HOME/state/leases/02.changed"
+}
+
+@test "Bash write to a path in another lease's changed set: first denied with the warning, second allowed with context; the same commands under the session's own untouched paths allowed" {
+  guard_leases; W="$DAEDALUS_HOME/worktrees/01/thing"
+  run guard_as sA 'echo x > hooks/capture.py' "$W"; denied; case "$output" in *"changed in window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA 'echo x > hooks/capture.py' "$W"; case "$output" in *'"permissionDecision"'*) echo "second must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA 'sed -i "" s/a/b/ hooks/capture.py' "$W"; case "$output" in *'"permissionDecision"'*) echo "$output"; return 1 ;; *) : ;; esac
+  run guard_as sA 'echo x > a.txt' "$W"; allowed
+}
+
+@test "a Bash write into the prime's checkout is denied for every window; git worktree remove of another window's worktree is denied; an unbindable session's trunk push is denied" {
+  guard_leases
+  run guard_as sA 'echo x > a.txt' "$T"; denied; case "$output" in *"This is the prime's checkout (target/thing). Your work goes in worktrees/01/thing."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'cp x a.txt' "$T"; denied
+  run guard_as sB 'git -C target/thing worktree remove worktrees/01'; denied; case "$output" in *"window 01's worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'rm -rf worktrees/01/thing/a.txt'; denied
+  run guard_as sZ 'git push origin HEAD:main' "$T"; denied; case "$output" in *"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a released window's OWN worktree is closed to its Bash tool too (§4.2 "edits under it are denied")
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["released"]="2026-09-25T12:00:00"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  run guard_as sB 'echo x > a.txt' "$DAEDALUS_HOME/worktrees/02/thing"; denied; case "$output" in *"this window is released; its worktree is closed"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "vault: git add / commit / commit -a / stash under vault/ denied from every session naming core/vault-commit.sh — a non-prime's commit or push also names the prime's window number; a write to vault/hot.md denied for a non-prime with the prime's window number; allowed for the prime" {
+  guard_leases
+  for c in 'git add -A' 'git commit -m x' 'git commit -am x' 'git stash'; do
+    run guard_as sA "$c" "$DAEDALUS_HOME/vault"; denied; case "$output" in *"The vault is committed by \`core/vault-commit.sh\`, which checks every claim first"*) : ;; *) echo "'$c': $output"; return 1 ;; esac
+    case "$output" in *"pen is held by"*) echo "the prime is not told about the pen: $output"; return 1 ;; *) : ;; esac
+    run guard_as sB "$c" "$DAEDALUS_HOME/vault"; denied; done
+  run guard_as sB 'git commit -m x' "$DAEDALUS_HOME/vault"; denied
+  case "$output" in *"You are window 02; the pen is held by window 01"*"core/vault-commit.sh"*) : ;; *) echo "non-prime commit must name the prime's window: $output"; return 1 ;; esac
+  run guard_as sB 'git push origin main' "$DAEDALUS_HOME/vault"; denied; case "$output" in *"You are window 02; the pen is held by window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'echo x > hot.md' "$DAEDALUS_HOME/vault"; denied; case "$output" in *"Only the prime window commits the vault and writes hot.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA 'git push origin main' "$DAEDALUS_HOME/vault"; allowed
+  run guard_as sA 'echo x > hot.md' "$DAEDALUS_HOME/vault"; allowed
+  run guard_as sB 'echo x > proposals/PROP-9.md' "$DAEDALUS_HOME/vault"; allowed
+}
+
+@test "with no lease files the vault rules still deny raw commits (every session), and nothing else changes" {
+  run guard 'git -C vault commit -m x'; denied
+  run guard 'git -C vault push origin main'; allowed
 }
