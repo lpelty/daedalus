@@ -10,7 +10,7 @@ setup() {
   DAEDALUS_HOME="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault/evidence"
-  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
@@ -422,4 +422,18 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   case "$output" in *"(visitor, not blocking)"*) : ;; *) echo "the unbindable reason must survive as a note: $output"; return 1 ;; esac
   run env DIRECT_CALL_ID=abc bash -c "$(declare -f edit_as); edit_as sZ '$T/a.txt'"
   case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "PreToolUse still denies a visitor: $output"; return 1 ;; esac
+}
+
+@test "another live lease's RUNNING run — run dir, and a written vault summary with no review file yet — is not stray; a stale lease's is stray with the 'never finished' line" {
+  two_leases; live_holder 01; live_holder 02
+  cp "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
+  rid="20991231-000000-abcdef"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid"
+  printf '{"run_id":"%s","started":"2099-12-31T00:00:00","lease":"02","session_id":"sB","result":"RUNNING"}' "$rid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  printf -- '---\ntype: evidence\nresult: PASS\n---\n' > "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  printf 'x\n' > "$DAEDALUS_HOME/state/evidence/$rid/gate-1.log"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(pid=1,proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"a gate run under window 02 (poc-ui) never finished; its session is gone"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
 }

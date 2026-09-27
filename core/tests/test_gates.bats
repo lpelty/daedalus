@@ -4,8 +4,12 @@ setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/target/thing"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  cp "$SRC/lib.sh" "$SRC/gates.sh" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
   export DAEDALUS_HOME
+  # Registry isolation: gates.sh asks leaselib.py my-lease for this session's
+  # window, and a present, empty session registry keeps every run from reading
+  # the developer's real ~/.claude/sessions/.
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"; mkdir -p "$BATS_TEST_TMPDIR/sessions"
   echo "marker" > "$DAEDALUS_HOME/target/thing/marker.txt"
 }
 
@@ -864,4 +868,17 @@ EOF
   [ "$status" -ne 0 ]
   case "$output" in *"does not render"*) : ;; *) echo "expected the unrenderable reason; got: $output"; return 1 ;; esac
   [ ! -f "$BATS_TEST_TMPDIR/bin12/argv" ]
+}
+
+@test "run.json exists and is manifested — with the vault summary path — before the first gate runs, as RUNNING with the lease and session id; two concurrent runs leave a manifest whose every line is a complete path" {
+  cp "$SRC/manifest-append.py" "$SRC/verifylib.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{"lease":"02","session_id":"sB","worktree":"worktrees/02"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  git_target
+  # session sB is bound to window 02, so target_path resolves to its worktree (§4.4): give it one
+  git -C "$DAEDALUS_HOME/target/thing" worktree add -q "$DAEDALUS_HOME/worktrees/02/thing" -b lease/02
+  write_config "  - test -f \"\$DAEDALUS_HOME/state/evidence\"/*/run.json && grep -q RUNNING \"\$DAEDALUS_HOME/state/evidence\"/*/run.json && grep -q '\"lease\": \"02\"' \"\$DAEDALUS_HOME/state/evidence\"/*/run.json && grep -c vault/evidence \"\$DAEDALUS_HOME/vault/evidence/.manifest\" >/dev/null"   # cfg_list strips a trailing quote; end elsewhere
+  DAEDALUS_SESSION_ID=sB run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]
+  write_config "  - sleep 1"
+  ( bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null ) & ( bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null ) & wait
+  while IFS= read -r line; do [ -z "$line" ] && continue; [ -e "$line" ] || { echo "incomplete manifest line: $line"; return 1; }; done < "$DAEDALUS_HOME/vault/evidence/.manifest"
 }

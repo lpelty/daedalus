@@ -81,7 +81,24 @@ run_id="$(date +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 ev_state="$DAEDALUS_HOME/state/evidence/$run_id"
 ev_vault="$DAEDALUS_HOME/vault/evidence"
 mkdir -p "$ev_state" "$ev_vault" || die "cannot create evidence directories"
-manifest="$ev_vault/.manifest"
+started="$(date +%Y-%m-%dT%H:%M:%S)"
+
+# The started record, FIRST (spec §4.9): a manifested run.json that says
+# RUNNING and names this session's window is what lets every other window's
+# Stop excuse this run's files while it runs. Manifested together with the
+# vault summary path in ONE locked append (the path is known before the
+# file exists), so the common case needs no excuse at all. Every later
+# manifest line goes through manifest-append.py too: two windows running
+# gates at once used to interleave `>>` appends into half paths.
+lease_nn="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease 2>/dev/null || true)"
+session_id="${DAEDALUS_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" <<'PY'
+import json, sys
+out, run_id, started, lease, sid = sys.argv[1:6]
+with open(out, "w") as fh:
+    json.dump({"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING"}, fh, indent=2)
+PY
+python3 "$DAEDALUS_HOME/core/manifest-append.py" "$ev_state/run.json" "$ev_vault/$run_id.md" || die "cannot append to the evidence manifest"
 
 fingerprint() {
   if [ -f "$DAEDALUS_HOME/core/fingerprint.sh" ]; then
@@ -91,7 +108,6 @@ fingerprint() {
   fi
 }
 
-started="$(date +%Y-%m-%dT%H:%M:%S)"
 config_sha="$(shasum -a 256 "$DAEDALUS_CONFIG" | awk '{print $1}')"
 fp_before="$(fingerprint)"
 fp_secs="$(sed -n 's/^fingerprint_secs=//p' "$ev_state/fingerprint.err" 2>/dev/null | tail -1)"
@@ -160,11 +176,10 @@ write_summary "$summary_tmp" "$result"
 # into the manifest BEFORE the refuter runs: the gate logs and the
 # fingerprint error file are what they are, verdict or no verdict. If the
 # review is killed from outside, what is left behind is manifested and
-# carries no result at all — run.json and the vault summary come after.
-{
-  [ -f "$ev_state/fingerprint.err" ] && printf '%s\n' "$ev_state/fingerprint.err"
-  printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}'
-} >> "$manifest"
+# carries no result at all — the final run.json and the vault summary come
+# after (their paths were manifested at the start).
+python3 "$DAEDALUS_HOME/core/manifest-append.py" $( [ -f "$ev_state/fingerprint.err" ] && printf '%s' "$ev_state/fingerprint.err" ) $(printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}') \
+  || die "cannot append to the evidence manifest"
 
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
   refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" "$summary_tmp" 2>&1 >/dev/null)"
@@ -204,9 +219,9 @@ rm -f "$summary_tmp"
 # recorded here.
 rows_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rows" > "$rows_tmp"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" <<'PY'
+python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" <<'PY'
 import json, sys, time
-out, run_id, started, fp, fp_secs, config_sha, result, rows_path = sys.argv[1:9]
+out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid = sys.argv[1:11]
 gates = []
 with open(rows_path) as fh:
     data = fh.read()
@@ -216,14 +231,13 @@ for line in data.splitlines():
     n, code, dur, log, cmd = line.split("\t", 4)
     gates.append({"n": int(n), "command": cmd, "exit": int(code), "duration_s": int(dur), "log": log})
 rec = {"run_id": run_id, "started": started, "fingerprint": fp, "fingerprint_secs": int(fp_secs or 0),
-       "config_sha": config_sha, "gates": gates, "result": result}
+       "config_sha": config_sha, "gates": gates, "result": result,
+       "lease": lease or None, "session_id": sid or None}
 rec["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 with open(out, "w") as fh:
     json.dump(rec, fh, indent=2)
 PY
 rm -f "$rows_tmp"
-
-printf '%s\n' "$ev_state/run.json" "$ev_vault/$run_id.md" >> "$manifest"
 
 if [ "$failed" -ne 0 ]; then
   log "run-id: $run_id"

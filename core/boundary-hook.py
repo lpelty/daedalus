@@ -59,15 +59,19 @@ RESTART = (" If the operator made this change, restart the session — a FRESH "
            "deletes state/session-<id>.json from outside the session first.")
 
 
+MANIFEST_FILES = (".manifest", ".manifest.lock")   # gates.sh's ledger and the lock its appends take
+
+
 def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
     """A vault/evidence path new this session that gates.sh actually
     recorded is the stage's own output, not tampering (PROP-017 finding 1):
     it must be listed in the manifest AND have the state-side run record
     (the vault-side frontmatter fallback would let a hand-written file
-    vouch for itself). `.manifest` is rewritten by every run; its entries
-    are judged here and by check_evidence, so the file itself is excused."""
+    vouch for itself). `.manifest` is rewritten by every run and
+    `.manifest.lock` is the lock every append takes (§4.9); their entries
+    are judged here and by check_evidence, so the files themselves are excused."""
     name = rel.rsplit("/", 1)[-1]
-    if name == ".manifest":
+    if name in MANIFEST_FILES:
         return True
     if str((root / rel).resolve()) not in manifest:
         return False
@@ -113,8 +117,8 @@ def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
                     manifest = v.manifest_paths(root)
                 if _sanctioned_evidence(root, path, manifest):
                     continue
-            if path == "vault/evidence/.manifest":
-                continue   # rewritten by every run; entries judged above/check_evidence
+            if path in ["vault/evidence/" + n for n in MANIFEST_FILES]:
+                continue   # rewritten/locked by every run; entries judged above/check_evidence
             bad.append(path)
     if bad:
         reasons.append("Protected files changed this session: %s. Revert these — Daedalus's own code changes by proposal, not by edit.%s"
@@ -134,22 +138,53 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
     except (ValueError, TypeError):
         since = 0
     manifest = v.manifest_paths(root)
+    # §4.9: gates.sh writes run.json FIRST, as a started record that names its window, and
+    # manifests it in the same breath. While that record is manifested, says RUNNING and names a
+    # window whose session is live, every file of that run — under state/evidence/<run-id>/ and
+    # vault/evidence/<run-id>*.md, keyed on the run id across both trees — is another window's
+    # gate run still in flight, not tampering. A RUNNING run whose window is stale (its session
+    # is gone) never finished: it is named once, in those words, and its unmanifested files are
+    # stray as before. An unleased run (lease null) gets no excuse — nothing can vouch for it.
+    ctx = v.lease_context(root, marker.get("session_id"))
+    running_ok: set = set()
+    never_finished: List[Tuple[str, str]] = []
+    ev_state = root / "state" / "evidence"
+    for rj in (ev_state.glob("*/run.json") if ev_state.is_dir() else []):
+        try:
+            rec = json.loads(rj.read_text())
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(rec, dict) or rec.get("result") != "RUNNING"
+                or str(rj.resolve()) not in manifest or not rec.get("lease")):
+            continue
+        rid, nn = str(rec.get("run_id") or rj.parent.name), str(rec["lease"])
+        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed"):
+            running_ok.add(rid)
+        else:
+            never_finished.append((rid, nn))
     stray: List[str] = []
-    for d in (root / "state" / "evidence", root / "vault" / "evidence"):
+    for d in (ev_state, root / "vault" / "evidence"):
         if not d.is_dir():
             continue
         for p in d.rglob("*"):
-            if not p.is_file() or p.name == ".manifest":
+            if not p.is_file() or p.name in MANIFEST_FILES:
                 continue
             try:
                 if p.stat().st_mtime < since:
                     continue
             except OSError:
                 continue
+            if any(rid and rid in str(p) for rid in running_ok):
+                continue
             if str(p.resolve()) not in manifest:
                 stray.append(str(p))
     if stray:
-        reasons.append("Evidence files exist that no gate run produced: %s. Evidence is written by core/gates.sh only.%s" % (", ".join(sorted(stray)), RESTART))
+        import leaselib as ll
+        gone = ["a gate run under %s never finished; its session is gone." % ll.window_label(nn, ctx["leases"].get(nn))
+                for rid, nn in never_finished if any(rid in s for s in stray)]
+        reasons.append("".join(g + " " for g in gone)
+                       + "Evidence files exist that no gate run produced: %s. Evidence is written by core/gates.sh only.%s"
+                       % (", ".join(sorted(stray)), RESTART))
 
 
 def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[str]) -> None:

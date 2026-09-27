@@ -306,7 +306,10 @@ fi
   cat "$body"
 } > "$verdict_file"
 rm -f "$body"
-printf '%s\n' "$verdict_file" >> "$ev/.manifest"
+# Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
+# another window's gates run. The review file is written and manifested in the
+# same breath, so the RUNNING excuse covers the negligible window between.
+python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || die "cannot append to the evidence manifest"
 # Verdict grammar: markdown dressing allowed before the word (bold, heading,
 # blockquote, list markers) and around the colon and verdict
 # ("**VERDICT**: REFUTED", "> VERDICT: STANDS", "1. VERDICT: **REFUTED**"),

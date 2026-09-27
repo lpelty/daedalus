@@ -1511,6 +1511,22 @@ def main(argv: list) -> int:
         print(liveness(root, args[0], lease)); return 0
     if cmd == "stale-after":
         print(stale_after_secs(root)); return 0
+    if cmd == "my-lease":
+        # gates.sh: the number of this session's lease for the run.json started
+        # record (§4.9), or nothing — an operator shell, an unleased session, or
+        # a deployment with no state/leases/ yet (never created here: lock()
+        # would mkdir it as a side effect of a plain gate run).
+        sid = session_id_from_env()
+        nn = None
+        if sid and leases_dir(root).is_dir():
+            try:
+                with lock(root, shared=True):
+                    nn, _ = lease_of_session(read_all(root), sid)
+            except Refused as e:
+                sys.stderr.write("daedalus: %s\n" % e); return 1
+        if nn:
+            print(nn)
+        return 0
     if cmd == "changed":
         if not args:
             sys.stderr.write("usage: leaselib.py changed <NN>\n"); return 2
