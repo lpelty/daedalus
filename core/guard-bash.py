@@ -16,7 +16,11 @@ whose refspec names the current commit (`HEAD`, `@`) is resolved to the
 current branch before that comparison, and `--all`/`--mirror` are denied
 outright inside the target: both push the trunk whatever branch is checked
 out. Relative paths resolve against the hook's `cwd`, then any
-`cd <dir> &&` earlier in the same command. Fails open on its own errors,
+`cd <dir> &&` earlier in the same command. Commands are split at `&&`,
+`||`, `|`, `&`, `;` and newlines — tokenized with shlex's punctuation
+mode, because plain shlex.split keeps a glued `;` on the word (`vault;`)
+and `cd vault; git commit -m x` was one cd segment whose git command was
+never examined (Task 11 review; the gap is v0.6.1's). Fails open on its own errors,
 except that an unparseable command is still checked for redirect and `-i`
 operands that resolve to protected paths, and that an unreadable config
 fails CLOSED for git inside `target/`: with no trunk to compare against,
@@ -54,7 +58,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 bh = importlib.import_module("boundary-hook")  # noqa: E402  (the file name has a dash)
 
-SEPARATORS = {"&&", "||", ";", "|", "&"}
+# The shell's command separators, tokenized as their own words (shlex punctuation mode, plus
+# newline): a token made only of these characters (`&&`, `||`, `|`, `|&`, `&`, `;`, `;;`, a
+# newline, or a run such as `;\n`) ends a segment.
+PUNCT = ";&|\n"
 # Scripts learn which session runs them from these variables (spec §4.4 step 1);
 # a prefix that strips or blanks one makes a session look like an operator shell.
 STRIP_VARS = re.compile(r"^(CLAUDE[A-Z_]*|DAEDALUS_SESSION_ID)$")
@@ -73,14 +80,29 @@ def deny(reason: str) -> None:
                                    "permissionDecisionReason": reason}})
 
 
+def is_separator(t: str) -> bool:
+    return bool(t) and all(c in PUNCT for c in t)
+
+
 def segments(tokens: List[str]) -> List[List[str]]:
     out: List[List[str]] = [[]]
     for t in tokens:
-        if t in SEPARATORS:
+        if is_separator(t):
             out.append([])
         else:
             out[-1].append(t)
     return [s for s in out if s]
+
+
+def tokenize(cmd: str) -> List[str]:
+    """shlex in punctuation mode: `;`, `&`, `|` and newlines come out as their own tokens
+    (runs merged: `&&`, `||`), quotes and escapes as in posix mode, `#` never a comment.
+    Raises ValueError as shlex.split does for a quote left open."""
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=PUNCT)
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    lex.commenters = ""
+    return list(lex)
 
 
 def resolve(cwd: Path, p: str) -> Path:
@@ -292,7 +314,7 @@ def strips_session_variable(seg: List[str]) -> bool:
             if a.startswith("-u") and len(a) > 2 and STRIP_VARS.match(a[2:]):
                 return True
         return False
-    # shlex keeps a glued `;` on the word (`unset CLAUDECODE; ls` -> `CLAUDECODE;`)
+    # rstrip(";"): tokenize() now splits a glued `;` off the word; kept for a token that still carries one
     if seg[0] == "unset":
         return any(STRIP_VARS.match(a.rstrip(";")) for a in seg[1:])
     if "=" in seg[0]:
@@ -421,7 +443,7 @@ def main() -> int:
         # Unconfigured (config.yaml unreadable) keeps target=None: check_git's
         # target/ rule fails closed there with the config sentence.
     try:
-        tokens = shlex.split(cmd, posix=True)
+        tokens = tokenize(cmd)
     except ValueError:
         # Unparseable (a heredoc with an apostrophe): check only redirect / -i operands.
         for m in re.finditer(r"(?:>>?|\s-i(?:\s+\S+)?\s)\s*([A-Za-z0-9_./~-]+)", cmd):

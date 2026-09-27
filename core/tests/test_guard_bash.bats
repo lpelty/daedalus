@@ -329,3 +329,24 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   run guard 'git -C vault commit -m x'; denied
   run guard 'git -C vault push origin main'; allowed
 }
+
+@test "a semicolon with no space before it, and a newline, separate commands the way && does: trunk push, vault commit and cd target/thing; ... are all denied; a quoted semicolon does not split" {
+  # shlex.split keeps a glued `;` on the word (`vault;`), so `cd vault; git commit -m x` was one cd segment
+  # and the git command was never examined — every rule in the guard was bypassed by the commonest spelling.
+  run guard 'cd target/thing; git push origin main'; denied
+  run guard 'cd target/thing;git push origin main'; denied
+  run guard 'cd vault; git commit -m x'; denied; case "$output" in *"core/vault-commit.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard 'cd vault; git add -A; git commit -m x'; denied
+  run guard "cd target/thing
+git push origin main"; denied
+  run guard 'true; git commit -m x' "$T"; denied
+  run guard 'git switch -c fix/x; git commit -m x' "$T"; allowed
+  run guard 'true; git push origin fix/x' "$T"; allowed
+  run guard 'echo "cd vault; git commit -m x" > /tmp/x' "$T"; allowed
+  run guard 'git commit -m "a; b"' "$T"; denied
+  guard_leases
+  run guard_as sB 'cd vault; git push origin main'; denied; case "$output" in *"pen is held by window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'cd vault; echo x > hot.md'; denied
+  run guard_as sB 'cd worktrees/02/thing; git worktree remove ../../01/thing'; denied
+  run guard_as sA 'cd worktrees/01/thing; echo x > hooks/capture.py'; denied; case "$output" in *"changed in window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+}
