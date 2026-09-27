@@ -4,7 +4,9 @@
 # the development site as a proposal — never as a local patch (PRD §5.4).
 
 target:
-  # The harness Daedalus builds and maintains.
+  # The harness Daedalus builds and maintains. It is checked out under target/;
+  # each window's worktrees/<NN>/ mirrors that layout (the same repo, nested
+  # and scaffold paths) and is where that window builds.
   repo: https://github.com/OWNER/REPO.git
   branch: main
 

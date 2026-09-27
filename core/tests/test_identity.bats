@@ -289,3 +289,18 @@ _run_scan_in_fixture() {
   run grep -q '^leases: ' "$DAEDALUS_HOME/core/templates/hot.md"; [ "$status" -eq 0 ]
   run grep -q '^session: ' "$DAEDALUS_HOME/core/templates/hot.md"; [ "$status" -ne 0 ]
 }
+
+# Spec §4.2, §4.3, §4.6, §4.7: the operator-facing summary of windows, the
+# board, the stop-once warning and the pen lives in the distribution docs —
+# in plain language, with a window example an operator can read as a number
+# ("window 02"), the command that drives it, and the one sanctioned vault
+# commit. Task 19 (plan 1 of 5).
+@test "CLAUDE.md, README and CHANGELOG describe windows, the board, the stop-once warning and the prime — in plain language" {
+  for f in CLAUDE.md README.md; do
+    run grep -q 'window 0' "$DAEDALUS_HOME/$f"; [ "$status" -eq 0 ] || { echo "$f lacks a window example"; return 1; }
+    run grep -q 'core/lease.sh' "$DAEDALUS_HOME/$f"; [ "$status" -eq 0 ] || { echo "$f does not name core/lease.sh"; return 1; }
+  done
+  run grep -q 'prime' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -q 'core/vault-commit.sh' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -eq 0 ]
+}

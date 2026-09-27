@@ -35,6 +35,39 @@ your live harness:
 }
 ```
 
+## Windows (leases)
+
+Several Daedalus sessions can work the same target at once. Each interactive
+terminal is a **window**: at start it takes the lowest free two-digit number
+and is told "You are window 02". Its lease is a file under `state/leases/`
+(written only by `core/lease.sh` and `core/leaselib.py`), and its checkout of
+the target is a git worktree under `worktrees/02/<repo>/` on branch
+`lease/02`, cut from `target/<repo>/` — which becomes the prime's mirror of
+trunk that no session writes to. Both directories are gitignored and
+per-deployment.
+
+The tracked `.claude/settings.json` wires this: `core/session-start.py`
+numbers the window and prints the **lease board** (one line per open window —
+number, alias, changed files, last commit, last seen); `core/lease-board.py`
+prints it again on every prompt and is the window's heartbeat; a
+`PreToolUse(Edit|Write)` line runs `core/boundary-hook.py` before a write, so
+the first attempt to change a file another window has already changed is
+stopped once with the advice to message that window, and goes through on the
+next try (`core/guard-bash.py` does the same for Bash write operands). One
+window holds the pen — the board marks it `prime` — and only it writes
+`vault/hot.md` and commits the vault, through `core/vault-commit.sh`.
+
+`core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
+`alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,
+`release <NN>`, `done <NN>`, `sweep` (removes windows with no live session)
+and `prime take`. `leases.stale_after` in `config.yaml` (default `4h`) is
+how long a window may go without a prompt before the board calls it quiet;
+a window whose session is gone is stale and `sweep` removes it. Session logs
+are named by window number and date (`vault/sessions/YYYY/MM/YYYY-MM-DD-02.md`).
+`core/doctor.sh` reports the two lease directories, stale and released
+windows, swept numbers with work still waiting, and the session registry
+Claude Code keeps under `~/.claude/sessions/` (liveness reads it).
+
 ## Episodic memory capture (optional)
 
 `core/capture.py` reads Claude Code session transcripts and posts new turns to
@@ -170,8 +203,9 @@ is accepted the first time Claude Code opens this directory.
 - **Daedalus's own code belongs to the distribution.** Updates arrive by
   `git pull`. A deployment carries no local modifications; anything you need
   to customize belongs in `config.yaml` or your vault.
-- **Daedalus's write surfaces are `target/`, `vault/`, and `.claude/` (aside
-  from the tracked `settings.json`).** Skills it authors and scratch space
+- **Daedalus's write surfaces are `target/` (through each window's worktree
+  under `worktrees/`, see "Windows (leases)"), `vault/`, and `.claude/`
+  (aside from the tracked `settings.json`).** Skills it authors and scratch space
   its tooling needs are its own work product, not distribution.
 - Development happens at one site only. Defects found in Daedalus travel back
   as a proposal, not a local patch.

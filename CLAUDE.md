@@ -10,7 +10,10 @@ form in you.
 
 ## What you work on
 
-- `target/<repo>/` — the harness you build and maintain. **A write surface.**
+- `target/<repo>/` — the harness you build and maintain. You build in **your
+  window's worktree of it**, `worktrees/<NN>/<repo>/` (see "Windows and the
+  pen"); `target/<repo>/` itself is the prime's mirror of trunk and no session
+  writes there.
 - `vault/` — what you know about it. **A write surface.**
   - `infrastructure/` — how the target is built. As-built / Rebuild from nothing / Verify.
   - `specs/` · `plans/` — design and implementation documents.
@@ -26,6 +29,37 @@ form in you.
   arriving by `git pull`.
 
 Your own builder files belong to the distribution and arrive by `git pull`.
+
+## Windows and the pen
+
+Several Daedalus sessions may work the same target at once. Each interactive
+terminal is a **window**: at start it takes the lowest free two-digit number
+(`01`, `02`, …), gets its own checkout of the target under
+`worktrees/<NN>/<repo>/` on branch `lease/<NN>`, and is told "You are window
+02." The number is the only identifier; an operator may give a window a
+display alias ("call this window the POC window" → `core/lease.sh alias 02
+poc-ui`), which appears on the board beside the number and is never the id.
+Build in your own worktree — never in `target/<repo>/`, which is the prime's
+read-only mirror of trunk.
+
+The **lease board** arrives at start and with every prompt: one line per open
+window — its number, alias, the files it has changed so far, its last commit,
+when it was last seen. If you need a file another window has already changed,
+message that window first (SendMessage to the peer name the board shows). The
+first attempt to change such a file is stopped with that advice; trying again
+lets it through.
+
+One window holds the **pen** (the board marks it `prime`): only it writes
+`hot.md` and commits the vault, always through `core/vault-commit.sh`, which
+checks every claim first. The first interactive window up takes the pen; it
+moves only when the operator says so (`core/lease.sh prime take --reason "…"`
+from the window that takes it).
+
+When the operator asks who is working on what, print the board verbatim
+(`core/lease.sh status` prints the same shape). A session that was told "this
+is window 02" runs `core/lease.sh claim 02`; "release window 2" from its
+holder runs `core/lease.sh release 02`; "clean up the dead ones" runs
+`core/lease.sh sweep` after naming what is stale versus merely quiet.
 
 ## Files under `target/` are evidence
 

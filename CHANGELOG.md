@@ -4,6 +4,38 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## Unreleased — numbered windows, lease worktrees, the board, the pen (v0.7.0 plan 1 of 5)
+
+- **Every interactive window numbers itself** at SessionStart and builds in
+  its own git worktree of the target (`worktrees/<NN>/<repo>`, branch
+  `lease/<NN>`); `target/<repo>` is the prime's mirror of trunk and no
+  session writes there. `core/lease.sh` (`create claim alias note update spawn
+  list status release done sweep prime take`) and `core/leaselib.py` are the
+  only writers of `state/leases/`.
+- **The lease board** is injected at start (by `session-start.py`, right
+  after it numbers and binds the window) and on every prompt
+  (`core/lease-board.py`); it is also the heartbeat and recomputes the
+  reader's observed changed set.
+- **Stop-once cross-lease warning** on PreToolUse(Edit|Write) and Bash write
+  operands; a Stop-time backstop catches a warning that never fired.
+- **The pen**: `state/leases/prime.json`; first interactive window up takes
+  it; `hot.md` and the vault are prime-only, and the vault is committed only
+  by `core/vault-commit.sh`.
+- `verifylib.target_root` (which returned `None` and let every guard fail
+  open) is replaced by the tri-state `resolve_target`; every consumer names
+  what it does under `Refused`. `fingerprint.sh` and `sync-target.sh` treat a
+  linked worktree as a repository.
+- Evidence: `run.json` is written first (`RUNNING`, with the window) and the
+  manifest is appended under a lock (`core/manifest-append.py`).
+- Session logs are named by window number and date; claim documents carry
+  `lease:`; per-session dedup files; the document index is prime-only.
+- Doctor reports the lease directories, stale/released/finished windows,
+  swept numbers with waiting work, and the session registry.
+- Not yet in this release: incremental capture (plan 2), the caller and
+  refuter launcher (plan 3), `promote` and the pre-push hook (plan 4),
+  `lease.sh rebase/split/adopt` (plans 4 and 5), the self-upgrade and
+  `VERSION` (plan 5).
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named
