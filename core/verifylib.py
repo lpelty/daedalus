@@ -559,8 +559,15 @@ def vault_claim_report(root: Path) -> List[dict]:
     read of state/leases/ (lease_context): a lease with no file, or a stale
     one, is not live — its claim is the prime's to answer for. `own` marks
     the caller's own lease (its claim is judged, never left out). May raise
-    VaultLocked (§3.3)."""
+    VaultLocked (§3.3), or leaselib.Refused when a lease file cannot be read:
+    an unreadable lease vouches for nothing, so no claim is judged — a
+    `live: false` row would hand a possibly-live window's claim to the
+    prime (or an operator shell, which no `is-prime` step guards) to stage.
+    Fails closed like verify-hook and boundary-hook (Task 16 review)."""
     ctx = lease_context(root, session_id_of_caller())
+    if ctx["unreadable"]:
+        import leaselib as ll
+        raise ll.Refused(ctx["unreadable"])
     out: List[dict] = []
     for p, fm in claims(root, vault_head(root), None, lease="*"):
         rid = fm.get("evidence-run", "")
@@ -590,10 +597,11 @@ def session_id_of_caller() -> Optional[str]:
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--vault-claims"]:
+        import leaselib as ll
         try:
             for row in vault_claim_report(ROOT):
                 print(json.dumps(row))
-        except VaultLocked as e:
+        except (VaultLocked, ll.Refused) as e:
             sys.stderr.write("daedalus: %s\n" % e)
             sys.exit(1)
         sys.exit(0)

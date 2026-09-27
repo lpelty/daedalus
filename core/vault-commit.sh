@@ -69,7 +69,15 @@ if [ -n "$dup" ]; then
 fi
 
 # 4. Per-file staging from the claim report — one JSON object per claim-shaped document.
-report="$(python3 "$DAEDALUS_HOME/core/verifylib.py" --vault-claims)" || die "the vault's claims could not be checked"
+# Every lease-derived input is read HERE, before anything is staged: a lease
+# file that cannot be read refuses the whole commit (the report fails closed and
+# its sentence names the file), and the window numbers for the default message
+# are read now rather than after `git add -A`, where a refusal would leave the
+# index dirtied with no sentence at all (Task 16 review). Never send a
+# leaselib call's stderr to /dev/null — its failure is the operator's to see.
+leases="$(python3 "$LL" numbers 2>&1)" || die "${leases#daedalus: }"
+leases="$(printf '%s\n' "$leases" | tr '\n' ',' | sed 's/^,*//; s/,$//; s/,/, /g')"
+report="$(python3 "$DAEDALUS_HOME/core/verifylib.py" --vault-claims)" || die "the vault's claims could not be checked, so nothing was staged"
 skip=""
 while IFS= read -r row; do
   [ -n "$row" ] || continue
@@ -101,7 +109,6 @@ EOF
 if git -C "$V" diff --cached --quiet; then
   log "nothing to commit"
 else
-  leases="$(python3 "$LL" numbers 2>/dev/null | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
   [ -n "$msg" ] || msg="vault: prime commit $(date +%Y-%m-%d) (leases: ${leases:-none})"
   # The vault's own identity when it has one; a placeholder only where none is configured.
   ident=""

@@ -67,3 +67,19 @@ EOF
   git -C "$DAEDALUS_HOME/vault" log -1 --format=%s | grep -q "vault: prime commit $(date +%Y-%m-%d) (leases: 01, 02)"
   [ "$(git -C "$BATS_TEST_TMPDIR/vault-origin.git" rev-parse main)" = "$(git -C "$DAEDALUS_HOME/vault" rev-parse HEAD)" ]
 }
+
+@test "an unreadable lease file refuses the commit before anything is staged — prime and operator shell alike, naming window 02's lease file (never a silent crash, never a fail-open commit)" {
+  doc proposals/PROP-2.md IMPLEMENTED 02 20260101-000000-abcdef   # a verified claim from window 02, whose session is live
+  printf 'not json' > "$DAEDALUS_HOME/state/leases/02.json"
+  # The claim report itself fails closed: no row (a `live: false` row would hand window 02's claim to the committer).
+  run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID python3 '$DAEDALUS_HOME/core/verifylib.py' --vault-claims"; [ "$status" -eq 1 ]
+  case "$output" in *"daedalus: The lease file for window 02 cannot be read"*) : ;; *) echo "report: $output"; return 1 ;; esac
+  case "$output" in *'"live"'*) echo "report: $output"; return 1 ;; *) : ;; esac
+  run env DAEDALUS_SESSION_ID=sA bash "$VC"; [ "$status" -ne 0 ]
+  case "$output" in *"The lease file for window 02 cannot be read"*) : ;; *) echo "prime: $output"; return 1 ;; esac
+  [ -z "$(git -C "$DAEDALUS_HOME/vault" diff --cached --name-only)" ]
+  run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID bash '$VC'"; [ "$status" -ne 0 ]
+  case "$output" in *"daedalus: "*"The lease file for window 02 cannot be read"*) : ;; *) echo "operator: $output"; return 1 ;; esac
+  [ -z "$(git -C "$DAEDALUS_HOME/vault" diff --cached --name-only)" ]
+  git -C "$DAEDALUS_HOME/vault" log -1 --format=%s | grep -q '^evidence$'   # nothing was committed
+}
