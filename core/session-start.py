@@ -113,6 +113,10 @@ def main() -> int:
     if ll is not None and sid:
         try:
             board = ll.board_for(root, sid, visitor)
+        except ll.Refused as e:
+            # a corrupt lease file must not make the board vanish (that reads as "no leases"):
+            # say the sentence lease.sh refuses with — it names the file and the fix
+            board = ll.BOARD_UNRENDERED % e
         except Exception:
             board = ""
     if board:

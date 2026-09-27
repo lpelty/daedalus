@@ -412,6 +412,20 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   printf 'new\n' > "$W/brand-new.py"; run hook_as Stop sA; [ "$status" -eq 0 ]
 }
 
+@test "Stop backstop: when state/ cannot be written the never-fired reason still blocks (exit 2) and stderr names the cause; the snapshot write failing is not a silent pass" {
+  two_leases; live_holder 01; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ]                                   # records 02's set as seen
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"
+  chmod 500 "$DAEDALUS_HOME/state"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py, which window 02 (poc-ui) had already changed, and the warning never fired"*) : ;; *) echo "must still block: $output"; return 1 ;; esac
+  case "$output" in *"daedalus: could not record the Stop snapshot in state/"*"previous snapshot"*) : ;; *) echo "stderr must name the cause: $output"; return 1 ;; esac
+  chmod 755 "$DAEDALUS_HOME/state"
+  run hook_as Stop sA; [ "$status" -eq 2 ]                                   # the previous snapshot still stands once state/ is writable again
+  case "$output" in *"daedalus: could not record"*) echo "no stderr line once state/ is writable: $output"; return 1 ;; *"the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "a visitor (DIRECT_CALL_ID set) is never blocked at Stop: stray evidence, an unbindable session and a backstop hit all become notes, exit 0; its PreToolUse denials still apply" {
   two_leases; live_holder 01; live_holder 02
   mkdir -p "$DAEDALUS_HOME/state/evidence/x"; printf 'x\n' > "$DAEDALUS_HOME/state/evidence/x/gate.log"   # unmanifested: stray
@@ -422,6 +436,11 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   case "$output" in *"(visitor, not blocking)"*) : ;; *) echo "the unbindable reason must survive as a note: $output"; return 1 ;; esac
   run env DIRECT_CALL_ID=abc bash -c "$(declare -f edit_as); edit_as sZ '$T/a.txt'"
   case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "PreToolUse still denies a visitor: $output"; return 1 ;; esac
+  # The downgrade is Stop-only (the plan nests it under the Stop branch): on PostToolUse(Bash)
+  # exit 2 only feeds text back after a command that already ran, so a visitor's reason is
+  # neither swallowed nor turned into a note nothing prints.
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f hook_as); hook_as PostToolUse sA"; [ "$status" -eq 2 ]
+  case "$output" in *"(visitor, not blocking)"*) echo "PostToolUse must not downgrade: $output"; return 1 ;; *"gate.log"*) : ;; *) echo "the PostToolUse reason must surface for a visitor: $output"; return 1 ;; esac
 }
 
 @test "another live lease's RUNNING run — run dir, and a written vault summary with no review file yet — is not stray; a stale lease's is stray with the 'never finished' line" {

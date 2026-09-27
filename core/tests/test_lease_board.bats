@@ -86,10 +86,40 @@ bind_live() {  # bind_live <NN> <sid> [name] — claim with a live registry pid
   run env DAEDALUS_LEASE=02 bash -c "$(declare -f board); board sB"
   [ "$(lease_json 02 session_id)" = "None" ]
   run board sB; c="$(ctx)"; case "$c" in *"This session holds no lease"*"core/lease.sh claim"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 02 — 0 changed"*) : ;; *) echo "the null 02 must render unmarked (no prime.json exists): $c"; return 1 ;; esac
   run env DIRECT_CALL_ID=x bash -c "$(declare -f board); board sV"; c="$(ctx)"
   case "$c" in *"This is a direct-call session; it holds no lease and cannot take the pen."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"This session holds no lease"*) echo "a visitor is never nagged: $c"; return 1 ;; *) : ;; esac
   [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]
+}
+
+@test "no prime.json: an unclaimed (null) lease is never marked prime — the board asserts no pen-holder that does not exist (§4.8: prime.json is the authority); on a registry-absent build the list shows no prime mark until prime take" {
+  LS create >/dev/null; bind_live 01 sA
+  LS create >/dev/null                                   # 02 stays null (session_id: null), no prime.json anywhere
+  [ ! -f "$DAEDALUS_HOME/state/leases/prime.json" ]
+  run board sA; c="$(ctx)"
+  case "$c" in *"prime (holds the pen"*) echo "a null lease read as prime: $c"; return 1 ;; *) : ;; esac
+  case "$c" in *"- 02 — 0 changed"*) : ;; *) echo "$c"; return 1 ;; esac
+  rm -rf "$BATS_TEST_TMPDIR/sessions"                    # registry-absent build (§3.1/A2): create, create, nobody takes the pen at start
+  rm -rf "$DAEDALUS_HOME/state/leases"; LS create >/dev/null; LS create >/dev/null
+  run LS list; case "$output" in *"prime (holds the pen"*) echo "phantom prime on a registry-absent list: $output"; return 1 ;; *) : ;; esac
+  case "$output" in *"nobody takes the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  run LS list; case "$output" in *"- 02 — prime"*) echo "the unclaimed 02 still reads as prime after 01 claimed: $output"; return 1 ;; *) : ;; esac
+  CLAUDE_CODE_SESSION_ID=sA LS prime take >/dev/null
+  run LS list; case "$output" in *"- 01 — prime (holds the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"- 02 — prime"*) echo "$output"; return 1 ;; *) : ;; esac
+}
+
+@test "a lease file that cannot be read does not make the board vanish: the prompt hook and SessionStart both carry the sentence naming the file and the fix (lease.sh refuses loudly in the same state)" {
+  LS create >/dev/null; bind_live 01 sA
+  LS create >/dev/null; printf 'not json\n' > "$DAEDALUS_HOME/state/leases/02.json"
+  run board sA; [ "$status" -eq 0 ]; [ -n "$output" ]; c="$(ctx)"
+  case "$c" in "The lease board could not be rendered: The lease file for window 02 cannot be read (not valid JSON"*"run \`core/lease.sh sweep\` before building."*) : ;; *) echo "$c"; return 1 ;; esac
+  run LS list; [ "$status" -eq 1 ]; case "$output" in *"The lease file for window 02 cannot be read"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"hook_event_name":"SessionStart","session_id":"sA","source":"startup","transcript_path":"%s/transcripts/sA.jsonl"}' "$BATS_TEST_TMPDIR" > "$BATS_TEST_TMPDIR/start.json"
+  run bash -c "python3 '$DAEDALUS_HOME/core/session-start.py' < '$BATS_TEST_TMPDIR/start.json'"; [ "$status" -eq 0 ]; c="$(ctx)"
+  case "$c" in *"The lease board could not be rendered: The lease file for window 02 cannot be read (not valid JSON"*) : ;; *) echo "$c"; return 1 ;; esac
 }
 
 @test "emitted on every prompt: two prompts, unchanged leases, two emissions, each tagged UserPromptSubmit" {

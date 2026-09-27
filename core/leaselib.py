@@ -39,6 +39,9 @@ class Refused(Exception):
     """A resolution that must fail closed; str(e) is the operator sentence."""
 
 
+BOARD_UNRENDERED = "The lease board could not be rendered: %s"
+
+
 def leases_dir(root: Path) -> Path:
     return root / "state" / "leases"
 
@@ -1348,7 +1351,9 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
     lease file's stored peer_name only when the registry has no live entry."""
     numbered = {k: d for k, d in leases.items() if k != "prime"}
     prime = leases.get("prime") or {}
-    prime_sid = prime.get("session_id")
+    # None when prime.json is absent or unclaimed; the mark below requires BOTH sides bound,
+    # else a null (created-but-unclaimed) lease reads as the holder of a pen nobody took (§4.8).
+    prime_sid = prime.get("session_id") or None
     live_map = registry_live_map() if live_map is None else live_map
     mine, _ = lease_of_session(leases, sid or "")
     head = "Lease board (%d window%s; %s):" % (len(numbered), "" if len(numbered) == 1 else "s",
@@ -1389,7 +1394,7 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
                 parts.append("a background clone that never reported — read its log with `claude logs %s` before sweeping"
                              % (d.get("peer_name") or "daedalus-%s" % nn))
         else:
-            if d.get("session_id") == prime_sid:
+            if prime_sid and d.get("session_id") == prime_sid:
                 parts.append("prime (holds the pen: hot.md, vault commits, promote)")
             if entries and entries[0].get("kind") == "bg" and not d.get("spawned"):
                 parts.append("background clone")

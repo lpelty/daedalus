@@ -251,7 +251,11 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
     pre-write hook catches it in whichever window touches it next. Then the
     snapshot is replaced with the other live leases' sets as they stand now. A set
     that cannot be recomputed (git failed in the worktree) keeps the last computed
-    set, and the Refused sentence rides along as a note — never a silent pass."""
+    set, and the Refused sentence rides along as a note — never a silent pass.
+    Likewise a snapshot that cannot be written: the reasons already found still
+    block, one stderr line says why, and the previous snapshot stands for next
+    time — the OSError climbing to main's outer except was a silent pass at
+    exactly the event where a timeout is meant to block (Task 12 review)."""
     import leaselib as ll
     ctx = v.lease_context(root, str(sid) if sid else None)
     if not ctx["leases"] or not ctx["mine"]:
@@ -280,7 +284,10 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
     b["seen"] = {nn: ctx["changed"].get(nn, {}) for nn in ctx["leases"]
                  if nn not in ("prime", mine_nn) and ctx["liveness"].get(nn) != "stale"
                  and not ctx["leases"][nn].get("released")}
-    save_boundary(root, sid, b)
+    try:
+        save_boundary(root, sid, b)
+    except OSError as e:
+        print(SNAPSHOT_FAILED % e, file=sys.stderr)
 
 
 def deny(reason: str) -> dict:
@@ -324,6 +331,8 @@ def save_boundary(root: Path, sid: object, data: dict) -> None:
 
 
 RECORD_FAILED = "daedalus: could not record the boundary warning in state/ (%s); the stop will repeat until it can be recorded."
+SNAPSHOT_FAILED = ("daedalus: could not record the Stop snapshot in state/ (%s); "
+                   "the backstop will use the previous snapshot next time.")
 
 
 def first_warning(root: Path, sid: object, key: str) -> bool:
@@ -539,9 +548,11 @@ def main() -> int:
             check_promotion(root, marker, reasons, notes)
     except Exception:
         return 0
-    if visitor and reasons:
+    if visitor and reasons and event == "Stop":
         # §8.5: a direct-call session is read-only and cannot have caused any of this — say
-        # it, never block (a blocked Stop in a -p session spins until max_turns).
+        # it, never block (a blocked Stop in a -p session spins until max_turns). Stop only:
+        # on PostToolUse(Bash) exit 2 just feeds the text back after a command that already
+        # ran, and notes are not printed there — a downgrade would drop the reason entirely.
         notes.extend("(visitor, not blocking) " + r for r in reasons)
         reasons = []
     if reasons:

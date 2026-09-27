@@ -7,8 +7,11 @@ announce a finished/released state. It never creates, numbers or binds a
 lease — session-start.py does that, before the marker is written (§4.2),
 and session-start.py also renders the board at start (an event's hooks run
 in parallel, so a second SessionStart hook could not be ordered after it).
-Emits nothing when no lease files exist; silent on its own failure. 2 s
-internal budget under the 5 s hook timeout.
+Emits nothing when no lease files exist. A lease file that cannot be read
+is reported as the board (one line naming the file and the fix — the same
+sentence lease.sh refuses with), never swallowed: a board that vanishes reads
+as "no leases", and the session starts guessing (§4.3). Silent only on its
+own unexpected failure. 2 s internal budget under the 5 s hook timeout.
 """
 from __future__ import annotations
 
@@ -42,6 +45,8 @@ def main() -> int:
     signal.alarm(BUDGET_SECS)
     try:
         text = ll.board_for(v.ROOT, sid, visitor)
+    except ll.Refused as e:
+        text = ll.BOARD_UNRENDERED % e       # the operator sentence names the file and the fix
     except Exception:
         return 0
     finally:
