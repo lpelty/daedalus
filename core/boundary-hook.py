@@ -145,11 +145,14 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
     # gate run still in flight, not tampering. A RUNNING run whose window is stale (its session
     # is gone) never finished: it is named once, in those words, and its unmanifested files are
     # stray as before. An unleased run (lease null) gets no excuse — nothing can vouch for it.
+    # A lease set that could not be READ vouches for nothing either way: no run is excused
+    # and none is called never-finished (that sentence was false for a live window whose
+    # liveness simply could not be read); the block names the unreadable file instead.
     ctx = v.lease_context(root, marker.get("session_id"))
     running_ok: set = set()
     never_finished: List[Tuple[str, str]] = []
     ev_state = root / "state" / "evidence"
-    for rj in (ev_state.glob("*/run.json") if ev_state.is_dir() else []):
+    for rj in ([] if ctx.get("unreadable") else (ev_state.glob("*/run.json") if ev_state.is_dir() else [])):
         try:
             rec = json.loads(rj.read_text())
         except (OSError, ValueError):
@@ -182,6 +185,8 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
         import leaselib as ll
         gone = ["a gate run under %s never finished; its session is gone." % ll.window_label(nn, ctx["leases"].get(nn))
                 for rid, nn in never_finished if any(rid in s for s in stray)]
+        if ctx.get("unreadable"):
+            gone = ["No gate run can be excused as still in flight while a lease file cannot be read. " + ctx["unreadable"]]
         reasons.append("".join(g + " " for g in gone)
                        + "Evidence files exist that no gate run produced: %s. Evidence is written by core/gates.sh only.%s"
                        % (", ".join(sorted(stray)), RESTART))

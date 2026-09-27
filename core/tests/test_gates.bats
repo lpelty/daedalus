@@ -882,3 +882,56 @@ EOF
   ( bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null ) & ( bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null ) & wait
   while IFS= read -r line; do [ -z "$line" ] && continue; [ -e "$line" ] || { echo "incomplete manifest line: $line"; return 1; }; done < "$DAEDALUS_HOME/vault/evidence/.manifest"
 }
+
+@test "a DAEDALUS_HOME containing a space leaves no gate log unmanifested: every manifest line is one complete, existing path" {
+  # Task 14 review: the pre-refuter append passed the gate-log paths through UNQUOTED
+  # $(...) substitutions, so bash split each path at the space — two fragments per log,
+  # neither a file — and the session's own Stop then blocked on evidence "no gate run
+  # produced". The parent commit's `printf | awk >> manifest` never split; the regression
+  # came in with the locked append. Paths never travel through word-splitting.
+  mkdir -p "$BATS_TEST_TMPDIR/sp ace"; mv "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR/sp ace/dae"
+  DAEDALUS_HOME="$BATS_TEST_TMPDIR/sp ace/dae"; export DAEDALUS_HOME
+  write_config "  - true
+  - true"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]
+  id="$(basename "$(ls -d "$DAEDALUS_HOME"/state/evidence/*/)")"   # no git target: INVALID, so no run-id line
+  n=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue; n=$((n+1))
+    [ -e "$line" ] || { echo "incomplete manifest line: $line"; cat "$DAEDALUS_HOME/vault/evidence/.manifest"; return 1; }
+  done < "$DAEDALUS_HOME/vault/evidence/.manifest"
+  [ "$n" -eq 4 ] || { echo "expected 4 manifest lines (run.json, summary, two gate logs); got $n:"; cat "$DAEDALUS_HOME/vault/evidence/.manifest"; return 1; }
+  grep -qxF "$DAEDALUS_HOME/state/evidence/$id/gate-1.log" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -qxF "$DAEDALUS_HOME/state/evidence/$id/gate-2.log" "$DAEDALUS_HOME/vault/evidence/.manifest"
+}
+
+@test "a manifest append that fails after a STANDS verdict is 'could not certify' (refuter exit 2): result FAIL, the reason and the append's own error reach the operator, and the review file is neither recorded as a refutation nor left unmanifested" {
+  # Task 14 review: refute.sh's append used lib.sh's die (exit 1), and gates.sh reads
+  # refuter exit 1 as REFUTED with the review file as the fail_log — a STANDS review whose
+  # manifest line failed was recorded as a refutation, and the append's stderr was swallowed
+  # (gates.sh prints the refuter's message only for codes other than 1). Every other
+  # cannot-certify path in refute.sh is an explicit exit 2 so that only a real REFUTED is 1.
+  install_refuter
+  mkdir -p "$BATS_TEST_TMPDIR/bin7"
+  printf '#!/usr/bin/env bash\ncat > /dev/null\nprintf "VERDICT: STANDS\\n"\n' > "$BATS_TEST_TMPDIR/bin7/claude"; chmod +x "$BATS_TEST_TMPDIR/bin7/claude"
+  mv "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/core/manifest-append.real.py"
+  cat > "$DAEDALUS_HOME/core/manifest-append.py" <<'PY'
+#!/usr/bin/env python3
+import os, subprocess, sys
+if any(a.endswith("-review.md") for a in sys.argv[1:]):
+    sys.stderr.write("simulated append failure\n"); sys.exit(1)
+sys.exit(subprocess.call([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest-append.real.py")] + sys.argv[1:]))
+PY
+  git_target
+  write_config "  - true" "  refute: true"
+  PATH="$BATS_TEST_TMPDIR/bin7:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ -n "$id" ] || { echo "no run-id in output: $output"; return 1; }
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  case "$output" in *"daedalus: log: /"*) echo "a failed append was recorded as a refutation (the review path is the fail_log): $output"; return 1 ;; esac
+  case "$output" in *"cannot append the review file to the evidence manifest"*) : ;; *) echo "the reason must be the fail_log: $output"; return 1 ;; esac
+  case "$output" in *"simulated append failure"*) : ;; *) echo "the append's own error must reach the operator: $output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ] || { echo "an unmanifested review file was left under vault/evidence"; return 1; }
+  ! grep -q -- "-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest"
+}

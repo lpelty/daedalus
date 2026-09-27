@@ -7,6 +7,12 @@ bash 3.2 on macOS has no flock binary, hence python3. The lock is
 vault/evidence/.manifest.lock — its own file, so a reader of .manifest
 (verifylib.manifest_paths) never blocks on it and the leases lock is never
 involved.
+
+Paths come as arguments, or newline-separated on stdin when an argument is
+`-`: a caller that has a LIST of paths (gates.sh's gate logs) pipes them,
+one per line, so no path ever crosses a shell word boundary — an unquoted
+$(...) once split every path at a space in DAEDALUS_HOME into fragments,
+each manifested, none a file (Task 14 review).
 """
 from __future__ import annotations
 
@@ -22,7 +28,10 @@ def main(argv: list) -> int:
     if not ev.is_dir():
         sys.stderr.write("daedalus: vault/evidence is missing; nothing manifested\n")
         return 1
-    paths = [a for a in argv[1:] if a.strip()]
+    paths: list = []
+    for a in argv[1:]:
+        paths.extend(sys.stdin.read().splitlines() if a == "-" else [a])
+    paths = [p for p in paths if p.strip()]
     if not paths:
         return 0
     fd = os.open(str(ev / ".manifest.lock"), os.O_RDWR | os.O_CREAT, 0o644)

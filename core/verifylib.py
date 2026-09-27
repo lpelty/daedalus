@@ -459,7 +459,7 @@ def repo_relative(root: Path, path: Path):
 
 def _empty_lease_context() -> dict:
     return {"leases": {}, "changed": {}, "mine": None, "prime": False, "prime_nn": None,
-            "liveness": {}, "refused": None}
+            "liveness": {}, "refused": None, "unreadable": None}
 
 
 def lease_context(root: Path, session_id: Optional[str]) -> dict:
@@ -478,6 +478,10 @@ def lease_context(root: Path, session_id: Optional[str]) -> dict:
             leases = ll.read_all(root)
             changed = {nn: ll.read_changed(root, nn) for nn in leases if nn != "prime"}
     except ll.Refused as e:
+        # `unreadable` regardless of session: the leases could not be READ, so the empty
+        # context vouches for nothing — a caller judging other windows' liveness (the RUNNING
+        # excuse) must not read {} as "every window is gone". `refused` keeps its session gate.
+        ctx["unreadable"] = str(e)
         if session_id:
             ctx["refused"] = str(e)
         return ctx

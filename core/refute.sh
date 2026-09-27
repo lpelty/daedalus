@@ -309,7 +309,17 @@ rm -f "$body"
 # Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
 # another window's gates run. The review file is written and manifested in the
 # same breath, so the RUNNING excuse covers the negligible window between.
-python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || die "cannot append to the evidence manifest"
+# A failed append is exit 2 — cannot certify — like every other failure here,
+# NEVER die (exit 1): gates.sh reads 1 as REFUTED with the review file as the
+# fail_log, so a STANDS review whose manifest line failed was recorded as a
+# refutation and the append's own error never reached the operator. The review
+# file is removed rather than left unmanifested under vault/evidence, a
+# protected path Daedalus cannot clean; the verdict was not certified anyway.
+python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
+  rm -f "$verdict_file"
+  printf 'cannot append the review file to the evidence manifest — cannot certify the run; the review file was removed rather than left unmanifested (%s)\n' "$verdict_file" >&2
+  exit 2
+}
 # Verdict grammar: markdown dressing allowed before the word (bold, heading,
 # blockquote, list markers) and around the colon and verdict
 # ("**VERDICT**: REFUTED", "> VERDICT: STANDS", "1. VERDICT: **REFUTED**"),

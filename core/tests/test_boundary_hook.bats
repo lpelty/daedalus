@@ -437,3 +437,24 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   run hook_as Stop sA; [ "$status" -eq 2 ]
   case "$output" in *"a gate run under window 02 (poc-ui) never finished; its session is gone"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "a lease file that cannot be read never turns a live window's RUNNING run into 'never finished; its session is gone': the block names the unreadable file, at Stop and at PostToolUse" {
+  # Task 14 review: when the lease read refuses, the context carries no liveness at all, so
+  # every manifested RUNNING run read as never_finished — a false sentence about a live
+  # window (alias dropped too), and on PostToolUse(Bash) the only text shown, since the
+  # unreadable-lease sentence surfaced only through the promotion check at Stop.
+  two_leases; live_holder 01; live_holder 02
+  cp "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
+  rid="20991231-000000-abcdef"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid"
+  printf '{"run_id":"%s","started":"2099-12-31T00:00:00","lease":"02","session_id":"sB","result":"RUNNING"}' "$rid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  printf -- '---\ntype: evidence\nresult: PASS\n---\n' > "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  printf 'x\n' > "$DAEDALUS_HOME/state/evidence/$rid/gate-1.log"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  printf 'garbage' > "$DAEDALUS_HOME/state/leases/03.json"
+  for ev in Stop PostToolUse; do
+    run hook_as "$ev" sA; [ "$status" -eq 2 ]
+    case "$output" in *"never finished"*) echo "$ev: false sentence about a live window: $output"; return 1 ;; esac
+    case "$output" in *"The lease file for window 03 cannot be read"*"core/lease.sh sweep"*"gate-1.log"*) : ;; *) echo "$ev must name the unreadable file as the cause: $output"; return 1 ;; esac
+  done
+}

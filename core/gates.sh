@@ -177,8 +177,14 @@ write_summary "$summary_tmp" "$result"
 # fingerprint error file are what they are, verdict or no verdict. If the
 # review is killed from outside, what is left behind is manifested and
 # carries no result at all — the final run.json and the vault summary come
-# after (their paths were manifested at the start).
-python3 "$DAEDALUS_HOME/core/manifest-append.py" $( [ -f "$ev_state/fingerprint.err" ] && printf '%s' "$ev_state/fingerprint.err" ) $(printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}') \
+# after (their paths were manifested at the start). The paths go one per
+# line on stdin (`-`), never through an unquoted $(...): word-splitting once
+# cut every path at a space in DAEDALUS_HOME into fragments, each manifested,
+# none a file — and the session's own Stop then blocked on its own gate logs.
+{
+  [ -f "$ev_state/fingerprint.err" ] && printf '%s\n' "$ev_state/fingerprint.err"
+  printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}'
+} | python3 "$DAEDALUS_HOME/core/manifest-append.py" - \
   || die "cannot append to the evidence manifest"
 
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
