@@ -1128,3 +1128,68 @@ two_windows_prime_01() {
   run LS rebase poc; [ "$status" -ne 0 ]; case "$output" in *"poc is an alias; window 01 carries it — say \`rebase 01\`"*) : ;; *) echo "$output"; return 1 ;; esac
   DIRECT_CALL_ID=x run LS rebase 01; [ "$status" -ne 0 ]; case "$output" in *"(a visitor)"*"core/lease.sh rebase"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# window_02_both_repos — windows 01 and 02; window 02 has one commit in thing and two in thing/sub.
+window_02_both_repos() {
+  export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x
+  LS create >/dev/null; LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/02/thing"
+  printf 'o\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "outer work"
+  printf 'n1\n' >> "$W/sub/n.txt"; git -C "$W/sub" -c user.email=t@x -c user.name=t commit -q -am "nested one"
+  printf 'n2\n' >> "$W/sub/n.txt"; git -C "$W/sub" -c user.email=t@x -c user.name=t commit -q -am "nested two"
+}
+
+@test "split: window 02's nested-repo commits move to a new window with no session, window 02 keeps its outer commits, the old nested tip is kept under refs/daedalus/split/ until release --remove, both lease files record it" {
+  window_02_both_repos; old="$(git -C "$W/sub" rev-parse HEAD)"
+  run LS split 02 --repo sub; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 03 now holds window 02's commits in thing/sub (2: \"nested one\", \"nested two\"); window 02 keeps its other commits."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "${lines[${#lines[@]}-1]}" = "03" ]
+  N="$DAEDALUS_HOME/worktrees/03/thing/sub"
+  [ "$(git -C "$N" log --format=%s -2 | tr '\n' '|')" = "nested two|nested one|" ]
+  [ "$(git -C "$N" rev-parse HEAD~2)" = "$(git -C "$T/sub" rev-parse origin/main)" ]
+  [ "$(git -C "$W/sub" rev-parse HEAD)" = "$(git -C "$T/sub" rev-parse origin/main)" ]
+  [ "$(git -C "$W" log -1 --format=%s)" = "outer work" ]
+  ref="$(git -C "$T/sub" for-each-ref --format='%(refname)' 'refs/daedalus/split/02-*')"; [ -n "$ref" ]
+  [ "$(git -C "$T/sub" rev-parse "$ref")" = "$old" ]
+  [ "$(lease_json 03 session_id)" = "None" ]
+  python3 - "$DAEDALUS_HOME/state/leases" "$ref" <<'PY'
+import json, sys
+d = sys.argv[1]; a = json.load(open(d + "/02.json")); b = json.load(open(d + "/03.json"))
+t = a["split_to"][-1]
+assert t["lease"] == "03" and t["repo"] == "thing/sub" and t["commits"] == 2 and t["kept"] == sys.argv[2], a
+assert b["split_from"]["lease"] == "02" and b["split_from"]["repo"] == "thing/sub", b
+PY
+  run LS release 02 --remove --force; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -z "$(git -C "$T/sub" for-each-ref --format='%(refname)' 'refs/daedalus/split/02-*')" ]
+}
+
+@test "split refuses: a repo that is not one of the window's nested repos, a nested repo with nothing to split, uncommitted work, another live window's lease, an alias — and allocates nothing" {
+  window_02_both_repos
+  run LS split 02 --repo other; [ "$status" -ne 0 ]; case "$output" in *"Window 02 has no nested repo other"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W/sub" reset -q --hard origin/main
+  run LS split 02 --repo sub; [ "$status" -ne 0 ]; case "$output" in *"Window 02 has no commits in thing/sub that are not already on main; nothing to split."*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'n3\n' >> "$W/sub/n.txt"; git -C "$W/sub" -c user.email=t@x -c user.name=t commit -q -am "nested three"
+  printf 'dirty\n' >> "$W/a.txt"
+  run LS split 02 --repo sub; [ "$status" -ne 0 ]; case "$output" in *"Window 02 has uncommitted changes in worktrees/02/thing (a.txt). Commit them first; split moves commits only."*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W" checkout -q -- a.txt
+  p="$(live_pid)"; registry_entry "$p" sB interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sB LS claim 02 >/dev/null
+  CLAUDE_CODE_SESSION_ID=sZ run LS split 02 --repo sub; [ "$status" -ne 0 ]; case "$output" in *"held by a live session (peer name daedalus-02)"*) : ;; *) echo "$output"; return 1 ;; esac
+  CLAUDE_CODE_SESSION_ID=sB LS alias 02 poc >/dev/null
+  CLAUDE_CODE_SESSION_ID=sB run LS split poc --repo sub; [ "$status" -ne 0 ]; case "$output" in *"poc is an alias; window 02 carries it — say \`split 02\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]
+}
+
+@test "split: nested commits that do not apply onto the moved trunk roll the new window back — no lease file, worktree or branch — and window 02 is unchanged; a visitor is refused" {
+  window_02_both_repos; before="$(git -C "$W/sub" rev-parse HEAD)"
+  # The move is not fetched into target/thing/sub: only split's own fetch brings it.
+  TRUNK_MOVES_NO_FETCH=1 sub_moves n.txt "sub trunk edits n.txt"
+  run LS split 02 --repo sub; [ "$status" -ne 0 ]
+  case "$output" in *"Window 02's commits in thing/sub do not apply cleanly onto current main"*"nothing was split. Run \`core/lease.sh rebase 02\` first, then split again."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]; [ ! -e "$DAEDALUS_HOME/worktrees/03/thing" ]
+  ! git -C "$T" rev-parse --verify -q lease/03 >/dev/null
+  ! git -C "$T/sub" rev-parse --verify -q lease/03 >/dev/null
+  [ "$(git -C "$W/sub" rev-parse HEAD)" = "$before" ]
+  [ -z "$(git -C "$T/sub" for-each-ref --format='%(refname)' 'refs/daedalus/split/')" ]
+  [ "$(python3 -c 'import json,sys; print("split_to" in json.load(open(sys.argv[1])))' "$DAEDALUS_HOME/state/leases/02.json")" = "False" ]
+  DIRECT_CALL_ID=x run LS split 02 --repo sub; [ "$status" -ne 0 ]; case "$output" in *"(a visitor)"*"core/lease.sh split"*) : ;; *) echo "$output"; return 1 ;; esac
+}

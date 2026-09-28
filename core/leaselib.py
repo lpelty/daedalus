@@ -1180,6 +1180,10 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
                 if code != 0:
                     last = err.strip().splitlines()[-1:] or ["no output"]
                     raise Refused("could not delete branch lease/%s in target/%s (%s)" % (nn, repo, last[0]))
+            # split's kept tips (spec §7.1 step 2): kept until release --remove, then gone.
+            _, split_refs, _ = _git(src, "for-each-ref", "--format=%(refname)", "refs/daedalus/split/%s-*" % nn)
+            for ref in split_refs.split():
+                _git(src, "update-ref", "-d", ref)
         _remove_lease_files(root, nn)
         out.append("Window %s released; its worktree and branch are deleted." % nn)
         return "\n".join(out)
@@ -1267,6 +1271,103 @@ def rebase(root: Path, token: str, sid: Optional[str]) -> str:
     except Refused:
         pass
     return "Window %s is up to date with trunk (%s). Run core/gates.sh before asking for promote." % (nn, "; ".join(report))
+
+
+def _discard_locked(root: Path, nn: str, trunks: Dict[str, str]) -> None:
+    """Undo an allocation made inside this lock (split's rollback): worktrees
+    (nested first), lease/<NN> branches, lease files. Caller holds the lock."""
+    for repo in reversed(list(trunks)):
+        src = root / "target" / repo
+        _git(src, "worktree", "remove", "--force", str(root / "worktrees" / nn / repo))
+        _git(src, "worktree", "prune")
+        _git(src, "branch", "-D", "lease/%s" % nn)
+    _remove_lease_files(root, nn)
+
+
+def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
+    """`lease.sh split <NN> --repo <nested>` (spec §7.1 step 2, §4.2): the nested
+    repo's commits origin/<trunk>..lease/<NN> become a new numbered window (as
+    `create` allocates it: no session bound, promoted from the board and
+    released afterwards); the original window's branch in that repo is reset
+    to origin/<trunk>, its old tip kept as refs/daedalus/split/<NN>-<stamp>
+    until `release --remove`. The outer repo is not touched. Refuses when
+    either worktree is dirty; a cherry-pick that does not apply rolls the new
+    window back. Everything under one lock (allocate_locked needs it)."""
+    with lock(root):
+        leases = read_all(root)
+        nn = number_of(leases, token, "split")
+        lease = leases.get(nn)
+        if lease is None:
+            raise Refused("There is no window %s." % nn)
+        _holder_or_shell(root, nn, lease, sid, "split")
+        if lease.get("worktree_ready") is False:
+            raise Refused("window %s's worktree was not finished at start; run `core/lease.sh claim %s` to finish it"
+                          % (nn, nn))
+        trunks = lease.get("trunks") or trunks_of(root, root / "target")
+        outer = next(iter(trunks))
+        key = "%s/%s" % (outer, nested.strip("/"))
+        if key not in trunks:
+            names = [k.split("/", 1)[1] for k in trunks if "/" in k]
+            raise Refused("Window %s has no nested repo %s (its nested repos: %s)."
+                          % (nn, nested, ", ".join(names) or "none"))
+        # A worktree that is not there reads clean to dirty_files and cannot be
+        # reset: refuse it before anything is allocated (as rebase does).
+        for repo in trunks:
+            if not (root / "worktrees" / nn / repo).is_dir():
+                raise Refused("worktrees/%s/%s is missing; run `core/lease.sh claim %s` to finish window %s's "
+                              "worktree, then split" % (nn, repo, nn, nn))
+        ntrunk, src = trunks[key], root / "target" / key
+        code, _, err = _git(src, "fetch", "--quiet", "origin", timeout=120)
+        if code != 0:
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("could not fetch origin in target/%s (%s); nothing was split" % (key, last[0]))
+        subjects = list(reversed(waiting_work(src, ntrunk, nn)))
+        if not subjects:
+            raise Refused("Window %s has no commits in %s that are not already on %s; nothing to split."
+                          % (nn, key, ntrunk))
+        for repo in trunks:
+            files = dirty_files(root / "worktrees" / nn / repo)
+            if files:
+                raise Refused("Window %s has uncommitted changes in worktrees/%s/%s (%s). Commit them first; split "
+                              "moves commits only." % (nn, nn, repo, ", ".join(files)))
+        new_nn, data = allocate_locked(root, None, note="split from window %s (%s)" % (nn, key))
+        new_trunks = data.get("trunks") or trunks
+        dest = root / "worktrees" / new_nn / key
+        if data.get("worktree_ready") is False or key not in new_trunks or not dest.is_dir():
+            _discard_locked(root, new_nn, new_trunks)
+            raise Refused("window %s's worktree for %s could not be made; nothing was split" % (new_nn, key))
+        code, _, err = _git(dest, "cherry-pick", "origin/%s..lease/%s" % (ntrunk, nn), timeout=300)
+        if code != 0:
+            _git(dest, "cherry-pick", "--abort")
+            _discard_locked(root, new_nn, new_trunks)
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("Window %s's commits in %s do not apply cleanly onto current %s (%s); nothing was split. "
+                          "Run `core/lease.sh rebase %s` first, then split again." % (nn, key, ntrunk, last[0], nn))
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        kept = "refs/daedalus/split/%s-%s" % (nn, stamp)
+        code, _, err = _git(src, "update-ref", kept, "lease/%s" % nn)
+        if code != 0:
+            raise Refused("could not keep lease/%s's old tip in %s (%s); window %s now holds copies and window %s is "
+                          "unchanged" % (nn, key, err.strip(), new_nn, nn))
+        code, _, err = _git(root / "worktrees" / nn / key, "reset", "--hard", "--quiet", "origin/" + ntrunk)
+        if code != 0:
+            raise Refused("could not reset window %s's branch in %s (%s); its old tip is kept as %s"
+                          % (nn, key, err.strip(), kept))
+        lease["split_to"] = (lease.get("split_to") or []) + [{"lease": new_nn, "repo": key, "at": now_stamp(),
+                                                              "commits": len(subjects), "kept": kept}]
+        write_lease(root, nn, lease)
+        fresh = read_lease(root, new_nn) or {}
+        fresh["split_from"] = {"lease": nn, "repo": key, "at": now_stamp(), "kept": kept}
+        write_lease(root, new_nn, fresh)
+    for n in (nn, new_nn):
+        try:
+            recompute_changed(root, n)
+        except Refused:
+            pass
+    return ("Window %s now holds window %s's commits in %s (%d: %s); window %s keeps its other commits. The old tip of "
+            "lease/%s in %s is kept as %s until `core/lease.sh release %s --remove`. Promote window %s from the board, "
+            "then release it.\n%s" % (new_nn, nn, key, len(subjects), _quoted(subjects), nn, nn, key, kept, nn, new_nn,
+                                      new_nn))
 
 
 def mark_done(root: Path, token: str, sid: str, summary: str) -> str:
@@ -1693,7 +1794,7 @@ VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take
 # `prime take` would move the pen to a read-only headless session that exits
 # in minutes. list/status stay allowed (they read).
 VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime",
-                   "rebase")
+                   "rebase", "split")
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
@@ -2084,7 +2185,7 @@ def main(argv: list) -> int:
     # and releases LOCK_SH itself. list/status do it through the board (Task 8);
     # create and resolve do not (a spawner's create may run hook-adjacent, and
     # resolve is on every target_path).
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase"):
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase", "split"):
         try:
             recompute_all_changed(root)
         except Refused as e:
@@ -2119,7 +2220,7 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
         return 0
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase"):
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase", "split"):
         def _refused(fn):
             try:
                 out = fn()
@@ -2175,6 +2276,8 @@ def main(argv: list) -> int:
                                                _after("--reason") if "--reason" in args else None, mode=mode))
         if cmd == "rebase":
             return _refused(lambda: rebase(root, args[0], sid))
+        if cmd == "split":
+            return _refused(lambda: split(root, args[0], sid, _after("--repo")))
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)
