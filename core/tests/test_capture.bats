@@ -1386,3 +1386,118 @@ PY
   [ "$status" -eq 2 ]
   case "$output" in *"capture: --throttle needs a whole number of seconds"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- the Stop tick and the session-end flush (spec §4.7) ---------------------
+tick_home() {
+  TH="$BATS_TEST_TMPDIR/tick"
+  mkdir -p "$TH/core"
+  cp "$ROOT/core/lib.sh" "$ROOT/core/capture.py" "$ROOT/core/capture-tick.sh" "$TH/core/"
+  printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\n' > "$TH/config.yaml"
+  unset TENANT_HOME TENANT_BANK HINDSIGHT_API_TENANT_API_KEY CLAUDE_CODE_SESSION_ID DAEDALUS_CONFIG
+  TICK_TRANSCRIPTS="$TRANSCRIPT_DIR"; unset TRANSCRIPT_DIR
+}
+with_memory() {   # with_memory [interval] — after start_op_stub: the block points at the stub; the variable goes
+  cat >> "$TH/config.yaml" <<EOF
+memory:
+  bank: tickbank
+  api_url: $HINDSIGHT_API_URL
+  transcript_dir: $TICK_TRANSCRIPTS
+  capture_interval: ${1:-120}
+EOF
+  unset HINDSIGHT_API_URL
+}
+tick() {
+  printf '{"hook_event_name":"Stop","session_id":"session-a","transcript_path":"%s"}' "$TRANSCRIPT" \
+    | DAEDALUS_HOME="$TH" bash "$TH/core/capture-tick.sh" "$@"
+}
+await_posts() {   # await_posts <n> — up to 10 s
+  local i=0
+  while [ "$i" -lt 50 ]; do [ "$(post_count)" -ge "$1" ] && return 0; sleep 0.2; i=$((i + 1)); done
+  echo "expected $1 POST(s), saw $(post_count); log: $(cat "$TH/.capture.log" 2>/dev/null)"; return 1
+}
+await_log() {     # await_log <text> — up to 10 s
+  local i=0
+  while [ "$i" -lt 50 ]; do grep -qF "$1" "$TH/.capture.log" 2>/dev/null && return 0; sleep 0.2; i=$((i + 1)); done
+  echo "no '$1' in: $(cat "$TH/.capture.log" 2>/dev/null)"; return 1
+}
+
+@test "capture-tick.sh and --final exit 0 silently without a memory: block: no output, no request, no log" {
+  tick_home; start_op_stub "running"
+  run tick; [ "$status" -eq 0 ]; [ -z "$output" ]
+  run tick --final; [ "$status" -eq 0 ]; [ -z "$output" ]
+  sleep 1
+  [ "$(post_count)" -eq 0 ]; [ ! -e "$TH/.capture.log" ]
+}
+
+@test "with a memory: block and no capture variables in the environment, a Stop tick captures the payload's transcript through the block, and logs the payload keys once" {
+  tick_home; start_op_stub "running"; with_memory
+  run tick; [ "$status" -eq 0 ]; [ -z "$output" ]
+  await_posts 1
+  grep -q '^POST /v1/default/banks/tickbank/memories' "$BATS_TEST_TMPDIR/requests.log"
+  grep -q 'session session-a' "$STUB_POSTS"
+  await_log "capture: queued"
+  grep -qF 'capture-tick: first hook payload keys: hook_event_name,session_id,transcript_path' "$TH/.capture.log"
+  run tick; await_log "throttled"
+  [ "$(grep -c 'first hook payload keys' "$TH/.capture.log")" -eq 1 ]
+}
+
+@test "an environment value overrides the memory: block's field in the tick" {
+  tick_home; start_op_stub "running"; with_memory
+  export TENANT_BANK=envbank
+  run tick; [ "$status" -eq 0 ]
+  await_posts 1
+  grep -q '^POST /v1/default/banks/envbank/memories' "$BATS_TEST_TMPDIR/requests.log"
+}
+
+@test "the tick returns at once while the push is slow — a Stop hook never waits on memory" {
+  tick_home; start_op_stub "running"; with_memory
+  printf '5' > "$BATS_TEST_TMPDIR/post_sleep"
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run tick
+  t1="$(python3 -c 'import time; print(time.time())')"
+  [ "$status" -eq 0 ]
+  python3 -c 'import sys; d = float(sys.argv[2]) - float(sys.argv[1]); assert d < 2, "the hook took %.1f s" % d' "$t0" "$t1"
+  await_posts 1
+}
+
+@test "the Stop tick is throttled per transcript; --final captures what the throttle held back" {
+  tick_home; start_op_stub "running"; with_memory
+  run tick; await_posts 1; await_log "capture: queued"
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$TRANSCRIPT"
+  run tick; await_log "throttled"
+  [ "$(post_count)" -eq 1 ]
+  run tick --final; [ "$status" -eq 0 ]
+  await_posts 2
+}
+
+@test "the tick honours memory.capture_interval end to end: with 2 s a second tick at once is throttled (the log names 2 s, not the 120 s default), and a tick after 3 s captures" {
+  # Every other tick test uses 120, which is also memory_env's default: a tick
+  # that ignored $CAPTURE_INTERVAL, or hard-coded --throttle 120, stayed green.
+  tick_home; start_op_stub "running"; with_memory 2
+  run tick; await_posts 1; await_log "capture: queued"
+  printf '{"type":"user","message":{"role":"user","content":"a second turn"}}\n' >> "$TRANSCRIPT"
+  run tick; await_log "throttled"
+  grep -qF "(interval 2 s)" "$TH/.capture.log"
+  run grep -qF "(interval 120 s)" "$TH/.capture.log"; [ "$status" -ne 0 ]
+  [ "$(post_count)" -eq 1 ]
+  sleep 3
+  run tick; await_posts 2
+}
+
+@test "the payload's session id is the fallback when it names no transcript_path" {
+  tick_home; start_op_stub "running"; with_memory
+  printf '{"hook_event_name":"Stop","session_id":"session-a"}' | DAEDALUS_HOME="$TH" bash "$TH/core/capture-tick.sh"
+  await_posts 1
+  grep -q 'session session-a' "$STUB_POSTS"
+}
+
+@test "the tracked settings.json runs capture-tick.sh on Stop (10 s, spec §4.6) and capture-tick.sh --final on SessionEnd" {
+  python3 - "$ROOT/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))["hooks"]
+stop = [h for g in d["Stop"] for h in g["hooks"] if "capture-tick.sh" in h["command"]]
+assert len(stop) == 1 and "--final" not in stop[0]["command"] and stop[0]["timeout"] == 10, stop
+end = [h for g in d["SessionEnd"] for h in g["hooks"] if "capture-tick.sh --final" in h["command"]]
+assert len(end) == 1 and end[0]["timeout"] == 5, end
+PY
+}

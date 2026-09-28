@@ -26,8 +26,10 @@
     "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]}],
     "Stop": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]},
-      {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/verify-hook.py", "timeout": 60}]}
+      {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/verify-hook.py", "timeout": 60}]},
+      {"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/capture-tick.sh", "timeout": 10}]}
     ],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/capture-tick.sh --final", "timeout": 5}]}],
     "PreCompact": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py", "timeout": 5}]},
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/code-context.py", "timeout": 5}]}
