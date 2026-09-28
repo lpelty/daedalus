@@ -30,6 +30,7 @@ leaselib come from core/ beside this file.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import fcntl
 import hashlib
@@ -801,16 +802,27 @@ def orientation_of(launch: dict, mode: str, launcher_err: str, offset: int = 0) 
     return "yes" if hit else "no"
 
 
-def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
-            resumed_by: Optional[str], phrase: str) -> int:
-    mode = rec["mode"]
-    label = label_of(mode, rec)
-    rj = call_dir / "launch.json"
+@contextlib.contextmanager
+def invocation_lock(call_dir: Path, call_id: str):
+    """One invocation of a call at a time (spec §8.3). Held for as long as the
+    receipt is read for, written by, or launched from one invocation."""
     with (call_dir / "invocation.lock").open("w") as lk:
         try:
             fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise Refusal("call %s is already running; one invocation of a call at a time" % rec["call_id"])
+            raise Refusal("call %s is already running; one invocation of a call at a time" % call_id)
+        yield
+
+
+def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
+            resumed_by: Optional[str], phrase: str, locked: bool = False) -> int:
+    """One attempt of a call. The caller that passes locked=True already holds
+    the invocation lock and read rec under it (a resume); otherwise it is taken
+    here."""
+    mode = rec["mode"]
+    label = label_of(mode, rec)
+    rj = call_dir / "launch.json"
+    with (contextlib.nullcontext() if locked else invocation_lock(call_dir, rec["call_id"])):
         stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         req_path = call_dir / ("%s-request.md" % stamp)
         ans_path = call_dir / ("%s-answer.md" % stamp)
@@ -1026,10 +1038,17 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
     if not CALL_ID_RE.fullmatch(call_id or ""):
         raise Refusal("unknown call %s: a call id is the 36-character id in the receipt line" % call_id)
     call_dir = root / "state" / "direct-calls" / call_id
-    try:
-        rec = json.loads((call_dir / "launch.json").read_text())
-    except (OSError, ValueError):
-        raise Refusal("unknown call %s: no receipt at state/direct-calls/%s" % (call_id, call_id))
+
+    def load() -> dict:
+        try:
+            return json.loads((call_dir / "launch.json").read_text())
+        except (OSError, ValueError):
+            raise Refusal("unknown call %s: no receipt at state/direct-calls/%s" % (call_id, call_id))
+    # A first read, unlocked, refuses early on what never changes in a receipt
+    # (its mode, caller and callee); the attempt is built from a second read
+    # under the invocation lock, since an attempt still running may finish
+    # while this one reads its request (spec §6.1(2), §8.3).
+    rec = load()
     mode = rec.get("mode")
     if args.callee and args.callee != mode:
         raise Refusal("call %s is a --callee %s call, not --callee %s" % (call_id, mode, args.callee))
@@ -1046,9 +1065,16 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
         recheck_agent(conf, rec)
     require_clean_distribution(root)
     request = read_request(args)
-    need_claude(rec)
-    launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
-    return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell", resumer_phrase(view))
+    with invocation_lock(call_dir, call_id):
+        fresh = load()
+        if (fresh.get("mode"), fresh.get("caller"), fresh.get("session_id")) != \
+                (mode, rec.get("caller"), rec.get("session_id")):
+            raise Refusal("the receipt of call %s changed while this resume started; nothing was launched" % call_id)
+        rec = fresh
+        need_claude(rec)
+        launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
+        return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell",
+                       resumer_phrase(view), locked=True)
 
 
 # --- doctor (spec §15) -------------------------------------------------------------------

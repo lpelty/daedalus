@@ -597,3 +597,93 @@ PY
   [ ! -e "$FAKE_CLAUDE_DIR/launcher-argv.txt" ]
   [ "$(calls)" -eq 0 ]
 }
+
+@test "--resume refuses modified distribution code before anything launches" {
+  direct_call "callers: Peer"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  printf '# edited\n' >> "$DAEDALUS_HOME/core/doctor.sh"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"Distribution code is modified"*"Nothing was launched."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "--resume of a --callee self call re-checks this Daedalus's callers list" {
+  direct_call "callers: Peer"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  sed -i.bak 's/callers: Peer/callers: Other/' "$DAEDALUS_HOME/config.yaml"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"Peer is no longer on this Daedalus's callers list"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "--resume refuses a new tree, tag, artifact directory or review mode" {
+  direct_call "callers: Peer"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  for flag in "--tag r1" "--tree $BATS_TEST_TMPDIR" "--artifact-dir $BATS_TEST_TMPDIR" "--mode branch"; do
+    # shellcheck disable=SC2086
+    run bash "$CALL" --resume "$id" $flag "again"
+    [ "$status" -eq 2 ]; case "$output" in *"keeps its original tree, tag, mode and directories"*) : ;; *) echo "$flag: $output"; return 1 ;; esac
+  done
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "--resume takes only a call id: a path that reaches a receipt elsewhere is refused by its shape" {
+  direct_call "callers: Peer"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  mkdir -p "$DAEDALUS_HOME/state/planted"
+  cp "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" "$DAEDALUS_HOME/state/planted/"
+  run bash "$CALL" --resume ../planted "again"
+  [ "$status" -eq 2 ]; case "$output" in *"a call id is the 36-character id in the receipt line"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "--resume names who resumed: the prime session and a session with no window, by session id in the receipt" {
+  direct_call "callers: Peer"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
+  DAEDALUS_SESSION_ID=sZ run --separate-stderr bash "$CALL" --resume "$id" "from sZ"
+  [ "$status" -ne 2 ] || { echo "$stderr"; return 1; }
+  [ "${stderr_lines[0]}" = "Daedalus call $id (resumed by a session with no window); receipt state/direct-calls/$id" ]
+  DAEDALUS_SESSION_ID=sA run --separate-stderr bash "$CALL" --resume "$id" "from the prime"
+  [ "$status" -ne 2 ] || { echo "$stderr"; return 1; }
+  [ "${stderr_lines[0]}" = "Daedalus call $id (resumed by the prime session); receipt state/direct-calls/$id" ]
+  python3 - "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+got = [(a["advisory"], a["resumed_by"]) for a in r["attempts"]]
+assert got == [(False, None), (True, "sZ"), (True, "sA")], got
+PY
+}
+
+@test "--resume that starts while the call is still running never erases the running attempt from the receipt" {
+  direct_call "callers: Peer"
+  export FAKE_MARKER="Daedalus session orientation: visitor, x"
+  FAKE_SLEEP=4 bash "$CALL" --callee self --caller Peer "first" >"$BATS_TEST_TMPDIR/a.out" 2>"$BATS_TEST_TMPDIR/a.err" 3>&- &
+  apid=$!
+  for _ in $(seq 1 100); do [ -e "$FAKE_CLAUDE_DIR/1.argv" ] && break; sleep 0.1; done
+  [ -e "$FAKE_CLAUDE_DIR/1.argv" ]
+  id="$(ls "$DAEDALUS_HOME/state/direct-calls")"; [ -n "$id" ]
+  # The resumer reads its request from a pipe that stays open until the first
+  # attempt has finished, so it is past its checks and waiting when the call ends.
+  fifo="$BATS_TEST_TMPDIR/req"; mkfifo "$fifo"
+  exec 5<>"$fifo"
+  bash "$CALL" --resume "$id" <"$fifo" >"$BATS_TEST_TMPDIR/b.out" 2>"$BATS_TEST_TMPDIR/b.err" 3>&- 5>&- &
+  bpid=$!
+  wait "$apid"
+  printf 'a follow-up\n' >&5
+  exec 5>&-
+  brc=0; wait "$bpid" || brc=$?
+  [ "$brc" -eq 0 ] || { cat "$BATS_TEST_TMPDIR/b.err"; return 1; }
+  [ "$(calls)" -eq 2 ]
+  python3 - "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+got = [a["advisory"] for a in r["attempts"]]
+assert got == [False, True], got
+PY
+}
