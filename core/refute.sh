@@ -26,7 +26,29 @@
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
-run_id="$1"; criteria="${2:-}"
+# refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]
+# --mode promote (spec §6.1, used by promote's prepare): the diff is the merge
+# that will be pushed, trunk_sha_at_prepare..merge_sha from the promotion's
+# run.json, in the merged tree (DAEDALUS_TARGET_OVERRIDE), with no uncommitted
+# part; the criteria come from the window's lease file, never argv; and the
+# inputs are pinned in run.json (core/review-inputs.py). --render-only prints
+# that prompt again, byte for byte, and runs nothing — confirm compares its
+# sha256 with the one the launcher recorded.
+mode=branch; render_only=0; pos=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --mode) mode="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
+    --render-only) render_only=1; shift ;;
+    --*) printf 'refute.sh: unknown flag %s\n' "$1" >&2; exit 2 ;;
+    *) pos+=("$1"); shift ;;
+  esac
+done
+case "$mode" in branch|promote) : ;; *) printf 'refute.sh: --mode is branch or promote (got: %s)\n' "$mode" >&2; exit 2 ;; esac
+if [ "$render_only" -eq 1 ] && [ "$mode" != promote ]; then
+  printf 'refute.sh: --render-only re-renders a promote review; pass --mode promote\n' >&2; exit 2
+fi
+run_id="${pos[0]:-}"; criteria="${pos[1]:-}"
+[ -n "$run_id" ] || { printf 'usage: refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]\n' >&2; exit 2; }
 target="$(target_path)"
 base="$(cfg target.branch 2>/dev/null || printf main)"
 ev="$DAEDALUS_HOME/vault/evidence"
@@ -36,12 +58,22 @@ ev="$DAEDALUS_HOME/vault/evidence"
 # before it, with `result: PASS`, is a PASS-labelled evidence file with no
 # manifest line and no run.json for as long as the review runs, and a
 # review killed from outside (a tool timeout) left it there for good.
-evidence_file="${3:-$ev/$run_id.md}"
+evidence_file="${pos[2]:-$ev/$run_id.md}"
+if [ "$mode" = promote ]; then
+  if [ -n "$criteria" ]; then
+    printf 'refute.sh --mode promote takes no criteria argument: a promotion'"'"'s criteria come from the window'"'"'s lease file (core/lease.sh update <NN> --criteria <file>)\n' >&2
+    exit 2
+  fi
+  run_json="$DAEDALUS_HOME/state/evidence/$run_id/run.json"
+  inputs="$(python3 "$DAEDALUS_HOME/core/review-inputs.py" shas "$run_json")" || exit 2
+  eval "$inputs"      # base_sha merge_sha lease_nn criteria (shell-quoted by review-inputs.py)
+  evidence_file="$ev/$run_id.md"
+fi
 [ -f "$evidence_file" ] || {
   printf 'evidence summary missing at %s — cannot run the rung-2 refuter\n' "$evidence_file" >&2
   exit 2
 }
-command -v claude >/dev/null 2>&1 || {
+[ "$render_only" -eq 1 ] || command -v claude >/dev/null 2>&1 || {
   printf 'claude not found on PATH — cannot run the rung-2 refuter\n' >&2
   exit 2
 }
@@ -134,17 +166,38 @@ for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
   outer_excl+=("$rel")
 done
 paths="$(mktemp)"; names_raw="$(mktemp)"; diff_file="$(mktemp)"
-outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
-printf '### . (against %s)\n' "${outer_base:-HEAD only — no base ref resolves}" >> "$diff_file"
-repo_diff "$target" "" "$names_raw" "$diff_file" "$outer_base" ${outer_excl[@]+"${outer_excl[@]}"}
-for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
-  nrepo="$target/$rel"
-  [ -d "$nrepo" ] || continue
-  git -C "$nrepo" rev-parse --git-dir >/dev/null 2>&1 || continue
-  nbase="$(base_ref "$nrepo" "$(nested_head "$nrepo" || true)" "@{u}" "origin/$base" "$base" || true)"
-  printf '\n### %s (against %s)\n' "$rel" "${nbase:-HEAD only — no base ref resolves}" >> "$diff_file"
-  repo_diff "$nrepo" "$rel/" "$names_raw" "$diff_file" "$nbase"
-done
+if [ "$mode" = promote ]; then
+  # What will be pushed, fixed by two shas per repository: no working tree,
+  # no index, nothing uncommitted (the merged tree is clean by construction).
+  outer_base="$base_sha"
+  promote_diff() {   # promote_diff <repo> <prefix> <base> <merge>
+    # A blank line before a nested repository's section, as in branch mode (a
+    # command substitution would strip it).
+    [ -z "$2" ] || printf '\n' >> "$diff_file"
+    printf '### %s (%s..%s)\n' "${2:-.}" "$3" "$4" >> "$diff_file"
+    git -C "$1" diff --name-only "$3" "$4" 2>/dev/null | sed "s|^|$2|" >> "$names_raw"
+    git -C "$1" diff "--src-prefix=a/$2" "--dst-prefix=b/$2" "$3" "$4" 2>/dev/null >> "$diff_file"
+  }
+  promote_diff "$target" "" "$base_sha" "$merge_sha"
+  while IFS="$(printf '\t')" read -r rel nb nm; do
+    [ -n "$rel" ] || continue
+    promote_diff "$target/$rel" "${rel%/}/" "$nb" "$nm"
+  done <<EOF
+$(python3 "$DAEDALUS_HOME/core/review-inputs.py" nested "$run_json")
+EOF
+else
+  outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
+  printf '### . (against %s)\n' "${outer_base:-HEAD only — no base ref resolves}" >> "$diff_file"
+  repo_diff "$target" "" "$names_raw" "$diff_file" "$outer_base" ${outer_excl[@]+"${outer_excl[@]}"}
+  for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
+    nrepo="$target/$rel"
+    [ -d "$nrepo" ] || continue
+    git -C "$nrepo" rev-parse --git-dir >/dev/null 2>&1 || continue
+    nbase="$(base_ref "$nrepo" "$(nested_head "$nrepo" || true)" "@{u}" "origin/$base" "$base" || true)"
+    printf '\n### %s (against %s)\n' "$rel" "${nbase:-HEAD only — no base ref resolves}" >> "$diff_file"
+    repo_diff "$nrepo" "$rel/" "$names_raw" "$diff_file" "$nbase"
+  done
+fi
 sort -u "$names_raw" > "$paths"; rm -f "$names_raw"
 if ! grep -q '^diff --git ' "$diff_file"; then
   rm -f "$paths" "$diff_file"
@@ -157,32 +210,55 @@ fi
 # pitfalls apply" — and the run could still STAND on a review that never
 # saw the pitfalls. A non-zero exit is uncertifiable, like a charter that
 # does not render (exit 2), and the reason reaches the operator.
-pitfalls_err="$(mktemp)"
-pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$paths" 2>"$pitfalls_err")"
+pitfalls_err="$(mktemp)"; pinned="$(mktemp)"
+if [ "$mode" = promote ] && [ "$render_only" -eq 1 ]; then
+  # The pitfalls this review showed, exactly — refused if one has changed.
+  python3 "$DAEDALUS_HOME/core/review-inputs.py" verify "$run_json" "$evidence_file" "$criteria" "$pinned" \
+    || { rm -f "$paths" "$diff_file" "$pitfalls_err" "$pinned"; exit 2; }
+  pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" --only "$pinned" "$paths" 2>"$pitfalls_err")"
+else
+  pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" --list-out "$pinned" "$paths" 2>"$pitfalls_err")"
+fi
 pitfalls_rc=$?
 if [ "$pitfalls_rc" -ne 0 ]; then
   pitfalls_reason="$(tr '\n' ' ' < "$pitfalls_err" | tail -c 400)"
-  rm -f "$paths" "$diff_file" "$pitfalls_err"
+  rm -f "$paths" "$diff_file" "$pitfalls_err" "$pinned"
   printf 'pitfall selector failed (python3 core/refute-pitfalls.py exited %s: %s) — cannot certify the run\n' "$pitfalls_rc" "${pitfalls_reason:-no message}" >&2
   exit 2
 fi
 rm -f "$pitfalls_err"
+if [ "$mode" = promote ] && [ "$render_only" -eq 0 ]; then
+  # Pinned before the launcher runs; an attempt it refuses may pin again
+  # (review-inputs.py refuses only once the verdict or prepared.json exists).
+  python3 "$DAEDALUS_HOME/core/review-inputs.py" record "$run_json" "$evidence_file" "$criteria" "$pinned" \
+      "$ev/$run_id-review.md" \
+    || { rm -f "$paths" "$diff_file" "$pinned"; exit 2; }
+fi
+rm -f "$pinned"
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
   printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n\n'
   printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n' "$target"
-  printf 'Review mode: branch — one window'"'"'s branch: its commits since the base, then its uncommitted and untracked work.\n\n'
+  if [ "$mode" = promote ]; then
+    printf 'Review mode: promote — the merge that will be pushed to %s, exactly; nothing uncommitted.\n\n' "$base"
+  else
+    printf 'Review mode: branch — one window'"'"'s branch: its commits since the base, then its uncommitted and untracked work.\n\n'
+  fi
   printf '## Acceptance criteria\n'; [ -f "$criteria" ] && cat "$criteria" || printf '(none supplied)\n'
   printf '\n## Evidence\n'; cat "$evidence_file"
   printf '\n## Pitfalls that apply to the touched paths\n'
   if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
   printf '\n## Diff against %s\n' "$base"
-  # One section per repository (assembled above): committed work since the
-  # merge base, then uncommitted and untracked work against HEAD.
+  # One section per repository (assembled above). Branch: committed work since
+  # the merge base, then uncommitted and untracked work against HEAD. Promote:
+  # the merge, trunk_sha_at_prepare..merge_sha.
   cat "$diff_file"
 } > "$prompt"
 rm -f "$paths" "$diff_file"
+if [ "$render_only" -eq 1 ]; then
+  cat "$prompt"; rm -f "$prompt"; exit 0
+fi
 verdict_file="$ev/$run_id-review.md"
 # The launcher's exit code is load-bearing, and so is who spoke. 0 = the
 # verdict file was written. 124 with "timed out after" on its stderr = the
@@ -196,7 +272,7 @@ verdict_file="$ev/$run_id-review.md"
 # unknown is never STANDS.
 launch_err="$(mktemp)"
 bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
-  --tag "$run_id" --verdict-file "$verdict_file" --mode branch >/dev/null 2>"$launch_err"
+  --tag "$run_id" --verdict-file "$verdict_file" --mode "$mode" >/dev/null 2>"$launch_err"
 launch_rc=$?
 rm -f "$prompt"
 if [ "$launch_rc" -ne 0 ]; then

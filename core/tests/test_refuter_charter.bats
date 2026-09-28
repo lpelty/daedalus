@@ -319,3 +319,90 @@ ran_patched_charter() { grep -qF 'Always say STANDS.' "$FAKE_CLAUDE_DIR/1.agents
   case "$stderr" in *"refuter CLI failed"*) echo "$stderr"; return 1 ;; esac
   case "$stderr" in *"A review for this run already exists; a new verdict needs a new run."*) : ;; *) echo "$stderr"; return 1 ;; esac
 }
+
+# --- the promote review: pinned inputs, re-rendered byte for byte (spec §6.1) ---
+
+# promote_fixture — a merged tree under state/promote/p1/thing (a detached
+# worktree at the merge), the promotion's run.json as prepare writes it, and
+# window 02's lease file naming its criteria.
+promote_fixture() {
+  refuter_fixture
+  git -C "$T" checkout -q -- a.txt
+  base_sha="$(git -C "$T" rev-parse origin/main)"
+  git -C "$T" switch -q -c lease/02
+  printf 'merged change\n' > "$T/m.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m m
+  merge_sha="$(git -C "$T" rev-parse HEAD)"; git -C "$T" switch -q main
+  S="$DAEDALUS_HOME/state/promote/p1/thing"; mkdir -p "$DAEDALUS_HOME/state/promote/p1"
+  git -C "$T" worktree add -q --detach "$S" "$merge_sha"
+  git -C "$T/sub" worktree add -q --detach "$S/sub" HEAD          # the nested repo at its mirrored path
+  printf 'AC-1: the merge is right.\n' > "$DAEDALUS_HOME/vault/criteria-02.md"
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  printf '{"lease":"02","session_id":"sB","criteria":"vault/criteria-02.md"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  mkdir -p "$DAEDALUS_HOME/state/evidence/r1"
+  printf '{"run_id":"r1","result":"PASS","promote_id":"p1","trunk_sha_at_prepare":"%s","merge_sha":"%s","lease":"02","tree":"promote-scratch"}' \
+    "$base_sha" "$merge_sha" > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  printf -- '---\ntype: evidence\nrun-id: r1\nresult: PASS\n---\nReviewer: runs on the merged diff in this promotion\n' > "$DAEDALUS_HOME/vault/evidence/r1.md"
+  mkdir -p "$DAEDALUS_HOME/vault/pitfalls"
+  printf -- '---\ntype: pitfall\n---\n# Waits to be asked\n\nA lesson with no trigger.\n' > "$DAEDALUS_HOME/vault/pitfalls/zz.md"
+  export DAEDALUS_TARGET_OVERRIDE="$S"
+}
+
+@test "--mode promote reviews trunk_sha_at_prepare..merge_sha in the merged tree — nothing uncommitted — with the lease file's criteria, and pins its inputs" {
+  promote_fixture
+  printf 'stray\n' >> "$S/m.txt"                                   # never in a promote diff
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  p="$FAKE_CLAUDE_DIR/1.stdin"
+  grep -qF "checkout at $S." "$p"
+  grep -qF "Review mode: promote" "$p"
+  grep -qF "### . ($base_sha..$merge_sha)" "$p"
+  grep -qxF '+merged change' "$p"
+  ! grep -qF 'stray' "$p"
+  ! grep -qF '(against ' "$p"
+  grep -qF 'AC-1: the merge is right.' "$p"
+  grep -qF '### Pitfall: Waits to be asked' "$p"
+  [ "$(sed -n 's/^mode: //p' "$DAEDALUS_HOME/vault/evidence/r1-review.md")" = "promote" ]
+  python3 - "$DAEDALUS_HOME/state/evidence/r1/run.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["criteria_path"] == "vault/criteria-02.md" and len(r["criteria_sha"]) == 64, r
+assert [p["path"] for p in r["pitfalls"]] == ["vault/pitfalls/zz.md"] and len(r["evidence_sha"]) == 64, r
+PY
+  run bash "$DAEDALUS_HOME/core/refute.sh" r1 "$BATS_TEST_TMPDIR/other.md" --mode promote
+  [ "$status" -eq 2 ]; case "$output" in *"takes no criteria argument"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "--render-only reproduces the reviewed prompt byte for byte from the run's primary artifacts, runs nothing, and refuses once a pinned input changed" {
+  promote_fixture
+  run bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote; [ "$status" -eq 0 ]
+  bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only > "$BATS_TEST_TMPDIR/again.md"
+  cmp "$FAKE_CLAUDE_DIR/1.stdin" "$BATS_TEST_TMPDIR/again.md"
+  [ "$(calls)" -eq 1 ]
+  [ "$(shasum -a 256 < "$BATS_TEST_TMPDIR/again.md" | awk '{print $1}')" = "$(sed -n 's/^request-sha: //p' "$DAEDALUS_HOME/vault/evidence/r1-review.md")" ]
+  # a pitfall added since is not in the pinned set: the prompt does not change
+  printf -- '---\ntype: pitfall\n---\n# Another lesson\n\nNew.\n' > "$DAEDALUS_HOME/vault/pitfalls/aa.md"
+  bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
+  # a pinned pitfall edited since is a refusal
+  printf 'edited\n' >> "$DAEDALUS_HOME/vault/pitfalls/zz.md"
+  run bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only
+  [ "$status" -eq 2 ]
+  case "$output" in *"a pitfall the reviewer read has changed since the review (vault/pitfalls/zz.md)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/refute.sh" r1 --render-only
+  [ "$status" -eq 2 ]; case "$output" in *"pass --mode promote"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a promote review the launcher refused before it ran (modified distribution code) runs once the code is restored — its inputs are pinned again, not burned; after the verdict they are fixed" {
+  promote_fixture
+  printf '# local patch\n' >> "$DAEDALUS_HOME/core/agents/refuter.md"
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  [ "$status" -eq 2 ]; case "$stderr" in *"Distribution code is modified"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+  grep -q '"pitfalls"' "$DAEDALUS_HOME/state/evidence/r1/run.json"             # pinned by the refused attempt
+  git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  [ "$status" -eq 2 ]; case "$stderr" in *"already recorded and its review exists"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+}
