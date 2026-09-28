@@ -785,3 +785,114 @@ PY
   DIRECT_CALL_ID=call-1 CLAUDE_CODE_SESSION_ID=sV run LS list
   [ "$status" -eq 0 ]
 }
+
+# fake_git '<bash snippet>' — a git on $BATS_TEST_TMPDIR/bin that runs the
+# snippet (it sees "$@" and $real, the real git) and then the real git. Put
+# the directory first on PATH for the command under test only.
+fake_git() {
+  local real; real="$(command -v git)"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  { printf '#!/usr/bin/env bash\nreal=%q\n' "$real"; printf '%s\n' "$1"; printf 'exec "$real" "$@"\n'; } > "$BATS_TEST_TMPDIR/bin/git"
+  chmod +x "$BATS_TEST_TMPDIR/bin/git"
+}
+
+@test "add_worktrees recomputes what is left before every git call: with prune and rev-parse taking 3 s each and 4 s left, it stops after the prune instead of running rev-parse on a stale timeout" {
+  # Review reproduction of the first draft: `left` computed once per repo and
+  # reused for prune, list, remove and rev-parse returned after 6.0 s against
+  # a deadline 4.0 s away — at production values, prune 20 s + rev-parse 20 s.
+  fake_git 'case " $* " in *" prune "*|*" rev-parse "*) sleep 3 ;; esac'
+  run python3 - "$DAEDALUS_HOME/core" "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR/bin" <<'PY'
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+import leaselib as ll
+from pathlib import Path
+root = Path(sys.argv[2])
+trunks = ll.trunks_of(root, root / "target")          # with the real git
+os.environ["PATH"] = sys.argv[3] + os.pathsep + os.environ["PATH"]
+t0 = time.time()
+ok = ll.add_worktrees(root, "07", trunks, timeout=20, deadline=t0 + 4)
+took = time.time() - t0
+print("returned %s after %.1f s" % (ok, took))
+assert ok is False and took < 4.5, (ok, took)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a git add cut off at its timeout takes its whole process group with it: the checkout child it started does not keep writing" {
+  # git worktree add checks out through a child (git reset --hard); v.run
+  # killed only the parent and the child kept writing the tree (review,
+  # git 2.50.1). The fake add starts a writer child, records its pid, and hangs.
+  mkdir -p "$BATS_TEST_TMPDIR/w"
+  fake_git 'case " $* " in *" worktree add "*)
+  ( while :; do : > "$FAKE_W/f.$RANDOM"; sleep 0.1; done ) &
+  printf "%s\n" "$!" > "$FAKE_W/child.pid"
+  sleep 30
+  exit 0 ;;
+esac'
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_W="$BATS_TEST_TMPDIR/w" LEASE_WORKTREE_TIMEOUT=1 run LS create
+  child="$(cat "$BATS_TEST_TMPDIR/w/child.pid")"
+  sleep 0.5
+  if kill -0 "$child" 2>/dev/null; then kill "$child"; echo "the checkout child $child outlived the timeout"; return 1; fi
+  [ "$(lease_json 01 worktree_ready)" = "False" ]
+}
+
+@test "an add interrupted mid-checkout (registered, locked 'initializing', half-written) is refused while its checkout may still be writing, then removed and re-added from its branch by claim — never adopted as it stands" {
+  # Measured 2026-09-27 (git 2.50.1): a worktree add killed mid-checkout leaves
+  # the worktree registered, locked with reason "initializing", its branch
+  # created, and a tree whose status lists every file deleted. Plan 1 adopted
+  # any registered worktree and fast-forwarded it.
+  LS create >/dev/null
+  wt="$DAEDALUS_HOME/worktrees/01/thing"
+  gd="$(git -C "$wt" rev-parse --absolute-git-dir)"
+  printf 'initializing\n' > "$gd/locked"; rm -f "$wt/a.txt" "$gd/index"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["worktree_ready"]=False; open(p,"w").write(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json"
+  : > "$gd/index.lock"                       # as far as git can tell, a checkout is still writing
+  CLAUDE_CODE_SESSION_ID=sC run LS claim 01
+  [ "$status" -ne 0 ]
+  case "$output" in *"window 01 is still being checked out"*"run \`core/lease.sh claim 01\` again in a minute"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$wt" ]                               # nothing was removed under a live writer
+  touch -t 200001010000 "$gd/index.lock"     # long stale: the writer is gone
+  CLAUDE_CODE_SESSION_ID=sC run LS claim 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$wt/a.txt" ]
+  [ -f "$wt/sub/n.txt" ]      # the nested worktree lives inside the outer one; remove -f -f took it, the nested pass re-adds it
+  run git -C "$DAEDALUS_HOME/target/thing" worktree list --porcelain
+  case "$output" in *"locked initializing"*) echo "still locked: $output"; return 1 ;; *) : ;; esac
+  [ -z "$(git -C "$wt" status --porcelain)" ]
+  [ "$(lease_json 01 worktree_ready)" = "None" ]
+}
+
+@test "when git deregisters a half-finished worktree but cannot delete its directory, claim deletes the leftover itself and re-adds" {
+  # Review reproduction: `remove -f -f` under a live checkout exits 255
+  # "Directory not empty" AFTER deregistering the worktree; every later add
+  # then refused "exists but is not a worktree". The fake remove does the real
+  # remove, then leaves a file behind and fails the same way.
+  LS create >/dev/null
+  wt="$DAEDALUS_HOME/worktrees/01/thing"
+  gd="$(git -C "$wt" rev-parse --absolute-git-dir)"
+  printf 'initializing\n' > "$gd/locked"; rm -f "$wt/a.txt" "$gd/index"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["worktree_ready"]=False; open(p,"w").write(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json"
+  fake_git 'case " $* " in *" worktree remove "*)
+  "$real" "$@"
+  mkdir -p "$FAKE_DEST" && : > "$FAKE_DEST/straggler"
+  echo "error: failed to delete: Directory not empty" >&2
+  exit 255 ;;
+esac'
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_DEST="$wt" CLAUDE_CODE_SESSION_ID=sC run LS claim 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$wt/a.txt" ]; [ ! -e "$wt/straggler" ]
+  [ -z "$(git -C "$wt" status --porcelain)" ]
+  [ "$(lease_json 01 worktree_ready)" = "None" ]
+}
+
+@test "claim of a number with no lease file whose add is cut off leaves the window worktree_ready false — never ready over a missing tree" {
+  # Plan 1's claim discarded add_worktrees' False on this path (leaselib.py
+  # :805-808): the lease was written ready while its tree was missing, and
+  # nothing ever finished it. This task makes False more common. 127 is what
+  # _run_bounded reports for a git call cut off at its timeout.
+  fake_git 'case " $* " in *" worktree add "*) exit 127 ;; esac'
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" CLAUDE_CODE_SESSION_ID=sF run LS claim 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 worktree_ready)" = "False" ] || { cat "$DAEDALUS_HOME/state/leases/01.json"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/a.txt" ]
+}

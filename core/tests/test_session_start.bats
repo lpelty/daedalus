@@ -374,3 +374,115 @@ assert h["timeout"]==30, h' "$SRC/../.claude/settings.json"
   c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
   case "$c" in *"Lease board (2 windows; you are window 02):"*"- 02 (you)"*"- 01 — prime"*) : ;; *) echo "$c"; return 1 ;; esac
 }
+
+@test "the worktree adds share SessionStart's budget: with the budget cut to 16 s and every add taking 3 s, the outer add completes, the nested add is cut off at the deadline, the window is worktree_ready false, the hook returns well inside the budget, and claim finishes it" {
+  # ADD_BUDGET = 16 - 5 (marker tail) - 5 (minimum resolve) = 6 s from the hook's start.
+  # Plan 1 gave every add a fixed 20 s: the nested add finished at ~6.5 s and
+  # the window came out ready — on a real 30 s budget two slow repos took 40 s.
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-slow" "$BATS_TEST_TMPDIR/bin/git"; chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  pid="$(live_pid)"; registry_entry "$pid" sW
+  t0="$(date +%s)"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_GIT_SLEEP=3 LEASE_TEST_HOOK_BUDGET=16 run start sW startup
+  t1="$(date +%s)"
+  [ "$status" -eq 0 ]
+  [ "$(lease_json 01 worktree_ready)" = "False" ]
+  [ -f "$DAEDALUS_HOME/worktrees/01/thing/a.txt" ]              # the outer add finished
+  [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/sub/n.txt" ]        # the nested one was cut off at the deadline
+  [ $((t1 - t0)) -lt 16 ] || { echo "the hook took $((t1 - t0)) s"; return 1; }
+  CLAUDE_CODE_SESSION_ID=sW run bash "$DAEDALUS_HOME/core/lease.sh" claim 01
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/worktrees/01/thing/sub/n.txt" ]
+  [ "$(lease_json 01 worktree_ready)" = "None" ]
+}
+
+@test "a DAEDALUS_LEASE bind that finishes an unfinished window spends only SessionStart's budget: out of time, the window stays worktree_ready false and claim finishes it" {
+  # The hint path is how a registry-absent build binds (spec §4.8, corrected
+  # 2026-09-27), and how a window left unfinished by an earlier cut-off start
+  # comes back. Plan 1's bind() ran its adds with a fixed 20 s each and no
+  # deadline: reproduced in review, two 9 s adds ran to completion inside the hook.
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  T="$DAEDALUS_HOME/target/thing"
+  git -C "$T/sub" worktree remove --force "$DAEDALUS_HOME/worktrees/01/thing/sub"
+  git -C "$T" worktree remove --force "$DAEDALUS_HOME/worktrees/01/thing"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["worktree_ready"]=False; open(p,"w").write(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-slow" "$BATS_TEST_TMPDIR/bin/git"; chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  t0="$(date +%s)"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" DAEDALUS_LEASE=01 FAKE_GIT_SLEEP=3 LEASE_TEST_HOOK_BUDGET=16 run start sH startup
+  t1="$(date +%s)"
+  [ "$status" -eq 0 ]
+  [ "$(lease_json 01 worktree_ready)" = "False" ] || { echo "ready although the nested add had no time: $(cat "$DAEDALUS_HOME/state/leases/01.json")"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/sub/n.txt" ]
+  [ $((t1 - t0)) -lt 16 ] || { echo "the hook took $((t1 - t0)) s"; return 1; }
+  CLAUDE_CODE_SESSION_ID=sH run bash "$DAEDALUS_HOME/core/lease.sh" claim 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$DAEDALUS_HOME/worktrees/01/thing/sub/n.txt" ]
+  [ "$(lease_json 01 worktree_ready)" = "None" ]
+}
+
+@test "the tracked settings.json budget and the hook's add budget agree: SessionStart's timeout in .claude/settings.json is session-start.py's HOOK_BUDGET_SECS (30), 20 of them for worktree adds" {
+  # Reads the tracked file itself ($SRC/../.claude/settings.json, as the
+  # "gives session-start.py 30 s" test does): a settings.json that dropped the
+  # timeout to 10 must fail here, not only there.
+  run python3 -c 'import json, sys; sys.path.insert(0, sys.argv[1]); import importlib; m = importlib.import_module("session-start")
+t = [h.get("timeout") for g in json.load(open(sys.argv[2]))["hooks"]["SessionStart"] for h in g["hooks"] if "session-start.py" in h["command"]]
+assert t == [m.HOOK_BUDGET_SECS] and m.HOOK_BUDGET_SECS == 30 and m.ADD_BUDGET_SECS == 20, (t, m.HOOK_BUDGET_SECS, m.ADD_BUDGET_SECS)' "$DAEDALUS_HOME/core" "$SRC/../.claude/settings.json"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the lease lock held past the start budget: SessionStart does not wait for it — the bind writes nothing and says so, naming claim; the board says it renders at the next prompt; the marker is written; the hook returns inside the budget" {
+  # Plan 1 waited for the lease lock with no bound: a lease.sh command in
+  # another shell holding it through its adds held this start past its 30 s,
+  # and Claude Code stopped the hook. Decision 18: both acquires are bounded.
+  pid="$(live_pid)"; registry_entry "$pid" sL
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  # started in a command substitution, as live_pid does, so the kill at teardown
+  # is not reported as a job of the test's own shell
+  holder="$(python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close(); time.sleep(20)' "$DAEDALUS_HOME/state/leases/.lock" "$BATS_TEST_TMPDIR/held" 3>&- </dev/null >/dev/null 2>&1 & echo "$!")"
+  printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"      # teardown_live kills the holder
+  i=0; while [ ! -e "$BATS_TEST_TMPDIR/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  t0="$(date +%s)"
+  LEASE_TEST_HOOK_BUDGET=16 run start sL startup
+  t1="$(date +%s)"
+  [ "$status" -eq 0 ]
+  [ $((t1 - t0)) -lt 16 ] || { echo "the hook took $((t1 - t0)) s"; return 1; }
+  # the orientation line's own read of the leases is bounded as well (found at
+  # Task 3: unbounded, it alone held the hook until the holder let go, 19 s)
+  case "$(first_line)" in "Daedalus session orientation: unleased, "*) : ;; *) first_line; return 1 ;; esac
+  ctx="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
+  case "$ctx" in *"This window was not bound at start: the lease lock stayed busy past the start budget"*"core/lease.sh claim"*) : ;; *) echo "$ctx"; return 1 ;; esac
+  case "$ctx" in *"The lease board could not be rendered: the lease lock stayed busy past the start budget; the board renders at your next prompt"*) : ;; *) echo "$ctx"; return 1 ;; esac
+  [ -z "$(ls "$DAEDALUS_HOME/state/leases")" ] || { ls -la "$DAEDALUS_HOME/state/leases"; return 1; }   # nothing written (ls hides .lock)
+  [ -f "$DAEDALUS_HOME/state/session-sL.json" ]
+}
+
+@test "a SessionStart stopped with SIGTERM mid-add takes the add's checkout with it: no git child keeps writing after the hook is gone" {
+  # _run_bounded puts each git call in its own session so a timeout can kill
+  # the whole group; that also puts the checkout outside the hook's group, so
+  # a signal to the hook no longer reached it (review, 2026-09-27). Decision 20.
+  pid="$(live_pid)"; registry_entry "$pid" sT
+  mkdir -p "$BATS_TEST_TMPDIR/bin" "$BATS_TEST_TMPDIR/w"
+  real="$(command -v git)"
+  { printf '#!/usr/bin/env bash\nreal=%q\n' "$real"
+    cat <<'EOF'
+case " $* " in *" worktree add "*)
+  ( while :; do : > "$FAKE_W/f.$RANDOM"; sleep 0.1; done ) &
+  printf '%s\n' "$!" > "$FAKE_W/child.pid"
+  sleep 30
+  exit 0 ;;
+esac
+exec "$real" "$@"
+EOF
+  } > "$BATS_TEST_TMPDIR/bin/git"
+  chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  printf '{"hook_event_name":"SessionStart","session_id":"sT","source":"startup","transcript_path":"%s/transcripts/sT.jsonl"}' "$BATS_TEST_TMPDIR" \
+    | PATH="$BATS_TEST_TMPDIR/bin:$PATH" FAKE_W="$BATS_TEST_TMPDIR/w" python3 "$DAEDALUS_HOME/core/session-start.py" 3>&- >/dev/null 2>&1 &
+  hook=$!
+  i=0; while [ ! -s "$BATS_TEST_TMPDIR/w/child.pid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$BATS_TEST_TMPDIR/w/child.pid" ] || { kill "$hook" 2>/dev/null; echo "the add never started"; return 1; }
+  child="$(cat "$BATS_TEST_TMPDIR/w/child.pid")"
+  kill -TERM "$hook"; wait "$hook" 2>/dev/null || true
+  sleep 0.5
+  if kill -0 "$child" 2>/dev/null; then kill "$child"; echo "the checkout child $child outlived the hook"; return 1; fi
+}

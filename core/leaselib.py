@@ -20,6 +20,9 @@ import fcntl
 import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -41,24 +44,49 @@ class Refused(Exception):
 
 BOARD_UNRENDERED = "The lease board could not be rendered: %s"
 
+# SessionStart's two lease-lock waits are bounded by the hook's budget (§4.2;
+# plan 2 Decision 18). What each says when the lock stays busy past it:
+LOCK_BUSY_AT_START = ("This window was not bound at start: the lease lock stayed busy past the start budget (a "
+                      "`core/lease.sh` command or another window's start was holding it). Run `core/lease.sh claim "
+                      "<NN>` with your window's number, or `core/lease.sh create` and claim the number it prints.")
+BOARD_LOCK_BUSY = "the lease lock stayed busy past the start budget; the board renders at your next prompt"
+
 
 def leases_dir(root: Path) -> Path:
     return root / "state" / "leases"
 
 
 @contextlib.contextmanager
-def lock(root: Path, shared: bool = False) -> Iterator[None]:
+def lock(root: Path, shared: bool = False, deadline: Optional[float] = None,
+         busy: str = "the lease lock stayed busy") -> Iterator[None]:
     """NOT re-entrant. flock belongs to the open file description and this
     opens the file afresh, so a nested lock() — in this process or a child
     process — blocks until the outer one is released, i.e. forever. Every
     function that runs under the lock is named *_locked or says "Caller holds
     the lock", and never calls lock(), resolve(), recompute_all_changed(),
-    board_for() or lib.sh target_path (which shells back into leaselib)."""
+    board_for() or lib.sh target_path (which shells back into leaselib).
+
+    Without `deadline` it blocks, as every shell command does (a shell has no
+    budget). With one (epoch seconds; SessionStart's budget, §4.2) it polls
+    without blocking every 50 ms and, still busy at the deadline, raises
+    Refused(busy) with nothing done under the lock. A lock that is free is
+    taken even past the deadline."""
     d = leases_dir(root)
     d.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(d / ".lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        if deadline is None:
+            fcntl.flock(fd, mode)
+        else:
+            while True:
+                try:
+                    fcntl.flock(fd, mode | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.time() >= deadline:
+                        raise Refused(busy)
+                    time.sleep(0.05)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -540,41 +568,204 @@ def _git(repo: Path, *args: str, timeout: int = 20) -> Tuple[int, str, str]:
     return v.run(["git", "-C", str(repo)] + list(args), timeout=timeout)
 
 
-def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20) -> bool:
+# An interrupted add's checkout counts as possibly still writing while the
+# worktree's index.lock is younger than this.
+CHECKOUT_FRESH_SECS = 60
+
+
+def _left(deadline: Optional[float], cap: int) -> int:
+    """Whole seconds the next git call may take: `cap`, or what is left before
+    `deadline` (epoch seconds) when that comes sooner. 0 = no time left. The
+    SessionStart hook has 30 s in all (§4.2); a fixed per-add timeout let one
+    outer and one nested add take 40."""
+    if deadline is None:
+        return cap
+    return max(0, min(cap, int(deadline - time.time())))
+
+
+def _kill_group(p: "subprocess.Popen") -> None:
+    """SIGKILL the whole process group `p` leads (it was started in its own
+    session), then reap it for at most 5 s."""
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        p.communicate(timeout=5)
+    except Exception:
+        pass
+
+
+def _run_bounded(cmd: list, timeout: int) -> Tuple[int, str, str]:
+    """v.run's contract — (code, stdout, stderr), 127 on a timeout or an OS
+    failure — but the command runs in its own session and, on timeout, its
+    WHOLE process group is killed. `git worktree add` checks out through a
+    child (`git reset --hard --no-recurse-submodules`); v.run killed only the
+    parent, and the orphan kept writing the tree after the budget was spent
+    (reproduced on git 2.50.1, review of 2026-09-27). Its own session also
+    takes the checkout out of the caller's process group, so a signal to the
+    caller no longer reaches it: on ANY exception while waiting — Ctrl-C in a
+    lease.sh shell (KeyboardInterrupt), SIGTERM (session-start.py turns it
+    into SystemExit) — the group is killed too, then the exception goes on
+    (plan 2 Decision 20). A SIGKILL of the caller cannot be caught; the
+    interrupted-add recovery in add_worktrees cleans up after it."""
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             start_new_session=True)
+    except OSError as e:
+        return 127, "", str(e)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        _kill_group(p)
+        return 127, "", "timed out after %d s" % timeout
+    except BaseException:
+        _kill_group(p)
+        raise
+
+
+def _git_budget(repo: Path, *args: str, timeout: int, deadline: Optional[float]):
+    """One git call under the SessionStart budget: its timeout is recomputed
+    from `deadline` immediately before it runs (the first draft computed it
+    once per repo and reused it for four calls). None when no whole second is
+    left — the caller stops, and the window is written worktree_ready: false."""
+    left = _left(deadline, timeout)
+    if left < 1:
+        return None
+    return _run_bounded(["git", "-C", str(repo)] + list(args), left)
+
+
+def _registered(listed: str, dest: Path) -> bool:
+    want = "worktree " + str(dest.resolve())
+    return any(ln.strip() == want for ln in listed.splitlines() if ln.startswith("worktree "))
+
+
+def _interrupted_add(listed: str, dest: Path) -> bool:
+    """True when `git worktree list --porcelain` shows `dest` registered and
+    still locked with reason 'initializing' — an add killed mid-checkout (a
+    SessionStart cut off at its budget, a killed shell). Measured 2026-09-27 on
+    git 2.50.1: such a worktree has its branch and a half-written tree whose
+    status lists every file deleted; adopting it hands the window a broken
+    checkout."""
+    want = "worktree " + str(dest.resolve())
+    block: list = []
+    for ln in listed.splitlines() + [""]:
+        if ln.strip():
+            block.append(ln.strip())
+            continue
+        if block and block[0] == want:
+            return "locked initializing" in block
+        block = []
+    return False
+
+
+def _checkout_live(dest: Path) -> bool:
+    """True while an interrupted add's checkout may still be writing `dest`:
+    the worktree's index.lock exists and was touched within
+    CHECKOUT_FRESH_SECS. Removing a tree under a live writer failed with
+    'Directory not empty' after git had already deregistered it (review,
+    2026-09-27)."""
+    try:
+        line = (dest / ".git").read_text().strip()
+    except OSError:
+        return False
+    if not line.startswith("gitdir:"):
+        return False
+    gitdir = Path(line[len("gitdir:"):].strip())
+    if not gitdir.is_absolute():
+        gitdir = dest / gitdir
+    try:
+        return time.time() - (gitdir / "index.lock").stat().st_mtime < CHECKOUT_FRESH_SECS
+    except OSError:
+        return False
+
+
+def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20,
+                  deadline: Optional[float] = None) -> bool:
     """§4.2 'Re-use or refuse': prune; adopt a registered worktree in place;
     check out an existing merged lease/<NN>; else cut it from origin/<trunk>;
     fast-forward an adopted one; recreate target.scaffold dirs empty. Returns
-    False only when a worktree add timed out (the lease is then written
-    worktree_ready: false and `claim` finishes it). Caller holds the lock."""
+    False when a git call timed out or `deadline` (SessionStart's budget) left
+    no whole second for the next one — the lease is then written
+    worktree_ready: false and `claim` finishes it, fast-forward included.
+
+    Every git call's timeout is the smaller of `timeout` and what is left
+    before `deadline`, recomputed immediately before the call, and a call cut
+    off takes its whole process group with it (_run_bounded) — so no repo,
+    nested or not, pushes SessionStart past its 30 s, and no checkout keeps
+    writing after it. A worktree list cut off is "out of time", never "not
+    registered". A registered worktree still locked 'initializing' (an add
+    killed mid-checkout) is refused while its checkout may still be writing
+    (_checkout_live), else removed with `remove -f -f` — plain -f refuses a
+    locked tree — and added again from its branch; when git deregisters it
+    but cannot delete the directory, the leftover is deleted here. Caller
+    holds the lock."""
     base = root / "worktrees" / nn
     branch = "lease/%s" % nn
     for repo, trunk in trunks.items():
         src = root / "target" / repo
         dest = base / repo
-        _git(src, "worktree", "prune")
+
+        def git(*args: str, cwd: Path = src):
+            return _git_budget(cwd, *args, timeout=timeout, deadline=deadline)
+
+        r = git("worktree", "prune")
+        if r is None or r[0] == 127:
+            return False
         registered = False
         if dest.exists():
-            listed = _git(src, "worktree", "list", "--porcelain")[1]
-            registered = any(ln.strip() == "worktree " + str(dest.resolve())
-                             for ln in listed.splitlines() if ln.startswith("worktree "))
+            r = git("worktree", "list", "--porcelain")
+            if r is None or r[0] == 127:
+                return False
+            listed = r[1]
+            registered = _registered(listed, dest)
             if not registered:
                 raise Refused("worktrees/%s/%s exists but is not a worktree of target/%s; move it aside." % (nn, repo, repo))
-        has_branch = _git(src, "rev-parse", "--verify", "-q", branch)[0] == 0
+            if _interrupted_add(listed, dest):
+                if _checkout_live(dest):
+                    raise Refused("window %s is still being checked out (%s); run `core/lease.sh claim %s` again in "
+                                  "a minute." % (nn, repo, nn))
+                r = git("worktree", "remove", "-f", "-f", str(dest))
+                if r is None or r[0] == 127:
+                    return False
+                if r[0] != 0:
+                    r2 = git("worktree", "list", "--porcelain")
+                    if r2 is None or r2[0] == 127:
+                        return False
+                    if _registered(r2[1], dest):
+                        last = r[2].strip().splitlines()[-1:] or ["no output"]
+                        raise Refused("worktrees/%s/%s is a half-finished checkout (its add was interrupted) and git "
+                                      "would not remove it: %s" % (nn, repo, last[0]))
+                    # git deregistered it, then failed on the directory: finish the job.
+                    shutil.rmtree(str(dest), ignore_errors=True)
+                    if dest.exists():
+                        raise Refused("worktrees/%s/%s is left over from an interrupted checkout and could not be "
+                                      "deleted; move it aside." % (nn, repo))
+                    r = git("worktree", "prune")
+                    if r is None or r[0] == 127:
+                        return False
+                registered = False
+        r = git("rev-parse", "--verify", "-q", branch)
+        if r is None or r[0] == 127:
+            return False
+        has_branch = r[0] == 0
         if not registered:
             if has_branch:
-                code, _, err = v.run(["git", "-C", str(src), "worktree", "add", str(dest), branch], timeout=timeout)
+                r = git("worktree", "add", str(dest), branch)
             else:
-                code, _, err = v.run(["git", "-C", str(src), "worktree", "add", str(dest), "-b", branch, "origin/" + trunk],
-                                     timeout=timeout)
-            if code == 127:
-                return False   # v.run's code for a timeout or an OS failure
-            if code != 0:
-                last = err.strip().splitlines()[-1:] or ["no output"]
+                r = git("worktree", "add", str(dest), "-b", branch, "origin/" + trunk)
+            if r is None or r[0] == 127:
+                return False   # no time left, or cut off: claim finishes it
+            if r[0] != 0:
+                last = r[2].strip().splitlines()[-1:] or ["no output"]
                 raise Refused("git worktree add for window %s (%s) failed: %s" % (nn, repo, last[0]))
         if has_branch or registered:
-            code, _, err = _git(dest, "merge", "--ff-only", "--quiet", "origin/" + trunk)
-            if code != 0:
-                last = err.strip().splitlines()[-1:] or ["no output"]
+            r = git("merge", "--ff-only", "--quiet", "origin/" + trunk, cwd=dest)
+            if r is None or r[0] == 127:
+                return False   # not started, or cut off: claim fast-forwards it (Decision 19)
+            if r[0] != 0:
+                last = r[2].strip().splitlines()[-1:] or ["no output"]
                 sys.stderr.write("daedalus: window %s: %s could not be fast-forwarded to origin/%s (%s); "
                                  "the tree is usable but behind trunk — rebase it before promoting.\n"
                                  % (nn, repo, trunk, last[0]))
@@ -590,10 +781,12 @@ def now_stamp() -> str:
 
 
 def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
-                    spawned: bool = False, timeout: Optional[int] = None) -> Tuple[str, dict]:
+                    spawned: bool = False, timeout: Optional[int] = None,
+                    deadline: Optional[float] = None) -> Tuple[str, dict]:
     """§4.2 'Allocation': lowest free number; prune; re-use or refuse; worktree
     add; lease O_EXCL; empty .changed. CALLER HOLDS THE LOCK (session_start_bind
-    and claim call this from inside theirs; the lock is not re-entrant)."""
+    and claim call this from inside theirs; the lock is not re-entrant).
+    `deadline` bounds the worktree adds (SessionStart's budget, §4.2)."""
     timeout = int(os.environ.get("LEASE_WORKTREE_TIMEOUT") or (timeout or 20))
     target_base = root / "target"
     trunks = trunks_of(root, target_base)
@@ -616,7 +809,7 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
             continue               # another allocator took this number: recompute under the same lock
         break
     try:
-        ready = add_worktrees(root, nn, trunks, timeout=timeout)
+        ready = add_worktrees(root, nn, trunks, timeout=timeout, deadline=deadline)
     except BaseException:
         # A refused or failed add must not leave the number held by a lease
         # that has no tree: the next allocation would skip it forever.
@@ -703,7 +896,7 @@ def _held_by_live(nn: str, lease: dict, remedy: str) -> Refused:
     return Refused("Window %s is held by a live session (peer name %s). %s" % (nn, peer_of(lease), remedy))
 
 
-def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True) -> dict:
+def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True, deadline: Optional[float] = None) -> dict:
     """claim / DAEDALUS_LEASE binding. Caller holds the lock. The same rule the
     hook applies: null or dead holder -> bind; a live (or quiet, or resumed)
     other holder -> refuse with its peer name. A compare-and-swap on the
@@ -711,7 +904,9 @@ def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True) -> dict:
     registry entry for sid (None on a build without one); an unfinished
     worktree (worktree_ready: false) is completed here (§4.2) — except when
     finish_worktree is False: a SessionStart that just spent its add budget
-    in allocate_locked must not spend it twice (§4.6); `claim` finishes it."""
+    in allocate_locked must not spend it twice (§4.6); `claim` finishes it.
+    `deadline` bounds that completion when SessionStart binds through
+    `DAEDALUS_LEASE` (§4.2's 30 s); `claim` passes none."""
     lease = read_lease(root, nn)
     if lease is None:
         raise Refused("There is no lease file for window %s; run `core/lease.sh create` for a number first." % nn)
@@ -737,7 +932,7 @@ def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True) -> dict:
         for key in ("finished", "summary", "spawned"):
             fresh.pop(key, None)
     if finish_worktree and fresh.get("worktree_ready") is False:
-        if add_worktrees(root, nn, fresh.get("trunks") or trunks_of(root, root / "target")):
+        if add_worktrees(root, nn, fresh.get("trunks") or trunks_of(root, root / "target"), deadline=deadline):
             fresh.pop("worktree_ready", None)
     write_lease(root, nn, fresh)
     heartbeat(root, nn)
@@ -804,7 +999,12 @@ def claim(root: Path, token: str, sid: str) -> str:
                 "repos": list(trunks), "trunks": trunks, "created": now_stamp(), "bound_at": None, "promoted": []}
         write_lease(root, nn, data, exclusive=True)
         try:
-            add_worktrees(root, nn, trunks)
+            if not add_worktrees(root, nn, trunks):
+                # cut off (a git call timed out): written unfinished, so the
+                # bind just below — and any later claim — finishes it (§4.2).
+                # Plan 1 discarded this False and wrote the window ready.
+                data["worktree_ready"] = False
+                write_lease(root, nn, data)
             write_changed(root, nn, {})
             lease = bind(root, nn, sid)
         except BaseException:
@@ -1083,11 +1283,16 @@ def first_up(root: Path, sid: str) -> bool:
     return True
 
 
-def session_start_bind(root: Path, sid: str) -> dict:
+def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -> dict:
     """Returns {"lease": NN|None, "prime": bool, "took_pen": bool, "numbered": bool, "notes": [..]}.
     Order per §4.2: hint bind -> self-rebind -> auto-number (terminal windows only) -> first-up.
     ONE lock around the whole sequence; everything called inside is a *_locked /
-    "caller holds the lock" function (allocate_locked, bind, self_rebind, first_up)."""
+    "caller holds the lock" function (allocate_locked, bind, self_rebind, first_up).
+    `deadline` (epoch seconds) is the moment every worktree git call must stop —
+    SessionStart's budget less the marker's share (§4.2) — on the
+    `DAEDALUS_LEASE` bind and the auto-number alike. The wait for the lease lock
+    is bounded by the same deadline: still busy then, it raises
+    Refused(LOCK_BUSY_AT_START) having written nothing (plan 2 Decision 18)."""
     out = {"lease": None, "prime": False, "took_pen": False, "numbered": False, "notes": []}
     terminal = is_terminal_window(sid)
     hint = os.environ.get("DAEDALUS_LEASE", "").strip()
@@ -1098,7 +1303,7 @@ def session_start_bind(root: Path, sid: str) -> dict:
         # named under the home (Task 6 review).
         out["notes"].append(bad_hint_sentence(hint) + "; it was ignored.")
         hint = ""
-    with lock(root):
+    with lock(root, deadline=deadline, busy=LOCK_BUSY_AT_START):
         held, _ = lease_of_session(read_all(root), sid)
         if hint and held is not None and held != hint:
             # One lease per session, the rule claim() enforces, holds on the
@@ -1116,7 +1321,7 @@ def session_start_bind(root: Path, sid: str) -> dict:
                                     "and `claim` it." % hint)
             else:
                 try:
-                    bind(root, hint, sid)
+                    bind(root, hint, sid, deadline=deadline)
                     out["lease"] = hint
                 except Refused as e:
                     # §4.2's exact line: "`DAEDALUS_LEASE=02` ignored: window 02 is held by a live session (peer name …)"
@@ -1129,7 +1334,7 @@ def session_start_bind(root: Path, sid: str) -> dict:
         if out["lease"] is None:
             out["lease"] = self_rebind(root, sid)
         if out["lease"] is None and terminal:
-            nn, data = allocate_locked(root, sid)      # NOT allocate(): the lock is held here
+            nn, data = allocate_locked(root, sid, deadline=deadline)      # NOT allocate(): the lock is held here
             try:
                 bind(root, nn, sid, finish_worktree=False)
             except Refused:
@@ -1144,11 +1349,23 @@ def session_start_bind(root: Path, sid: str) -> dict:
     return out
 
 
-def orientation(root: Path, sid: Optional[str], visitor: bool = False) -> str:
-    """The first line of SessionStart's additionalContext (§8.2)."""
+def orientation(root: Path, sid: Optional[str], visitor: bool = False, deadline: Optional[float] = None) -> str:
+    """The first line of SessionStart's additionalContext (§8.2).
+
+    `deadline` bounds the wait for the lease lock, SessionStart's third
+    acquire beside the bind's and the board's (§4.2; plan 2 Decision 18,
+    found at Task 3: unbounded, a lock held elsewhere kept the hook until its
+    holder let go). Still busy then, the lease files are read without the
+    lock: each lands whole by tmp + os.replace, so "which window names this
+    session" is answered from what is on disk rather than guessed as unleased."""
     if visitor:
         return "Daedalus session orientation: visitor, %s" % root
-    with lock(root, shared=True):
+    try:
+        with lock(root, shared=True, deadline=deadline):
+            leases = read_all(root)
+    except Refused:
+        if deadline is None:
+            raise
         leases = read_all(root)
     nn, lease = lease_of_session(leases, sid or "")
     if nn is None:
@@ -1468,15 +1685,19 @@ def waiting_numbers(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
     return out
 
 
-def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False) -> str:
+def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False,
+              deadline: Optional[float] = None) -> str:
     """The four duties of §4.3 in one call: recompute the reader's changed set
     (every lease's for `list`/`status` — a shell has no budget), touch the
     reader's heartbeat, refresh stored pid/proc_started/peer_name from the
     registry for every lease whose session it shows live (so the file and the
     board agree, §4.1), then render. Never binds, numbers or takes the pen
     (§4.2). '' when no numbered lease exists. Never called while the lock is
-    held (it takes the lock itself, twice); the git and ps work runs outside it."""
-    with lock(root, shared=True):
+    held (it takes the lock itself, twice); the git and ps work runs outside it.
+    `deadline` bounds both lock acquires (SessionStart only, §4.2): still busy
+    then, it raises Refused(BOARD_LOCK_BUSY), which the hook renders as
+    BOARD_UNRENDERED."""
+    with lock(root, shared=True, deadline=deadline, busy=BOARD_LOCK_BUSY):
         leases = read_all(root)
     if not any(k != "prime" for k in leases):
         return ""
@@ -1493,7 +1714,7 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     now, quiet_after = time.time(), stale_after_secs(root)
     states = {nn: liveness(root, nn, d, now, quiet_after) for nn, d in leases.items() if nn != "prime"}   # computed ONCE
     live_map = registry_live_map()                                                                          # read ONCE
-    with lock(root):
+    with lock(root, deadline=deadline, busy=BOARD_LOCK_BUSY):
         leases = read_all(root)
         for nn, d in leases.items():
             if nn != "prime" and d.get("session_id"):

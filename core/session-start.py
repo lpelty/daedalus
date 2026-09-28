@@ -24,17 +24,24 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 
 # The tracked .claude/settings.json gives this hook 30 s (pinned in
-# test_session_start.bats). Allocation may spend most of it on worktree adds;
-# the target resolution that follows gets what is left, less a tail for the
-# marker's own git calls, and never less than the 5 s every other hook uses.
-HOOK_BUDGET_SECS = 30
+# test_session_start.bats). The worktree git calls get ADD_BUDGET_SECS of it,
+# measured from the hook's start (leaselib.add_worktrees gives every call what
+# is left, kills a cut-off call's whole process group, and leaves the window
+# worktree_ready: false for `claim`); the target resolution after them gets
+# what is left less a tail for the marker's own git calls, and never less than
+# the 5 s every other hook uses. MARKER_TAIL_SECS is an allowance, not an
+# enforced timeout (v.run's default is 20 s). LEASE_TEST_HOOK_BUDGET is a test
+# knob and can only shrink the budget.
+HOOK_BUDGET_SECS = min(30, int(os.environ.get("LEASE_TEST_HOOK_BUDGET") or 30))
 MARKER_TAIL_SECS = 5
 MIN_RESOLVE_SECS = 5
+ADD_BUDGET_SECS = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - MIN_RESOLVE_SECS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -63,6 +70,10 @@ def resolve_budget(started_at: float) -> int:
 
 
 def main() -> int:
+    # A SIGTERM (a cancelled hook, a shutdown) becomes SystemExit, so
+    # leaselib._run_bounded kills the running git's process group on its way
+    # out instead of leaving a checkout writing (plan 2 Decision 20).
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     started_at = time.time()
     try:
         payload = json.load(sys.stdin)
@@ -81,7 +92,7 @@ def main() -> int:
         ll = None
     if ll is not None and not visitor and sid:
         try:
-            b = ll.session_start_bind(root, sid)
+            b = ll.session_start_bind(root, sid, deadline=started_at + ADD_BUDGET_SECS)
             lease_nn = b["lease"]
             bind_notes.extend(b["notes"])
             if b["numbered"]:
@@ -112,7 +123,9 @@ def main() -> int:
     board = ""
     if ll is not None and sid:
         try:
-            board = ll.board_for(root, sid, visitor)
+            # the same deadline as the bind, or one second from now when that
+            # is later: the board's lock wait is bounded too (Decision 18)
+            board = ll.board_for(root, sid, visitor, deadline=max(started_at + ADD_BUDGET_SECS, time.time() + 1))
         except ll.Refused as e:
             # a corrupt lease file must not make the board vanish (that reads as "no leases"):
             # say the sentence lease.sh refuses with — it names the file and the fix
@@ -220,7 +233,9 @@ def main() -> int:
     # Emit ALWAYS, even with nothing to say: the orientation line is the
     # contract §8.2 greps for.
     try:
-        head = ll.orientation(root, sid, visitor=visitor) if (ll is not None and sid) \
+        # bounded like the board's wait: the orientation line reads the leases under the lock too
+        head = ll.orientation(root, sid, visitor=visitor, deadline=max(started_at + ADD_BUDGET_SECS, time.time() + 1)) \
+            if (ll is not None and sid) \
             else "Daedalus session orientation: %s, %s" % ("visitor" if visitor else "unleased", root)
     except Exception:
         head = "Daedalus session orientation: unleased, %s" % root
