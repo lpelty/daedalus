@@ -13,11 +13,13 @@ id. Callers check the exit code AND a non-empty stdout, never the receipt line
 alone. Exit 0: answer produced and orientation verified. 2: refused before
 launch. 3: answer produced, orientation not verified. 124: timed out (process
 group killed). Any other non-zero is claude's own exit (or the callee
-launcher's), passed through.
+launcher's), passed through — except a child's 3 with no answer, which is 1:
+3 here always means an answer exists.
 
 The callee is configuration, never an argument (spec §8.4): --callee agent
-reads direct_call.callee_home / callee_name (and optional callee_launcher)
-from this deployment's config.yaml and is refused while they are unset. Core
+reads direct_call.callee_home / callee_name (and optional callee_launcher,
+with callee_launcher_args for whatever that launcher itself requires, such as
+its own name for the tenant) from this deployment's config.yaml and is refused while they are unset. Core
 names no agent and has no default callee, so the same code calls one agent on
 one deployment and a different agent on the next.
 
@@ -35,6 +37,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -77,12 +80,15 @@ BINDING_VARS = ("DAEDALUS_LEASE", "DAEDALUS_SESSION_ID", "DAEDALUS_HOOK_PID", "D
 CALL_VARS = ("CAPTURE_DEFER_TO_CALLER", "DIRECT_CALL_ID", "DIRECT_CALL_RECEIPT_DIR", "DIRECT_CALL_CALLER")
 CONFIG_KEYS = ("direct_call.callee_home", "direct_call.callee_name", "direct_call.callee_human",
                "direct_call.callers", "direct_call.orientation_marker", "direct_call.callee_launcher",
-               "direct_call.tools", "direct_call.max_turns", "direct_call.timeout", "direct_call.capture",
+               "direct_call.callee_launcher_args", "direct_call.tools", "direct_call.max_turns", "direct_call.timeout", "direct_call.capture",
                "direct_call.capture_wait", "verify.refute_model", "verify.refute_timeout",
                "memory.transcript_dir")
 REQUEST_FILE = "\0request-file"
 WRITE_ONCE = "A review for this run already exists; a new verdict needs a new run."
 EXIT_REFUSED, EXIT_UNVERIFIED, EXIT_TIMEOUT = 2, 3, 124
+# The flags this launcher supplies to a callee launcher itself (see
+# launch_agent); direct_call.callee_launcher_args may not name them.
+LAUNCHER_OWN_FLAGS = ("--caller", "--request-file", "--artifact-dir", "--resume")
 CALL_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # One parser for config.yaml: lib.sh cfg (lib.sh:19-69). Every key in one bash call.
 CFG_SNIPPET = r'''source "$DAEDALUS_HOME/core/lib.sh"; set +e
@@ -200,7 +206,7 @@ def direct_call_settings(conf: Dict[str, str]) -> Tuple[dict, List[str]]:
     refuses on the first; doctor prints them all."""
     g = conf.get
     problems: List[str] = []
-    s = {"callee_home": None, "callee_name": None, "callee_launcher": None,
+    s = {"callee_home": None, "callee_name": None, "callee_launcher": None, "callee_launcher_args": [],
          "callee_human": g("direct_call.callee_human") or "the operator",
          "callers": [c.strip() for c in (g("direct_call.callers") or "").split(",") if c.strip()],
          "marker": g("direct_call.orientation_marker"), "tools": list(READ_ONLY_TOOLS),
@@ -224,6 +230,25 @@ def direct_call_settings(conf: Dict[str, str]) -> Tuple[dict, List[str]]:
                             % launcher)
         else:
             s["callee_launcher"] = launcher
+    # Whatever the callee's own launcher requires before Daedalus's flags —
+    # its own name for the tenant, an interpreter's arguments — split as shell
+    # words (a trailing # comment dropped). Configuration, so core names no
+    # agent and assumes no launcher's argv beyond the four flags it supplies.
+    largs = g("direct_call.callee_launcher_args")
+    if largs:
+        try:
+            words = shlex.split(largs, comments=True)
+        except ValueError as e:
+            problems.append("direct_call.callee_launcher_args cannot be split into arguments (%s; got: %s)" % (e, largs))
+        else:
+            own = [w for w in words if w.split("=", 1)[0] in LAUNCHER_OWN_FLAGS]
+            if not launcher:
+                problems.append("direct_call.callee_launcher_args is set but direct_call.callee_launcher is not")
+            elif own:
+                problems.append("direct_call.callee_launcher_args may not name %s — Daedalus passes %s itself "
+                                "(got: %s)" % (", ".join(own), ", ".join(LAUNCHER_OWN_FLAGS), largs))
+            else:
+                s["callee_launcher_args"] = words
     tools = g("direct_call.tools")
     if tools is not None:
         names = [t.strip() for t in tools.split(",") if t.strip()]
@@ -506,39 +531,84 @@ def _names(val: str) -> List[str]:
     return [c.strip().strip("'\"") for c in val.split(",") if c.strip()]
 
 
+# Anything that makes direct_calls a key other than a plain, unquoted
+# top-level `direct_calls:` line: quoted, complex (`? `), inside a flow
+# mapping, or nested under another key.
+_DIRECT_CALLS_KEY = re.compile(r"""(^|[\s{,?])["']?direct_calls["']?\s*(:|$)""")
+
+
+def _indent(line: str) -> Optional[int]:
+    """Leading spaces; None when the indentation holds a tab (not YAML)."""
+    n = len(line) - len(line.lstrip(" "))
+    return None if line[n:n + 1] == "\t" else n
+
+
 def agent_yaml_callers(text: str) -> Tuple[bool, Optional[List[str]]]:
-    """(a top-level direct_calls: key is present, the callers it names — None
-    when present but unreadable). Three shapes are read, YAML comments allowed:
-    `callers: [a, b]` or `callers: a, b` under the block; a block list
-    (`callers:` then `- a` lines); the flow mapping
-    `direct_calls: {callers: [a, b]}`."""
-    lines = [raw.split(" #", 1)[0].rstrip() for raw in text.splitlines()]
-    lines = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
-    for i, line in enumerate(lines):
-        if line[:1].isspace() or line.split(":", 1)[0].strip() != "direct_calls":
-            continue
-        rest = line.split(":", 1)[1].strip()
-        if rest:
-            m = re.fullmatch(r"\{\s*callers\s*:\s*(\[[^\]]*\])\s*\}", rest)
-            return True, (_names(m.group(1)) if m else None)
-        body = []
-        for ln in lines[i + 1:]:
-            if not ln[:1].isspace():
-                break
-            body.append(ln.strip())
-        for j, item in enumerate(body):
-            if item.startswith("callers:"):
-                val = item.split(":", 1)[1].strip()
-                if val:
-                    return True, _names(val)
-                items = []
-                for b in body[j + 1:]:
-                    if not b.startswith("- "):
-                        break
-                    items.append(b[2:].strip().strip("'\""))
-                return True, (items or None)
+    """(direct_calls is present, the callers it names — None when present but
+    unreadable, which the caller refuses). A stdlib reader of the narrow shapes
+    an agent.yaml writes, keeping YAML's structure so that a deny-by-default
+    list cannot admit more than YAML would, YAML comments allowed:
+      direct_calls: {callers: [a, b]}
+      direct_calls:            with, at its first child indent,
+        callers: [a, b]        or `callers: a, b`, or `callers:` followed by
+                               `- a` lines (at that indent or deeper).
+    Only a `callers:` at the block's first child indent counts: one nested
+    under a sibling key is that sibling's. Unreadable, so refused: a
+    duplicate direct_calls or callers key; direct_calls quoted, complex or
+    anywhere but a plain top-level key; tabs in the indentation; a flow list
+    spanning lines; any item under callers that is not a plain `- name`."""
+    lines = []
+    for raw in text.splitlines():
+        ln = raw.split(" #", 1)[0].rstrip()
+        if ln.strip() and not ln.lstrip().startswith("#"):
+            lines.append(ln)
+    tops = [i for i, ln in enumerate(lines)
+            if not ln[:1].isspace() and re.match(r"direct_calls\s*:(\s|$)", ln)]
+    mentioned = any(_DIRECT_CALLS_KEY.search(ln) for ln in lines)
+    if len(tops) != 1:
+        return (True, None) if (tops or mentioned) else (False, None)
+    i = tops[0]
+    rest = lines[i].split(":", 1)[1].strip()
+    if rest:
+        m = re.fullmatch(r"\{\s*callers\s*:\s*(\[[^\]\[]*\])\s*\}", rest)
+        return True, (_names(m.group(1)) if m else None)
+    body = []
+    for ln in lines[i + 1:]:
+        if not ln[:1].isspace():
+            break
+        body.append(ln)
+    if not body or any(_indent(ln) is None for ln in body):
         return True, None
-    return False, None
+    child = _indent(body[0])
+    found: List[Tuple[int, str]] = []
+    for j, ln in enumerate(body):
+        n = _indent(ln)
+        if n < child:
+            return True, None
+        if n == child and re.match(r"callers\s*:(\s|$)", ln.strip()):
+            found.append((j, ln.strip().split(":", 1)[1].strip()))
+    if len(found) != 1:
+        return True, None
+    j, val = found[0]
+    if val:
+        if val.startswith("[") != val.endswith("]"):
+            return True, None
+        return True, _names(val)
+    items: List[str] = []
+    item_indent = None
+    for ln in body[j + 1:]:
+        n = _indent(ln)
+        item = ln.strip()
+        if n < child or (n == child and not item.startswith("- ")):
+            break
+        if not item.startswith("- ") or (item_indent is not None and n != item_indent):
+            return True, None
+        item_indent = n
+        name = item[2:].strip().strip("'\"")
+        if not name or ":" in name or name[:1] in "[{&*!|>":
+            return True, None
+        items.append(name)
+    return True, (items or None)
 
 
 def callee_callers(home: Path, callee: str) -> Tuple[Optional[List[str]], str]:
@@ -573,7 +643,7 @@ def prepare_agent(root: Path, conf: Dict[str, str], args: argparse.Namespace, vi
     if args.caller:
         raise Refusal("--caller is for --callee self; a call to the configured agent is always from %s" % SELF_NAME)
     fields = {"caller": SELF_NAME, "callee": s["callee_name"], "callee_home": s["callee_home"],
-              "callee_launcher": s["callee_launcher"]}
+              "callee_launcher": s["callee_launcher"], "callee_launcher_args": s["callee_launcher_args"]}
     if s["callee_launcher"]:
         fields["callee_allowlist"] = "the callee's own launcher enforces it"
         return fields
@@ -591,7 +661,8 @@ def launch_agent(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, re
     env = child_env(rec["call_id"], call_dir, SELF_NAME)
     if rec.get("callee_launcher"):
         # REQUEST_FILE is replaced by this attempt's request sidecar in attempt().
-        cmd = [rec["callee_launcher"], "--caller", SELF_NAME, "--request-file", REQUEST_FILE]
+        cmd = [rec["callee_launcher"], *(rec.get("callee_launcher_args") or []),
+               "--caller", SELF_NAME, "--request-file", REQUEST_FILE]
         if resumed:
             if not rec.get("callee_receipt"):
                 raise Refusal("call %s has no receipt id from %s's launcher to resume" % (rec["call_id"], rec["callee"]))
@@ -782,8 +853,12 @@ def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
                 code = EXIT_TIMEOUT
             elif produced:
                 code = 0 if rc == 0 and orientation == "yes" else EXIT_UNVERIFIED
+            elif rc in (0, EXIT_UNVERIFIED):
+                # 3 here means "an answer exists"; a child's 3 without one
+                # (the callee launcher's is_error path) is a plain failure.
+                code = 1
             else:
-                code = rc if rc != 0 else 1
+                code = rc
             verdict_note = None
             if produced and mode == "refuter" and rec.get("verdict_file") and resumed_by is None:
                 verdict_note = write_verdict(root, call_dir, rec, answer)
@@ -928,7 +1003,9 @@ def doctor(root: Path) -> int:
         if s["callee_home"]:
             print("OK       direct call: callee %s at %s%s; callers of this Daedalus: %s"
                   % (s["callee_name"], s["callee_home"],
-                     " through its own launcher" if s["callee_launcher"] else "", callers))
+                     (" through its own launcher%s" % (" (with %s)" % shlex.join(s["callee_launcher_args"])
+                                                      if s["callee_launcher_args"] else ""))
+                     if s["callee_launcher"] else "", callers))
         else:
             print("NOTE     direct call: no callee configured (optional) — core/call-agent.sh --callee agent is "
                   "refused until direct_call.callee_home and callee_name are set in config.yaml; callers of this "

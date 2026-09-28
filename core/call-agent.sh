@@ -4,9 +4,10 @@
 # direct_call.callee_home / callee_name), this Daedalus called by an allowlisted
 # agent (--callee self), and the fresh-context refuter Thing (--callee refuter,
 # used by core/refute.sh). Answer on stdout, a two-line receipt on stderr,
-# resume by call id; exit 0 / 2 refused / 3 orientation unverified / 124 timed
-# out, else claude's own exit. Callers check the exit code AND a non-empty
-# stdout, never the receipt line alone. See core/call_agent.py for the contract.
+# resume by call id; exit 0 / 2 refused / 3 answered, orientation unverified /
+# 124 timed out, else claude's own exit (1 for a child's 3 with no answer).
+# Callers check the exit code AND a non-empty stdout, never the receipt line
+# alone. See core/call_agent.py for the contract.
 #
 # bash 3.2: this file only sources lib.sh (which exports DAEDALUS_HOME and
 # DAEDALUS_CONFIG — call_agent.py refuses either unless it is this deployment's)

@@ -108,11 +108,17 @@ verify:
 #   # Optional. The agent's own direct-call launcher (absolute path). When
 #   # set, --callee agent runs it instead of a bare claude -p, so the agent's
 #   # allowlist, receipt and capture apply. It is called as
-#   #   <launcher> --caller Daedalus --request-file <file> --artifact-dir <dir>
-#   #   <launcher> --caller Daedalus --resume <its call id> --request-file <file>
+#   #   <launcher> <args> --caller Daedalus --request-file <file> --artifact-dir <dir>
+#   #   <launcher> <args> --caller Daedalus --resume <its call id> --request-file <file>
 #   # and must answer on stdout with "<Name> call <id>; receipt ..." and
-#   # "... orientation: yes|no ..." on stderr.
+#   # "... orientation: yes|no ..." on stderr. Exit 3 means it answered but
+#   # could not verify orientation; exit 3 with no answer is a failure.
 #   callee_launcher: /abs/path/to/callee-launcher
+#   # Optional, with callee_launcher only: the <args> above, as shell words —
+#   # whatever that launcher itself requires, typically its own name for the
+#   # agent (a launcher serving several agents refuses a call without it).
+#   # It may not name --caller, --request-file, --artifact-dir or --resume.
+#   callee_launcher_args: --callee agentname
 #   # Read-only tools, passed as --tools. Only Read, Grep and Glob are accepted.
 #   tools: Read,Grep,Glob
 #   max_turns: 40

@@ -54,9 +54,9 @@ teardown() { teardown_live; }
   # comments on their own lines only: cfg does not strip an inline comment
   run grep -E '^#   [a-z_]+: .*[^ ] +#' "$ex"; [ "$status" -ne 0 ] || { echo "inline comment: $output"; return 1; }
   sed -n '/^# direct_call:/,/^$/p' "$ex" | sed 's/^# \{0,1\}//' | grep -v '^ *#' | grep -v '^$' \
-    | sed "s|callee_home: .*|callee_home: $CALLEE|; /callee_launcher:/d" >> "$DAEDALUS_HOME/config.yaml"
+    | sed "s|callee_home: .*|callee_home: $CALLEE|; s|callee_launcher: .*|callee_launcher: /usr/bin/true|" >> "$DAEDALUS_HOME/config.yaml"
   run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
-  case "$output" in *"OK       direct call: callee "*) : ;; *) echo "$output"; cat "$DAEDALUS_HOME/config.yaml"; return 1 ;; esac
+  case "$output" in *"OK       direct call: callee AgentName at $CALLEE through its own launcher (with --callee agentname); callers of this Daedalus: AgentName"*) : ;; *) echo "$output"; cat "$DAEDALUS_HOME/config.yaml"; return 1 ;; esac
 }
 
 # --- the engine through --callee self: receipts, the stdout/stderr contract, exit codes, the watchdog (Task 2) ---
@@ -376,12 +376,15 @@ YAML
 
 @test "with callee_launcher set, the agent's own launcher runs instead of claude: its argv, its receipt id, its orientation, capture deferred" {
   cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
-  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher"
+  # The fixture requires --callee as the real launcher does; the tenant name
+  # reaches it from config only (callee_launcher_args), never from core.
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher" \
+    "callee_launcher_args: --callee alpha   # the launcher's own name for its tenant"
   run --separate-stderr bash "$CALL" --callee agent --artifact-dir "$DAEDALUS_HOME/target/thing" "what is this hook for?"
   [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
   [ "$output" = "callee launcher answer" ]
   [ "$(calls)" -eq 0 ]
-  [ "$(sed -n 1,2p "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tr '\n' ' ')" = "--caller Daedalus " ]
+  [ "$(sed -n 1,4p "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tr '\n' ' ')" = "--callee alpha --caller Daedalus " ]
   grep -qx -- '--artifact-dir' "$FAKE_CLAUDE_DIR/launcher-argv.txt"
   grep -qx "$DAEDALUS_HOME/target/thing" "$FAKE_CLAUDE_DIR/launcher-argv.txt"
   req="$(grep -A1 -x -- '--request-file' "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tail -1)"
@@ -393,7 +396,7 @@ YAML
 
 @test "a callee launcher that answers but cannot verify orientation (its exit 3) is an answer: printed, exit 3, orientation no; a real failure is named as the launcher's" {
   cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
-  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher"
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher" "callee_launcher_args: --callee alpha"
   CALLEE_LAUNCHER_EXIT=3 run --separate-stderr bash "$CALL" --callee agent "hello"
   [ "$status" -eq 3 ] || { echo "$status / $output / $stderr"; return 1; }
   [ "$output" = "callee launcher answer" ]
@@ -403,6 +406,79 @@ YAML
   [ "$status" -eq 7 ]; [ -z "$output" ]
   [ "${#stderr_lines[@]}" -eq 2 ] || { printf '%s\n' "$stderr"; return 1; }
   case "${stderr_lines[1]}" in *"; exit: 7 — failed: the callee launcher exited 7 (with output). No answer is certified.") : ;; *) echo "$stderr"; return 1 ;; esac
+}
+
+@test "a callee launcher that exits 3 with no answer is a failure, exit 1 — exit 3 means an answer was produced" {
+  # The real launcher does exactly this when claude reports an error but exits 0.
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher" "callee_launcher_args: --callee alpha"
+  CALLEE_LAUNCHER_EXIT=3 CALLEE_LAUNCHER_ANSWER= run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 1 ] || { echo "$status / $output / $stderr"; return 1; }
+  [ -z "$output" ]
+  [ "${stderr_lines[1]}" = "Alpha orientation: no; capture: deferred; exit: 1 — failed: the callee launcher exited 3 (no output). No answer is certified." ] \
+    || { printf '%s\n' "$stderr"; return 1; }
+  grep -q '"status": "failed"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  grep -q '"exit_code": 1,' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+}
+
+@test "callee_launcher_args carries the tenant name the callee's launcher requires: without it the launcher's own usage error is a failure; it never overrides the flags Daedalus supplies; it needs callee_launcher" {
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher"
+  run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; [ -z "$output" ]
+  case "${stderr_lines[1]}" in *"failed: the callee launcher exited 2 (no output). No answer is certified.") : ;; *) echo "$stderr"; return 1 ;; esac
+  for bad in "--caller Someone" "--callee alpha --request-file /x" "--artifact-dir=/etc" "--resume 1" "--callee \"alpha"; do
+    sed -i.bak '/callee_launcher_args:/d' "$DAEDALUS_HOME/config.yaml"
+    printf '  callee_launcher_args: %s\n' "$bad" >> "$DAEDALUS_HOME/config.yaml"
+    rm -f "$FAKE_CLAUDE_DIR/launcher-argv.txt"
+    run bash "$CALL" --callee agent "hello"
+    [ "$status" -eq 2 ] || { echo "$bad: $status $output"; return 1; }
+    case "$output" in *"direct_call.callee_launcher_args"*) : ;; *) echo "$bad: $output"; return 1 ;; esac
+    [ ! -e "$FAKE_CLAUDE_DIR/launcher-argv.txt" ]
+  done
+  sed -i.bak '/callee_launcher:/d; /callee_launcher_args:/d' "$DAEDALUS_HOME/config.yaml"
+  printf '  callee_launcher_args: --callee alpha\n' >> "$DAEDALUS_HOME/config.yaml"
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  case "$output" in *"MISSING  direct call: direct_call.callee_launcher_args is set but direct_call.callee_launcher is not"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "the callee's allowlist parser keeps YAML's structure: a callers key nested under a sibling does not admit; a quoted or complex direct_calls key, a duplicate key, a nested mapping under callers refuse" {
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha"
+  printf 'direct_calls:\n  room:\n    callers: [Daedalus]\n  callers: [Peer]\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"Daedalus is not on Alpha's callers list"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '"direct_calls": {callers: [Peer]}\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"cannot read Alpha's callers list in agent.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+  run python3 - "$DAEDALUS_HOME/core" <<'CASES'
+import sys; sys.path.insert(0, sys.argv[1]); from call_agent import agent_yaml_callers as p
+cases = [
+  ("direct_calls:\n  room:\n    callers: [Daedalus]\n  callers: [Peer]\n", (True, ["Peer"])),
+  ("direct_calls:\n  room:\n    callers: [Daedalus]\n", (True, None)),
+  ("direct_calls:\n  callers:\n  - Peer\n  - Daedalus\nskills: x\n", (True, ["Peer", "Daedalus"])),
+  ("direct_calls:\n  callers:\n    - Peer\n  other:\n    - Daedalus\n", (True, ["Peer"])),
+  ("direct_calls:   # c\n  callers: [Peer, Daedalus]   # c\nskills: {shared: all}\n", (True, ["Peer", "Daedalus"])),
+  ('"direct_calls": {callers: [Peer]}\n', (True, None)),
+  ("'direct_calls':\n  callers: [Peer]\n", (True, None)),
+  ("? direct_calls\n: {callers: [Peer]}\n", (True, None)),
+  ("{direct_calls: {callers: [Peer]}}\n", (True, None)),
+  ("direct_calls:\n  callers: [Peer]\n  callers: [Daedalus]\n", (True, None)),
+  ("direct_calls:\n  callers: [Daedalus]\ndirect_calls:\n  callers: [Peer]\n", (True, None)),
+  ("direct_calls:\n  callers:\n    - name: Daedalus\n", (True, None)),
+  ("direct_calls:\n  callers:\n    room: [Daedalus]\n", (True, None)),
+  ("direct_calls:\n  callers: [Peer,\n    Daedalus]\n", (True, None)),
+  ("direct_calls:\n\tcallers: [Daedalus]\n", (True, None)),
+  ("direct_calls:\n  callers:\n", (True, None)),
+  ("name: x\nrooms:\n  direct_calls: {callers: [Daedalus]}\n", (True, None)),
+  ("name: x\n", (False, None)),
+]
+bad = [(t, p(t), want) for t, want in cases if p(t) != want]
+for b in bad: print("%r -> %r, want %r" % b)
+sys.exit(1 if bad else 0)
+CASES
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "the callee's allowlist in every shape agent.yaml writes it — the flow mapping, a block list — and a direct_calls key it cannot read refuses (deny by default)" {
