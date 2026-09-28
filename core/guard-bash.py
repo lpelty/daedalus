@@ -20,7 +20,9 @@ out. Relative paths resolve against the hook's `cwd`, then any
 `||`, `|`, `&`, `;` and newlines — tokenized with shlex's punctuation
 mode, because plain shlex.split keeps a glued `;` on the word (`vault;`)
 and `cd vault; git commit -m x` was one cd segment whose git command was
-never examined (Task 11 review). Heredoc bodies are removed before
+never examined (Task 11 review). `>` is punctuation too, so a redirect is
+its own token in every form (`x>path`, `2>`, `>|`, `&>>`) and `2>&1` does
+not split a segment at its `&` (plan 4 Task 2 review). Heredoc bodies are removed before
 tokenizing: a body is prose, and an apostrophe in it ("it's") is what
 made shlex raise. Fails open on its own errors, except that a command
 that is still unparseable is checked for redirect and `-i` operands
@@ -121,19 +123,69 @@ def strip_heredocs(cmd: str) -> str:
     return "\n".join(out)
 
 
+# An unquoted redirect operator as its own token: `>`, `>>`, `>|`, `>&`, `&>`, `&>>` (the fd
+# number before it, `2>`, is the preceding word). Plan 4 Task 2 review: `>` is punctuation to
+# the lexer, so `echo x>path` and `2>&1` split the way the shell splits them — quoted text
+# (`'a->b'`) stays one word.
+REDIRECT_RUN = re.compile(r"&>>?|>>?[|&]?")
+
+
+def split_punct_run(t: str) -> List[str]:
+    """A merged punctuation run that carries a `>` split into separators and redirect
+    operators: `&&>` -> `&&`, `>`; `;>` -> `;`, `>`; `&>>` stays whole."""
+    out: List[str] = []
+    sep = ""
+    i = 0
+    while i < len(t):
+        if t.startswith(("&&", "||"), i):
+            sep += t[i:i + 2]
+            i += 2
+            continue
+        m = REDIRECT_RUN.match(t, i)
+        if m:
+            if sep:
+                out.append(sep)
+                sep = ""
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        sep += t[i]
+        i += 1
+    if sep:
+        out.append(sep)
+    return out
+
+
+def is_redirect(t: str) -> bool:
+    return ">" in t and all(c in "&>|" for c in t)
+
+
 def tokenize(cmd: str) -> List[str]:
     """shlex in punctuation mode over the command with its heredoc bodies removed: `;`, `&`,
-    `|` and newlines come out as their own tokens (runs merged: `&&`, `||`), quotes and
-    escapes as in posix mode, `#` never a comment. Raises ValueError only for a quote the
-    shell itself leaves open."""
-    lex = shlex.shlex(strip_heredocs(cmd), posix=True, punctuation_chars=PUNCT)
+    `|`, `>` and newlines come out as their own tokens (runs merged: `&&`, `||`, `>>`, `&>`),
+    quotes and escapes as in posix mode, `#` never a comment. A run that mixes a separator
+    and a redirect is split (split_punct_run). Raises ValueError only for a quote the shell
+    itself leaves open."""
+    lex = shlex.shlex(strip_heredocs(cmd), posix=True, punctuation_chars=PUNCT + ">")
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
     lex.commenters = ""
-    return list(lex)
+    out: List[str] = []
+    for t in lex:
+        if ">" in t and t and all(c in PUNCT + ">" for c in t):
+            out.extend(split_punct_run(t))
+        else:
+            out.append(t)
+    return out
+
+
+# The two variables a transcript path is spelled with; expanded from the hook's environment
+# (the session's own), everything else left literal (plan 4 Task 2 review).
+PATH_VARS = re.compile(r"\$(?:\{(HOME|CLAUDE_CONFIG_DIR)\}|(HOME|CLAUDE_CONFIG_DIR)\b)")
 
 
 def resolve(cwd: Path, p: str) -> Path:
+    p = PATH_VARS.sub(lambda m: os.environ.get(m.group(1) or m.group(2)) or m.group(0), p)
     p = os.path.expanduser(p)
     return (cwd / p).resolve() if not os.path.isabs(p) else Path(p).resolve()
 
@@ -292,29 +344,95 @@ def push_destinations(rest: List[str]) -> List[str]:
     return dests
 
 
+def split_redirects(seg: List[str]) -> Tuple[List[str], List[str], bool]:
+    """(redirect targets, the words with every redirect and its target removed, whether the
+    last word is a bare number glued to a redirect — `cp a b 2>/dev/null` tokenizes as
+    `b`, `2`, `>`, so the number may be an fd rather than an operand). `>&N` / `>&-`
+    duplicate a descriptor and write no file."""
+    targets: List[str] = []
+    words: List[str] = []
+    fd_tail = False
+    i = 0
+    while i < len(seg):
+        t = seg[i]
+        if is_redirect(t):
+            nxt = seg[i + 1] if i + 1 < len(seg) else ""
+            if nxt and not (t.endswith("&") and (nxt.isdigit() or nxt == "-")):
+                targets.append(nxt)
+            if words and words[-1].isdigit() and not t.startswith("&"):
+                fd_tail = True
+            i += 2
+            continue
+        words.append(t)
+        fd_tail = False
+        i += 1
+    return targets, words, fd_tail
+
+
+def positionals(args: List[str]) -> List[str]:
+    """The operands of a file command: every word not starting with `-`, and every word after
+    `--` (Claude Code project slugs all start with `-`: `rm -rf -- <slug>`)."""
+    out: List[str] = []
+    for i, a in enumerate(args):
+        if a == "--":
+            return out + list(args[i + 1:])
+        if not a.startswith("-"):
+            out.append(a)
+    return out
+
+
+PERL_INPLACE = re.compile(r"-[0aelnpsw]*i")
+RECURSIVE_COPY = re.compile(r"-[A-Za-z]*[Rra]")
+
+
+def tree_operands(seg: List[str]) -> Tuple[List[str], List[str]]:
+    """(removed, filled): operands a command removes or renames whole (rm, unlink, mv's
+    sources) and directories a recursive copy fills (cp -R/-r/-a, rsync). guard main denies
+    either when it is an ancestor of the transcript directory — a write operand below it is
+    write_check's; one above it replaces the record wholesale (plan 4 Task 2 review)."""
+    _, words, _ = split_redirects(seg)
+    if not words:
+        return [], []
+    head, pos = words[0], positionals(words[1:])
+    if head in ("rm", "unlink"):
+        return pos, []
+    if head == "mv" and len(pos) >= 2:
+        return pos[:-1], []
+    recursive = head == "rsync" or (head == "cp" and any(
+        a in ("--recursive", "--archive") or (not a.startswith("--") and RECURSIVE_COPY.match(a)) for a in words[1:]))
+    if recursive and len(pos) >= 2:
+        return [], [pos[-1]]
+    return [], []
+
+
 def write_operands(seg: List[str]) -> List[str]:
-    ops: List[str] = []
-    for i, t in enumerate(seg):
-        if t in (">", ">>") and i + 1 < len(seg):
-            ops.append(seg[i + 1])
-        elif t.startswith((">", ">>")) and len(t) > 2 and t.lstrip(">"):
-            ops.append(t.lstrip(">"))
+    ops, words, fd_tail = split_redirects(seg)
+    seg = words
     if not seg:
         return ops
     head = seg[0]
+    pos = positionals(seg[1:])
     if head == "sed" and any(t == "-i" or t.startswith("-i") for t in seg[1:]):
         ops.extend(t for t in seg[1:] if not t.startswith("-") and ("/" in t or t.endswith((".sh", ".py", ".md", ".json", ".yaml"))))
     if head == "tee":
-        ops.extend(t for t in seg[1:] if not t.startswith("-"))
-    if head in ("cp", "install") and len(seg) >= 3:
-        ops.append(seg[-1])
-    if head == "mv" and len(seg) >= 3:
+        ops.extend(pos)
+    if head in ("cp", "install", "ln", "rsync") and len(pos) >= 2:
+        # the destination; when a redirect's fd number sits last it may be the fd, so the word before is taken too
+        ops.append(pos[-1])
+        if fd_tail and len(pos) >= 3:
+            ops.append(pos[-2])
+    if head == "mv" and len(pos) >= 2:
         # mv writes its destination and removes every source.
-        ops.extend(t for t in seg[1:] if not t.startswith("-"))
-    if head in ("rm", "unlink"):
-        ops.extend(t for t in seg[1:] if not t.startswith("-"))
+        ops.extend(pos)
+    if head in ("rm", "unlink", "truncate"):
+        ops.extend(pos)
+    if head == "dd":
+        ops.extend(t[3:] for t in seg[1:] if t.startswith("of=") and len(t) > 3)
+    if head in ("perl", "ruby") and any(PERL_INPLACE.match(t) for t in seg[1:]):
+        # in-place edit: every file operand; the program after -e is not one
+        ops.extend(t for i, t in enumerate(seg[1:], 1) if not t.startswith("-") and seg[i - 1] not in ("-e", "-E"))
     if head == "patch":
-        ops.extend(t for t in seg[1:] if not t.startswith("-"))
+        ops.extend(pos)
     if head == "git" and len(seg) >= 3 and seg[1] in ("apply", "checkout") and "--" in seg:
         ops.extend(seg[seg.index("--") + 1:])
     if head in ("python3", "python", "perl", "ruby", "node", "bash", "sh") and any(t in ("-c", "-e") for t in seg):
@@ -361,6 +479,21 @@ def check_vault_git(args: List[str], repo: Path, vault: Path, ctx: dict) -> Opti
         return text + " " + VAULT_RULE if sub == "commit" else text
     if sub in ("add", "commit", "stash"):
         return VAULT_RULE
+    return None
+
+
+def transcript_ancestor(root: Path, p: Path, filled: bool) -> Optional[str]:
+    """§7.4 above the transcript directory: removing or renaming an ancestor of it (`rm -rf
+    ~/.claude/projects`, `mv ~/.claude/projects x`) takes the record with it; a recursive
+    copy onto one (`cp -R fake/ ~/.claude/projects/`) can replace it. The home directory and
+    what is above it are not refused as a copy destination — `cp -R x ~/` is ordinary."""
+    import transcriptlib as tl
+    home = Path(os.path.expanduser("~")).resolve()
+    for d in tl.transcript_dirs(root):
+        if d != p and under(d, p):
+            if filled and (p == home or under(home, p)):
+                continue
+            return bh.TRANSCRIPT_DENY
     return None
 
 
@@ -481,6 +614,7 @@ def main() -> int:
                 here = resolve(here, seg[1])
                 continue
             if seg[0] == "git":
+                seg = split_redirects(seg)[1] or seg    # `2>&1` is not a refspec or an argument
                 repo_dir, args = git_repo_and_args(seg, here)
                 if args[:2] in (["switch", "-c"], ["checkout", "-b"]):
                     branch_created = True
@@ -497,6 +631,12 @@ def main() -> int:
                     deny(reason)
                     return 0
                 reason = check_vault_git(args, repo_dir, vault, ctx) or check_worktree_remove(args, repo_dir, root, ctx)
+                if reason:
+                    deny(reason)
+                    return 0
+            removed, filled = tree_operands(seg)
+            for op in removed + filled:
+                reason = transcript_ancestor(root, resolve(here, op), op in filled and op not in removed)
                 if reason:
                     deny(reason)
                     return 0

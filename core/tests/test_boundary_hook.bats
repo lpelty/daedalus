@@ -504,3 +504,14 @@ PY
   printf '{"session_id":"s7","transcript_path":"%s/s7.jsonl"}' "$O" > "$DAEDALUS_HOME/state/session-s7.json"
   run ed Write "$O/s7.jsonl"; case "$output" in *"nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "the transcript denial on the Edit|Write leg needs no lease state: with the lease lock unreadable (a lease read that breaks), an Edit of the transcript is still denied with the transcript sentence" {
+  P="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$DAEDALUS_HOME" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$P" "$DAEDALUS_HOME/state/leases"
+  : > "$P/s1.jsonl"; : > "$DAEDALUS_HOME/state/leases/.lock"; chmod 000 "$DAEDALUS_HOME/state/leases/.lock"
+  ed() { printf '{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+  run ed Edit "$P/s1.jsonl"
+  case "$output" in *'"permissionDecision": "deny"'*"the session transcript is the record of the operator's yes; nothing writes it."*) : ;; *) echo "fails open when the lease read breaks: $output"; return 1 ;; esac
+  run ed Write "$P/s1.jsonl"
+  case "$output" in *'"deny"'*"nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  chmod 600 "$DAEDALUS_HOME/state/leases/.lock"
+}

@@ -152,8 +152,9 @@ def transcript_for(root: Path, session_id: str) -> Path:
     """A session's transcript, resolved: its SessionStart marker's transcript_path
     when that file exists (§7.2 step 2), else <the first transcript dir>/<id>.jsonl.
     Raises Unprotected when it is not inside a directory transcript_dirs names
-    (outside <dir>/memory/) — a transcript the guard does not protect is not
-    evidence (Decision 36)."""
+    (outside <dir>/memory/), or when it has a second hard link (its bytes are also
+    a path the guard does not deny) — a transcript the guard does not protect is
+    not evidence (Decision 36; plan 4 Task 2 review)."""
     marker = v.read_marker(root, session_id) or {}
     recorded = str(marker.get("transcript_path") or "")
     dirs = transcript_dirs(root)
@@ -161,6 +162,12 @@ def transcript_for(root: Path, session_id: str) -> Path:
     rp = path.resolve()
     if not any(under(rp, d) and not under(rp, d / "memory") for d in dirs):
         raise Unprotected(str(rp))
+    try:
+        if rp.stat().st_nlink > 1:
+            # a second hard link shares these bytes with a path the guard does not deny
+            raise Unprotected("%s (it has another hard link)" % rp)
+    except FileNotFoundError:
+        pass
     return rp
 
 

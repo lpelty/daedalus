@@ -510,9 +510,9 @@ def _pre(decision: Optional[str], text: str) -> dict:
 
 
 def check_pretooluse(root: Path, payload: dict) -> Optional[dict]:
-    """PreToolUse(Edit|Write): one read of the leases (lease_context, §4.6
-    budget rule — no bash seam, no git), then write_check on the path. None
-    means nothing to say."""
+    """PreToolUse(Edit|Write): the transcript denial first (§7.4 — no lease state),
+    then one read of the leases (lease_context, §4.6 budget rule — no bash seam,
+    no git), then write_check on the path. None means nothing to say."""
     if payload.get("tool_name") not in ("Edit", "Write"):
         return None
     sid = v.export_session(payload)
@@ -520,6 +520,12 @@ def check_pretooluse(root: Path, payload: dict) -> Optional[dict]:
     if not fp or not os.path.isabs(fp):
         return None
     op = Path(fp).resolve()
+    # The transcript denial needs no lease state, so it is judged BEFORE the lease read:
+    # a lock that cannot be opened, or stays busy past the hook's timeout, must not make
+    # it fail open (plan 4 Task 2 review). write_check repeats it for the Bash leg.
+    reason = transcript_deny(root, op)
+    if reason:
+        return _pre("deny", reason)
     ctx = v.lease_context(root, sid)
     reason, context = write_check(root, ctx, op, sid, ctx["refused"])
     if reason:

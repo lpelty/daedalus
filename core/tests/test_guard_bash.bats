@@ -436,3 +436,34 @@ git push origin main"; denied
   python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; import verifylib as v; assert not v.is_protected(Path(sys.argv[2]), Path(sys.argv[3]))' \
     "$DAEDALUS_HOME/core" "$DAEDALUS_HOME" "$P/s1.jsonl"
 }
+
+@test "the transcript's parseable write shapes beyond redirect/sed/tee/cp/mv/rm — fd and clobber redirects, an attached redirect, a hard link, rsync, dd, truncate, perl -i, \$HOME and \$CLAUDE_CONFIG_DIR, rm -- of a slug, and removing or recursively copying onto an ancestor of the transcript directory — are denied; ordinary commands near it are not" {
+  P="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$(cd "$DAEDALUS_HOME" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$P/memory"
+  S="${P##*/}"; R="${P#"$CLAUDE_CONFIG_DIR"/}"
+  : > "$P/s1.jsonl"; mkdir -p "$BATS_TEST_TMPDIR/fake"
+  for c in "echo x 2> $P/s1.jsonl" "echo x 1>> $P/s1.jsonl" "echo x >| $P/s1.jsonl" "echo x &>> $P/s1.jsonl" \
+           "echo x>$P/s1.jsonl" "echo x 2>&1 >>$P/s1.jsonl" "ln -f /tmp/forged.jsonl $P/s1.jsonl" \
+           "rsync -a $BATS_TEST_TMPDIR/fake/ $P/" "dd if=/tmp/f of=$P/s1.jsonl" "truncate -s 0 $P/s1.jsonl" \
+           "perl -pi -e s/a/b/ $P/s1.jsonl" "echo x >> \$CLAUDE_CONFIG_DIR/$R/s1.jsonl" "echo x >> \${CLAUDE_CONFIG_DIR}/$R/s1.jsonl" \
+           "cp -R $BATS_TEST_TMPDIR/fake/ $CLAUDE_CONFIG_DIR/projects/" "rsync -a $BATS_TEST_TMPDIR/fake/ $CLAUDE_CONFIG_DIR/projects/" \
+           "mv $CLAUDE_CONFIG_DIR/projects /tmp/elsewhere" "rm -rf $CLAUDE_CONFIG_DIR/projects" "rm -rf $CLAUDE_CONFIG_DIR"; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"the session transcript is the record of the operator's yes; nothing writes it."*) : ;; *) echo "$c: $output"; return 1 ;; esac
+  done
+  run guard "rm -rf -- $S" "$CLAUDE_CONFIG_DIR/projects"; denied
+  case "$output" in *"nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  HOME="$BATS_TEST_TMPDIR" run guard "echo x >> \$HOME/$R/s1.jsonl"; denied
+  # near misses stay allowed: fd duplication, a quoted arrow, a copy into the home itself, a non-recursive copy, a sibling project
+  for c in "echo x 2>&1 | cat" "ls 2>/dev/null" "echo 'a->b'" "cp $BATS_TEST_TMPDIR/fake/x $CLAUDE_CONFIG_DIR/projects/" \
+           "rm -rf $CLAUDE_CONFIG_DIR/projects/-some-other-home" "rsync -a $BATS_TEST_TMPDIR/fake/ $BATS_TEST_TMPDIR/elsewhere/" \
+           "echo x >> $P/memory/MEMORY.md" "cat $P/s1.jsonl 2>/dev/null"; do
+    run guard "$c"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+  HOME="$CLAUDE_CONFIG_DIR" run guard "cp -R $BATS_TEST_TMPDIR/fake/ $CLAUDE_CONFIG_DIR/"; allowed
+}
+
+@test "an attached or fd-numbered redirect onto distribution code is a write operand, and cp's destination is found past a trailing redirect" {
+  for c in "echo x>core/lib.sh" "echo x 2>core/lib.sh" "cp /tmp/x core/lib.sh 2>/dev/null" "ln -f /tmp/x core/lib.sh"; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+  done
+}

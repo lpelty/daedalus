@@ -151,6 +151,16 @@ try:
 except tl.Unprotected:
     pass
 assert out not in tl.transcript_dirs(home)
+# a transcript with a second hard link shares its bytes with a file outside the denied
+# directory, which anything may write: not evidence (plan 4 Task 2 review)
+forged = out / "forged.jsonl"; os.link(rec, forged)
+try:
+    tl.transcript_for(home, "sX")
+    raise SystemExit("a hard-linked transcript was accepted")
+except tl.Unprotected:
+    pass
+forged.unlink()
+assert tl.transcript_for(home, "sX") == rec
 print("ok")
 PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
