@@ -212,6 +212,86 @@ target_path() {
   printf '%s\n' "$DAEDALUS_HOME/target/$name"
 }
 
+# The variables capture reads (core/capture.py) — the names memory_env exports.
+MEMORY_ENV_VARS="TENANT_HOME TENANT_BANK HINDSIGHT_API_URL TRANSCRIPT_DIR CAPTURE_INTERVAL HINDSIGHT_API_TENANT_API_KEY TENANT_USER_LABEL TENANT_ASSISTANT_LABEL"
+
+# memory_configured — true when config.yaml carries a top-level memory: block
+# (spec §4.7). Presence only; memory_env judges whether the fields are usable.
+memory_configured() {
+  [ -f "$DAEDALUS_CONFIG" ] && grep -q '^memory:' "$DAEDALUS_CONFIG"
+}
+
+# memory_env — print `export NAME=value` lines for episodic capture (spec §4.7
+# "Where capture's configuration lives — one place"). The memory: block is THE
+# source; a variable already in the environment overrides its field, so a hook
+# line written for an older release (VAR=… prefixes) keeps working through the
+# upgrade. Callers: eval "$(memory_env)" — close.sh, capture-tick.sh, and the
+# direct-call launcher (plan 3). Values are %q-quoted, so eval takes them
+# literally. Returns 1 with ONE plain sentence on stderr and nothing on stdout
+# when there is no bank or a field is unusable. The API key is read from
+# memory.api_key_file (a 0600 file under the home) so it never sits on a hook
+# command line, where any process listing shows it; it is never printed in a
+# message.
+memory_env() {
+  local bank home api interval interval_ok tdir phys key keyfile mode ulabel alabel
+  bank="${TENANT_BANK:-$(cfg memory.bank 2>/dev/null || true)}"
+  if [ -z "$bank" ]; then
+    printf 'daedalus: episodic capture needs memory.bank in config.yaml (or TENANT_BANK in the environment) — see "Episodic memory capture" in README.md\n' >&2
+    return 1
+  fi
+  home="${TENANT_HOME:-$DAEDALUS_HOME}"
+  api="${HINDSIGHT_API_URL:-$(cfg memory.api_url 2>/dev/null || printf 'http://127.0.0.1:8888')}"
+  interval="${CAPTURE_INTERVAL:-$(cfg memory.capture_interval 2>/dev/null || printf 120)}"
+  case "$interval" in
+    ''|*[!0-9]*) interval_ok=0 ;;
+    *) if [ "${#interval}" -le 6 ] && [ "$interval" -gt 0 ]; then interval_ok=1; else interval_ok=0; fi ;;
+  esac
+  if [ "$interval_ok" -ne 1 ]; then
+    printf 'daedalus: memory.capture_interval must be a whole number of seconds > 0 (got: %s)\n' "$interval" >&2
+    return 1
+  fi
+  tdir="${TRANSCRIPT_DIR:-$(cfg memory.transcript_dir 2>/dev/null || true)}"
+  if [ -z "$tdir" ]; then
+    # Claude Code's project directory for this home: the resolved path with
+    # every character other than a letter or digit as - (Claude Code's rule,
+    # verified against a live home 2026-09-13; it slugs the physical cwd, so
+    # /tmp becomes -private-tmp). The hook payload's transcript_path and the
+    # SessionStart marker come first; this is the last resort.
+    phys="$(cd "$DAEDALUS_HOME" 2>/dev/null && pwd -P)" || phys="$DAEDALUS_HOME"
+    tdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$phys" | sed 's/[^A-Za-z0-9]/-/g')"
+  fi
+  key="${HINDSIGHT_API_TENANT_API_KEY:-}"
+  if [ -z "$key" ] && keyfile="$(cfg memory.api_key_file 2>/dev/null)"; then
+    case "$keyfile" in
+      /*|..|../*|*/..|*/../*)
+        printf 'daedalus: memory.api_key_file must be a path under the Daedalus home, not absolute and without .. (got: %s)\n' "$keyfile" >&2
+        return 1 ;;
+    esac
+    if [ ! -f "$DAEDALUS_HOME/$keyfile" ]; then
+      printf 'daedalus: memory.api_key_file %s does not exist\n' "$keyfile" >&2
+      return 1
+    fi
+    mode="$(python3 -c 'import os,sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$DAEDALUS_HOME/$keyfile")"
+    case "$mode" in
+      600|400) : ;;
+      *) printf 'daedalus: memory.api_key_file %s is readable by others (mode %s); run chmod 600 %s\n' "$keyfile" "$mode" "$keyfile" >&2
+         return 1 ;;
+    esac
+    key="$(head -n 1 "$DAEDALUS_HOME/$keyfile" | tr -d '[:space:]')"
+  fi
+  ulabel="${TENANT_USER_LABEL:-$(cfg memory.user_label 2>/dev/null || true)}"
+  alabel="${TENANT_ASSISTANT_LABEL:-$(cfg memory.assistant_label 2>/dev/null || true)}"
+  printf 'export TENANT_HOME=%q\n' "$home"
+  printf 'export TENANT_BANK=%q\n' "$bank"
+  printf 'export HINDSIGHT_API_URL=%q\n' "$api"
+  printf 'export TRANSCRIPT_DIR=%q\n' "$tdir"
+  printf 'export CAPTURE_INTERVAL=%q\n' "$interval"
+  if [ -n "$key" ]; then printf 'export HINDSIGHT_API_TENANT_API_KEY=%q\n' "$key"; fi
+  if [ -n "$ulabel" ]; then printf 'export TENANT_USER_LABEL=%q\n' "$ulabel"; fi
+  if [ -n "$alabel" ]; then printf 'export TENANT_ASSISTANT_LABEL=%q\n' "$alabel"; fi
+  return 0
+}
+
 # scaffold_repo <url> <dest> — recreate a repo's TOP-LEVEL DIRECTORY NAMES at
 # <dest>, empty, plus a placeholder hot.md. File contents are never
 # downloaded.

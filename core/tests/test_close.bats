@@ -36,17 +36,22 @@ teardown() {
   stop_stub
 }
 
+seed_transcript() {
+  export TRANSCRIPT_DIR_FIXTURE="$BATS_TEST_TMPDIR/transcripts"
+  mkdir -p "$TRANSCRIPT_DIR_FIXTURE"
+  cat > "$TRANSCRIPT_DIR_FIXTURE/session-a.jsonl" <<'EOF'
+{"type":"user","message":{"role":"user","content":"what did we decide about the scheduler"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"It executes rendered goal files."}]}}
+EOF
+}
+
 configure_capture() {
   export TENANT_HOME="$DAEDALUS_HOME"
   export TENANT_BANK="testbank"
   export TRANSCRIPT_DIR="$BATS_TEST_TMPDIR/transcripts"
   export HINDSIGHT_API_URL="http://127.0.0.1:1"
   export HINDSIGHT_API_TENANT_API_KEY="not-a-real-key"
-  mkdir -p "$TRANSCRIPT_DIR"
-  cat > "$TRANSCRIPT_DIR/session-a.jsonl" <<'EOF'
-{"type":"user","message":{"role":"user","content":"what did we decide about the scheduler"}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"It executes rendered goal files."}]}}
-EOF
+  seed_transcript
 }
 
 @test "close.sh exists and is executable" {
@@ -133,19 +138,25 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# A local stub standing in for the memory backend.
+# A local stub standing in for the memory backend. Logs every request as
+# "<METHOD> <path>" to requests.log and every POST body to posts.jsonl, so a
+# test can see which bank and which session were written. Each POST gets its
+# own operation id (stub-op-1, stub-op-2, ...); GET .../operations/<id> is
+# "running" for an id listed in $BATS_TEST_TMPDIR/running_ops, else
+# "completed" (Task 10's whole-session close test uses the knob).
 start_stub() {
+  : > "$BATS_TEST_TMPDIR/requests.log"; : > "$BATS_TEST_TMPDIR/posts.jsonl"
   STUB_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
-  python3 - "$STUB_PORT" > "$BATS_TEST_TMPDIR/stub.log" 2>&1 <<'PY' &
-import sys, json
+  python3 - "$STUB_PORT" "$BATS_TEST_TMPDIR" > "$BATS_TEST_TMPDIR/stub.log" 2>&1 <<'PY' &
+import sys, json, os, itertools
 from http.server import BaseHTTPRequestHandler, HTTPServer
+tmp = sys.argv[2]
+counter = itertools.count(1)
 
 class H(BaseHTTPRequestHandler):
     # Speaks the PROP-002 verify-extraction protocol close.sh depends on:
     # the retain POST returns an operation_id, and capture then polls
-    # GET .../operations/<id> until the status is terminal. The original
-    # stub predated that protocol (no operation_id, no GET handler), which
-    # left these two tests red from PROP-002's reapply until 2026-09-01.
+    # GET .../operations/<id> until the status is terminal.
     def _json(self, obj):
         body = json.dumps(obj).encode()
         self.send_response(200)
@@ -153,13 +164,24 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def _log(self):
+        with open(os.path.join(tmp, "requests.log"), "a") as f:
+            f.write("%s %s\n" % (self.command, self.path))
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(n)
+        raw = self.rfile.read(n).decode()
+        self._log()
+        with open(os.path.join(tmp, "posts.jsonl"), "a") as f:
+            f.write(raw.replace("\n", " ") + "\n")
         self._json({"success": True, "items_count": 1, "async": True,
-                    "operation_id": "stub-op-1"})
+                    "operation_id": "stub-op-%d" % next(counter)})
     def do_GET(self):
-        self._json({"status": "completed", "extraction_errors_count": 0})
+        self._log()
+        knob = os.path.join(tmp, "running_ops")
+        running = set(open(knob).read().split()) if os.path.exists(knob) else set()
+        op = self.path.rsplit("/", 1)[-1]
+        self._json({"status": "running" if op in running else "completed",
+                    "extraction_errors_count": 0})
     def log_message(self, *a):
         pass
 
@@ -196,4 +218,42 @@ stop_stub() {
   # never touches the backend and exits 0, and the failure leg would prove nothing.
   printf '{"type":"user","message":{"role":"user","content":"one more turn"}}\n' >> "$TRANSCRIPT_DIR/session-a.jsonl"
   run bash "$CLOSE" --commit; [ "$status" -ne 0 ]; case "$output" in *VAULT-COMMIT-RAN*) echo "must not commit after a failed capture: $output"; return 1 ;; *) : ;; esac
+}
+
+# --- the memory: block is the source (spec §4.7 "one place") ----------------
+# A Bash tool carries none of the TENANT_* variables, so close.sh from a
+# session used to die at its own environment check unless the operator had
+# exported them in the shell that started Claude Code.
+memory_block() {   # memory_block <bank> — after start_stub: points at the stub
+  cat >> "$DAEDALUS_HOME/config.yaml" <<EOF
+memory:
+  bank: $1
+  api_url: $HINDSIGHT_API_URL
+  transcript_dir: $BATS_TEST_TMPDIR/transcripts
+EOF
+}
+
+@test "close with no capture variables in the environment and a memory: block in config.yaml captures" {
+  seed_transcript; start_stub; memory_block blockbank
+  run env -u TENANT_HOME -u TENANT_BANK -u TRANSCRIPT_DIR -u HINDSIGHT_API_URL -u HINDSIGHT_API_TENANT_API_KEY \
+      CLAUDE_CODE_SESSION_ID=session-a bash "$CLOSE"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^POST /v1/default/banks/blockbank/memories' "$BATS_TEST_TMPDIR/requests.log"
+  case "$output" in *"close complete"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "close with neither a memory: block nor the variables dies naming memory: and the README section" {
+  seed_transcript
+  run env -u TENANT_HOME -u TENANT_BANK -u TRANSCRIPT_DIR -u HINDSIGHT_API_URL CLAUDE_CODE_SESSION_ID=session-a bash "$CLOSE"
+  [ "$status" -ne 0 ]
+  case "$output" in *"memory.bank"*"README"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "an environment variable overrides the memory: block's field for close" {
+  seed_transcript; start_stub; memory_block blockbank
+  run env -u TENANT_HOME -u TRANSCRIPT_DIR -u HINDSIGHT_API_URL -u HINDSIGHT_API_TENANT_API_KEY \
+      TENANT_BANK=envbank CLAUDE_CODE_SESSION_ID=session-a bash "$CLOSE"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^POST /v1/default/banks/envbank/memories' "$BATS_TEST_TMPDIR/requests.log"
+  run grep -q 'blockbank' "$BATS_TEST_TMPDIR/requests.log"; [ "$status" -ne 0 ]
 }

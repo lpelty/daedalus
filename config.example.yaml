@@ -107,3 +107,23 @@ leases:
   # "quiet" (a live terminal the operator left open). Never swept without
   # --force. An integer with an m, h or d suffix; default 4h.
   stale_after: 4h
+
+# memory:
+#   # Optional — episodic capture into a Hindsight bank. THE source for
+#   # capture's configuration (core/close.sh, the Stop and SessionEnd hooks);
+#   # an environment variable of the same meaning (TENANT_BANK,
+#   # HINDSIGHT_API_URL, ...) overrides one field. Shipped commented out:
+#   # a block turns on a capture at every Stop, so add it once a server runs.
+#   bank: daedalus
+#   api_url: http://127.0.0.1:8888
+#   # The REST API key, in a file under this home, mode 0600. Never the key
+#   # itself here, and never on a hook command line (visible to ps).
+#   api_key_file: state/hindsight/api-key
+#   # Seconds between captures of one transcript at Stop.
+#   capture_interval: 120
+#   # Optional. Default: $CLAUDE_CONFIG_DIR/projects/<this home's resolved
+#   # path, every character but letters and digits as ->.
+#   # transcript_dir: /path/to/transcripts
+#   # Optional turn labels; default User / Assistant.
+#   # user_label: OPERATOR
+#   # assistant_label: Daedalus

@@ -12,11 +12,13 @@
 # the session went unrecorded is worse than no close at all.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-for v in TENANT_HOME TENANT_BANK TRANSCRIPT_DIR; do
-  # bash 3.2 supports ${!v} indirect expansion — verified on the target
-  # shell (GNU bash 3.2.57, arm64-apple-darwin25), so no eval is needed.
-  [ -n "${!v:-}" ] || die "episodic capture needs $v — see the capture section of README.md"
-done
+# Capture's configuration (spec §4.7): the memory: block in config.yaml, each
+# field overridable by an environment variable of the same meaning. A Bash
+# tool carries none of those variables, which is why close.sh from a session
+# used to die here unless the operator had exported them. memory_env's own
+# sentence names what is missing; this line says what did not happen.
+env_lines="$(memory_env)" || die "episodic capture is not configured — nothing was flushed"
+eval "$env_lines"
 
 commit=0
 case "${1:-}" in

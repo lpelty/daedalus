@@ -253,3 +253,115 @@ EOF
   sed -i '' 's#  dir: other#  dir: a/b#' "$TESTCFG"
   run target_name; [ "$status" -ne 0 ]; case "$output" in *"must be a single directory name"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- memory: block and memory_env (spec §4.7 "one place", §8.1) --------------
+clear_mem_env() {
+  unset TENANT_HOME TENANT_BANK HINDSIGHT_API_URL TRANSCRIPT_DIR CAPTURE_INTERVAL \
+        HINDSIGHT_API_TENANT_API_KEY TENANT_USER_LABEL TENANT_ASSISTANT_LABEL
+}
+
+@test "memory_env: no memory: block and no TENANT_BANK -> returns 1, prints no export, and names memory.bank and TENANT_BANK" {
+  clear_mem_env
+  run memory_env
+  [ "$status" -eq 1 ]
+  case "$output" in *"memory.bank"*"TENANT_BANK"*"README"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"export "*) echo "printed exports: $output"; return 1 ;; *) : ;; esac
+  run memory_configured; [ "$status" -ne 0 ]
+}
+
+@test "memory_env: the memory: block is the source — every field exported, TENANT_HOME is the Daedalus home, no key when none is configured" {
+  clear_mem_env
+  cat >> "$TESTCFG" <<'EOF'
+memory:
+  bank: testbank
+  api_url: http://127.0.0.1:9
+  capture_interval: 90
+  transcript_dir: /tmp/transcripts-x
+  user_label: OPERATOR
+  assistant_label: Daedalus
+EOF
+  run memory_configured; [ "$status" -eq 0 ]
+  run memory_env; [ "$status" -eq 0 ]
+  eval "$output"
+  [ "$TENANT_BANK" = testbank ]; [ "$HINDSIGHT_API_URL" = http://127.0.0.1:9 ]; [ "$CAPTURE_INTERVAL" = 90 ]
+  [ "$TRANSCRIPT_DIR" = /tmp/transcripts-x ]; [ "$TENANT_USER_LABEL" = OPERATOR ]; [ "$TENANT_ASSISTANT_LABEL" = Daedalus ]
+  [ "$TENANT_HOME" = "$DAEDALUS_HOME" ]
+  [ -z "${HINDSIGHT_API_TENANT_API_KEY:-}" ]
+}
+
+@test "memory_env: an environment variable overrides its field, field by field" {
+  clear_mem_env
+  printf 'memory:\n  bank: testbank\n  api_url: http://127.0.0.1:9\n  capture_interval: 90\n' >> "$TESTCFG"
+  export TENANT_BANK=envbank CAPTURE_INTERVAL=30
+  run memory_env; [ "$status" -eq 0 ]
+  clear_mem_env; eval "$output"
+  [ "$TENANT_BANK" = envbank ]; [ "$CAPTURE_INTERVAL" = 30 ]; [ "$HINDSIGHT_API_URL" = http://127.0.0.1:9 ]
+}
+
+@test "memory_env: defaults — 127.0.0.1:8888, 120 s, and a transcript directory derived from the home (every character but letters and digits as -) under CLAUDE_CONFIG_DIR" {
+  clear_mem_env
+  printf 'memory:\n  bank: b\n' >> "$TESTCFG"
+  export DAEDALUS_HOME=/srv/dae.home CLAUDE_CONFIG_DIR=/cfg
+  run memory_env; [ "$status" -eq 0 ]
+  eval "$output"
+  [ "$HINDSIGHT_API_URL" = http://127.0.0.1:8888 ]; [ "$CAPTURE_INTERVAL" = 120 ]
+  [ "$TRANSCRIPT_DIR" = /cfg/projects/-srv-dae-home ]; [ "$TENANT_HOME" = /srv/dae.home ]
+}
+
+@test "memory_env: the derived transcript directory follows Claude Code's rule on the physical path — every character but letters and digits becomes -" {
+  clear_mem_env
+  printf 'memory:\n  bank: b\n' >> "$TESTCFG"
+  H="$BATS_TEST_TMPDIR/my_home.d"; mkdir -p "$H"
+  export DAEDALUS_HOME="$H" CLAUDE_CONFIG_DIR=/cfg
+  run memory_env; [ "$status" -eq 0 ]
+  eval "$output"
+  # An independent spelling of the rule (sed, not the implementation's), on
+  # the resolved path: the bats temp dir sits behind /var -> /private/var.
+  want="/cfg/projects/$(cd "$H" && pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
+  [ "$TRANSCRIPT_DIR" = "$want" ] || { echo "$TRANSCRIPT_DIR != $want"; return 1; }
+  case "$TRANSCRIPT_DIR" in */projects/*_*|*/projects/*.*) echo "kept punctuation: $TRANSCRIPT_DIR"; return 1 ;; *) : ;; esac
+}
+
+@test "memory_env: capture_interval must be whole seconds > 0" {
+  clear_mem_env
+  printf 'memory:\n  bank: b\n  capture_interval: 2m\n' >> "$TESTCFG"
+  run memory_env; [ "$status" -eq 1 ]
+  case "$output" in *"memory.capture_interval must be a whole number of seconds"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "memory_env: api_key_file is read from under the home when 0600; refused when others can read it, when absolute, with .., or missing" {
+  clear_mem_env
+  H="$BATS_TEST_TMPDIR/h"; mkdir -p "$H/state/hindsight"
+  printf 'not-a-real-key\n' > "$H/state/hindsight/api-key"; chmod 600 "$H/state/hindsight/api-key"
+  printf 'memory:\n  bank: b\n  api_key_file: state/hindsight/api-key\n' >> "$TESTCFG"
+  export DAEDALUS_HOME="$H"
+  run memory_env; [ "$status" -eq 0 ]
+  eval "$output"; [ "$HINDSIGHT_API_TENANT_API_KEY" = not-a-real-key ]; unset HINDSIGHT_API_TENANT_API_KEY
+  chmod 644 "$H/state/hindsight/api-key"
+  run memory_env; [ "$status" -eq 1 ]
+  case "$output" in *"memory.api_key_file state/hindsight/api-key is readable by others (mode 644); run chmod 600"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *not-a-real-key*) echo "the key leaked into a message: $output"; return 1 ;; *) : ;; esac
+  for bad in /etc/key ../key state/../../key; do
+    sed -i '' "s#^  api_key_file: .*#  api_key_file: $bad#" "$TESTCFG"
+    run memory_env; [ "$status" -eq 1 ]
+    case "$output" in *"must be a path under the Daedalus home"*) : ;; *) echo "$bad: $output"; return 1 ;; esac
+  done
+  sed -i '' 's#^  api_key_file: .*#  api_key_file: state/none#' "$TESTCFG"
+  run memory_env; [ "$status" -eq 1 ]
+  case "$output" in *"memory.api_key_file state/none does not exist"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "config.example.yaml ships a memory: block commented out, and memory_env reads it once uncommented" {
+  clear_mem_env
+  ex="$DAEDALUS_HOME/config.example.yaml"
+  grep -q '^# memory:' "$ex"
+  run grep -q '^memory:' "$ex"; [ "$status" -ne 0 ]
+  { cat "$TESTCFG"; sed -n '/^# memory:/,/^$/p' "$ex" | sed 's/^# //'; } > "$BATS_TEST_TMPDIR/c2.yaml"
+  H="$BATS_TEST_TMPDIR/h2"; mkdir -p "$H/state/hindsight"
+  printf 'k\n' > "$H/state/hindsight/api-key"; chmod 600 "$H/state/hindsight/api-key"
+  export DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c2.yaml" DAEDALUS_HOME="$H"
+  run memory_env; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  eval "$output"
+  [ "$TENANT_BANK" = daedalus ]; [ "$CAPTURE_INTERVAL" = 120 ]; [ "$HINDSIGHT_API_URL" = http://127.0.0.1:8888 ]
+  [ "$HINDSIGHT_API_TENANT_API_KEY" = k ]
+}
