@@ -343,8 +343,7 @@ def distribution_state(root: Path) -> Tuple[str, str]:
     top = integrity_git(root, "rev-parse", "--is-inside-work-tree", "--show-prefix")
     if top.returncode != 0 or top.stdout.decode("utf-8", "replace").strip() != "true":
         return "unknown", "%s is not the root of a git checkout" % root
-    fmt = integrity_git(root, "rev-parse", "--show-object-format")
-    algo = fmt.stdout.decode().strip() if fmt.returncode == 0 and fmt.stdout.strip() else "sha1"
+    algo = object_format(root)
     if algo not in ("sha1", "sha256"):
         return "unknown", "unsupported git object format %s in %s" % (algo, root)
     ls = integrity_git(root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", *DIST_PATHS)
@@ -391,6 +390,21 @@ def distribution_state(root: Path) -> Tuple[str, str]:
     return "modified", shown + (" and %d more" % (len(changed) - 10) if len(changed) > 10 else "")
 
 
+def object_format(root: Path) -> str:
+    fmt = integrity_git(root, "rev-parse", "--show-object-format")
+    return fmt.stdout.decode().strip() if fmt.returncode == 0 and fmt.stdout.strip() else "sha1"
+
+
+def committed_id(root: Path, spec: str) -> Optional[str]:
+    p = integrity_git(root, "rev-parse", spec)
+    return p.stdout.decode().strip() if p.returncode == 0 else None
+
+
+def committed_dist(root: Path) -> Dict[str, Optional[str]]:
+    return {"core_tree": committed_id(root, "HEAD:core"),
+            "charter_sha": committed_id(root, "HEAD:core/agents/refuter.md")}
+
+
 def require_clean_distribution(root: Path) -> Dict[str, Optional[str]]:
     state, detail = distribution_state(root)
     if state == "modified":
@@ -398,11 +412,24 @@ def require_clean_distribution(root: Path) -> Dict[str, Optional[str]]:
                       "Nothing was launched." % detail)
     if state == "unknown":
         raise Refusal("Cannot tell whether distribution code is modified: %s. Nothing was launched." % detail)
+    return committed_dist(root)
 
-    def committed(spec: str) -> Optional[str]:
-        p = integrity_git(root, "rev-parse", spec)
-        return p.stdout.decode().strip() if p.returncode == 0 else None
-    return {"core_tree": committed("HEAD:core"), "charter_sha": committed("HEAD:core/agents/refuter.md")}
+
+def still_clean(root: Path, dist: Dict[str, Optional[str]]) -> Optional[str]:
+    """The integrity check again, after the reviewer ran and before its answer
+    counts (spec §6.1): None when distribution code is still the committed code
+    checked before the launch, the reason otherwise. The fingerprint and the
+    review take minutes; a change made meanwhile, whoever made it, means the
+    reviewer that ran cannot be shown to be the one the verdict names."""
+    state, detail = distribution_state(root)
+    tail = "the reviewer that ran cannot be shown to be the committed one. No answer is certified and no verdict was written."
+    if state == "modified":
+        return "Distribution code is modified (%s) after the review started; %s" % (detail, tail)
+    if state == "unknown":
+        return "Cannot tell whether distribution code was modified during the review: %s; %s" % (detail, tail)
+    if committed_dist(root) != dist:
+        return "The committed distribution code changed during the review (core/ or the charter at HEAD); %s" % tail
+    return None
 
 
 # --- who is asking ---------------------------------------------------------------
@@ -691,14 +718,49 @@ def launch_agent(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, re
             "settings": s, "cleanup": []}
 
 
-def render_charter(root: Path) -> Tuple[str, str]:
+def render_charter(root: Path, dist: Optional[Dict[str, Optional[str]]] = None) -> Tuple[str, str]:
     """(path of the rendered --agents file, agent name). The charter is
-    distribution code under core/ (never .claude/agents/, a write surface)."""
+    distribution code under core/ (never .claude/agents/, a write surface).
+
+    With dist (require_clean_distribution's answer) this is the render that
+    runs: the charter and its renderer are each read once, their bytes checked
+    against the committed blobs dist names (the charter's charter_sha, the
+    renderer's blob in core_tree), and those same bytes rendered from a private
+    copy. A change on disk after the integrity check — during the minutes the
+    fingerprint takes — never reaches the reviewer (spec §6.1: the reviewer
+    that ran is the reviewer that is tracked). Without dist it only proves the
+    charter renders, for the refusal order."""
     charter = root / "core" / "agents" / "refuter.md"
+    renderer = root / "core" / "agentdef.py"
     if not charter.is_file():
         raise Refusal("refuter charter missing at %s — cannot run the rung-2 refuter" % charter)
-    p = subprocess.run([sys.executable, str(root / "core" / "agentdef.py"), str(charter)],
-                       capture_output=True, text=True, timeout=20)
+    copy_dir = None
+    run_charter, run_renderer = charter, renderer
+    if dist is not None:
+        algo = object_format(root)
+        tree = dist.get("core_tree")
+        want = ((charter, dist.get("charter_sha")),
+                (renderer, committed_id(root, "%s:agentdef.py" % tree) if tree else None))
+        copy_dir = Path(tempfile.mkdtemp(prefix="daedalus-charter-"))
+        try:
+            copies = []
+            for src, oid in want:
+                data = src.read_bytes()
+                if not oid or blob_id(data, algo) != oid:
+                    raise Refusal("Distribution code is modified (%s changed after the integrity check); restore "
+                                  "it before a review runs. Nothing was launched." % src.relative_to(root))
+                (copy_dir / src.name).write_bytes(data)
+                copies.append(copy_dir / src.name)
+        except BaseException:
+            subprocess.run(["rm", "-rf", str(copy_dir)])
+            raise
+        run_charter, run_renderer = copies
+    try:
+        p = subprocess.run([sys.executable, str(run_renderer), str(run_charter)],
+                           capture_output=True, text=True, timeout=20)
+    finally:
+        if copy_dir is not None:
+            subprocess.run(["rm", "-rf", str(copy_dir)])
     if p.returncode != 0:
         raise Refusal("refuter charter at %s does not render (python3 core/agentdef.py %s) — cannot run the "
                       "rung-2 refuter" % (charter, charter))
@@ -823,14 +885,22 @@ def prepare_refuter(root: Path, conf: Dict[str, str], args: argparse.Namespace, 
             "managed_claude_md": managed_claude_md()}
 
 
-def launch_refuter(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, request: bytes, resumed: bool) -> dict:
+def launch_refuter(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, request: bytes, resumed: bool,
+                   charter: Tuple[str, str], dist: Dict[str, Optional[str]]) -> dict:
     """No frame prompt: the charter is the whole system prompt and the request
     is the prompt file (spec §6.1). The full launch set is passed on every
     attempt, a resume included: a resumed session does not restore a CLI
-    --agents definition, --settings or (on Bedrock) the model."""
-    rs, problems = refuter_settings(conf)
-    first(problems)
-    agents, name = render_charter(root)
+    --agents definition, --settings or (on Bedrock) the model. charter is the
+    render made straight after the integrity check (render_charter with dist),
+    never a second read of the disk; dist is what attempt() checks again after
+    the call."""
+    agents, name = charter
+    try:
+        rs, problems = refuter_settings(conf)
+        first(problems)
+    except BaseException:
+        os.unlink(agents)
+        raise
     workdir = tempfile.mkdtemp(prefix="daedalus-refuter-")
     try:
         Path(workdir).resolve().relative_to(root)
@@ -849,7 +919,7 @@ def launch_refuter(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, 
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     return {"cmd": cmd, "cwd": Path(workdir), "timeout": rs["timeout"], "env": env, "output": "text",
             "stdin": request, "marker": None, "transcript": None, "settings": None,
-            "cleanup": [agents, workdir]}
+            "cleanup": [agents, workdir], "dist": dist}
 
 
 PREPARE = {"self": prepare_self, "agent": prepare_agent, "refuter": prepare_refuter}
@@ -1045,6 +1115,10 @@ def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
             else:
                 code = rc
             verdict_note = None
+            if produced and mode == "refuter":
+                verdict_note = still_clean(root, launch["dist"])
+                if verdict_note:
+                    code, produced = EXIT_REFUSED, False
             if produced and mode == "refuter" and rec.get("verdict_file") and resumed_by is None:
                 verdict_note = write_verdict(root, call_dir, rec, answer)
                 if verdict_note:
@@ -1196,6 +1270,19 @@ def new_call(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: d
         render_path, _ = render_charter(root)       # the charter's own refusals come first (v0.6.1 order)
         os.unlink(render_path)
     dist = require_clean_distribution(root)
+    # The charter that runs is rendered here, from the bytes the integrity
+    # check vouched for — not after the fingerprint (spec §6.1).
+    charter = render_charter(root, dist) if mode == "refuter" else None
+    try:
+        return new_call_checked(root, conf, args, view, mode, dist, charter)
+    except BaseException:
+        if charter and os.path.exists(charter[0]):
+            os.unlink(charter[0])
+        raise
+
+
+def new_call_checked(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dict, mode: str,
+                     dist: Dict[str, Optional[str]], charter: Optional[Tuple[str, str]]) -> int:
     request = read_request(args)
     if args.artifact_dir and not Path(args.artifact_dir).is_dir():
         raise Refusal("--artifact-dir is not a directory: %s" % args.artifact_dir)
@@ -1211,7 +1298,10 @@ def new_call(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: d
     need_claude(rec)
     base = root / "state" / "direct-calls"
     call_dir = base / call_id
-    launch = LAUNCH[mode](root, conf, rec, call_dir, request, False)
+    if mode == "refuter":
+        launch = launch_refuter(root, conf, rec, call_dir, request, False, charter, dist)
+    else:
+        launch = LAUNCH[mode](root, conf, rec, call_dir, request, False)
     base.mkdir(parents=True, exist_ok=True)
     os.chmod(base, 0o700)
     call_dir.mkdir(mode=0o700)
@@ -1282,7 +1372,7 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
         raise Refusal("call %s is a --callee %s call, which this build cannot resume" % (call_id, mode))
     if mode == "agent":
         recheck_agent(conf, rec)
-    require_clean_distribution(root)
+    dist = require_clean_distribution(root)
     request = read_request(args)
     with invocation_lock(call_dir, call_id):
         fresh = load()
@@ -1291,7 +1381,10 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
             raise Refusal("the receipt of call %s changed while this resume started; nothing was launched" % call_id)
         rec = fresh
         need_claude(rec)
-        launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
+        if mode == "refuter":
+            launch = launch_refuter(root, conf, rec, call_dir, request, True, render_charter(root, dist), dist)
+        else:
+            launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
         return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell",
                        resumer_phrase(view), locked=True)
 

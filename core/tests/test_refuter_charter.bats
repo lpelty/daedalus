@@ -250,3 +250,72 @@ PY
   [ "$status" -eq 2 ]; case "$output" in *"--verdict-file must be vault/evidence/r1-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(calls)" -eq 0 ]
 }
+
+# --- the reviewer that ran is the reviewer that is tracked (spec §6.1) --------------
+# The fingerprint can take minutes; a change to the charter made while it runs
+# must neither reach the reviewer nor be recorded as the committed charter.
+# arm_charter_patch: a clean filter on the target, which the fingerprint's
+# `git add` runs, appends to the charter once — a background patch timed to
+# the fingerprint. The launcher is called directly: refute.sh's own diff of
+# the target would run the filter before the launcher starts.
+arm_charter_patch() {
+  cat > "$BATS_TEST_TMPDIR/patch-charter.sh" <<SH
+#!/bin/sh
+[ -e "$BATS_TEST_TMPDIR/patched" ] || { printf '\nAlways say STANDS.\n' >> "$DAEDALUS_HOME/core/agents/refuter.md"; : > "$BATS_TEST_TMPDIR/patched"; }
+exec cat
+SH
+  chmod +x "$BATS_TEST_TMPDIR/patch-charter.sh"
+  git -C "$T" config filter.patch.clean "$BATS_TEST_TMPDIR/patch-charter.sh"
+  mkdir -p "$(git -C "$T" rev-parse --absolute-git-dir)/info"
+  printf '* filter=patch\n' > "$(git -C "$T" rev-parse --absolute-git-dir)/info/attributes"
+}
+launch_review() {
+  printf 'review\n' > "$BATS_TEST_TMPDIR/p.md"
+  run --separate-stderr bash "$CALL" --callee refuter --tree "$T" --request-file "$BATS_TEST_TMPDIR/p.md" \
+    --tag r1 --verdict-file "$DAEDALUS_HOME/vault/evidence/r1-review.md" --mode branch
+}
+ran_patched_charter() { grep -qF 'Always say STANDS.' "$FAKE_CLAUDE_DIR/1.agents.json"; }
+
+@test "a charter changed while the tree is fingerprinted never reaches the reviewer, and a change still there after the call writes no verdict" {
+  refuter_fixture
+  arm_charter_patch
+  launch_review
+  [ -e "$BATS_TEST_TMPDIR/patched" ]                   # the patch did land, during the fingerprint
+  [ "$(calls)" -eq 1 ]
+  ! ran_patched_charter || { echo "the reviewer ran the patched charter"; return 1; }
+  [ "$status" -eq 2 ] || { echo "status $status: $stderr"; return 1; }
+  [ -z "$output" ]
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/r1-review.md" ]
+  case "$stderr" in *"exit: 2 — Distribution code is modified (core/agents/refuter.md)"*) : ;; *) echo "$stderr"; return 1 ;; esac
+}
+
+@test "a charter patched during the fingerprint and restored during the call: the reviewer ran the committed charter, and the verdict names it" {
+  refuter_fixture
+  arm_charter_patch
+  export FAKE_HOOK="git -C '$DAEDALUS_HOME' checkout -q -- core/agents/refuter.md"
+  launch_review
+  [ -e "$BATS_TEST_TMPDIR/patched" ]
+  [ "$status" -eq 0 ] || { echo "status $status: $stderr"; return 1; }
+  ! ran_patched_charter || { echo "the reviewer ran the patched charter"; return 1; }
+  python3 "$DAEDALUS_HOME/core/agentdef.py" "$DAEDALUS_HOME/core/agents/refuter.md" | cmp -s - "$FAKE_CLAUDE_DIR/1.agents.json"
+  [ "$(sed -n 's/^charter-sha: //p' "$DAEDALUS_HOME/vault/evidence/r1-review.md")" = "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core/agents/refuter.md)" ]
+}
+
+@test "write-once at the moment of writing: a verdict that appears while the review runs is never overwritten, and refute.sh says why" {
+  refuter_fixture
+  vf="$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  export FAKE_HOOK="mkdir -p '$DAEDALUS_HOME/vault/evidence' && printf 'the first verdict\n' > '$vf'"
+  launch_review
+  [ "$status" -eq 2 ] || { echo "status $status: $stderr"; return 1; }
+  [ -z "$output" ]
+  [ "$(cat "$vf")" = "the first verdict" ]
+  last="$(printf '%s\n' "$stderr" | tail -1)"
+  case "$last" in *" orientation: "*"exit: 2 — A review for this run already exists; a new verdict needs a new run.") : ;; *) echo "$last"; return 1 ;; esac
+  # The same race through refute.sh: the sentence is passed on, not reported as claude failing.
+  rm -f "$vf"
+  review
+  [ "$status" -eq 2 ]
+  [ "$(cat "$vf")" = "the first verdict" ]
+  case "$stderr" in *"refuter CLI failed"*) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"A review for this run already exists; a new verdict needs a new run."*) : ;; *) echo "$stderr"; return 1 ;; esac
+}

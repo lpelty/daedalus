@@ -189,8 +189,11 @@ verdict_file="$ev/$run_id-review.md"
 # watchdog killed the reviewer. A refusal before launch (exit 2, no receipt
 # line) carries its own sentence — a missing or unrenderable charter,
 # modified distribution code, a review that already exists — and is passed on
-# as it is. Anything else is claude's own failure. All of them are exit 2
-# here: unknown is never STANDS.
+# as it is. So is a refusal after the review ran (exit 2, the sentence on the
+# orientation line after "exit: 2 — "): a verdict that appeared meanwhile
+# (write-once) or distribution code changed during the review. Anything else
+# is claude's own failure ("— failed: …"). All of them are exit 2 here:
+# unknown is never STANDS.
 launch_err="$(mktemp)"
 bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
   --tag "$run_id" --verdict-file "$verdict_file" --mode branch >/dev/null 2>"$launch_err"
@@ -201,6 +204,10 @@ if [ "$launch_rc" -ne 0 ]; then
     printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$(refute_timeout 2>/dev/null || printf '?')" >&2
   elif ! grep -q ' call [0-9a-f-]*.*; receipt ' "$launch_err"; then
     sed 's/^daedalus: //' "$launch_err" >&2
+  elif refusal="$(sed -n 's/^.* orientation: .*; exit: 2 — //p' "$launch_err" | grep -v '^failed: ' | head -1)" \
+       && [ -n "$refusal" ]; then
+    printf '%s — cannot certify the run; receipt: %s\n' "$refusal" \
+      "$(sed -n 's/^.*; receipt //p' "$launch_err" | head -1)" >&2
   else
     printf 'refuter CLI failed (exit %s, %s output) — cannot certify the run; receipt: %s\n' "$launch_rc" \
       "$(grep -q '(with output)' "$launch_err" && printf with || printf no)" \
