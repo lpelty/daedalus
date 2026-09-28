@@ -230,7 +230,7 @@ PY
   git -C "$DAEDALUS_HOME" add .gitignore
   mkdir -p "$DAEDALUS_HOME/core/agents" "$BATS_TEST_TMPDIR/bin"
   cp "$SRC/refute.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" \
-     "$SRC/call-agent.sh" "$SRC/call_agent.py" "$SRC/leaselib.py" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+     "$SRC/call-agent.sh" "$SRC/call_agent.py" "$SRC/distcheck.py" "$SRC/leaselib.py" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
   cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
   # The launcher that runs the review refuses while core/ differs from the
   # committed version (spec §6.1): commit the files this test just added.

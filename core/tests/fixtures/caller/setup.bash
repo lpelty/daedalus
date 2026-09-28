@@ -11,7 +11,7 @@ caller_fixture() {
   local src; src="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core/agents"
   # Whatever of the launcher's files this build has (later tasks add some).
-  for f in call-agent.sh call_agent.py agentdef.py fingerprint.sh doctor.sh refute.sh refute-pitfalls.py review-inputs.py; do
+  for f in call-agent.sh call_agent.py distcheck.py agentdef.py fingerprint.sh doctor.sh refute.sh refute-pitfalls.py review-inputs.py; do
     [ -f "$src/$f" ] && cp "$src/$f" "$DAEDALUS_HOME/core/"
   done
   cp "$src/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"

@@ -99,3 +99,27 @@ PY
   git -C "$DAEDALUS_HOME" update-index --skip-worktree core/agents/refuter.md
   refused core/agents/refuter.md
 }
+
+@test "the integrity check is the first distribution code a call runs: a modified lib.sh or verifylib.py that would leave a mark when run is refused before it runs" {
+  printf 'touch "%s/lib-ran"\n' "$BATS_TEST_TMPDIR" >> "$DAEDALUS_HOME/core/lib.sh"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *"Distribution code is modified (core/lib.sh); restore it"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$BATS_TEST_TMPDIR/lib-ran" ] || { echo "lib.sh ran before the integrity check"; return 1; }
+  git -C "$DAEDALUS_HOME" checkout -q -- core/lib.sh
+  printf '\nopen("%s/py-ran", "w").close()\n' "$BATS_TEST_TMPDIR" >> "$DAEDALUS_HOME/core/verifylib.py"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *"Distribution code is modified (core/verifylib.py); restore it"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$BATS_TEST_TMPDIR/py-ran" ] || { echo "verifylib.py was imported before the integrity check"; return 1; }
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "the checker is checked before it runs: a distcheck.py rewritten to pass everything is refused by git alone, and nothing after it runs" {
+  printf 'import sys\nsys.exit(0)\n' > "$DAEDALUS_HOME/core/distcheck.py"
+  printf 'touch "%s/lib-ran"\n' "$BATS_TEST_TMPDIR" >> "$DAEDALUS_HOME/core/lib.sh"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *"Distribution code is modified (core/distcheck.py); restore it"*"Nothing was launched."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$BATS_TEST_TMPDIR/lib-ran" ]; [ "$(calls)" -eq 0 ]
+}

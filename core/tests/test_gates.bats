@@ -41,7 +41,7 @@ EOF
 install_refuter() {
   mkdir -p "$DAEDALUS_HOME/core/agents"
   cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" \
-     "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/call-agent.sh" "$SRC/call_agent.py" "$DAEDALUS_HOME/core/"
+     "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/call-agent.sh" "$SRC/call_agent.py" "$SRC/distcheck.py" "$DAEDALUS_HOME/core/"
   cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
   printf 'target/\nvault/\nstate/\nworktrees/\nconfig.yaml\n__pycache__/\n*.pyc\n' > "$DAEDALUS_HOME/.gitignore"
   git init -q -b main "$DAEDALUS_HOME"
@@ -866,6 +866,7 @@ EOF
   git_target
   write_config "  - true" "  refute: true"
   rm "$DAEDALUS_HOME/core/agents/refuter.md"
+  commit_core   # committed: the integrity check runs first, so an uncommitted removal would be "modified"
   PATH="$BATS_TEST_TMPDIR/bin12:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
   case "$output" in *"charter missing"*) : ;; *) echo "expected the missing-charter reason; got: $output"; return 1 ;; esac
@@ -875,6 +876,7 @@ EOF
   [ ! -f "$BATS_TEST_TMPDIR/bin12/argv" ]
   # A charter that does not render is the same case.
   printf 'not an agent\n' > "$DAEDALUS_HOME/core/agents/refuter.md"
+  commit_core
   rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault/evidence"
   PATH="$BATS_TEST_TMPDIR/bin12:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -ne 0 ]
