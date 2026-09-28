@@ -308,9 +308,14 @@ def _proc_started(pid) -> int | None:
         return None
 
 
-def _my_claim() -> dict:
+def _my_claim(cfg: dict) -> dict:
+    """This run's claim. It carries the run's own ceiling: another run judges
+    it by that, not by its own settings -- a close with a raised
+    CAPTURE_VERIFY_TIMEOUT_SEC must not be cleared as overdue by a tick using
+    the default while it is still honestly polling."""
     pid = os.getpid()
-    return {"pid": pid, "proc_started": _proc_started(pid), "started": time.time()}
+    return {"pid": pid, "proc_started": _proc_started(pid), "started": time.time(),
+            "ceiling": _in_flight_ceiling(cfg)}
 
 
 def _is_mine(claim, me: dict) -> bool:
@@ -323,17 +328,26 @@ def _in_flight_ceiling(cfg: dict) -> int:
             + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC) + IN_FLIGHT_MARGIN_SEC)
 
 
+def _claim_ceiling(claim, cfg: dict) -> float:
+    """The ceiling `claim` is judged by: the one its run recorded, or -- for a
+    claim an older build wrote without one -- the observer's own."""
+    ceiling = claim.get("ceiling") if isinstance(claim, dict) else None
+    if isinstance(ceiling, (int, float)) and not isinstance(ceiling, bool) and ceiling > 0:
+        return ceiling
+    return _in_flight_ceiling(cfg)
+
+
 def _claim_live(claim, cfg: dict, now: float) -> bool:
     """Is the run that wrote `claim` still running? Never pid-only (spec §4.7,
     the pid-reuse hole §4.5 closes for leases): dead when the pid is gone, when
     the pid's start time is not the recorded one (a recycled pid), or when the
-    claim is older than the ceiling -- a tick killed at its hook timeout, or
+    claim is older than its ceiling (the one its run recorded) -- a tick killed at its hook timeout, or
     by sleep or shutdown, must not block every later capture of its
     transcript. A pid whose start time cannot be read is judged by pid and age."""
     if not isinstance(claim, dict):
         return False
     started = claim.get("started")
-    if not isinstance(started, (int, float)) or now - started > _in_flight_ceiling(cfg):
+    if not isinstance(started, (int, float)) or now - started > _claim_ceiling(claim, cfg):
         return False
     pid = claim.get("pid")
     if not _pid_alive(pid):
@@ -688,7 +702,7 @@ def _run_timeout(ctx: dict | None, cfg: dict, cap: int) -> int:
     (plan 2 Decision 3)."""
     if not ctx:
         return cap
-    left = ctx["me"]["started"] + _in_flight_ceiling(cfg) - 5 - time.time()
+    left = ctx["me"]["started"] + _claim_ceiling(ctx["me"], cfg) - 5 - time.time()
     return max(0, min(cap, int(left)))
 
 
@@ -712,7 +726,7 @@ def _claim_run(transcript: str, cfg: dict, throttle: int | None) -> tuple:
     the ledger entries this run will settle, save, and return ("claimed", ctx)."""
     th = cfg["tenant_home"]
     key = _transcript_key(transcript)
-    me = _my_claim()
+    me = _my_claim(cfg)
     now = me["started"]
     with _state_lock(th):
         state = _load_state(th)
@@ -768,7 +782,10 @@ def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None)
         print("capture: the new bytes end mid-line; the rest of the line is left for the next run")
         return True, None, None
     end = offset + cut + 1
-    new_lines = data[:cut + 1].decode("utf-8", errors="replace").splitlines()
+    # Newline bytes only: str.splitlines() also breaks on U+2028, U+2029, U+0085
+    # and other separators JSON leaves raw inside strings, which tore a pasted
+    # turn into undecodable fragments (review of Task 9).
+    new_lines = data[:cut + 1].decode("utf-8", errors="replace").split("\n")
 
     convo, unknown, total = _scan_transcript(new_lines, cfg["user_label"], cfg["assistant_label"])
     if unknown:
@@ -790,15 +807,22 @@ def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None)
               "context": f"session {sid} ({stamp}) part {i + 1}/{len(chunks)}",
               "document_id": f"{sid}-o{offset}-p{i:02d}"}
              for i, chunk in enumerate(chunks)]
+    # In both early returns below this run pushed nothing. The fast path (a
+    # tick, the session-end flush) is right to report success: the next run
+    # or the successor pushes the span. A close (verification on) is not: it
+    # promises the session was recorded, so it fails and says to close again
+    # (spec §4.7, PROP-002).
     if ctx is not None:
+        verifying = bool(cfg.get("verify_extraction"))
+        again = " — this close recorded nothing new; close again" if verifying else ""
         post_timeout = _run_timeout(ctx, cfg, 120)
         if post_timeout < 1:
-            print("capture: this run is out of time before its push; the next run pushes the span")
-            return True, None, None
+            print("capture: this run is out of time before its push; the next run pushes the span" + again)
+            return not verifying, None, None
         if not _still_claimed(ctx, cfg):
             print("capture: another run took over this transcript while this one worked (this run's claim "
-                  "was older than the in-flight ceiling); this run pushes nothing")
-            return True, None, None
+                  "was older than the in-flight ceiling); this run pushes nothing" + again)
+            return not verifying, None, None
     else:
         post_timeout = 120
     # async=true -> server queues extraction and returns 202 on ACCEPTANCE.
@@ -929,6 +953,13 @@ def _capture_path(transcript: str, cfg: dict):
     status, info = _claim_run(transcript, cfg, None)
     if status == "busy":
         started = time.strftime("%H:%M", time.localtime(info.get("started") or 0))
+        if cfg.get("verify_extraction"):
+            # A close must not report "close complete" while another run still
+            # holds this transcript: that run's span is at best queued, not
+            # confirmed (PROP-002).
+            print(f"capture: a capture of this transcript is in flight (pid {info.get('pid')}, "
+                  f"started {started}); this close recorded nothing — close again in a minute")
+            return False
         print(f"capture: a capture of this transcript is in flight (pid {info.get('pid')}, "
               f"started {started}) — skipping")
         return True
@@ -947,7 +978,7 @@ def _settle_ledger(cfg: dict) -> None:
     """Settle the ledger when there is no transcript to push (the one named
     does not exist yet): the same three sections, without an in_flight claim."""
     th = cfg["tenant_home"]
-    me = _my_claim()
+    me = _my_claim(cfg)
     with _state_lock(th):
         state = _load_state(th)
         snapshot = _claim_pending_locked(state, me, cfg, me["started"])

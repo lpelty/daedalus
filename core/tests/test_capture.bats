@@ -1188,3 +1188,158 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(post_count)" -eq 1 ]
 }
+
+# Review of Task 9: the two guards past the time limit (the claim re-check just
+# before the POST, and section (c)'s refusal) are reached only when a successor
+# takes the claim while this run's own clock still says it has time -- the
+# laptop slept mid-run, or a response outlasted its socket timeout.
+@test "a run whose claim a successor took, while its own time limit still allows the POST, pushes nothing and records nothing: the claim is re-checked just before the POST" {
+  start_op_stub "running"
+  run python3 - "$ROOT/core" "$TRANSCRIPT" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+t = sys.argv[2]
+status, ctx = capture._claim_run(t, cfg, None)
+assert status == "claimed", status
+with capture._state_lock(cfg["tenant_home"]):               # a successor's claim, taken after a sleep
+    s = capture._load_state(cfg["tenant_home"])
+    s["transcripts"][ctx["key"]]["in_flight"] = {"offset": 0, "pid": 1, "proc_started": 1,
+                                                 "started": ctx["me"]["started"] + 1}
+    capture._save_state(cfg["tenant_home"], s)
+assert capture._run_timeout(ctx, cfg, 120) >= 1              # this run's own clock allows the POST
+ok, entry, advance_to = capture._push_span(t, ctx["offset"], cfg, ctx)
+assert (ok, entry, advance_to) == (True, None, None), (ok, entry, advance_to)
+capture._finish_run(ctx, cfg, [], entry, advance_to, t)
+state = json.load(open(capture._offsets_path(cfg["tenant_home"])))
+assert state["pending"] == [], state["pending"]
+assert state["offsets"] == {}, state["offsets"]
+assert state["transcripts"][ctx["key"]]["in_flight"]["pid"] == 1, "the successor's claim was touched"
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(post_count)" -eq 0 ]
+}
+
+@test "a run whose claim a successor took after its POST records no pending entry and does not advance the offset (section (c))" {
+  start_op_stub "running"
+  run python3 - "$ROOT/core" "$TRANSCRIPT" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+t = sys.argv[2]
+status, ctx = capture._claim_run(t, cfg, None)
+assert status == "claimed", status
+ok, entry, advance_to = capture._push_span(t, ctx["offset"], cfg, ctx)
+assert ok and entry is not None and advance_to, (ok, entry, advance_to)
+with capture._state_lock(cfg["tenant_home"]):               # taken over between the POST and section (c)
+    s = capture._load_state(cfg["tenant_home"])
+    s["transcripts"][ctx["key"]]["in_flight"] = {"offset": 0, "pid": 1, "proc_started": 1,
+                                                 "started": ctx["me"]["started"] + 1}
+    capture._save_state(cfg["tenant_home"], s)
+capture._finish_run(ctx, cfg, [], entry, advance_to, t)
+state = json.load(open(capture._offsets_path(cfg["tenant_home"])))
+assert state["pending"] == [], state["pending"]
+assert state["offsets"] == {}, state["offsets"]
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(post_count)" -eq 1 ]
+}
+
+@test "with verification on (a close), a run that pushes nothing because it lost its claim or ran out of time fails, so close.sh never says close complete over it" {
+  start_op_stub "completed"
+  CAPTURE_VERIFY_EXTRACTION=1 CAPTURE_VERIFY_TIMEOUT_SEC=5 run python3 - "$ROOT/core" "$TRANSCRIPT" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+t = sys.argv[2]
+
+def take_over(*a, **k):                                     # a successor takes the claim mid-run
+    with capture._state_lock(cfg["tenant_home"]):
+        s = capture._load_state(cfg["tenant_home"])
+        key = capture._transcript_key(t)
+        mine = s["transcripts"][key]["in_flight"]
+        s["transcripts"][key]["in_flight"] = {"offset": 0, "pid": 1, "proc_started": 1,
+                                              "started": mine["started"] + 1}
+        capture._save_state(cfg["tenant_home"], s)
+    return []
+real = capture._reconcile_snapshot
+capture._reconcile_snapshot = take_over
+try:
+    capture.main(["capture", "--transcript", t])
+    raise AssertionError("a close that pushed nothing exited 0")
+except SystemExit as e:
+    assert e.code == 1, e.code
+capture._reconcile_snapshot = real
+
+with capture._state_lock(cfg["tenant_home"]):               # clear the successor, then: out of time
+    s = capture._load_state(cfg["tenant_home"])
+    s["transcripts"] = {}
+    capture._save_state(cfg["tenant_home"], s)
+status, ctx = capture._claim_run(t, cfg, None)
+assert status == "claimed", status
+ctx["me"]["started"] -= 100000
+ok, entry, advance_to = capture._push_span(t, ctx["offset"], cfg, ctx)
+assert ok is False and advance_to is None, (ok, entry, advance_to)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"close again"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 0 ]; [ "$(stored_offset)" = "0" ]
+}
+
+@test "with verification on (a close), a capture of this transcript already in flight fails with a line to close again; the fast path still skips with exit 0" {
+  start_op_stub "running"
+  sleep 300 & sp=$!
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(date +%s)"
+  run python3 "$CAPTURE" capture
+  st_fast=$status; out_fast="$output"
+  CAPTURE_VERIFY_EXTRACTION=1 CAPTURE_VERIFY_TIMEOUT_SEC=5 run python3 "$CAPTURE" capture
+  kill "$sp"
+  [ "$st_fast" -eq 0 ] || { echo "$out_fast"; return 1; }
+  [ "$status" -ne 0 ]
+  case "$output" in *"in flight (pid $sp"*"close again"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 0 ]
+}
+
+@test "a claim is judged by the ceiling its own run recorded: a close's longer verify timeout keeps its claim live for a tick using the default" {
+  start_op_stub "running"
+  sleep 300 & sp=$!
+  mkdir -p "$(dirname "$OFFSETS")"
+  python3 - "$OFFSETS" "$TRANSCRIPT" "$sp" "$(ps_ms "$sp")" <<'PY'
+import json, os, sys, time, pathlib
+p = pathlib.Path(sys.argv[1])
+d = {"offsets": {}, "pending": [], "transcripts": {os.path.realpath(sys.argv[2]): {"in_flight": {
+    "offset": 0, "pid": int(sys.argv[3]), "proc_started": int(sys.argv[4]),
+    "started": time.time() - 600, "ceiling": 2000}}}}      # 600 s old: past the default 300 s, inside its own 2000 s
+p.write_text(json.dumps(d))
+PY
+  run python3 "$CAPTURE" capture
+  kill "$sp"
+  case "$output" in *"in flight (pid $sp"*"skipping"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 0 ]
+  run python3 - "$ROOT/core" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+assert capture._my_claim(cfg)["ceiling"] == capture._in_flight_ceiling(cfg)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a turn holding a Unicode line separator (U+2028) is captured whole: only newline bytes end a transcript line" {
+  start_op_stub "running"
+  python3 - "$TRANSCRIPT" <<'PY'
+import json, sys
+line = json.dumps({"type": "user", "message": {"role": "user",
+                   "content": "pasted para one para two: THE DECISION"}}, ensure_ascii=False)
+open(sys.argv[1], "w", encoding="utf-8").write(line + "\n")
+PY
+  run python3 "$CAPTURE" capture; [ "$status" -eq 0 ]
+  case "$output" in *"parse failure"*) echo "$output"; return 1 ;; *) : ;; esac
+  grep -q 'THE DECISION' "$STUB_POSTS"
+  size=$(python3 -c "import os,sys; print(os.path.getsize(sys.argv[1]))" "$TRANSCRIPT")
+  [ "$(stored_offset)" = "$size" ]
+}
