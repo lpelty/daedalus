@@ -15,12 +15,19 @@ teardown() { teardown_live; }
   case "$output" in *"unrecognized arguments: --callee-home"*) : ;; *) echo "$output"; return 1 ;; esac
   run bash "$CALL" --callee agent --callee-name Someone "hello"
   [ "$status" -eq 2 ]
+  # exit 2 alone is what an unconfigured --callee agent returns anyway: pin the reason
+  case "$output" in *"unrecognized arguments: --callee-name"*) : ;; *) echo "$output"; return 1 ;; esac
   run bash "$CALL" --callee nobody "hello"
   [ "$status" -eq 2 ]
   [ "$(calls)" -eq 0 ]
 }
 
 @test "doctor names every invalid direct_call value as MISSING and turns red" {
+  # The fixture's doctor is already red for unrelated reasons, so "non-zero"
+  # proves nothing: pin the problem count the block adds.
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  base="$(printf '%s\n' "$output" | sed -n 's/.* \([0-9][0-9]*\) problem(s) found.*/\1/p')"
+  [ -n "$base" ] || { echo "no problem count before the block: $output"; return 1; }
   direct_call "callers: Peer" "timeout: ten" "tools: Read,Bash" "max_turns: 0" "capture: maybe"
   run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
   [ "$status" -eq 0 ]
@@ -29,6 +36,8 @@ teardown() { teardown_live; }
   done
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -ne 0 ]
+  after="$(printf '%s\n' "$output" | sed -n 's/.* \([0-9][0-9]*\) problem(s) found.*/\1/p')"
+  [ "$after" -eq $((base + 4)) ] || { echo "problems $base -> $after, want +4 (tools, max_turns, timeout, capture): $output"; return 1; }
   case "$output" in *"MISSING  direct call: direct_call.timeout must be a whole number from 1 to 9999999 (got: ten)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
