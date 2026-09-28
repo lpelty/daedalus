@@ -137,6 +137,26 @@ claim() {  # claim <file> <status> <updated-by> <created> [evidence-run]
   case "$output" in *"PROP-1.md"*) : ;; *) echo "not listed: $output"; return 1 ;; esac
 }
 
+@test "a claim citing a promotion's gate run (tree promote-scratch, reviewer deferred to promote) is refused at Stop and listed by --doctor, even when the merged tree's fingerprint equals the target's; the window's own run passes" {
+  # A promotion whose trunk has not moved: the merged scratch holds exactly the target's content,
+  # so its fingerprint (independent of HEAD) matches, and gates.sh --promote wrote PASS with no review.
+  PID=01-20260928-120000-abc; PT="$DAEDALUS_HOME/state/promote/$PID/thing"
+  mkdir -p "$(dirname "$PT")"; git clone -q "$T" "$PT"
+  printf '{"promote_id":"%s","lease":"01","repo":"thing","trunk_sha_at_prepare":"%s","merge_sha":"%s","nested":{}}' \
+    "$PID" "$(git -C "$T" rev-parse HEAD)" "$(git -C "$PT" rev-parse HEAD)" > "$DAEDALUS_HOME/state/promote/$PID/context.json"
+  pid_run="$(DAEDALUS_TARGET_OVERRIDE="$PT" bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID" | tail -1)"
+  own="$(gate)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["fingerprint"])' "$DAEDALUS_HOME/state/evidence/$pid_run/run.json")" = \
+    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["fingerprint"])' "$DAEDALUS_HOME/state/evidence/$own/run.json")" ]
+  claim PROP-1.md IMPLEMENTED daedalus 2026-12-01 "$pid_run"
+  run stop; [ "$status" -eq 2 ]
+  case "$output" in *"PROP-1.md cites a promotion's gate run ($pid_run); a window's claim needs its own core/gates.sh run"*) : ;; *) echo "wrong reason: $output"; return 1 ;; esac
+  run python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor
+  case "$output" in *"PROP-1.md cites a promotion's gate run"*) : ;; *) echo "not listed: $output"; return 1 ;; esac
+  claim PROP-1.md IMPLEMENTED daedalus 2026-12-01 "$own"
+  run stop; [ "$status" -eq 0 ] || { echo "positive control: $output"; return 1; }
+}
+
 # --- Claim attribution (spec §4.9) and the vault index.lock (spec §3.3) ------
 
 # ps_ms <pid> — the epoch-millisecond start time of a live pid, as leaselib.proc_started_of computes it.

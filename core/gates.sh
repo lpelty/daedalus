@@ -34,6 +34,28 @@ if [ -n "$promote_id" ]; then
     "$DAEDALUS_HOME/state/promote/$promote_id/"*|"$home_p/state/promote/$promote_id/"*) : ;;
     *) die "--promote $promote_id runs on the merged tree: DAEDALUS_TARGET_OVERRIDE must point under state/promote/$promote_id/" ;;
   esac
+  # The promotion record is read here, before any run exists: a context.json the
+  # run.json writers below cannot use would otherwise leave a PASS-labelled vault
+  # summary and a printed run-id with no run.json behind them.
+  ctx_msg="$(python3 - "$promo_ctx" "$promote_id" <<'PY'
+import json, re, sys
+path, pid = sys.argv[1:3]
+where = "state/promote/%s/context.json" % pid
+try:
+    c = json.load(open(path))
+except (OSError, ValueError) as e:
+    print("%s cannot be read as JSON (%s)" % (where, e)); sys.exit(1)
+if not isinstance(c, dict):
+    print("%s is not a JSON object" % where); sys.exit(1)
+if c.get("promote_id") != pid:
+    print("%s names promotion %s, not %s" % (where, c.get("promote_id"), pid)); sys.exit(1)
+if not (isinstance(c.get("lease"), str) and re.fullmatch(r"[0-9]{2}", c["lease"])):
+    print("%s names no two-digit window number as its lease (got %r)" % (where, c.get("lease"))); sys.exit(1)
+for k in ("merge_sha", "trunk_sha_at_prepare"):
+    if not (isinstance(c.get(k), str) and c[k].strip()):
+        print("%s has no %s" % (where, k)); sys.exit(1)
+PY
+)" || die "--promote $promote_id: ${ctx_msg:-the promotion record cannot be checked} — only core/promote.sh writes it; run promote again"
 fi
 
 # The gate definition must live inside this deployment. A config elsewhere
@@ -135,6 +157,7 @@ if ctx:
 with open(out, "w") as fh:
     json.dump(rec, fh, indent=2)
 PY
+[ "$?" -eq 0 ] || die "cannot write run.json for run $run_id"
 python3 "$DAEDALUS_HOME/core/manifest-append.py" "$ev_state/run.json" "$ev_vault/$run_id.md" || die "cannot append to the evidence manifest"
 
 fingerprint() {
@@ -286,7 +309,14 @@ rec["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 with open(out, "w") as fh:
     json.dump(rec, fh, indent=2)
 PY
+rj=$?
 rm -f "$rows_tmp"
+if [ "$rj" -ne 0 ]; then
+  # The vault summary was written above with the result; with no run.json behind
+  # it, it must not say PASS.
+  write_summary "$ev_vault/$run_id.md" INVALID
+  die "cannot write run.json for run $run_id — do not cite it"
+fi
 
 if [ "$failed" -ne 0 ]; then
   log "run-id: $run_id"

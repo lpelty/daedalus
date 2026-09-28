@@ -996,6 +996,32 @@ PY
   [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/evidence")" ]
 }
 
+@test "--promote with a context.json that will not parse, is not an object, names another promotion, names no two-digit window, or lacks a merge or trunk commit dies in plain language before any run exists — never a PASS with no run.json" {
+  write_config "  - true"
+  promote_run_fixture
+  ctx="$DAEDALUS_HOME/state/promote/$PID/context.json"; good="$(cat "$ctx")"
+  bad() {  # bad <context.json text> <expected words>
+    printf '%s' "$1" > "$ctx"
+    run env DAEDALUS_TARGET_OVERRIDE="$PT" bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+    [ "$status" -ne 0 ] || { echo "accepted: $1 -> $output"; return 1; }
+    case "$output" in *"$2"*) : ;; *) echo "wrong reason for $1: $output"; return 1 ;; esac
+    case "$output" in *"all gates passed"*|*Traceback*) echo "leaked: $output"; return 1 ;; esac
+    [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/evidence")" ] || { echo "a run exists after $1"; return 1; }
+    [ ! -d "$DAEDALUS_HOME/vault/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/vault/evidence")" ] || { echo "a vault summary exists after $1"; return 1; }
+  }
+  bad '{not json' "cannot be read as JSON"
+  bad '[]' "is not a JSON object"
+  bad "$(printf '%s' "$good" | sed 's/"promote_id":"[^"]*"/"promote_id":"02-other"/')" "names promotion 02-other, not $PID"
+  bad "$(printf '%s' "$good" | sed 's/"lease":"02"/"lease":"alias"/')" "no two-digit window number"
+  bad "$(printf '%s' "$good" | sed 's/"lease":"02"/"lease":2/')" "no two-digit window number"
+  bad "$(printf '%s' "$good" | sed 's/"merge_sha":"[^"]*"/"merge_sha":""/')" "no merge_sha"
+  bad "$(printf '%s' "$good" | sed 's/"trunk_sha_at_prepare":"[^"]*",//')" "no trunk_sha_at_prepare"
+  printf '%s' "$good" > "$ctx"
+  run env DAEDALUS_TARGET_OVERRIDE="$PT" bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "positive control failed: $output"; return 1; }
+  [ -f "$DAEDALUS_HOME/state/evidence/$(printf '%s\n' "$output" | tail -1)/run.json" ]
+}
+
 @test "refute.sh --verdict-of reads a review with the grammar the run uses: STANDS 0, REFUTED 1, no verdict line 2 — dressing allowed, an echoed instruction line matches neither" {
   cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
   vo() { run bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$1"; }

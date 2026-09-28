@@ -5,7 +5,8 @@ A claim is a vault document of Daedalus's, changed this session, carrying
 `status: IMPLEMENTED` or `kind: completion`, created after the deployment's
 first evidence. Each must cite an `evidence-run:` whose record says PASS,
 whose config hash matches the session's, and whose fingerprint matches the
-target now. Never exits early on `stop_hook_active`. Fails closed only when a
+target now. A promotion's gate run (tree promote-scratch) is promote's
+evidence and never stands behind a window's claim. Never exits early on `stop_hook_active`. Fails closed only when a
 claim exists and the evidence cannot be read. `--doctor` runs the same check
 over the whole vault and prints one line per problem.
 
@@ -52,6 +53,12 @@ def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], 
         if rec.get("result") != "PASS":
             logs = [g.get("log") for g in rec.get("gates", []) if g.get("exit") not in (0, None)]
             out.append("%s cites evidence-run %s, whose result is %s%s." % (p, rid, rec.get("result"), (" — see " + logs[0]) if logs else ""))
+            continue
+        # A promotion's gate run (gates.sh --promote) is PASS with its reviewer deferred to
+        # core/promote.sh, which never flips it; its merged tree can fingerprint exactly like a
+        # window's clean worktree. It is promote's evidence, never a window's claim.
+        if rec.get("tree") == "promote-scratch" or rec.get("refuter") == "deferred-to-promote" or rec.get("promote_id"):
+            out.append("%s cites a promotion's gate run (%s); a window's claim needs its own core/gates.sh run." % (p, rid))
             continue
         if not live:
             continue
