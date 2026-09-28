@@ -717,6 +717,20 @@ def _resolve_transcript(args: list[str], cfg: dict) -> tuple[str | None, str | N
 
 
 def cmd_capture(args: list[str], cfg: dict):
+    # Direct calls (spec §8.5): the launcher runs `claude -p` in this home, so
+    # this session's capture would record the call under the operator's label
+    # on the fast path. The launcher owns that capture — it re-captures with
+    # the caller's label and verified extraction — so when it sets
+    # CAPTURE_DEFER_TO_CALLER=1 in claude's environment (inherited by the Stop
+    # tick and the SessionEnd flush) capture stands down: no POST, offsets
+    # untouched, exit 0. Never set outside a launcher. Ported from the engine's
+    # hooks/capture.py. DIRECT_CALL_ID stands it down too: spec §8.5 makes it
+    # the one signal every hook of a called Daedalus keys on (a visitor). The
+    # launcher's own re-capture runs in the caller's environment, which
+    # carries neither.
+    if os.environ.get("CAPTURE_DEFER_TO_CALLER") == "1" or os.environ.get("DIRECT_CALL_ID"):
+        print("capture: deferred to caller (direct call) — no post, offset unchanged")
+        return True
     transcript, source = _resolve_transcript(args, cfg)
     if not transcript:
         print(REFUSE_GUESS)

@@ -963,3 +963,29 @@ PY
   case "$output" in *"this session's transcript is not at $TRANSCRIPT_DIR/no-such-session.jsonl"*"memory.transcript_dir"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(post_count)" -eq 0 ]
 }
+
+# --- a direct call's capture belongs to the caller (spec §4.7 (3), §8.5) ----
+@test "CAPTURE_DEFER_TO_CALLER=1: capture stands down — 'deferred to caller', no request reaches the server, offsets untouched" {
+  start_op_stub "running"
+  CAPTURE_DEFER_TO_CALLER=1 run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+  case "$output" in *"capture: deferred to caller (direct call) — no post, offset unchanged"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -s "$BATS_TEST_TMPDIR/requests.log" ]
+  [ ! -f "$OFFSETS" ]
+}
+
+@test "DIRECT_CALL_ID alone (a visitor, spec §8.5) also stands capture down: no request, offsets untouched" {
+  start_op_stub "running"
+  DIRECT_CALL_ID=call-1 run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+  case "$output" in *"capture: deferred to caller (direct call) — no post, offset unchanged"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -s "$BATS_TEST_TMPDIR/requests.log" ]
+  [ ! -f "$OFFSETS" ]
+}
+
+@test "CAPTURE_DEFER_TO_CALLER=1 stands down before naming a transcript: a visitor's hook with nothing to name exits 0, not the refusal" {
+  unset CLAUDE_CODE_SESSION_ID
+  CAPTURE_DEFER_TO_CALLER=1 run python3 "$CAPTURE" capture </dev/null
+  [ "$status" -eq 0 ]
+  case "$output" in *"deferred to caller"*) : ;; *) echo "$output"; return 1 ;; esac
+}
