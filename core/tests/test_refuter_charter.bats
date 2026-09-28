@@ -399,8 +399,20 @@ PY
   [ "$(calls)" -eq 0 ]
   grep -q '"pitfalls"' "$DAEDALUS_HOME/state/evidence/r1/run.json"             # pinned by the refused attempt
   git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
+  printf '\nEdited between the refused attempt and the retry.\n' >> "$DAEDALUS_HOME/vault/pitfalls/zz.md"
+  printf 'AC-2: added between the refused attempt and the retry.\n' >> "$DAEDALUS_HOME/vault/criteria-02.md"
   run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
   [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  grep -qF 'Edited between the refused attempt and the retry.' "$FAKE_CLAUDE_DIR/1.stdin"
+  grep -qF 'AC-2: added between the refused attempt and the retry.' "$FAKE_CLAUDE_DIR/1.stdin"
+  python3 - "$DAEDALUS_HOME/state/evidence/r1/run.json" "$DAEDALUS_HOME" <<'PY'
+import hashlib, json, sys
+r, home = json.load(open(sys.argv[1])), sys.argv[2]
+sha = lambda rel: hashlib.sha256(open(home + "/" + rel, "rb").read()).hexdigest()
+pins = {p["path"]: p["sha256"] for p in r["pitfalls"]}
+assert pins.get("vault/pitfalls/zz.md") == sha("vault/pitfalls/zz.md"), pins   # the retry's pins, not the refused attempt's
+assert r["criteria_sha"] == sha("vault/criteria-02.md"), r
+PY
   bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
   run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
   [ "$status" -eq 2 ]; case "$stderr" in *"already recorded and its review exists"*) : ;; *) echo "$stderr"; return 1 ;; esac
