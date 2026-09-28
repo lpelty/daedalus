@@ -34,6 +34,10 @@ import os
 import json
 import re
 import select
+import copy
+import fcntl
+import subprocess
+from contextlib import contextmanager
 import time
 import urllib.request
 import urllib.error
@@ -56,6 +60,21 @@ VERIFY_POLL_SEC = 2
 # this whole mechanism exists to make visible.
 MAX_PENDING_SPANS = 50
 
+# Spec §4.7 "Capture, incremental". A run claims its transcript (in_flight)
+# for as long as an honest run takes; a claim older than capture_interval +
+# the verify timeout + this margin is dead whatever its pid says.
+IN_FLIGHT_MARGIN_SEC = 60
+DEFAULT_CAPTURE_INTERVAL = 120
+# Settling earlier spans is time-boxed per run: against an unreachable server
+# every GET waits out its 15 s timeout, and the ledger holds up to 50 spans.
+# Entries not reached are kept for the next run.
+RECONCILE_BUDGET_SEC = 30
+
+
+def _env_secs(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    return int(raw) if raw.isdigit() and int(raw) > 0 else default
+
 
 def _require_env() -> dict:
     missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
@@ -76,6 +95,9 @@ def _require_env() -> dict:
         "verify_extraction": os.environ.get("CAPTURE_VERIFY_EXTRACTION") == "1",
         "verify_timeout": int(os.environ.get("CAPTURE_VERIFY_TIMEOUT_SEC",
                                              VERIFY_TIMEOUT_SEC)),
+        # Seconds between Stop-tick captures of one transcript (memory.capture_interval
+        # through lib.sh memory_env); also sizes the in-flight ceiling.
+        "capture_interval": _env_secs("CAPTURE_INTERVAL", DEFAULT_CAPTURE_INTERVAL),
     }
 
 
@@ -198,13 +220,18 @@ def _load_state(tenant_home: Path) -> dict:
     """Read the cursor state, tolerating a file written by an older build.
 
     A deployment that pulls this code has an existing offsets.json with only
-    an "offsets" key. Missing keys are filled in rather than assumed, so the
-    first run after an upgrade reconciles an empty ledger instead of crashing
-    on its own state. Individual ledger entries are validated too, not just the
-    top-level keys -- see _clean_pending.
+    an "offsets" key (or "offsets" and "pending"). Missing keys are filled in
+    rather than assumed, so the first run after an upgrade reconciles an empty
+    ledger instead of crashing on its own state. Individual ledger entries are
+    validated too, not just the top-level keys -- see _clean_pending.
+
+    "transcripts" (spec §4.7) holds, per transcript key, the last_capture
+    stamp the Stop tick throttles on and the in_flight claim of a run that is
+    capturing it. It sits BESIDE "offsets", whose values stay plain integers,
+    so an older build reading this file still finds what it expects.
     """
     p = _offsets_path(tenant_home)
-    state = {"offsets": {}, "pending": []}
+    state = {"offsets": {}, "pending": [], "transcripts": {}}
     if p.exists():
         try:
             stored = json.loads(p.read_text() or "{}")
@@ -218,13 +245,126 @@ def _load_state(tenant_home: Path) -> dict:
             state["offsets"] = stored["offsets"]
         if isinstance(stored.get("pending"), list):
             state["pending"] = _clean_pending(stored["pending"])
+        if isinstance(stored.get("transcripts"), dict):
+            state["transcripts"] = {k: v for k, v in stored["transcripts"].items() if isinstance(v, dict)}
     return state
 
 
 def _save_state(tenant_home: Path, state: dict):
+    """tmp + os.replace, so a concurrent reader never sees a half-written file
+    (write_text truncates first: a load in that instant read '' and started
+    from empty state)."""
     p = _offsets_path(tenant_home)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(state, indent=2))
+    tmp = p.with_name("%s.tmp.%d" % (p.name, os.getpid()))
+    tmp.write_text(json.dumps(state, indent=2))
+    os.replace(str(tmp), str(p))
+
+
+@contextmanager
+def _state_lock(tenant_home: Path):
+    """The one lock over offsets.json (spec §4.7). Held for a load-modify-save of
+    local state only -- NEVER across a network call: a lock held through one
+    slow Hindsight round trip would queue every window's capture behind it.
+    Not re-entrant (flock belongs to the open file description): nothing
+    called under it takes it again."""
+    p = _offsets_path(tenant_home).with_name("offsets.json.lock")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(p), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _pid_alive(pid) -> bool:
+    """kill(pid, 0). EPERM means the process EXISTS (another user's, pid 1);
+    only ESRCH is dead -- leaselib.pid_alive's rule (spec §4.5), copied."""
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _proc_started(pid) -> int | None:
+    """Epoch milliseconds of pid's start from `ps -o lstart=` -- the parse
+    leaselib.proc_started_of uses (spec §4.5), copied because this module
+    imports nothing from core."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+    try:
+        return int(time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) * 1000)
+    except ValueError:
+        return None
+
+
+def _my_claim() -> dict:
+    pid = os.getpid()
+    return {"pid": pid, "proc_started": _proc_started(pid), "started": time.time()}
+
+
+def _is_mine(claim, me: dict) -> bool:
+    return (isinstance(claim, dict) and claim.get("pid") == me["pid"]
+            and claim.get("started") == me["started"])
+
+
+def _in_flight_ceiling(cfg: dict) -> int:
+    return (cfg.get("capture_interval", DEFAULT_CAPTURE_INTERVAL)
+            + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC) + IN_FLIGHT_MARGIN_SEC)
+
+
+def _claim_live(claim, cfg: dict, now: float) -> bool:
+    """Is the run that wrote `claim` still running? Never pid-only (spec §4.7,
+    the pid-reuse hole §4.5 closes for leases): dead when the pid is gone, when
+    the pid's start time is not the recorded one (a recycled pid), or when the
+    claim is older than the ceiling -- a tick killed at its hook timeout, or
+    by sleep or shutdown, must not block every later capture of its
+    transcript. A pid whose start time cannot be read is judged by pid and age."""
+    if not isinstance(claim, dict):
+        return False
+    started = claim.get("started")
+    if not isinstance(started, (int, float)) or now - started > _in_flight_ceiling(cfg):
+        return False
+    pid = claim.get("pid")
+    if not _pid_alive(pid):
+        return False
+    actual = _proc_started(pid)
+    if actual is None:
+        return True
+    try:
+        return abs(actual - int(claim.get("proc_started"))) <= 2000
+    except (TypeError, ValueError):
+        return False
+
+
+def _entry_id(entry: dict) -> tuple:
+    return (entry.get("operation_id"), entry.get("transcript"),
+            entry.get("offset_from"), entry.get("offset_to"))
+
+
+def _claim_pending_locked(state: dict, me: dict, cfg: dict, now: float) -> list:
+    """Caller holds the lock. Stamp every ledger entry no LIVE run is settling
+    with this run's claim and return deep copies of them: the snapshot section
+    (b) settles with no lock held. Without the claim two runs settle one entry
+    -- each GETs it, and on a failure each re-pushes it."""
+    snapshot = []
+    for entry in state["pending"]:
+        other = entry.get("claim")
+        if other is not None and not _is_mine(other, me) and _claim_live(other, cfg, now):
+            continue
+        entry["claim"] = me
+        snapshot.append(copy.deepcopy(entry))
+    return snapshot
 
 
 # --- transcript parsing ------------------------------------------------------
@@ -240,28 +380,69 @@ def _extract_text(message: dict) -> str:
     return ""
 
 
-def _transcript_to_convo(raw_lines: list[str], user_label: str = "User", assistant_label: str = "Assistant") -> str:
-    """Turn transcript .jsonl lines into '<user_label>:' / '<assistant_label>:' turns.
-    Tool calls and tool results are skipped — episodic memory wants the
-    reasoning and decisions, not raw tool dumps."""
+def _scan_transcript(raw_lines: list[str], user_label: str = "User",
+                     assistant_label: str = "Assistant") -> tuple:
+    """Turn transcript .jsonl lines into '<user_label>:' / '<assistant_label>:'
+    turns, and count the entries this build cannot read. Returns (convo,
+    unknown, total). Tool calls and tool results are skipped -- episodic
+    memory wants the reasoning and decisions, not raw tool dumps.
+
+    An entry is UNKNOWN (spec §10 A12: the transcript format is internal and
+    changes between versions) when it is not a JSON object, has no string
+    "type", or is a user/assistant entry whose "message" is not an object or
+    whose "content" is neither a string nor a list. Other types (summaries,
+    snapshots, system lines) are known, and skipped."""
     turns = []
+    unknown = total = 0
     for line in raw_lines:
         line = line.strip()
         if not line:
             continue
+        total += 1
         try:
             d = json.loads(line)
         except json.JSONDecodeError:
+            unknown += 1
             continue
-        t = d.get("type")
+        if not isinstance(d, dict) or not isinstance(d.get("type"), str):
+            unknown += 1
+            continue
+        t = d["type"]
         if t not in ("user", "assistant"):
             continue
-        text = _extract_text(d.get("message", {})).strip()
+        message = d.get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), (str, list)):
+            unknown += 1
+            continue
+        text = _extract_text(message).strip()
         if not text:
             continue
         who = user_label if t == "user" else assistant_label
         turns.append(f"{who}: {text}")
-    return "\n\n".join(turns)
+    return "\n\n".join(turns), unknown, total
+
+
+def _transcript_to_convo(raw_lines: list[str], user_label: str = "User", assistant_label: str = "Assistant") -> str:
+    """The turns of _scan_transcript, for a caller that needs only the text."""
+    return _scan_transcript(raw_lines, user_label, assistant_label)[0]
+
+
+def _report_parse_failure(cfg: dict, unknown: int, total: int) -> None:
+    """Say once per deployment -- into .capture.log when the Stop tick runs
+    this -- that the transcript holds entries this build cannot read: a format
+    change must be visible, not a silent loss (spec §10 A12). The stamp file
+    makes it once; deleting it brings the line back."""
+    stamp = cfg["tenant_home"] / "state" / "hindsight" / "parse-failure-reported"
+    if stamp.exists():
+        return
+    print(f"capture: transcript parse failure — {unknown} of {total} entries have a shape this build does "
+          f"not read (the transcript format may have changed). Readable turns are still captured; these "
+          f"entries are not. Said once; delete {stamp} to hear it again.")
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(datetime.now(timezone.utc).isoformat() + "\n")
+    except OSError:
+        pass
 
 
 def _split_convo(convo: str, max_chars: int = MAX_ITEM_CHARS) -> list[str]:
@@ -356,11 +537,11 @@ def _check_operation(op_id: str, bank: str, cfg: dict) -> tuple[str, str]:
     return "unknown", f"status={status or 'unknown'}"
 
 
-def _push_items(items: list[dict], stamp: str, bank: str, cfg: dict) -> dict:
+def _push_items(items: list[dict], stamp: str, bank: str, cfg: dict, timeout: int = 120) -> dict:
     """POST a batch of items for async extraction. Returns the raw response."""
     return _req("POST", _bank(bank, "/memories"),
                 {"items": items, "async": True, "document_tags": [stamp]},
-                api=cfg["api"])
+                timeout=timeout, api=cfg["api"])
 
 
 def _enforce_ledger_cap(entries: list) -> list:
@@ -391,14 +572,14 @@ def _enforce_ledger_cap(entries: list) -> list:
     return kept
 
 
-def _reconcile_pending(cfg: dict, state: dict) -> None:
-    """Settle the fate of spans pushed by an earlier run that could not wait.
+def _reconcile_snapshot(cfg: dict, snapshot: list, offsets: dict, deadline: float) -> list:
+    """Section (b) of spec §4.7: settle a SNAPSHOT of the ledger with no lock held.
 
-    The fast SessionEnd path advances the offset on acceptance because the
-    hook must not block session exit -- but acceptance is not storage, and
-    the process that would learn the verdict is already gone. So each push
-    records what it pushed, and the NEXT run (any run: the next capture, or
-    close.sh) asks the server how it turned out.
+    The fast path advances the offset on acceptance because a hook must not
+    block -- but acceptance is not storage, and the process that would learn
+    the verdict is already gone. So each push records what it pushed, and a
+    LATER run (the next Stop tick, the session-end flush, or close.sh) asks
+    the server how it turned out.
 
     A span whose extraction failed is re-pushed with the SAME document_ids it
     was pushed with the first time. That is not incidental: hindsight-api
@@ -407,9 +588,9 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
     attempt. Re-deriving ids from a fresh offset would duplicate the content
     instead (2026-07-09 incident, and GC-6).
 
-    Mutates `state["pending"]` in place; the caller persists it. An entry is
-    only ever dropped on a confirmed verdict, on being superseded (below) --
-    never on an unreachable server, and never merely because it is old.
+    An entry is only ever dropped on a confirmed verdict or on being
+    superseded (below) -- never on an unreachable server, and never merely
+    because it is old.
 
     SUPERSEDED ENTRIES. Re-pushing under the original document_ids is a
     REPLACEMENT, which is what makes the retry safe -- but only while those ids
@@ -417,29 +598,21 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
     from an EARLIER offset (reprocess, or any path that rewinds the cursor),
     the next capture derives the same ids from the same starting offset while
     reading MORE bytes, so those ids now hold newer, longer content. Re-pushing
-    the older items would delete it: the 2026-07-09 incident arriving by a
-    different route, destruction by stale ledger rather than by reused id.
+    the older items would delete it. The test is whether the cursor has
+    REWOUND behind this entry -- not whether it has merely moved: a cursor
+    that advanced past an entry is the normal case (the transcript grew). An
+    entry with no stored cursor at all is treated as superseded.
 
-    The test is therefore whether the cursor has REWOUND behind this entry --
-    not whether it has merely moved. A cursor that advanced past an entry is
-    the normal, healthy case: the transcript grew and later spans were pushed
-    under their own ids, which do not collide with this one. Discarding those
-    would throw away exactly the unconfirmed spans this ledger exists to hold.
-
-    An entry with no stored cursor at all is treated as superseded. The ways to
-    reach that state are that the cursor was cleared (reprocess -- superseded
-    by definition) or that state was hand-edited; in both cases re-pushing
-    content nothing vouches for is the more dangerous choice. Losing a retry
-    costs one span, and the log names it; a wrong re-push destroys newer memory
-    silently.
+    Returns verdicts {"id": _entry_id(entry), "action": "drop" | "replace",
+    "entry": <the retried entry, for replace>}; an entry with no verdict is
+    kept. _finish_run applies them under the lock, and only to entries this run
+    still has claimed. Entries not reached before `deadline` are kept for the
+    next run, so an unreachable server cannot hold one run open indefinitely.
     """
-    pending = state.get("pending") or []
-    if not pending:
-        return
     bank = cfg["bank"]
-    offsets = state.get("offsets") or {}
-    still_pending = []
-    for entry in pending:
+    verdicts = []
+    for entry in snapshot:
+        eid = _entry_id(entry)
         op_id = entry.get("operation_id")
         items = entry.get("items") or []
         span = (f"{entry.get('transcript','?')} "
@@ -450,9 +623,6 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
                           or transcript in offsets)
             current = _lookup_offset(offsets, transcript)
             end = entry.get("offset_to")
-            # Superseded only if the cursor rewound behind this span's end (or
-            # vanished). A cursor at or past the end means the transcript
-            # simply grew, which does not touch this entry's document_ids.
             rewound = (not isinstance(end, int)) or current < end
             if not has_offset or rewound:
                 print(f"capture: pending span SUPERSEDED — {span}; the stored "
@@ -461,6 +631,7 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
                       f"span's end, so its document_ids will be rewritten by a "
                       f"re-read. Discarding it rather than re-pushing older "
                       f"content over newer.", file=sys.stderr)
+                verdicts.append({"id": eid, "action": "drop"})
                 continue
         if not op_id or not items:
             # Nothing actionable: no id to poll and/or no content to re-push.
@@ -468,16 +639,19 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
             print(f"capture: pending entry for {span} is unusable "
                   f"(operation_id={op_id!r}, {len(items)} item(s)); keeping it "
                   f"in the ledger for an operator to see")
-            still_pending.append(entry)
+            continue
+        if time.time() >= deadline:
+            print(f"capture: pending span left for the next run — {span} "
+                  f"(this run's settling time is used up)")
             continue
         verdict, detail = _check_operation(op_id, bank, cfg)
         if verdict == "ok":
             print(f"capture: pending span confirmed stored — {span} ({detail})")
+            verdicts.append({"id": eid, "action": "drop"})
             continue
         if verdict == "unknown":
             print(f"capture: pending span still unresolved — {span} ({detail}); "
                   f"will re-check next run")
-            still_pending.append(entry)
             continue
         # Terminal failure. Re-push the identical items under their original
         # document_ids, which replaces the failed document rather than
@@ -489,13 +663,11 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
         if res.get("_error"):
             print(f"capture: re-push FAILED — {res['_error']} "
                   f"{res.get('_body','')}; span stays in the ledger")
-            still_pending.append(entry)
             continue
         new_op = res.get("operation_id") or res.get("id")
         if not new_op:
             print("capture: re-push accepted but returned no operation id; "
                   "span stays in the ledger (cannot verify)")
-            still_pending.append(entry)
             continue
         # The retry is itself unverified until someone checks it. Carry the
         # entry forward under the new operation id so the next run settles it.
@@ -503,48 +675,113 @@ def _reconcile_pending(cfg: dict, state: dict) -> None:
         retried["operation_id"] = new_op
         retried["retried_at"] = datetime.now(timezone.utc).isoformat()
         retried["retries"] = int(entry.get("retries") or 0) + 1
-        still_pending.append(retried)
-
-    state["pending"] = _enforce_ledger_cap(still_pending)
+        verdicts.append({"id": eid, "action": "replace", "entry": retried})
+    return verdicts
 
 
 # --- commands ----------------------------------------------------------------
-def _capture_path(transcript: str, cfg: dict):
-    """Push transcript bytes past the stored offset. Each push gets
-    document_ids unique to (session, offset, part) — hindsight-api treats a
-    repeated document_id as a re-ingest that DELETES the document's prior
-    memories, so reusing the bare session id destroyed every earlier delta
-    (2026-07-09 incident)."""
-    tenant_home = cfg["tenant_home"]
-    bank = cfg["bank"]
-    state = _load_state(tenant_home)
+def _run_timeout(ctx: dict | None, cfg: dict, cap: int) -> int:
+    """Seconds one network call of this run may take: `cap`, or what is left
+    before the run's claim could be cleared as overdue (its start + the
+    in-flight ceiling, less 5 s) when that is sooner. 0 = no time left. With
+    it, a run's POST never lands after a successor was allowed to start
+    (plan 2 Decision 3)."""
+    if not ctx:
+        return cap
+    left = ctx["me"]["started"] + _in_flight_ceiling(cfg) - 5 - time.time()
+    return max(0, min(cap, int(left)))
 
-    # Settle earlier pushes BEFORE doing anything else. A run that has nothing
-    # new to send is still the run that can learn what happened to the last
-    # one, so this must not sit behind the size check below.
-    _reconcile_pending(cfg, state)
-    _save_state(tenant_home, state)
 
-    # One identity per file, so capture and reprocess cannot each open their
-    # own cursor for it. The old spelling is still honoured on read.
+def _still_claimed(ctx: dict, cfg: dict) -> bool:
+    """Is this run's in_flight claim still the one on file? Read under the
+    lock, with no network: a run whose claim another run cleared as overdue
+    must not push -- its successor pushes a superset of the same span under
+    the same document_ids."""
+    with _state_lock(cfg["tenant_home"]):
+        state = _load_state(cfg["tenant_home"])
+        held = (state["transcripts"].get(ctx["key"]) or {}).get("in_flight")
+    return _is_mine(held, ctx["me"]) and held.get("offset") == ctx["offset"]
+
+
+def _claim_run(transcript: str, cfg: dict, throttle: int | None) -> tuple:
+    """Section (a) of spec §4.7, under the lock and with no network: load;
+    honour the throttle ("throttled", seconds since the last capture) -- checked
+    first, so a throttled tick never reports another run as in flight; clear a
+    dead in_flight claim; refuse a live one ("busy", its claim); otherwise stamp
+    in_flight = {offset, pid, proc_started, started} and last_capture, claim
+    the ledger entries this run will settle, save, and return ("claimed", ctx)."""
+    th = cfg["tenant_home"]
     key = _transcript_key(transcript)
-    offset = _lookup_offset(state["offsets"], transcript)
+    me = _my_claim()
+    now = me["started"]
+    with _state_lock(th):
+        state = _load_state(th)
+        slot = state["transcripts"].setdefault(key, {})
+        last = slot.get("last_capture")
+        if throttle and isinstance(last, (int, float)) and now - last < throttle:
+            return "throttled", int(now - last)
+        held = slot.get("in_flight")
+        if held is not None:
+            if _claim_live(held, cfg, now):
+                return "busy", held
+            pid = held.get("pid") if isinstance(held, dict) else "?"
+            print(f"capture: cleared a dead in-flight claim for this transcript (pid {pid})")
+            slot.pop("in_flight", None)
+        offset = _lookup_offset(state["offsets"], transcript)
+        snapshot = _claim_pending_locked(state, me, cfg, now)
+        slot["in_flight"] = dict(me, offset=offset)
+        slot["last_capture"] = now
+        offsets = dict(state["offsets"])
+        _save_state(th, state)
+    return "claimed", {"key": key, "offset": offset, "me": me, "snapshot": snapshot, "offsets": offsets}
+
+
+def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None) -> tuple:
+    """Section (b)'s push, no lock held across the network: the complete lines
+    past `offset`. Returns (ok, pending_entry, advance_to); _finish_run applies
+    both under the lock. Each push gets document_ids unique to (session,
+    offset, part) -- hindsight-api treats a repeated document_id as a re-ingest
+    that DELETES the document's prior memories, so reusing the bare session id
+    destroyed every earlier delta (2026-07-09 incident).
+
+    WHOLE LINES ONLY (plan 2 Decision 16). A detached Stop tick reads a
+    transcript Claude Code is still writing: read exactly the bytes up to the
+    size measured here, and stop at the last newline. A torn last line is left
+    for the next run (read as undecodable and advanced past, it was lost), and
+    bytes appended after the measurement are not read by this run (read to end
+    of file, they were read again by the next run under new document_ids).
+
+    With `ctx` (a claimed run), the POST is sent only while this run's claim
+    is still the one on file, and is given at most what is left before the
+    claim could be cleared as overdue (Decision 3)."""
+    bank = cfg["bank"]
     size = Path(transcript).stat().st_size
     if size <= offset:
         print(f"capture: nothing new ({transcript}, offset={offset}, size={size})")
-        return True
+        return True, None, None
 
-    with open(transcript, "r", encoding="utf-8", errors="replace") as f:
+    with open(transcript, "rb") as f:
         f.seek(offset)
-        new_lines = f.readlines()
+        data = f.read(size - offset)
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        print("capture: the new bytes end mid-line; the rest of the line is left for the next run")
+        return True, None, None
+    end = offset + cut + 1
+    new_lines = data[:cut + 1].decode("utf-8", errors="replace").splitlines()
 
-    convo = _transcript_to_convo(new_lines, cfg["user_label"], cfg["assistant_label"])
+    convo, unknown, total = _scan_transcript(new_lines, cfg["user_label"], cfg["assistant_label"])
+    if unknown:
+        _report_parse_failure(cfg, unknown, total)
     if not convo.strip():
-        state["offsets"].pop(transcript, None)
-        state["offsets"][key] = size
-        _save_state(tenant_home, state)
+        if unknown:
+            # Nothing readable and something unrecognised: hold the offset, so a
+            # build that reads this format can still capture it (Decision 17).
+            print(f"capture: nothing readable in the new bytes ({unknown} of {total} entries in a shape "
+                  f"this build does not read); offset held at {offset}")
+            return True, None, None
         print("capture: new bytes but no conversational text; offset advanced.")
-        return True
+        return True, None, end
 
     sid = Path(transcript).stem
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -553,93 +790,174 @@ def _capture_path(transcript: str, cfg: dict):
               "context": f"session {sid} ({stamp}) part {i + 1}/{len(chunks)}",
               "document_id": f"{sid}-o{offset}-p{i:02d}"}
              for i, chunk in enumerate(chunks)]
+    if ctx is not None:
+        post_timeout = _run_timeout(ctx, cfg, 120)
+        if post_timeout < 1:
+            print("capture: this run is out of time before its push; the next run pushes the span")
+            return True, None, None
+        if not _still_claimed(ctx, cfg):
+            print("capture: another run took over this transcript while this one worked (this run's claim "
+                  "was older than the in-flight ceiling); this run pushes nothing")
+            return True, None, None
+    else:
+        post_timeout = 120
     # async=true -> server queues extraction and returns 202 on ACCEPTANCE.
     # Acceptance is not storage: extraction happens later and can fail on its
-    # own (PROP-002 observed a terminal failure with four distinct
-    # JSONDecodeErrors on identical input). Whether we wait for that verdict
-    # is the caller's choice -- see the offset discipline below.
-    res = _push_items(items, stamp, bank, cfg)
+    # own (PROP-002). Whether we wait for that verdict is the caller's choice.
+    res = _push_items(items, stamp, bank, cfg, timeout=post_timeout)
     if res.get("_error"):
         print(f"capture: retain FAILED — {res['_error']} {res.get('_body','')}")
         # Do not advance the offset; retry next time. Report failure to the
         # caller so an explicit close (core/close.sh) can refuse to claim the
         # session was recorded when it was not.
-        return False
+        return False, None, None
 
     op_id = res.get("operation_id") or res.get("id")
 
     # PROP-002: the offset is the only record of what has been captured, so it
-    # must not advance past a span the server never stored. Advancing on
-    # acceptance made every extraction failure silent AND permanent -- the next
-    # capture starts after the lost span, and close.sh exited 0 reporting a
-    # session that went unrecorded.
-    #
-    # When verification is on (core/close.sh), the offset advances only after
-    # the operation reaches a terminal success -- an explicit close can afford
-    # to wait, and it promises the session was recorded.
+    # must not advance past a span the server never stored. With verification
+    # on (core/close.sh) the offset advances only after the operation reaches
+    # a terminal success -- an explicit close can wait, and it promises the
+    # session was recorded.
+    entry = None
     if cfg.get("verify_extraction"):
         if not op_id:
-            # Nothing to poll. Do not advance -- an unverifiable push is
-            # indistinguishable from a failed one, and the offset is the thing
-            # we cannot get back.
             print("capture: retain accepted but returned no operation id; "
                   "offset NOT advanced (cannot verify extraction)")
-            return False
+            return False, None, None
         ok, detail = _await_extraction(op_id, bank, cfg)
         if not ok:
             print(f"capture: extraction FAILED — {detail}. Offset NOT advanced "
                   f"(offset stays {offset}); the span will be retried.")
-            return False
+            return False, None, None
         print(f"capture: extraction confirmed ({detail})")
     else:
-        # The fast SessionEnd path. It cannot wait for the verdict: hooks share
-        # a ~1.5s budget and extraction takes 8-22s, so blocking here is not
-        # slow, it is structurally impossible.
-        #
-        # So the offset advances -- but the span is NOT abandoned. It is
-        # recorded as pending, with the exact items and document_ids it was
-        # pushed under, and the next run settles it (_reconcile_pending above).
-        #
-        # Advancing rather than holding is deliberate. Holding the offset would
-        # make the next run re-read from the same start against a transcript
-        # that has since GROWN, deriving document_ids from a different offset
-        # for content already ingested -- duplication, not replacement. Keeping
-        # the pushed items verbatim is what makes the retry a same-id re-ingest,
-        # which is the one form of retry hindsight-api treats as a replacement
-        # (GC-6, 2026-07-09 incident).
+        # The fast path (the Stop tick, the session-end flush). It cannot wait
+        # for the verdict, so the offset advances -- but the span is NOT
+        # abandoned: it is recorded as pending with the exact items and
+        # document_ids it was pushed under, and a later run settles it.
+        # Advancing rather than holding is deliberate: holding would make the
+        # next run re-read from the same start against a transcript that has
+        # since GROWN, deriving document_ids for content already ingested --
+        # duplication, not replacement (GC-6, 2026-07-09 incident).
         entry = {
             "operation_id": op_id,
-            "transcript": key,
+            "transcript": _transcript_key(transcript),
             "offset_from": offset,
-            "offset_to": size,
+            "offset_to": end,
             "stamp": stamp,
             "pushed_at": datetime.now(timezone.utc).isoformat(),
             "items": items,
         }
-        state.setdefault("pending", []).append(entry)
-        # Enforce the cap AFTER the append. Reconcile trimmed before this ran,
-        # so the ledger settled one entry above the stated cap every time.
-        state["pending"] = _enforce_ledger_cap(state["pending"])
         if op_id:
             print(f"capture: extraction unverified (fast path); span "
-                  f"[{offset}->{size}] recorded as pending under operation "
+                  f"[{offset}->{end}] recorded as pending under operation "
                   f"{op_id} — the next run confirms or re-pushes it")
         else:
-            # No id means no way to ask. Record it anyway: an unresolvable
-            # span must be visible in durable state, not only in a log line.
             print("capture: retain accepted but returned no operation id; span "
-                  f"[{offset}->{size}] recorded as pending and UNVERIFIABLE — "
+                  f"[{offset}->{end}] recorded as pending and UNVERIFIABLE — "
                   "it needs an operator, not a retry")
-
-    # Retire any entry an older build left under the un-normalized spelling, so
-    # the file ends up with exactly one cursor rather than two that disagree.
-    state["offsets"].pop(transcript, None)
-    state["offsets"][key] = size
-    _save_state(tenant_home, state)
     verb = "captured" if cfg.get("verify_extraction") else "queued"
     print(f"capture: {verb} {len(convo)} chars from {sid} in {len(items)} "
-          f"item(s) (offset {offset}->{size}). {res}")
-    return True
+          f"item(s) (offset {offset}->{end}). {res}")
+    return True, entry, end
+
+
+def _finish_run(ctx: dict, cfg: dict, verdicts: list, new_entry: dict | None,
+                advance_to: int | None, transcript: str | None) -> None:
+    """Section (c) of spec §4.7, under the lock: reload; apply each verdict only
+    to an entry this run still has claimed (one another run settled or retried
+    meanwhile is left alone); release this run's claims; and -- only while this
+    run's in_flight claim is still the one on file (the same offset it claimed)
+    -- append this run's own pending entry, advance the offset and clear the
+    claim. A run whose claim another run cleared as overdue drops its entry and
+    leaves the offset: the successor pushed a superset of the same span under
+    the same document_ids, and this run's shorter entry, re-pushed on a later
+    failure, would replace it (plan 2 Decision 3)."""
+    th = cfg["tenant_home"]
+    me = ctx["me"]
+    by_id = {v["id"]: v for v in verdicts}
+    with _state_lock(th):
+        state = _load_state(th)
+        kept = []
+        for entry in state["pending"]:
+            if _is_mine(entry.get("claim"), me):
+                verdict = by_id.get(_entry_id(entry))
+                if verdict is not None and verdict["action"] == "drop":
+                    continue
+                if verdict is not None and verdict["action"] == "replace":
+                    entry = dict(verdict["entry"])
+                else:
+                    entry = dict(entry)
+                entry.pop("claim", None)
+            kept.append(entry)
+        key = ctx.get("key")
+        still_mine = True
+        if key is not None:
+            slot = state["transcripts"].setdefault(key, {})
+            held = slot.get("in_flight")
+            still_mine = _is_mine(held, me) and held.get("offset") == ctx["offset"]
+        if new_entry is not None:
+            if still_mine:
+                kept.append(new_entry)
+            else:
+                print(f"capture: another run took over this transcript; this run's span "
+                      f"[{new_entry.get('offset_from')}->{new_entry.get('offset_to')}] is not recorded — "
+                      f"the other run pushed it, longer, under the same document ids")
+        # Enforce the cap AFTER the append, or the ledger settles one above it.
+        state["pending"] = _enforce_ledger_cap(kept)
+        if key is not None:
+            if advance_to is not None:
+                if still_mine:
+                    # Retire any entry an older build left under the
+                    # un-normalized spelling: one cursor per file, not two.
+                    state["offsets"].pop(transcript, None)
+                    state["offsets"][key] = advance_to
+                else:
+                    print("capture: another run cleared this run's in-flight claim while it "
+                          "worked; the offset is left for that run")
+            if still_mine:
+                slot.pop("in_flight", None)
+        _save_state(th, state)
+
+
+def _capture_path(transcript: str, cfg: dict):
+    """One capture of one transcript in three sections (spec §4.7): claim it,
+    settle and push with no lock, apply what this run still holds. A second
+    run while one is in flight skips; a claim is always released, even when
+    the push raises."""
+    status, info = _claim_run(transcript, cfg, None)
+    if status == "busy":
+        started = time.strftime("%H:%M", time.localtime(info.get("started") or 0))
+        print(f"capture: a capture of this transcript is in flight (pid {info.get('pid')}, "
+              f"started {started}) — skipping")
+        return True
+    ctx = info
+    ok, new_entry, advance_to, verdicts = False, None, None, []
+    try:
+        verdicts = _reconcile_snapshot(cfg, ctx["snapshot"], ctx["offsets"],
+                                       time.time() + RECONCILE_BUDGET_SEC)
+        ok, new_entry, advance_to = _push_span(transcript, ctx["offset"], cfg, ctx)
+    finally:
+        _finish_run(ctx, cfg, verdicts, new_entry, advance_to, transcript)
+    return ok
+
+
+def _settle_ledger(cfg: dict) -> None:
+    """Settle the ledger when there is no transcript to push (the one named
+    does not exist yet): the same three sections, without an in_flight claim."""
+    th = cfg["tenant_home"]
+    me = _my_claim()
+    with _state_lock(th):
+        state = _load_state(th)
+        snapshot = _claim_pending_locked(state, me, cfg, me["started"])
+        offsets = dict(state["offsets"])
+        _save_state(th, state)
+    verdicts = []
+    try:
+        verdicts = _reconcile_snapshot(cfg, snapshot, offsets, time.time() + RECONCILE_BUDGET_SEC)
+    finally:
+        _finish_run({"key": None, "offset": None, "me": me}, cfg, verdicts, None, None, None)
 
 
 REFUSE_GUESS = ("capture: I cannot tell which transcript is this session's (no hook payload, "
@@ -754,9 +1072,7 @@ def cmd_capture(args: list[str], cfg: dict):
         # A hook payload named it: the session may simply never have written
         # one. Still settle the ledger. A pending span belongs to a PAST transcript,
         # so its fate does not depend on there being a current one.
-        state = _load_state(cfg["tenant_home"])
-        _reconcile_pending(cfg, state)
-        _save_state(cfg["tenant_home"], state)
+        _settle_ledger(cfg)
         print(f"capture: no transcript ({transcript})")
         return True
     return _capture_path(transcript, cfg)
@@ -822,34 +1138,40 @@ def cmd_reprocess(args: list[str], cfg: dict):
         print(f"reprocess: no such transcript ({transcript})")
         return
     tenant_home = cfg["tenant_home"]
-    state = _load_state(tenant_home)
-    # Clear the cursor under both spellings: an older build tracked this file
-    # under the path exactly as it was typed.
-    state["offsets"].pop(transcript, None)
-    state["offsets"].pop(args[0], None)
+    with _state_lock(tenant_home):
+        state = _load_state(tenant_home)
+        held = (state["transcripts"].get(transcript) or {}).get("in_flight")
+        if held is not None and _claim_live(held, cfg, time.time()):
+            print(f"reprocess: a capture of this transcript is in flight (pid {held.get('pid')}); "
+                  f"run reprocess again when it has finished")
+            return False
+        # Clear the cursor under both spellings: an older build tracked this file
+        # under the path exactly as it was typed.
+        state["offsets"].pop(transcript, None)
+        state["offsets"].pop(args[0], None)
 
-    # Drop this transcript's unsettled spans. reprocess is about to re-read the
-    # file from zero and push it under the SAME document_ids, so every pending
-    # entry for it describes content those ids will no longer hold. Leaving
-    # them armed a re-push of the older, shorter span over the fuller one --
-    # destroying whatever was appended since (2026-07-09, by another route).
-    keys = {transcript, str(args[0])}
-    kept, dropped = [], []
-    for entry in state.get("pending") or []:
-        t = entry.get("transcript")
-        if t is not None and (str(t) in keys or _transcript_key(t) == transcript):
-            dropped.append(entry)
-        else:
-            kept.append(entry)
-    if dropped:
-        print(f"reprocess: discarding {len(dropped)} unsettled span(s) for this "
-              f"transcript — it is being re-read from the start, so their "
-              f"document_ids are superseded by this run:")
-        for e in dropped:
-            print(f"reprocess:   superseded [{e.get('offset_from')}->"
-                  f"{e.get('offset_to')}] operation={e.get('operation_id')}")
-    state["pending"] = kept
-    _save_state(tenant_home, state)
+        # Drop this transcript's unsettled spans. reprocess is about to re-read the
+        # file from zero and push it under the SAME document_ids, so every pending
+        # entry for it describes content those ids will no longer hold. Leaving
+        # them armed a re-push of the older, shorter span over the fuller one --
+        # destroying whatever was appended since (2026-07-09, by another route).
+        keys = {transcript, str(args[0])}
+        kept, dropped = [], []
+        for entry in state.get("pending") or []:
+            t = entry.get("transcript")
+            if t is not None and (str(t) in keys or _transcript_key(t) == transcript):
+                dropped.append(entry)
+            else:
+                kept.append(entry)
+        if dropped:
+            print(f"reprocess: discarding {len(dropped)} unsettled span(s) for this "
+                  f"transcript — it is being re-read from the start, so their "
+                  f"document_ids are superseded by this run:")
+            for e in dropped:
+                print(f"reprocess:   superseded [{e.get('offset_from')}->"
+                      f"{e.get('offset_to')}] operation={e.get('operation_id')}")
+        state["pending"] = kept
+        _save_state(tenant_home, state)
     _capture_path(transcript, cfg)
 
 

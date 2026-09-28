@@ -819,6 +819,27 @@ print(len(json.loads(p.read_text() or "{}").get("pending", []) or []))
 PY
 }
 
+# Epoch milliseconds a live pid started — the parse capture.py's _proc_started
+# and leaselib.proc_started_of use (spec §4.5).
+ps_ms() { python3 -c 'import subprocess,sys,time
+out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
+print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
+
+# seed_in_flight <pid> <proc_started_ms> <started_epoch> [transcript] — write an
+# in-flight claim for a transcript into offsets.json, as a running capture would.
+seed_in_flight() {
+  mkdir -p "$(dirname "$OFFSETS")"
+  python3 - "$OFFSETS" "${4:-$TRANSCRIPT}" "$1" "$2" "$3" <<'PY'
+import json, os, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+d = json.loads(p.read_text()) if p.exists() else {}
+d.setdefault("offsets", {}); d.setdefault("pending", [])
+d.setdefault("transcripts", {})[os.path.realpath(sys.argv[2])] = {"in_flight": {
+    "offset": 0, "pid": int(sys.argv[3]), "proc_started": int(sys.argv[4]), "started": float(sys.argv[5])}}
+p.write_text(json.dumps(d))
+PY
+}
+
 # All document_ids the stub was asked to ingest, in order, one per line.
 posted_document_ids() {
   python3 - "$STUB_POSTS" <<'PY'
@@ -988,4 +1009,182 @@ PY
   CAPTURE_DEFER_TO_CALLER=1 run python3 "$CAPTURE" capture </dev/null
   [ "$status" -eq 0 ]
   case "$output" in *"deferred to caller"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- one capture per transcript; no network call under the lock (§4.7 (1)) ---
+@test "two captures of two transcripts at once both advance their offsets — no lost update" {
+  start_op_stub "running"; printf '1' > "$BATS_TEST_TMPDIR/post_sleep"
+  B="$TRANSCRIPT_DIR/session-b.jsonl"; cp "$TRANSCRIPT" "$B"
+  python3 "$CAPTURE" capture --transcript "$TRANSCRIPT" > "$BATS_TEST_TMPDIR/a.out" 2>&1 & pa=$!
+  python3 "$CAPTURE" capture --transcript "$B" > "$BATS_TEST_TMPDIR/b.out" 2>&1 & pb=$!
+  wait "$pa" "$pb"
+  run python3 - "$OFFSETS" "$TRANSCRIPT" "$B" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1]))["offsets"]
+for t in sys.argv[2:]:
+    assert d.get(os.path.realpath(t)) == os.path.getsize(t), (t, d)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; cat "$BATS_TEST_TMPDIR/a.out" "$BATS_TEST_TMPDIR/b.out"; return 1; }
+}
+
+@test "a second capture of a transcript while one is in flight posts nothing and says so; exactly one POST reaches the server" {
+  start_op_stub "running"; printf '5' > "$BATS_TEST_TMPDIR/post_sleep"
+  python3 "$CAPTURE" capture > "$BATS_TEST_TMPDIR/a.out" 2>&1 & pa=$!
+  sleep 1
+  run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+  case "$output" in *"capture: a capture of this transcript is in flight (pid "*", started "*") — skipping"*) : ;; *) echo "$output"; return 1 ;; esac
+  wait "$pa"
+  [ "$(post_count)" -eq 1 ]
+  size=$(python3 -c "import os,sys; print(os.path.getsize(sys.argv[1]))" "$TRANSCRIPT")
+  [ "$(stored_offset)" = "$size" ]
+}
+
+@test "an in-flight claim whose pid is now another process (pid 1: alive, start time does not match) is cleared and the capture proceeds" {
+  start_op_stub "running"
+  seed_in_flight 1 1 "$(date +%s)"
+  run python3 "$CAPTURE" capture
+  [ "$status" -eq 0 ]
+  case "$output" in *"capture: cleared a dead in-flight claim for this transcript (pid 1)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 1 ]
+}
+
+@test "a live in-flight claim is honoured; once older than the ceiling (interval + verify timeout + 60 s) it is cleared although its pid lives" {
+  start_op_stub "running"
+  sleep 300 & sp=$!
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(date +%s)"
+  run python3 "$CAPTURE" capture
+  case "$output" in *"in flight (pid $sp"*"skipping"*) : ;; *) kill "$sp"; echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 0 ]
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(( $(date +%s) - 100 ))"
+  CAPTURE_INTERVAL=1 CAPTURE_VERIFY_TIMEOUT_SEC=1 run python3 "$CAPTURE" capture   # ceiling 62 s
+  kill "$sp"
+  case "$output" in *"cleared a dead in-flight claim"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 1 ]
+}
+
+@test "a stalled operations GET for one transcript's pending span does not delay another transcript's capture: no network call runs under the lock, and a span another live run is settling is left to it" {
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture                          # session-a: one pending span
+  printf '5' > "$BATS_TEST_TMPDIR/get_sleep"
+  printf '{"type":"user","message":{"role":"user","content":"one more"}}\n' >> "$TRANSCRIPT"
+  python3 "$CAPTURE" capture > "$BATS_TEST_TMPDIR/a.out" 2>&1 & pa=$!    # settles it: its GET stalls 5 s
+  sleep 0.5
+  B="$TRANSCRIPT_DIR/session-b.jsonl"; cp "$TRANSCRIPT" "$B"
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run python3 "$CAPTURE" capture --transcript "$B"
+  t1="$(python3 -c 'import time; print(time.time())')"
+  [ "$status" -eq 0 ]
+  python3 -c 'import sys; d = float(sys.argv[2]) - float(sys.argv[1]); assert d < 3, "the other transcript waited %.1f s" % d' "$t0" "$t1"
+  wait "$pa"
+  run python3 - "$OFFSETS" "$TRANSCRIPT" "$B" <<'PY'
+import json, os, sys
+state = json.load(open(sys.argv[1]))
+for t in sys.argv[2:]:
+    assert state["offsets"].get(os.path.realpath(t)) == os.path.getsize(t), (t, state["offsets"])
+assert not [e for e in state["pending"] if "claim" in e], "a claim outlived its run: %r" % state["pending"]
+assert not [k for k, v in state.get("transcripts", {}).items() if v.get("in_flight")], state["transcripts"]
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; cat "$BATS_TEST_TMPDIR/a.out"; return 1; }
+}
+
+@test "reprocess refuses while a capture of that transcript is in flight, and changes nothing" {
+  start_op_stub "running"
+  sleep 300 & sp=$!
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(date +%s)"
+  before="$(shasum "$OFFSETS")"
+  run python3 "$CAPTURE" reprocess "$TRANSCRIPT"
+  kill "$sp"
+  [ "$status" -ne 0 ]
+  case "$output" in *"reprocess: a capture of this transcript is in flight (pid $sp)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(shasum "$OFFSETS")" = "$before" ]; [ "$(post_count)" -eq 0 ]
+}
+
+# --- a transcript read while it is being written (Decisions 16 and 17) --------
+@test "a torn last line is left for the next run and captured whole there; no turn is pushed twice" {
+  # Review reproduction on plan 1: the torn line was skipped as undecodable,
+  # the offset advanced past it, and "THE DECISION: ship Friday" never reached memory.
+  start_op_stub "running"
+  printf '{"type":"user","message":{"role":"user","content":"THE DECISION: ship Fri' >> "$TRANSCRIPT"
+  run python3 "$CAPTURE" capture; [ "$status" -eq 0 ]
+  printf 'day"}}\n{"type":"user","message":{"role":"user","content":"turn three"}}\n' >> "$TRANSCRIPT"
+  run python3 "$CAPTURE" capture; [ "$status" -eq 0 ]
+  grep -q 'THE DECISION: ship Friday' "$STUB_POSTS"
+  [ "$(grep -c 'turn three' "$STUB_POSTS")" -eq 1 ]
+  [ "$(grep -c 'what did we decide about the scheduler' "$STUB_POSTS")" -eq 1 ]
+  size=$(python3 -c "import os,sys; print(os.path.getsize(sys.argv[1]))" "$TRANSCRIPT")
+  [ "$(stored_offset)" = "$size" ]
+}
+
+@test "bytes appended after a run measured the transcript are not read by that run: it advances only to what it measured" {
+  start_op_stub "running"
+  run python3 - "$ROOT/core" "$TRANSCRIPT" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+t = sys.argv[2]
+orig = pathlib.Path.stat
+measured = []
+def stat(self, *a, **k):
+    r = orig(self, *a, **k)
+    if not measured and str(self) == t:
+        measured.append(r.st_size)       # _push_span has just measured; now the session writes on
+        with open(t, "a") as f:
+            f.write('{"type":"user","message":{"role":"user","content":"a late turn"}}\n')
+    return r
+pathlib.Path.stat = stat
+ok, entry, advance_to = capture._push_span(t, 0, cfg)
+assert measured and ok and advance_to == measured[0], (measured, ok, advance_to)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run grep -q 'a late turn' "$STUB_POSTS"; [ "$status" -ne 0 ]
+}
+
+@test "a transcript in a shape this build cannot read is reported once as a parse failure, and the offset is held, not advanced past it" {
+  start_op_stub "running"
+  printf '{"kind":"user","body":"moved"}\n{"type":"user","message":{"role":"user","parts":["moved too"]}}\n' > "$TRANSCRIPT"
+  run python3 "$CAPTURE" capture; [ "$status" -eq 0 ]
+  case "$output" in *"capture: transcript parse failure — 2 of 2 entries have a shape this build does not read"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"offset held at 0"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(stored_offset)" = "0" ]; [ "$(post_count)" -eq 0 ]
+  run python3 "$CAPTURE" capture
+  case "$output" in *"parse failure"*) echo "said twice: $output"; return 1 ;; *) : ;; esac
+  [ "$(stored_offset)" = "0" ]
+}
+
+@test "a run whose claim was cleared as overdue pushes nothing and records no pending entry: its successor's push under the same document_ids is the only one" {
+  # Review finding: the overdue run appended its shorter pending entry
+  # (0 -> size1) beside the successor's (0 -> size2) under the same ids; a later
+  # failure verdict would re-push the shorter one over the longer document.
+  # Here the run's time limit stops it before its POST (a successor can clear
+  # a live claim only past the ceiling, which is past that limit); the claim
+  # re-check under the lock and section (c)'s check are the further guards.
+  start_op_stub "running"
+  run python3 - "$ROOT/core" "$TRANSCRIPT" "$CAPTURE" <<'PY'
+import json, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+t = sys.argv[2]
+status, ctx = capture._claim_run(t, cfg, None)            # run A claims offset 0
+assert status == "claimed", status
+with capture._state_lock(cfg["tenant_home"]):             # ... and becomes overdue
+    s = capture._load_state(cfg["tenant_home"])
+    s["transcripts"][ctx["key"]]["in_flight"]["started"] -= 10000
+    capture._save_state(cfg["tenant_home"], s)
+ctx["me"]["started"] -= 10000
+with open(t, "a") as f:                                   # the session writes on
+    f.write('{"type":"user","message":{"role":"user","content":"grown since"}}\n')
+b = subprocess.run([sys.executable, sys.argv[3], "capture", "--transcript", t],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL)   # run B
+assert "cleared a dead in-flight claim" in b.stdout, b.stdout
+ok, entry, advance_to = capture._push_span(t, ctx["offset"], cfg, ctx)      # A finishes late
+capture._finish_run(ctx, cfg, [], entry, advance_to, t)
+state = json.load(open(capture._offsets_path(cfg["tenant_home"])))
+at0 = [e for e in state["pending"] if e.get("offset_from") == 0]
+assert len(at0) == 1, at0
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(post_count)" -eq 1 ]
 }
