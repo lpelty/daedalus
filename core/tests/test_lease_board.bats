@@ -6,6 +6,8 @@
 BATS_NO_PARALLELIZE_WITHIN_FILE=true
 bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
+load fixtures/transcripts/setup.bash
+load fixtures/tty/setup.bash
 setup() { lease_fixture; LS() { bash "$DAEDALUS_HOME/core/lease.sh" "$@"; }; }
 teardown() { teardown_live; }
 board() { printf '{"hook_event_name":"%s","session_id":"%s","prompt":"hello there"}' "${2:-UserPromptSubmit}" "$1" | python3 "$DAEDALUS_HOME/core/lease-board.py"; }
@@ -143,6 +145,7 @@ bind_live() {  # bind_live <NN> <sid> [name] — claim with a live registry pid
 @test "handover: the displaced holder is told on its next board who took the pen, when, and why" {
   LS create >/dev/null; bind_live 01 sA; LS create >/dev/null; bind_live 02 sB; LS alias 02 electron >/dev/null
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  tx "$(tx_path sB)" operator "the operator asked the electron window to close out the day" >/dev/null
   CLAUDE_CODE_SESSION_ID=sB LS prime take --reason "the operator asked the electron window to close out the day" >/dev/null
   run board sA; c="$(ctx)"
   case "$c" in *"You no longer hold the pen; window 02 (electron) took it at "*" (reason: 'the operator asked the electron window to close out the day')"*) : ;; *) echo "$c"; return 1 ;; esac

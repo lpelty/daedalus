@@ -1485,45 +1485,92 @@ def recompute_all_changed(root: Path) -> None:
 
 # --- The pen (§4.8) -----------------------------------------------------------
 
-def prime_take(root: Path, sid: str, reason: Optional[str]) -> str:
+def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcribed") -> str:
     """`lease.sh prime take [--reason "..."]` from the TAKING session. Every
     prime is a window (§4.8), so a session with no numbered lease is refused.
-    A live holder (live, quiet or resumed — HELD_BY_LIVE) needs --reason, the
-    operator's words, recorded in prime.json's append-only history; a stale
-    holder, or no prime.json at all (a registry-absent build that never
-    first-upped), needs none. The take is a compare-and-swap on the
-    session_id the taker read (§4.1); LEASE_TEST_CAS_EXPECT lets a test
-    simulate a stale read.
+    A live holder (live, quiet or resumed — HELD_BY_LIVE) needs the operator's
+    reason; a stale holder, or no prime.json at all (a registry-absent build
+    that never first-upped), needs none. The reason is recorded in prime.json's
+    append-only history.
 
-    DEFERRED to plan 4 (spec §4.8 'Handover', which records the deferral): in
-    `transcribed` mode a --reason given over a live holder must appear in the
-    TAKER's own transcript as words the operator typed after the holder's
-    bound_at. That check needs plan 4's transcript machinery (the parser the
-    promote confirm uses, §7.2 step 2). Until it lands, the reason is recorded
-    in prime.json's history exactly as given and nothing verifies it."""
-    with lock(root):
+    The reason is checked (spec §4.8, §7.4). transcribed: --reason must be,
+    whole, a turn the operator typed in the TAKER's own transcript after the
+    holder's bound_at (transcriptlib; plan 4 Decision 30; no shown turn is
+    required — there is no block to show), in a transcript nothing may write
+    (Decision 36); the history entry records the transcript entry. tty:
+    --reason is refused and the reason is read from /dev/tty — the take is the
+    operator's keystroke; a process that descends from an agent, or from no
+    terminal login, is refused (Decision 32). Both happen with NO lock held
+    (plan 4 Decision 15: they may wait on a person, and the lock is not
+    re-entrant); the write is a compare-and-swap on the holder read at the
+    start (§4.1). LEASE_TEST_CAS_EXPECT lets a test simulate a stale read."""
+    import transcriptlib as tl
+    with lock(root, shared=True):
         leases = read_all(root)
-        mine, _ = lease_of_session(leases, sid)
-        if mine is None:
-            raise Refused("This session holds no window, so it cannot take the pen; claim a number first.")
-        registry_entry_for(sid)   # §4.5: a session open in two terminals cannot take the pen either (Refused)
-        prime = leases.get("prime") or {}
-        holder = prime.get("session_id")
-        expect = os.environ.get("LEASE_TEST_CAS_EXPECT", holder)   # test knob: simulate a stale read
-        if holder and holder != sid and not reason:
-            live, hnn, hlease = prime_holder_live(root, leases, str(holder))
-            if live and hlease is not None:
+    mine, _ = lease_of_session(leases, sid)
+    if mine is None:
+        raise Refused("This session holds no window, so it cannot take the pen; claim a number first.")
+    registry_entry_for(sid)   # §4.5: a session open in two terminals cannot take the pen either (Refused)
+    if mode == "tty" and reason is not None:
+        raise Refused("In tty mode (promote.confirm: tty) the reason for taking the pen is typed in a terminal, "
+                      "not passed as --reason. Run `core/lease.sh prime take` and type it when asked.")
+    prime = leases.get("prime") or {}
+    holder = prime.get("session_id")
+    expect = os.environ.get("LEASE_TEST_CAS_EXPECT", holder)   # test knob: simulate a stale read
+    record: Dict[str, object] = {}
+    if holder and holder != sid:
+        live, hnn, hlease = prime_holder_live(root, leases, str(holder))
+        if live and mode == "tty":
+            paste = "Paste this line in your own shell: `cd %s && DAEDALUS_SESSION_ID=%s core/lease.sh prime take`" % (root, sid)
+            try:
+                reason, _tty = tl.tty_answer("Why does window %s take the pen from %s? (the operator's words): "
+                                             % (mine, window_label(hnn, hlease) if hlease is not None
+                                                else "the live holder"), root)
+            except tl.NotAPerson as e:
+                raise Refused("Taking the pen from a live window must be typed by a person in their own terminal: %s. "
+                              "The pen did not move. %s" % (e, paste))
+            except tl.NoTerminal:
+                raise Refused("Taking the pen from a live window must be typed by a person in a terminal. This "
+                              "session has none. The pen did not move. %s" % paste)
+            if not reason.strip():
+                raise Refused("An empty reason is not a reason. The pen did not move.")
+            record["reason_typed_at_terminal"] = True
+        elif live and not reason:
+            if hlease is not None:
                 raise Refused("The pen is held by a live session, %s. Taking it needs --reason \"<the operator's words>\"."
                               % window_label(hnn, hlease))
-            if live:
-                names = [e.get("name") for e in registry_live_entries(str(holder)) if e.get("name")]
-                raise Refused("The pen is held by a live session that holds no window now (peer name %s). "
-                              "Taking it needs --reason \"<the operator's words>\"." % (names[0] if names else "unknown"))
+            names = [e.get("name") for e in registry_live_entries(str(holder)) if e.get("name")]
+            raise Refused("The pen is held by a live session that holds no window now (peer name %s). "
+                          "Taking it needs --reason \"<the operator's words>\"." % (names[0] if names else "unknown"))
+        elif live:
+            bound = str(prime.get("bound_at") or "")
+            try:
+                found = tl.find_operator_words(tl.transcript_for(root, sid), str(reason),
+                                               tl.local_stamp_epoch(bound) if bound else 0.0, require_shown=False)
+            except tl.Missing as e:
+                raise Refused("I cannot find this window's transcript (%s), so the operator's words cannot be checked. "
+                              "The pen did not move. If the transcript lives elsewhere, set memory.transcript_dir in "
+                              "config.yaml; or set promote.confirm: tty and take the pen by typing the reason." % e)
+            except tl.Unprotected as e:
+                raise Refused("This window's transcript (%s) is outside every directory nothing may write, so it is not "
+                              "evidence of the operator's words. The pen did not move. Set memory.transcript_dir in "
+                              "config.yaml, or set promote.confirm: tty and take the pen by typing the reason." % e)
+            except tl.Unreadable as e:
+                raise Refused("I cannot read this build's transcript format (%s), so the operator's words cannot be "
+                              "checked. The pen did not move. Until the parser is updated, set `promote.confirm: tty` "
+                              "and take the pen by typing the reason." % e)
+            except (tl.NotFound, tl.NotShown):
+                raise Refused("I could not find those words as something the operator typed in this window since "
+                              "the pen was last taken. The pen did not move.")
+            record["transcript_ref"] = found["transcript_ref"]
+    with lock(root):
         fresh = read_lease(root, "prime") or {}
         if fresh.get("session_id") != expect:
             raise Refused("`prime` changed under you — re-read the board and try again")
-        fresh["history"] = (fresh.get("history") or []) + [{"from": holder, "to": sid, "at": now_stamp(),
-                                                            "reason": reason or "previous holder gone"}]
+        entry: Dict[str, object] = {"from": holder, "to": sid, "at": now_stamp(),
+                                    "reason": reason or "previous holder gone"}
+        entry.update(record)
+        fresh["history"] = (fresh.get("history") or []) + [entry]
         fresh.update({"session_id": sid, "bound_at": now_stamp()})
         write_lease(root, "prime", fresh)
     return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
@@ -2012,8 +2059,13 @@ def main(argv: list) -> int:
         if cmd == "prime":
             if args[:1] != ["take"]:
                 sys.stderr.write('usage: core/lease.sh prime take [--reason "..."]\n'); return 2
+            import transcriptlib as tl
+            try:
+                mode = tl.confirm_mode(root)
+            except ValueError as e:
+                sys.stderr.write("daedalus: %s\n" % e); return 1
             return _refused(lambda: prime_take(root, require_session(sid, "prime take"),
-                                               _after("--reason") if "--reason" in args else None))
+                                               _after("--reason") if "--reason" in args else None, mode=mode))
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)

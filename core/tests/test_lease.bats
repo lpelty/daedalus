@@ -5,6 +5,8 @@
 BATS_NO_PARALLELIZE_WITHIN_FILE=true
 bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
+load fixtures/transcripts/setup.bash
+load fixtures/tty/setup.bash
 setup() { lease_fixture; LL="$DAEDALUS_HOME/core/leaselib.py"; }
 teardown() { teardown_live; }
 
@@ -698,6 +700,7 @@ PY
   CLAUDE_CODE_SESSION_ID=sB run LS prime take
   [ "$status" -ne 0 ]; case "$output" in *"window 01"*"--reason"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(lease_json prime session_id)" = "sA" ]
+  tx "$(tx_path sB)" operator "the operator asked window 02 to close out the day" >/dev/null
   CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "the operator asked window 02 to close out the day"
   [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
   case "$output" in *"Window 02 holds the pen now (prime)"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -707,6 +710,7 @@ PY
   CLAUDE_CODE_SESSION_ID=sA run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sA" ]
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==2 and h[0]["to"]=="sB" and h[-1]["from"]=="sB" and h[-1]["to"]=="sA", h' "$DAEDALUS_HOME/state/leases/prime.json"
   # CAS: the session_id the taker read (simulated by the test knob) is not what the file holds now.
+  tx "$(tx_path sB)" operator "x" >/dev/null   # the reason check runs first and must pass; the CAS refusal is what this test sees
   CLAUDE_CODE_SESSION_ID=sB LEASE_TEST_CAS_EXPECT=sZ run LS prime take --reason x
   [ "$status" -ne 0 ]; case "$output" in *"prime\` changed under you — re-read the board"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(lease_json prime session_id)" = "sA" ]
@@ -750,6 +754,7 @@ PY
   CLAUDE_CODE_SESSION_ID=sB run LS prime take
   [ "$status" -ne 0 ]; case "$output" in *"held by a live session"*"holds no window"*"daedalus-01"*"--reason"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(lease_json prime session_id)" = "sA" ]
+  tx "$(tx_path sB)" operator "the operator asked for the pen" >/dev/null
   CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "the operator asked for the pen"
   [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"]=="sA" and "asked for the pen" in h[0]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
@@ -946,4 +951,60 @@ esac'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(lease_json 01 worktree_ready)" = "False" ] || { cat "$DAEDALUS_HOME/state/leases/01.json"; return 1; }
   [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/a.txt" ]
+}
+
+# two_windows_prime_01 — windows 01 (sA, holds the pen) and 02 (sB), both live.
+two_windows_prime_01() {
+  LS create >/dev/null; LS create >/dev/null
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sB LS claim 02 >/dev/null
+  python3 "$LL" _test-write prime "{\"session_id\":\"sA\",\"bound_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\",\"history\":[]}"
+  sleep 1   # bound_at has one-second resolution; every transcript entry below is after it
+}
+
+@test "prime take --reason over a live holder (transcribed): words not in the taker's transcript, or typed before the holder's bound_at, or only in a tool result, are refused and the pen does not move; typed after, the take records the transcript entry" {
+  two_windows_prime_01; X="$(tx_path sB)"
+  tx "$X" operator "something else entirely" >/dev/null
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "hand the pen to window 02"
+  [ "$status" -ne 0 ]; case "$output" in *"I could not find those words as something the operator typed in this window since the pen was last taken. The pen did not move."*) : ;; *) echo "$output"; return 1 ;; esac
+  tx "$X" operator "hand the pen to window 02" "$(plus "$(now)" -3600)" >/dev/null
+  tx "$X" tool-result "hand the pen to window 02" >/dev/null
+  tx "$X" operator "please do not hand the pen to window 02 yet" >/dev/null   # a fragment of a longer turn is not the words (Decision 30)
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "hand the pen to window 02"
+  [ "$status" -ne 0 ]; [ "$(lease_json prime session_id)" = "sA" ]
+  said="$(tx "$X" operator "Hand the pen to window 02.")"
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "hand the pen to window 02"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"][-1]; assert h["transcript_ref"]["uuid"]==sys.argv[2] and h["reason"]=="hand the pen to window 02", h' "$DAEDALUS_HOME/state/leases/prime.json" "$said"
+}
+
+@test "prime take --reason (transcribed): an unreadable transcript is refused naming promote.confirm: tty; a missing one names memory.transcript_dir; one outside every protected directory is not evidence; a stale holder needs no reason and no transcript" {
+  two_windows_prime_01; X="$(tx_path sB)"
+  tx "$X" operator "take it" >/dev/null; tx "$X" malformed "x" >/dev/null
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "take it"
+  [ "$status" -ne 0 ]; case "$output" in *"I cannot read this build's transcript format ("*"The pen did not move."*"promote.confirm: tty"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$X"
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "take it"
+  [ "$status" -ne 0 ]; case "$output" in *"I cannot find this window's transcript ("*"memory.transcript_dir"*) : ;; *) echo "$output"; return 1 ;; esac
+  # Decision 36: a marker pointing at a transcript nothing protects is not evidence, even when the words are in it.
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere"; tx "$BATS_TEST_TMPDIR/elsewhere/sB.jsonl" operator "take it" >/dev/null
+  printf '{"session_id":"sB","transcript_path":"%s"}' "$BATS_TEST_TMPDIR/elsewhere/sB.jsonl" > "$DAEDALUS_HOME/state/session-sB.json"
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "take it"
+  [ "$status" -ne 0 ]; case "$output" in *"is outside every directory nothing may write, so it is not evidence"*"The pen did not move."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+  kill "$p1"; wait "$p1" 2>/dev/null || true
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
+}
+
+@test "prime take in tty mode: --reason is refused; with no terminal the refusal hands over a paste line carrying the taker's session id; typed at a terminal, the take records that it was typed" {
+  two_windows_prime_01
+  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "x"
+  [ "$status" -ne 0 ]; case "$output" in *"typed in a terminal, not passed as --reason"*) : ;; *) echo "$output"; return 1 ;; esac
+  run no_tty env CLAUDE_CODE_SESSION_ID=sB bash "$DAEDALUS_HOME/core/lease.sh" prime take
+  [ "$status" -ne 0 ]; case "$output" in *"must be typed by a person in a terminal"*"cd $DAEDALUS_HOME && DAEDALUS_SESSION_ID=sB core/lease.sh prime take"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
+  run type_into "the operator wants window 02 to hold it" "the operator's words" env DAEDALUS_SESSION_ID=sB bash "$DAEDALUS_HOME/core/lease.sh" prime take
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"][-1]; assert h["reason_typed_at_terminal"] is True and "window 02 to hold it" in h["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
 }
