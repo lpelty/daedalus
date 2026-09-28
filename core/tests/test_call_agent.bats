@@ -321,3 +321,113 @@ r = json.load(open(sys.argv[1]))
 assert r["core_tree"] == sys.argv[2] and r["charter_sha"] == sys.argv[3], r
 PY
 }
+
+# --- --callee agent: the callee is configuration, never an argument (Task 4, spec §8.4) ---
+
+@test "--callee agent with callee_home or callee_name unset is refused before any claude starts" {
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *"no callee is configured: set direct_call.callee_home and callee_name in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  direct_call "callee_home: $CALLEE"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"no callee is configured"*) : ;; *) echo "$output"; return 1 ;; esac
+  sed -i.bak "s|callee_home: .*|callee_name: Alpha|" "$DAEDALUS_HOME/config.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"no callee is configured"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "generalization: the same core calls whichever agent config.yaml names — two deployments, two homes, two names, no code change" {
+  cp "$DAEDALUS_HOME/config.yaml" "$BATS_TEST_TMPDIR/base.yaml"
+  for who in Alpha Beta; do
+    home="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/home-$who"; mkdir -p "$home"
+    cp "$BATS_TEST_TMPDIR/base.yaml" "$DAEDALUS_HOME/config.yaml"
+    direct_call "callee_home: $home" "callee_name: $who" "orientation_marker: 'Session orientation'"
+    FAKE_MARKER="Session orientation: ready" run --separate-stderr bash "$CALL" --callee agent "hello"
+    [ "$status" -eq 0 ] || { echo "$who: $stderr"; return 1; }
+    n="$(calls)"
+    [ "$(cat "$FAKE_CLAUDE_DIR/$n.cwd")" = "$home" ]
+    case "${stderr_lines[0]}" in "$who call "*) : ;; *) echo "$stderr"; return 1 ;; esac
+    grep -q "You are $who, being called directly by Daedalus" "$FAKE_CLAUDE_DIR/$n.argv"
+  done
+}
+
+@test "the callee's allowlist is honoured without importing anything: agent.yaml naming others refuses; a .direct-callers file naming Daedalus admits; no list proceeds and says so" {
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha"
+  cat > "$CALLEE/agent.yaml" <<'YAML'
+name: alpha
+direct_calls:   # who may call this agent (deny by default)
+  callers: [Peer, Other]   # a trailing comment, as a real manifest carries
+skills: {shared: all}
+YAML
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *"Daedalus is not on Alpha's callers list (agent.yaml direct_calls.callers)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+  sed -i.bak 's/\[Peer, Other\]/[Peer, Daedalus]/' "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ]      # admitted; no marker configured -> unverified
+  rm "$CALLEE/agent.yaml"; printf 'Peer\nDaedalus\n' > "$CALLEE/.direct-callers"
+  run bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ]
+  rm "$CALLEE/.direct-callers"
+  run --separate-stderr bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ]
+  [ "${stderr_lines[1]}" = "Alpha orientation: unverified; capture: skipped; exit: 3" ]
+  grep -q '"callee_allowlist": "no callee allowlist found"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+}
+
+@test "with callee_launcher set, the agent's own launcher runs instead of claude: its argv, its receipt id, its orientation, capture deferred" {
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher"
+  run --separate-stderr bash "$CALL" --callee agent --artifact-dir "$DAEDALUS_HOME/target/thing" "what is this hook for?"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "$output" = "callee launcher answer" ]
+  [ "$(calls)" -eq 0 ]
+  [ "$(sed -n 1,2p "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tr '\n' ' ')" = "--caller Daedalus " ]
+  grep -qx -- '--artifact-dir' "$FAKE_CLAUDE_DIR/launcher-argv.txt"
+  grep -qx "$DAEDALUS_HOME/target/thing" "$FAKE_CLAUDE_DIR/launcher-argv.txt"
+  req="$(grep -A1 -x -- '--request-file' "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tail -1)"
+  [ "$(cat "$req")" = "what is this hook for?" ]
+  [ "${stderr_lines[1]}" = "Alpha orientation: yes; capture: deferred; exit: 0" ]
+  grep -q '"callee_receipt": "0f0f0f0f-1111-2222-3333-444444444444"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  grep -q '^DIRECT_CALL_CALLER=Daedalus$' "$FAKE_CLAUDE_DIR/launcher-env.txt"
+}
+
+@test "a callee launcher that answers but cannot verify orientation (its exit 3) is an answer: printed, exit 3, orientation no; a real failure is named as the launcher's" {
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher"
+  CALLEE_LAUNCHER_EXIT=3 run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 3 ] || { echo "$status / $output / $stderr"; return 1; }
+  [ "$output" = "callee launcher answer" ]
+  [ "${stderr_lines[1]}" = "Alpha orientation: no; capture: deferred; exit: 3" ]
+  grep -q '"status": "completed"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  CALLEE_LAUNCHER_EXIT=7 run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 7 ]; [ -z "$output" ]
+  [ "${#stderr_lines[@]}" -eq 2 ] || { printf '%s\n' "$stderr"; return 1; }
+  case "${stderr_lines[1]}" in *"; exit: 7 — failed: the callee launcher exited 7 (with output). No answer is certified.") : ;; *) echo "$stderr"; return 1 ;; esac
+}
+
+@test "the callee's allowlist in every shape agent.yaml writes it — the flow mapping, a block list — and a direct_calls key it cannot read refuses (deny by default)" {
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha"
+  printf 'direct_calls: {callers: [Peer]}\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"Daedalus is not on Alpha's callers list (agent.yaml direct_calls.callers)"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'direct_calls: {callers: [Peer, Daedalus]}\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  printf 'direct_calls:\n  callers:\n    - Peer\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"not on Alpha's callers list"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'direct_calls:\n  callers:\n    - Peer\n    - Daedalus   # this test\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  printf 'direct_calls:\n  who: everyone\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"cannot read Alpha's callers list in agent.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'direct_calls: {callers: [Daedalus], also: x}\n' > "$CALLEE/agent.yaml"
+  run bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"cannot read Alpha's callers list"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 2 ]
+}
+
+@test "a configured marker that the transcript lacks is orientation: no, exit 3; present, exit 0" {
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "orientation_marker: 'Session orientation'"
+  run bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ]
+  FAKE_MARKER="Session orientation: Alpha, ready" run bash "$CALL" --callee agent "hello"; [ "$status" -eq 0 ]
+}

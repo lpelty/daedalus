@@ -95,10 +95,10 @@ setup() {
   # Token list: the general set from the narrow test above (fleet, atlas,
   # smartsheet, larrypelty), plus larry/lpelty/an absolute-home-path prefix
   # since those are equally personal and not covered by "larrypelty" alone.
-  # "bill" — the agent's own name — is included separately below with a
-  # word-boundary match: as a bare regex alternative it would also match
-  # "billing", "billion", and "William", none of which are identity leaks,
-  # so it can't share the unbounded pattern the other tokens use safely.
+  # The agent names are included separately below with a word-boundary
+  # match: as bare regex alternatives they would also match "billing",
+  # "billion", "William" and the like, none of which are identity leaks, so
+  # they can't share the unbounded pattern the other tokens use safely.
   #
   # Paths come from `git ls-files` over the distribution prefixes (see PREMISE
   # above), so the scan follows the repo as files are added or renamed rather
@@ -109,8 +109,11 @@ setup() {
     if grep -qiE "larry|lpelty|/Users/|fleet|atlas|smartsheet" "$f"; then
       offenders="$offenders $f(token)"
     fi
-    if grep -qwiE "bill" "$f"; then
-      offenders="$offenders $f(bill)"
+    # Agent names, word-bounded (spec §8.4): the caller is generalized — the
+    # callee is named only by a deployment's gitignored config.yaml — so no
+    # agent's name may be hardcoded anywhere in the distribution.
+    if grep -qwiE "bill|wren|clara|moot" "$f"; then
+      offenders="$offenders $f(agent name)"
     fi
   done <<EOF
 $(git ls-files -- core .claude CLAUDE.md SOUL.md README.md CHANGELOG.md config.example.yaml)
@@ -204,6 +207,22 @@ _run_scan_in_fixture() {
 
   run _run_scan_in_fixture
   [ "$status" -eq 0 ]
+}
+
+@test "wide scan catches a hardcoded agent name in core (the callee is named only by config)" {
+  _make_fixture_repo
+  printf '# callee: wren\n' >> "$fixture/core/somefile.sh"
+  git -C "$fixture" add -A
+  run _run_scan_in_fixture
+  [ "$status" -ne 0 ]
+}
+
+@test "wide scan's agent names are word-bounded: moots, billing and Clarabelle are not agent names" {
+  _make_fixture_repo
+  printf '# moots, billing and Clarabelle\n' >> "$fixture/core/somefile.sh"
+  git -C "$fixture" add -A
+  run _run_scan_in_fixture
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "loaded identity files state rules positively" {

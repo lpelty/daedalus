@@ -499,8 +499,116 @@ def launch_self(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, req
             "settings": s, "cleanup": []}
 
 
-PREPARE = {"self": prepare_self}
-LAUNCH = {"self": launch_self}
+def _names(val: str) -> List[str]:
+    val = val.strip()
+    if val.startswith("[") and val.endswith("]"):
+        val = val[1:-1]
+    return [c.strip().strip("'\"") for c in val.split(",") if c.strip()]
+
+
+def agent_yaml_callers(text: str) -> Tuple[bool, Optional[List[str]]]:
+    """(a top-level direct_calls: key is present, the callers it names — None
+    when present but unreadable). Three shapes are read, YAML comments allowed:
+    `callers: [a, b]` or `callers: a, b` under the block; a block list
+    (`callers:` then `- a` lines); the flow mapping
+    `direct_calls: {callers: [a, b]}`."""
+    lines = [raw.split(" #", 1)[0].rstrip() for raw in text.splitlines()]
+    lines = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+    for i, line in enumerate(lines):
+        if line[:1].isspace() or line.split(":", 1)[0].strip() != "direct_calls":
+            continue
+        rest = line.split(":", 1)[1].strip()
+        if rest:
+            m = re.fullmatch(r"\{\s*callers\s*:\s*(\[[^\]]*\])\s*\}", rest)
+            return True, (_names(m.group(1)) if m else None)
+        body = []
+        for ln in lines[i + 1:]:
+            if not ln[:1].isspace():
+                break
+            body.append(ln.strip())
+        for j, item in enumerate(body):
+            if item.startswith("callers:"):
+                val = item.split(":", 1)[1].strip()
+                if val:
+                    return True, _names(val)
+                items = []
+                for b in body[j + 1:]:
+                    if not b.startswith("- "):
+                        break
+                    items.append(b[2:].strip().strip("'\""))
+                return True, (items or None)
+        return True, None
+    return False, None
+
+
+def callee_callers(home: Path, callee: str) -> Tuple[Optional[List[str]], str]:
+    """The callee's own allowlist, read without importing anything of the
+    callee's (spec §8.4; Decision 19), deny by default: direct_calls.callers in
+    <home>/agent.yaml; a direct_calls: key whose callers cannot be read is a
+    refusal, never an open door. With no such key, a plain
+    <home>/.direct-callers (one name per line, or comma separated).
+    (None, 'no callee allowlist found') only when neither exists."""
+    y = home / "agent.yaml"
+    if y.is_file():
+        present, names = agent_yaml_callers(y.read_text(errors="replace"))
+        if present:
+            if names is None:
+                raise Refusal("cannot read %s's callers list in agent.yaml (read under direct_calls: are "
+                              "`callers: [a, b]`, a `- name` list, and `direct_calls: {callers: [a, b]}`) — a list "
+                              "that cannot be read may not name %s" % (callee, SELF_NAME))
+            return names, "agent.yaml direct_calls.callers"
+    f = home / ".direct-callers"
+    if f.is_file():
+        names = [c.strip() for c in re.split(r"[,\n]", f.read_text(errors="replace"))
+                 if c.strip() and not c.strip().startswith("#")]
+        return names, ".direct-callers"
+    return None, "no callee allowlist found"
+
+
+def prepare_agent(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dict) -> dict:
+    if not (conf.get("direct_call.callee_home") and conf.get("direct_call.callee_name")):
+        raise Refusal("no callee is configured: set direct_call.callee_home and callee_name in config.yaml")
+    s, problems = direct_call_settings(conf)
+    first(problems)
+    if args.caller:
+        raise Refusal("--caller is for --callee self; a call to the configured agent is always from %s" % SELF_NAME)
+    fields = {"caller": SELF_NAME, "callee": s["callee_name"], "callee_home": s["callee_home"],
+              "callee_launcher": s["callee_launcher"]}
+    if s["callee_launcher"]:
+        fields["callee_allowlist"] = "the callee's own launcher enforces it"
+        return fields
+    names, source = callee_callers(Path(s["callee_home"]), s["callee_name"])
+    if names is not None and SELF_NAME not in names:
+        raise Refusal("%s is not on %s's callers list (%s)" % (SELF_NAME, s["callee_name"], source))
+    fields["callee_allowlist"] = source
+    return fields
+
+
+def launch_agent(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, request: bytes, resumed: bool) -> dict:
+    s, problems = direct_call_settings(conf)
+    first(problems)
+    home = Path(rec["callee_home"]).resolve()
+    env = child_env(rec["call_id"], call_dir, SELF_NAME)
+    if rec.get("callee_launcher"):
+        # REQUEST_FILE is replaced by this attempt's request sidecar in attempt().
+        cmd = [rec["callee_launcher"], "--caller", SELF_NAME, "--request-file", REQUEST_FILE]
+        if resumed:
+            if not rec.get("callee_receipt"):
+                raise Refusal("call %s has no receipt id from %s's launcher to resume" % (rec["call_id"], rec["callee"]))
+            cmd += ["--resume", rec["callee_receipt"]]
+        else:
+            cmd += ["--artifact-dir", rec.get("artifact_dir") or home_raw()]
+        return {"cmd": cmd, "cwd": home, "timeout": s["timeout"], "env": env, "output": "launcher",
+                "stdin": b"", "marker": None, "transcript": None, "settings": s, "cleanup": []}
+    frame = frame_prompt(rec["callee"], SELF_NAME, s["callee_human"], rec["call_id"], resumed)
+    return {"cmd": agent_command(s, rec, frame, resumed), "cwd": home, "timeout": s["timeout"], "env": env,
+            "output": "json", "stdin": wrap_request(SELF_NAME, rec["call_id"], resumed, request),
+            "marker": s["marker"], "transcript": transcript_dir_for(home) / (rec["session_id"] + ".jsonl"),
+            "settings": s, "cleanup": []}
+
+
+PREPARE = {"self": prepare_self, "agent": prepare_agent}
+LAUNCH = {"self": launch_self, "agent": launch_agent}
 
 
 # --- running one attempt --------------------------------------------------------------
@@ -748,7 +856,12 @@ def write_verdict(root: Path, call_dir: Path, rec: dict, answer: str) -> Optiona
 # --- capture (spec §8.5) ---------------------------------------------------------------
 
 def recapture(root: Path, call_dir: Path, stamp: str, rec: dict, launch: dict) -> dict:
-    """Task 6 replaces this body with the launcher's re-capture (spec §8.5)."""
+    """Task 6 replaces this body with the launcher's re-capture (spec §8.5).
+    A call through the callee's own launcher is captured there (Decision 9)."""
+    if launch["output"] == "launcher":
+        return {"status": "deferred", "exit_code": None,
+                "detail": "%s's own launcher captures this call (its receipt %s)"
+                          % (rec["callee"], rec.get("callee_receipt") or "unknown")}
     return {"status": "skipped", "exit_code": None, "detail": "re-capture is not wired in this build"}
 
 

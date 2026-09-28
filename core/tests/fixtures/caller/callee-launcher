@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# A callee's own direct-call launcher (spec §8.4), as the fixture for
+# direct_call.callee_launcher: records its argv and answers by the same
+# contract — the answer on stdout, a receipt with its own call id on stderr.
+# CALLEE_LAUNCHER_EXIT (default 0): 3 is "answered, orientation not verified"
+# (the answer still on stdout, as the contract says); anything else non-zero
+# is a failure that still printed something.
+code="${CALLEE_LAUNCHER_EXIT:-0}"; orient=yes; [ "$code" = 0 ] || orient=no
+printf '%s\n' "$@" > "${FAKE_CLAUDE_DIR:?}/launcher-argv.txt"
+env | grep -E '^(DIRECT_CALL_|CAPTURE_DEFER)' > "$FAKE_CLAUDE_DIR/launcher-env.txt"
+printf 'Alpha call 0f0f0f0f-1111-2222-3333-444444444444; receipt /somewhere/state/direct-calls/x\n' >&2
+printf 'callee launcher answer\n'
+printf 'Alpha orientation: %s; recall: skipped; capture: confirmed; exit: %s\n' "$orient" "$code" >&2
+exit "$code"
