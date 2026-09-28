@@ -278,6 +278,12 @@ memory_env() {
          return 1 ;;
     esac
     key="$(head -n 1 "$DAEDALUS_HOME/$keyfile" | tr -d '[:space:]')"
+    # A configured file that yields no key is an error, not "no key": falling
+    # back would post unauthenticated and the background tick would only see 401s.
+    if [ -z "$key" ]; then
+      printf 'daedalus: memory.api_key_file %s is empty — put the REST API key on its first line\n' "$keyfile" >&2
+      return 1
+    fi
   fi
   ulabel="${TENANT_USER_LABEL:-$(cfg memory.user_label 2>/dev/null || true)}"
   alabel="${TENANT_ASSISTANT_LABEL:-$(cfg memory.assistant_label 2>/dev/null || true)}"

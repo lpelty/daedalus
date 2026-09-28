@@ -349,6 +349,15 @@ EOF
   sed -i '' 's#^  api_key_file: .*#  api_key_file: state/none#' "$TESTCFG"
   run memory_env; [ "$status" -eq 1 ]
   case "$output" in *"memory.api_key_file state/none does not exist"*) : ;; *) echo "$output"; return 1 ;; esac
+  # A configured key file that yields no key is refused, never treated as "no key".
+  sed -i '' 's#^  api_key_file: .*#  api_key_file: state/hindsight/api-key#' "$TESTCFG"
+  chmod 600 "$H/state/hindsight/api-key"
+  for body in '' '\nkey-on-second-line\n' '   \n'; do
+    printf "$body" > "$H/state/hindsight/api-key"
+    run memory_env; [ "$status" -eq 1 ] || { echo "body [$body] rc=$status: $output"; return 1; }
+    case "$output" in *"memory.api_key_file state/hindsight/api-key is empty — put the REST API key on its first line"*) : ;; *) echo "body [$body]: $output"; return 1 ;; esac
+    case "$output" in *HINDSIGHT_API_TENANT_API_KEY*|*key-on-second-line*) echo "body [$body] leaked: $output"; return 1 ;; *) : ;; esac
+  done
 }
 
 @test "config.example.yaml ships a memory: block commented out, and memory_env reads it once uncommented" {
