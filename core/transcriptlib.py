@@ -7,7 +7,9 @@
 module checks it. The words must be an entry the operator TYPED — the whole
 turn, not a fragment of one (plan 4 Decision 30) — after a cut-off (the
 promotion's primaries, Decision 35; for --skip-review the earlier REFUTED
-prepare; for `prime take --reason` the pen holder's bound_at) and — for
+prepare; for `prime take --reason` the moment the holder took the pen, its
+bound_epoch — always an absolute instant, never a local stamp the reading
+process's TZ would move) and — for
 promote — as the operator's first reply to an assistant entry with text that
 follows the cut-off and carries the block's opening words (the turn in which
 the prime showed it; a turn between them answered the block instead). A
@@ -180,11 +182,6 @@ def parse_ts(raw: object) -> Optional[float]:
     if not m:
         return None
     return calendar.timegm(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")) + float(m.group(2) or 0)
-
-
-def local_stamp_epoch(stamp: str) -> float:
-    """A local 'YYYY-mm-ddTHH:MM:SS' (leaselib.now_stamp; the marker's `started`)."""
-    return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
 
 
 def iso_utc(epoch: float) -> str:

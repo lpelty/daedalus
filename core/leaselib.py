@@ -803,6 +803,29 @@ def now_stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def pen_bound() -> dict:
+    """The fields every prime.json write sets when the pen changes hands:
+    bound_at, the local stamp people read, and bound_epoch, the absolute instant
+    `prime take --reason` measures the operator's words against. The cut-off is
+    never the local stamp: a zone-less stamp means whatever the reading
+    process's TZ says, and TZ is the taker's to set (plan 4 Task 3 review)."""
+    return {"bound_at": now_stamp(), "bound_epoch": time.time()}
+
+
+def pen_cutoff(root: Path, prime: dict) -> float:
+    """When the holder took the pen, as epoch seconds: bound_epoch; for a
+    prime.json written by a build before it, the file's own modification time —
+    every write that moves the pen rewrites the file, and a later write can only
+    move the cut-off later, never earlier."""
+    epoch = prime.get("bound_epoch")
+    if isinstance(epoch, (int, float)) and not isinstance(epoch, bool):
+        return float(epoch)
+    try:
+        return lease_path(root, "prime").stat().st_mtime
+    except OSError:
+        return time.time()
+
+
 def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
                     spawned: bool = False, timeout: Optional[int] = None,
                     deadline: Optional[float] = None) -> Tuple[str, dict]:
@@ -1293,7 +1316,7 @@ def first_up(root: Path, sid: str) -> bool:
     prime = read_lease(root, "prime")
     if prime is None:
         try:
-            write_lease(root, "prime", {"session_id": sid, "bound_at": now_stamp(), "history": []}, exclusive=True)
+            write_lease(root, "prime", dict({"session_id": sid, "history": []}, **pen_bound()), exclusive=True)
             return True
         except FileExistsError:
             return False
@@ -1307,7 +1330,7 @@ def first_up(root: Path, sid: str) -> bool:
         return False
     fresh["history"] = (fresh.get("history") or []) + [{"from": holder, "to": sid, "at": now_stamp(),
                                                         "reason": "first-up (previous holder gone)"}]
-    fresh.update({"session_id": sid, "bound_at": now_stamp()})
+    fresh.update(dict({"session_id": sid}, **pen_bound()))
     write_lease(root, "prime", fresh)
     return True
 
@@ -1495,7 +1518,7 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
 
     The reason is checked (spec §4.8, §7.4). transcribed: --reason must be,
     whole, a turn the operator typed in the TAKER's own transcript after the
-    holder's bound_at (transcriptlib; plan 4 Decision 30; no shown turn is
+    holder took the pen — bound_epoch, an absolute instant (pen_cutoff) — (transcriptlib; plan 4 Decision 30; no shown turn is
     required — there is no block to show), in a transcript nothing may write
     (Decision 36); the history entry records the transcript entry. tty:
     --reason is refused and the reason is read from /dev/tty — the take is the
@@ -1543,10 +1566,9 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
             raise Refused("The pen is held by a live session that holds no window now (peer name %s). "
                           "Taking it needs --reason \"<the operator's words>\"." % (names[0] if names else "unknown"))
         elif live:
-            bound = str(prime.get("bound_at") or "")
             try:
                 found = tl.find_operator_words(tl.transcript_for(root, sid), str(reason),
-                                               tl.local_stamp_epoch(bound) if bound else 0.0, require_shown=False)
+                                               pen_cutoff(root, prime), require_shown=False)
             except tl.Missing as e:
                 raise Refused("I cannot find this window's transcript (%s), so the operator's words cannot be checked. "
                               "The pen did not move. If the transcript lives elsewhere, set memory.transcript_dir in "
@@ -1571,7 +1593,7 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
                                     "reason": reason or "previous holder gone"}
         entry.update(record)
         fresh["history"] = (fresh.get("history") or []) + [entry]
-        fresh.update({"session_id": sid, "bound_at": now_stamp()})
+        fresh.update(dict({"session_id": sid}, **pen_bound()))
         write_lease(root, "prime", fresh)
     return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
 

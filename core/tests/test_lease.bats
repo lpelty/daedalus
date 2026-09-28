@@ -958,8 +958,8 @@ two_windows_prime_01() {
   LS create >/dev/null; LS create >/dev/null
   p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
   p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sB LS claim 02 >/dev/null
-  python3 "$LL" _test-write prime "{\"session_id\":\"sA\",\"bound_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\",\"history\":[]}"
-  sleep 1   # bound_at has one-second resolution; every transcript entry below is after it
+  python3 "$LL" _test-write prime "{\"session_id\":\"sA\",\"bound_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\",\"bound_epoch\":$(now),\"history\":[]}"
+  sleep 1   # every transcript entry below is clearly after the holder's bound_epoch
 }
 
 @test "prime take --reason over a live holder (transcribed): words not in the taker's transcript, or typed before the holder's bound_at, or only in a tool result, are refused and the pen does not move; typed after, the take records the transcript entry" {
@@ -1007,4 +1007,45 @@ two_windows_prime_01() {
   run type_into "the operator wants window 02 to hold it" "the operator's words" env DAEDALUS_SESSION_ID=sB bash "$DAEDALUS_HOME/core/lease.sh" prime take
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"][-1]; assert h["reason_typed_at_terminal"] is True and "window 02 to hold it" in h["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
+}
+
+# The cut-off is an absolute instant (bound_epoch), never a local stamp the
+# taker's own process parses: TZ is the taker's to set, and a zone-less
+# bound_at read under TZ=Etc/GMT-14 lands ~19 hours early (Task 3 review).
+@test "prime take --reason (transcribed): the taker's TZ does not move the cut-off — words typed before the holder took the pen stay refused under TZ=Etc/GMT-14 and TZ=XXX-24" {
+  export TZ=America/Chicago
+  two_windows_prime_01; X="$(tx_path sB)"
+  tx "$X" operator "old words from this morning" "$(plus "$(now)" -36000)" >/dev/null
+  for zone in Etc/GMT-14 XXX-24; do
+    TZ="$zone" CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "old words from this morning"
+    [ "$status" -ne 0 ] || { echo "$zone: $output"; return 1; }
+    case "$output" in *"I could not find those words as something the operator typed in this window since the pen was last taken. The pen did not move."*) : ;; *) echo "$zone: $output"; return 1 ;; esac
+    [ "$(lease_json prime session_id)" = "sA" ]
+  done
+}
+
+@test "prime take --reason (transcribed): a take made under a shifted TZ does not write a future cut-off — the next live-holder take with words typed after it goes through" {
+  export TZ=America/Chicago
+  two_windows_prime_01; XB="$(tx_path sB)"; XA="$(tx_path sA)"
+  tx "$XB" operator "window 02 takes the pen" >/dev/null
+  TZ=Etc/GMT-14 CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "window 02 takes the pen"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
+  sleep 1
+  tx "$XA" operator "window 01 takes it back" >/dev/null
+  CLAUDE_CODE_SESSION_ID=sA run LS prime take --reason "window 01 takes it back"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sA" ]
+  python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])); assert abs(d["bound_epoch"]-time.time())<60, d' "$DAEDALUS_HOME/state/leases/prime.json"
+}
+
+@test "prime take --reason (transcribed): a prime.json from an older build with no bound_epoch is cut off at the file's own modification time, not its local stamp" {
+  export TZ=America/Chicago
+  two_windows_prime_01; X="$(tx_path sB)"
+  python3 "$LL" _test-write prime "{\"session_id\":\"sA\",\"bound_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\",\"history\":[]}"
+  sleep 1
+  tx "$X" operator "old words from this morning" "$(plus "$(now)" -36000)" >/dev/null
+  TZ=Etc/GMT-14 CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "old words from this morning"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sA" ]
+  tx "$X" operator "new words after the pen was taken" >/dev/null
+  TZ=Etc/GMT-14 CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "new words after the pen was taken"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
 }
