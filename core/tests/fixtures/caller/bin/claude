@@ -6,7 +6,12 @@ Daedalus, TENANT_ and AWS_ variables only), n counting calls from 1; appends
 a transcript line where Claude Code keeps one
 ($CLAUDE_CONFIG_DIR/projects/<cwd with every non-alphanumeric as ->/<session>.jsonl);
 and answers from the environment: FAKE_ANSWER (default "fake answer"),
-FAKE_MARKER (written into the transcript first, as SessionStart context is),
+FAKE_MARKER (written into the transcript first, in the two attachment records
+Claude Code keeps for a SessionStart hook's output: `hook_success` with the
+hook's JSON on `stdout`, and `hook_additional_context` with the context in a
+`content` list; FAKE_MARKER_SHAPE=success|context writes only one of them,
+FAKE_MARKER_EVENT names another hook event), FAKE_TOOL_RESULT (a tool_result
+record carrying that text, written after the request, as a Read would),
 FAKE_EXIT, FAKE_IS_ERROR, FAKE_SLEEP (seconds, after starting a child that
 ignores TERM; both pids go to $FAKE_CLAUDE_DIR/pids)."""
 import json, os, re, subprocess, sys, time
@@ -33,9 +38,21 @@ base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude"))
 tdir = base / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
 tdir.mkdir(parents=True, exist_ok=True)
 with open(tdir / ("%s.jsonl" % sid), "a") as t:
-    if os.environ.get("FAKE_MARKER"):
-        t.write(json.dumps({"type": "attachment", "content": os.environ["FAKE_MARKER"]}) + "\n")
+    marker, event = os.environ.get("FAKE_MARKER"), os.environ.get("FAKE_MARKER_EVENT", "SessionStart")
+    shape = os.environ.get("FAKE_MARKER_SHAPE", "both")
+    if marker and shape in ("both", "success"):
+        out = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": marker + "\n\nmore context"}}
+        t.write(json.dumps({"type": "attachment", "attachment": {
+            "type": "hook_success", "hookName": event + ":startup", "hookEvent": event, "content": "",
+            "stdout": json.dumps(out), "stderr": "", "exitCode": 0}}) + "\n")
+    if marker and shape in ("both", "context"):
+        t.write(json.dumps({"type": "attachment", "attachment": {
+            "type": "hook_additional_context", "hookName": event + ":startup", "hookEvent": event,
+            "content": [marker + "\n\nmore context"]}}) + "\n")
     t.write(json.dumps({"type": "user", "message": {"role": "user", "content": data.decode("utf-8", "replace")}}) + "\n")
+    if os.environ.get("FAKE_TOOL_RESULT"):
+        t.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_fake", "content": os.environ["FAKE_TOOL_RESULT"]}]}}) + "\n")
 if os.environ.get("FAKE_SLEEP"):
     child = subprocess.Popen(["sh", "-c", 'trap "" TERM; exec sleep 60'])
     (d / "pids").write_text("%d %d\n" % (os.getpid(), child.pid))

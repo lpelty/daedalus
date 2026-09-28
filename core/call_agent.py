@@ -421,19 +421,72 @@ def run_watched(cmd: List[str], cwd: Path, env: Dict[str, str], stdin_path: Path
     return (128 - rc if rc < 0 else rc), False
 
 
-def orientation_of(launch: dict, mode: str, launcher_err: str) -> str:
+def transcript_size(launch: dict) -> int:
+    """Where this attempt's records will start: a resumed session appends to
+    the transcript that already holds the earlier attempts' SessionStart."""
+    t = launch.get("transcript")
+    try:
+        return t.stat().st_size if t is not None else 0
+    except OSError:
+        return 0
+
+
+def session_start_contexts(transcript: Path, offset: int) -> List[str]:
+    """The text this session's SessionStart hooks injected, read from the only
+    records Claude Code writes for them: `type: attachment` with
+    attachment.hookEvent SessionStart — `hook_success` (the hook's stdout, its
+    additionalContext when it is JSON) and `hook_additional_context` (a list
+    of contexts). The request, the answer and every tool result live in other
+    records and are never read: the callee can Read files that quote the
+    marker, and a quote is not an orientation."""
+    out: List[str] = []
+    with transcript.open("rb") as fh:
+        fh.seek(offset)
+        data = fh.read()
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        a = r.get("attachment") if isinstance(r, dict) and r.get("type") == "attachment" else None
+        if not isinstance(a, dict) or a.get("hookEvent") != "SessionStart":
+            continue
+        if a.get("type") == "hook_success":
+            text = a.get("stdout") or ""
+            try:
+                hso = json.loads(text).get("hookSpecificOutput") or {}
+                text = (hso.get("additionalContext") or "") if isinstance(hso, dict) else ""
+            except (ValueError, AttributeError):
+                pass
+            if isinstance(text, str):
+                out.append(text)
+        elif a.get("type") == "hook_additional_context":
+            c = a.get("content")
+            out.extend(x for x in (c if isinstance(c, list) else [c]) if isinstance(x, str))
+    return out
+
+
+def orientation_of(launch: dict, mode: str, launcher_err: str, offset: int = 0) -> str:
     if mode == "refuter":
         return "yes"          # the charter is the identity; its sha is in the receipt
     if launch["output"] == "launcher":
         m = re.search(r"orientation: (yes|no|unverified)", launcher_err)
         return m.group(1) if m else "unverified"
-    if not launch["marker"]:
+    marker = launch["marker"]
+    if not marker:
         return "unverified"
-    t = launch["transcript"]
     try:
-        return "yes" if launch["marker"] in t.read_text(errors="replace") else "no"
+        contexts = session_start_contexts(launch["transcript"], offset)
     except OSError:
         return "no"
+    # Daedalus's own line is the first line of its context, so for self the
+    # marker must open a line; an agent's configured marker may sit inside
+    # its hook's heading ("# Session orientation — ...").
+    if mode == "self":
+        hit = any(l.startswith(marker) for c in contexts for l in c.splitlines())
+    else:
+        hit = any(marker in c for c in contexts)
+    return "yes" if hit else "no"
 
 
 def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
@@ -469,6 +522,7 @@ def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
         atomic_write(rj, rec)
         try:
             stdin_path = Path(os.devnull) if launch["output"] == "launcher" else req_path
+            offset = transcript_size(launch)
             rc, timed_out = run_watched(launch["cmd"], launch["cwd"], launch["env"], stdin_path,
                                         launch["timeout"], out_path, err_path)
             raw_out = out_path.read_bytes().decode("utf-8", errors="replace")
@@ -488,7 +542,7 @@ def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
                 m = re.search(r"call (" + CALL_ID_RE.pattern + r")", err_text)
                 if m and not rec.get("callee_receipt"):
                     rec["callee_receipt"] = m.group(1)
-            orientation = orientation_of(launch, mode, err_text)
+            orientation = orientation_of(launch, mode, err_text, offset)
             # A callee launcher speaks this launcher's contract: its exit 3 with
             # an answer on stdout is an answer whose orientation it could not
             # verify — printed, and exit 3 here too (Decision 9).

@@ -111,6 +111,55 @@ PY
   case "${stderr_lines[1]}" in "Daedalus orientation: no; capture: skipped; exit: 5 — failed: claude exited 5 (with output). No answer is certified.") : ;; *) echo "$stderr"; return 1 ;; esac
 }
 
+@test "orientation is read only from the called session's own SessionStart hook output: the marker quoted in the request, in a tool result, or in another hook's output is exit 3" {
+  # The transcript also holds the request and every tool result. The callee
+  # can Read core/session-start.py and core/leaselib.py, which carry the
+  # marker literal, so a plain search of the transcript would certify a
+  # session whose SessionStart never ran.
+  direct_call "callers: Peer"
+  m="Daedalus session orientation: window 01, /somewhere"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "$m
+what does that first line mean?"
+  [ "$status" -eq 3 ] || { echo "$status / $stderr"; return 1; }
+  [ "$output" = "fake answer" ]
+  [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
+  FAKE_TOOL_RESULT="$m" run --separate-stderr bash "$CALL" --callee self --caller Peer "explain session-start.py"
+  [ "$status" -eq 3 ] || { echo "$status / $stderr"; return 1; }
+  [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
+  FAKE_MARKER="$m" FAKE_MARKER_EVENT=UserPromptSubmit run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 3 ] || { echo "$status / $stderr"; return 1; }
+  [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
+  for d in "$DAEDALUS_HOME"/state/direct-calls/*/; do
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["orientation"] is False, r' "$d/launch.json"
+  done
+}
+
+@test "either record Claude Code keeps for a SessionStart hook verifies orientation" {
+  direct_call "callers: Peer"
+  for shape in success context; do
+    FAKE_MARKER="Daedalus session orientation: visitor, x" FAKE_MARKER_SHAPE=$shape \
+      run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+    [ "$status" -eq 0 ] || { echo "$shape: $status / $stderr"; return 1; }
+    [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: skipped; exit: 0" ]
+  done
+}
+
+@test "a resumed call is verified by its own SessionStart, not by the first attempt's record in the same transcript" {
+  # The launcher reads only what this attempt appended (attempt() takes the
+  # transcript's size before launch); --resume itself is Task 5.
+  grep -q '^def resume(' "$DAEDALUS_HOME/core/call_agent.py" || skip "--resume lands in plan 3 Task 5; this test then runs as written"
+  direct_call "callers: Peer"
+  FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 0 ] || { echo "$status / $stderr"; return 1; }
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\).*/\1/p')"
+  [ -n "$id" ]
+  run --separate-stderr bash "$CALL" --resume "$id" "and then?"
+  [ "$status" -eq 3 ] || { echo "$status / $output / $stderr"; return 1; }
+  [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
+  FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --resume "$id" "and then?"
+  [ "$status" -eq 0 ] || { echo "$status / $stderr"; return 1; }
+}
+
 @test "a hung call is killed at direct_call.timeout — its whole process group — and is exit 124 with the receipt timed-out" {
   direct_call "callers: Peer" "timeout: 2"
   t0="$(date +%s)"
