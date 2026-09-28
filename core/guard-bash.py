@@ -306,8 +306,11 @@ def write_operands(seg: List[str]) -> List[str]:
         ops.extend(t for t in seg[1:] if not t.startswith("-") and ("/" in t or t.endswith((".sh", ".py", ".md", ".json", ".yaml"))))
     if head == "tee":
         ops.extend(t for t in seg[1:] if not t.startswith("-"))
-    if head in ("cp", "mv", "install") and len(seg) >= 3:
+    if head in ("cp", "install") and len(seg) >= 3:
         ops.append(seg[-1])
+    if head == "mv" and len(seg) >= 3:
+        # mv writes its destination and removes every source.
+        ops.extend(t for t in seg[1:] if not t.startswith("-"))
     if head in ("rm", "unlink"):
         ops.extend(t for t in seg[1:] if not t.startswith("-"))
     if head == "patch":

@@ -10,7 +10,7 @@ setup() {
   DAEDALUS_HOME="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault/evidence"
-  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
@@ -481,4 +481,26 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
     case "$output" in *"never finished"*) echo "$ev: false sentence about a live window: $output"; return 1 ;; esac
     case "$output" in *"The lease file for window 03 cannot be read"*"core/lease.sh sweep"*"gate-1.log"*) : ;; *) echo "$ev must name the unreadable file as the cause: $output"; return 1 ;; esac
   done
+}
+
+@test "the session transcript is written by nothing: an Edit of <project dir>/<sid>.jsonl, and of a configured memory.transcript_dir, is denied with the transcript sentence; a sibling path outside, and the project's auto memory, are not" {
+  P="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$DAEDALUS_HOME" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$P/memory"
+  ed() { printf '{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+  run ed Edit "$P/s1.jsonl"
+  case "$output" in *'"permissionDecision": "deny"'*"the session transcript is the record of the operator's yes; nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  run ed Write "$P/other-session.jsonl"; case "$output" in *'"deny"'*) : ;; *) echo "$output"; return 1 ;; esac
+  run ed Write "$P/memory/MEMORY.md"; [ -z "$output" ] || { echo "auto memory must stay writable: $output"; return 1; }
+  run ed Write "$CLAUDE_CONFIG_DIR/projects/-some-other-home/s1.jsonl"; [ -z "$output" ] || { echo "$output"; return 1; }
+  TD="$BATS_TEST_TMPDIR/tdir"; mkdir -p "$TD" "$BATS_TEST_TMPDIR/tdir-sibling"
+  python3 - "$DAEDALUS_HOME/config.yaml" "$TD" <<'PY'
+import sys; p = sys.argv[1]; s = open(p).read()
+open(p, "w").write(s + "memory:\n  transcript_dir: %s\n" % sys.argv[2])
+PY
+  run ed Edit "$TD/s1.jsonl"; case "$output" in *"nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  run ed Edit "$BATS_TEST_TMPDIR/tdir-sibling/s1.jsonl"; [ -z "$output" ] || { echo "$output"; return 1; }
+  # Decision 36: a session started from another directory writes under another project slug;
+  # its marker names that transcript, and the directory is denied like the home's own.
+  O="$CLAUDE_CONFIG_DIR/projects/-another-cwd"; mkdir -p "$O"
+  printf '{"session_id":"s7","transcript_path":"%s/s7.jsonl"}' "$O" > "$DAEDALUS_HOME/state/session-s7.json"
+  run ed Write "$O/s7.jsonl"; case "$output" in *"nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
 }

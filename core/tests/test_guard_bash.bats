@@ -8,7 +8,7 @@ setup() {
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/state"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
   # the guard imports boundary-hook.py for the cross-lease helpers and leaselib for the leases (Task 11)
-  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
@@ -421,4 +421,18 @@ git push origin main"; denied
   chmod 755 "$DAEDALUS_HOME/state"
   run guard_as sA 'echo x > hooks/capture.py' "$W"; denied   # first RECORDED stop
   run guard_as sA 'echo x > hooks/capture.py' "$W"; case "$output" in *'"permissionDecision"'*) echo "after the record the second must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a Bash write operand under the transcript directory — redirect, sed -i, tee, cp, mv, rm, an unparseable command — is denied by the absolute-path check (not is_protected, which is root-relative); auto memory is not" {
+  P="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$(cd "$DAEDALUS_HOME" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$P/memory"
+  : > "$P/s1.jsonl"
+  for c in "echo x >> $P/s1.jsonl" "sed -i '' s/a/b/ $P/s1.jsonl" "tee $P/s1.jsonl" "cp /tmp/x $P/s1.jsonl" \
+           "mv $P/s1.jsonl /tmp/gone.jsonl" "rm -f $P/s1.jsonl" "echo it's > $P/s1.jsonl"; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"the session transcript is the record of the operator's yes; nothing writes it."*) : ;; *) echo "$c: $output"; return 1 ;; esac
+  done
+  run guard "echo note >> $P/memory/MEMORY.md"; allowed
+  run guard "cat $P/s1.jsonl"; allowed
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; import verifylib as v; assert not v.is_protected(Path(sys.argv[2]), Path(sys.argv[3]))' \
+    "$DAEDALUS_HOME/core" "$DAEDALUS_HOME" "$P/s1.jsonl"
 }

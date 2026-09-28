@@ -403,6 +403,22 @@ def warning_text(nn: str, lease: dict, rel: str, background: bool, ago: str) -> 
 NOT_PRIME = ("Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by window %s — "
              "ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so.")
 WORKTREES_ROOT = "worktrees/ holds every window's worktree; nothing writes or removes it as a whole. Your work goes in %s."
+TRANSCRIPT_DENY = "the session transcript is the record of the operator's yes; nothing writes it."
+
+
+def transcript_deny(root: Path, p: Path) -> Optional[str]:
+    """Spec §7.4: an operand under memory.transcript_dir, or Claude Code's
+    project directory for this home, is denied — an absolute-path check of its
+    own, because verifylib.is_protected is root-relative and would never see a
+    path outside the home. <dir>/memory/ (Claude Code's auto memory) is not the
+    record (plan 4 Decision 4); the operand is resolved first, so a symlink
+    there that points at a transcript is still denied."""
+    import transcriptlib as tl
+    rp = p.resolve()
+    for d in tl.transcript_dirs(root):
+        if under(rp, d) and not under(rp, d / "memory"):
+            return TRANSCRIPT_DENY
+    return None
 
 
 def tree_deny(root: Path, ctx: dict, p: Path) -> Optional[str]:
@@ -444,13 +460,17 @@ def tree_deny(root: Path, ctx: dict, p: Path) -> Optional[str]:
 
 def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """The lease-era checks for one resolved write path — the Edit/Write leg and every Bash
-    write operand run this same function. In order: fail closed under target/, worktrees/ and
+    write operand run this same function. In order: the session transcript (§7.4, any
+    session, leases or none); fail closed under target/, worktrees/ and
     hot.md for a session that cannot be bound or a lease file that cannot be read (§4.4 —
     judged BEFORE the empty-leases return, which is what a read failure leaves; `refused` is
     the caller's, since the guard's may also come from the bash seam); vault/hot.md for a
     non-prime (§4.7); the trees (tree_deny); the stop-once cross-lease warning (§4.6).
     Returns (deny reason, context): a deny; or context alone for a cross-lease path already
     warned this session; or (None, None)."""
+    reason = transcript_deny(root, p)
+    if reason:
+        return reason, None
     rroot = root.resolve()
     is_hot = p == rroot / "vault" / "hot.md"
     if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees") or is_hot):
