@@ -357,3 +357,109 @@ PY
   [ "$status" -ne 0 ]
   [ $((t1 - t0)) -lt 11 ] || { echo "close took $((t1 - t0)) s: each span got its own timeout"; return 1; }
 }
+
+@test "close waits out an earlier Stop-tick span that finishes while it waits: one close exits 0, says that span is confirmed stored, and says close complete" {
+  # Review of Task 10: with _await_own_spans a bare `return`, every other test
+  # here still passed — the whole-session test's second close runs only after
+  # op-1 has finished, so reconcile confirms it and the wait is never needed.
+  configure_capture; start_stub
+  printf 'stub-op-1\n' > "$BATS_TEST_TMPDIR/running_ops"
+  run python3 "$DAEDALUS_HOME/core/capture.py" capture          # a Stop tick's fast path: pending under stub-op-1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  ( sleep 3; rm -f "$BATS_TEST_TMPDIR/running_ops" ) & fin=$!    # the server finishes op-1 while the close waits
+  CAPTURE_VERIFY_TIMEOUT_SEC=20 run bash "$CLOSE"
+  wait "$fin" 2>/dev/null || true
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"earlier span [0->"*"of this session confirmed stored"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close complete"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# A live claim on this session's pending span, as a tick of ANOTHER transcript
+# (another clone) takes it for its whole run: in_flight on that other transcript,
+# the ledger entry stamped with the same claim. $1: the live pid.
+claim_pending_elsewhere() {
+  python3 - "$DAEDALUS_HOME/core" "$1" "$(ps_ms "$1")" <<'PY'
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+claim = {"pid": int(sys.argv[2]), "proc_started": int(sys.argv[3]), "started": time.time(), "ceiling": 2000}
+with capture._state_lock(cfg["tenant_home"]):
+    s = capture._load_state(cfg["tenant_home"])
+    assert len(s["pending"]) == 1, s["pending"]
+    s["pending"][0]["claim"] = claim
+    s["transcripts"].setdefault("/elsewhere/other-clone.jsonl", {})["in_flight"] = dict(claim, offset=0)
+    capture._save_state(cfg["tenant_home"], s)
+PY
+}
+
+@test "close waits for another clone's run that holds this session's earlier span, then confirms it itself: exit 0, close complete" {
+  # Review of Task 10: the span was left out of the close's snapshot, never
+  # waited for, and reported unconfirmed at once — though the server had stored it.
+  configure_capture; start_stub
+  run python3 "$DAEDALUS_HOME/core/capture.py" capture          # a Stop tick's fast path: pending under stub-op-1 (stored)
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  sleep 300 & sp=$!
+  claim_pending_elsewhere "$sp"
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  ( sleep 3; python3 - "$DAEDALUS_HOME/core" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import capture
+cfg = capture._require_env()
+with capture._state_lock(cfg["tenant_home"]):                  # the other run ends, releasing its claim unsettled
+    s = capture._load_state(cfg["tenant_home"])
+    for e in s["pending"]:
+        e.pop("claim", None)
+    s["transcripts"].pop("/elsewhere/other-clone.jsonl", None)
+    capture._save_state(cfg["tenant_home"], s)
+PY
+  ) & rel=$!
+  CAPTURE_VERIFY_TIMEOUT_SEC=20 run bash "$CLOSE"
+  wait "$rel" 2>/dev/null || true
+  kill "$sp"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"confirmed stored"*"[0->"*"close complete"*|*"[0->"*"confirmed stored"*"close complete"*) : ;; *) echo "$output"; return 1 ;; esac
+  grep -q '^GET .*/operations/stub-op-1$' "$BATS_TEST_TMPDIR/requests.log"
+}
+
+@test "close whose earlier span another capture still holds at the deadline says another capture is settling it — after waiting, not at once" {
+  configure_capture; start_stub
+  run python3 "$DAEDALUS_HOME/core/capture.py" capture
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  sleep 300 & sp=$!
+  claim_pending_elsewhere "$sp"
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  t0="$(date +%s)"
+  CAPTURE_VERIFY_TIMEOUT_SEC=4 run bash "$CLOSE"
+  t1="$(date +%s)"
+  kill "$sp"
+  [ "$status" -ne 0 ]
+  case "$output" in *"another capture is settling span [0->"*"wait and close again"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close complete"*) echo "$output"; return 1 ;; *) : ;; esac
+  [ $((t1 - t0)) -ge 3 ] || { echo "close gave up after $((t1 - t0)) s without waiting: $output"; return 1; }
+}
+
+@test "a close out of verification time records its new span as pending under its operation: the next close waits on it and never POSTs the same document id again" {
+  # Review of Task 10: the timed-out span was dropped with no ledger entry, so
+  # every later close re-POSTed its document id while the first extraction was
+  # still running — a re-ingest that deletes (spec §4.7).
+  configure_capture; start_stub
+  printf 'stub-op-1\nstub-op-2\nstub-op-3\n' > "$BATS_TEST_TMPDIR/running_ops"
+  run python3 "$DAEDALUS_HOME/core/capture.py" capture          # a Stop tick's fast path: pending under stub-op-1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  CAPTURE_VERIFY_TIMEOUT_SEC=4 run bash "$CLOSE"
+  [ "$status" -ne 0 ]
+  case "$output" in *"not confirmed within this close's time"*"pending under operation stub-op-2"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"extraction FAILED"*|*"close complete"*) echo "$output"; return 1 ;; *) : ;; esac
+  CAPTURE_VERIFY_TIMEOUT_SEC=4 run bash "$CLOSE"
+  [ "$status" -ne 0 ]
+  case "$output" in *"close complete"*) echo "$output"; return 1 ;; *) : ;; esac
+  run python3 -c 'import json,sys,collections
+ids=[i["document_id"] for l in open(sys.argv[1]) if l.strip() for i in json.loads(l)["items"]]
+d=[k for k,n in collections.Counter(ids).items() if n>1]
+print(ids); sys.exit(1 if d else 0)' "$BATS_TEST_TMPDIR/posts.jsonl"
+  [ "$status" -eq 0 ] || { echo "a document id was POSTed twice: $output"; return 1; }
+}

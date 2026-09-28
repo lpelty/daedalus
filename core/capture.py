@@ -496,17 +496,29 @@ def _split_convo(convo: str, max_chars: int = MAX_ITEM_CHARS) -> list[str]:
 
 def _await_extraction(op_id: str, bank: str, cfg: dict) -> tuple[bool, str]:
     """Poll an async retain operation until it reaches a terminal state.
+    Returns (ok, detail); _await_operation says which way it went.
 
-    Returns (ok, detail). `ok` is True only when the operation completed AND
+    `ok` is True only when the operation completed AND
+    reported no extraction errors; see _await_operation."""
+    verdict, detail = _await_operation(op_id, bank, cfg)
+    return verdict == "ok", detail
+
+
+def _await_operation(op_id: str, bank: str, cfg: dict) -> tuple[str, str]:
+    """Poll an async retain operation until it reaches a terminal state or
+    cfg's verify_timeout runs out. Returns (verdict, detail), verdict 'ok',
+    'failed' (a terminal failure) or 'timeout' (still unknown at the limit).
+    A close keeps the two apart: a failed span is re-pushed, while a span still
+    extracting is recorded as pending under its operation, never POSTed again
+    while that extraction may still land (review of plan 2 Task 10).
+
+    'ok' only when the operation completed AND `ok` is True only when the operation completed AND
     reported no extraction errors -- "the server accepted the batch" is not the
     same claim as "the memory was stored", and conflating them is what PROP-002
     documented (an accepted batch whose extraction died with four distinct
     JSONDecodeErrors, offset already advanced past it).
 
-    A timeout returns False. That is deliberate: an unknown outcome is treated
-    as failure so the offset stays put and the span is re-pushed next time.
-    Re-pushing a span the server *did* eventually store is cheap (a duplicate
-    document); losing one is permanent.
+    A timeout is never 'ok': an unknown outcome is not a stored one.
     """
     deadline = time.time() + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC)
     last = "no response"
@@ -522,17 +534,17 @@ def _await_extraction(op_id: str, bank: str, cfg: dict) -> tuple[bool, str]:
         errs = op.get("extraction_errors_count") or 0
         if status in ("completed", "succeeded", "success"):
             if errs:
-                return False, f"status={status} but extraction_errors_count={errs}"
-            return True, f"status={status}, operation {op_id}"
+                return "failed", f"status={status} but extraction_errors_count={errs}"
+            return "ok", f"status={status}, operation {op_id}"
         if status in ("failed", "error", "cancelled", "canceled"):
             # PROP-006: the live payload's field is error_message; "error" is
             # the fallback for an older or differently versioned server.
             reason = op.get("error_message") or op.get("error")
-            return False, (f"status={status}, retry_count={op.get('retry_count')}, "
-                           f"error={reason!r}, operation {op_id}")
+            return "failed", (f"status={status}, retry_count={op.get('retry_count')}, "
+                              f"error={reason!r}, operation {op_id}")
         last = f"status={status or 'unknown'}"
         time.sleep(VERIFY_POLL_SEC)
-    return False, f"timed out after {cfg.get('verify_timeout', VERIFY_TIMEOUT_SEC)}s ({last})"
+    return "timeout", f"waited {cfg.get('verify_timeout', VERIFY_TIMEOUT_SEC)} s, {last}"
 
 
 def _check_operation(op_id: str, bank: str, cfg: dict) -> tuple[str, str]:
@@ -855,17 +867,45 @@ def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None)
     # a terminal success -- an explicit close can wait, and it promises the
     # session was recorded.
     entry = None
+    confirmed = False
+    pending = {
+        "operation_id": op_id,
+        "transcript": _transcript_key(transcript),
+        "offset_from": offset,
+        "offset_to": end,
+        "stamp": stamp,
+        "pushed_at": datetime.now(timezone.utc).isoformat(),
+        "items": items,
+    }
     if cfg.get("verify_extraction"):
         if not op_id:
             print("capture: retain accepted but returned no operation id; "
                   "offset NOT advanced (cannot verify extraction)")
             return False, None, None
-        ok, detail = _await_extraction(op_id, bank, _verify_cfg(cfg))
-        if not ok:
+        dl = cfg.get("verify_deadline")
+        if dl is not None and dl - time.time() < 1:
+            # The earlier spans used up this close's time: ask once, no wait.
+            verdict, detail = _check_operation(op_id, bank, cfg)
+            verdict = "timeout" if verdict == "unknown" else verdict
+        else:
+            verdict, detail = _await_operation(op_id, bank, _verify_cfg(cfg))
+        if verdict == "failed":
             print(f"capture: extraction FAILED — {detail}. Offset NOT advanced "
                   f"(offset stays {offset}); the span will be retried.")
             return False, None, None
-        print(f"capture: extraction confirmed ({detail})")
+        if verdict == "timeout":
+            # Still extracting. Recorded as pending under its operation, as the
+            # fast path does, so the next close waits on that operation: with
+            # no entry it POSTed the same document_id again while this
+            # extraction ran on -- a re-ingest that deletes (review of plan 2
+            # Task 10). _capture_path then fails this close on the entry.
+            entry = pending
+            print(f"capture: extraction not confirmed within this close's time ({detail}); span "
+                  f"[{offset}->{end}] recorded as pending under operation {op_id} — the next close "
+                  f"waits on it rather than sending it again")
+        else:
+            confirmed = True
+            print(f"capture: extraction confirmed ({detail})")
     else:
         # The fast path (the Stop tick, the session-end flush). It cannot wait
         # for the verdict, so the offset advances -- but the span is NOT
@@ -875,15 +915,7 @@ def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None)
         # next run re-read from the same start against a transcript that has
         # since GROWN, deriving document_ids for content already ingested --
         # duplication, not replacement (GC-6, 2026-07-09 incident).
-        entry = {
-            "operation_id": op_id,
-            "transcript": _transcript_key(transcript),
-            "offset_from": offset,
-            "offset_to": end,
-            "stamp": stamp,
-            "pushed_at": datetime.now(timezone.utc).isoformat(),
-            "items": items,
-        }
+        entry = pending
         if op_id:
             print(f"capture: extraction unverified (fast path); span "
                   f"[{offset}->{end}] recorded as pending under operation "
@@ -892,7 +924,7 @@ def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None)
             print("capture: retain accepted but returned no operation id; span "
                   f"[{offset}->{end}] recorded as pending and UNVERIFIABLE — "
                   "it needs an operator, not a retry")
-    verb = "captured" if cfg.get("verify_extraction") else "queued"
+    verb = "captured" if confirmed else "queued"
     print(f"capture: {verb} {len(convo)} chars from {sid} in {len(items)} "
           f"item(s) (offset {offset}->{end}). {res}")
     return True, entry, end
@@ -969,24 +1001,18 @@ def _verify_cfg(cfg: dict) -> dict:
     return dict(cfg, verify_timeout=max(1, int(dl - time.time())))
 
 
-def _await_own_spans(cfg: dict, ctx: dict, verdicts: list) -> None:
-    """Verification mode (close.sh), section (b), no lock: wait out THIS
-    transcript's earlier spans in the snapshot -- the Stop ticks pushed most of
-    the session on the fast path, and a close promises the session is stored
-    (PROP-002), not only its last span. One verification timeout is shared by
-    all of them and with the new span's own wait: they all stop at
-    cfg["verify_deadline"]. A span confirmed stored becomes a "drop" verdict;
-    one re-pushed this run is awaited under its new operation id; anything
-    else stays in the ledger, and _capture_path then refuses to call the
-    session stored."""
-    key = ctx["key"]
+def _of_transcript(entry: dict, key: str) -> bool:
+    tr = entry.get("transcript")
+    return tr is not None and (tr == key or _transcript_key(tr) == key)
+
+
+def _await_entries(cfg: dict, entries: list, verdicts: list, until: float) -> None:
+    """Wait out each of `entries` (this run holds their claims) until `until`:
+    one confirmed stored becomes a "drop" verdict; one re-pushed this run is
+    awaited under its new operation id; anything else stays in the ledger."""
     bank = cfg["bank"]
     by_id = {v["id"]: v for v in verdicts}
-    until = cfg.get("verify_deadline") or time.time() + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC)
-    for entry in ctx["snapshot"]:
-        tr = entry.get("transcript")
-        if tr is None or (tr != key and _transcript_key(tr) != key):
-            continue
+    for entry in entries:
         eid = _entry_id(entry)
         verdict = by_id.get(eid)
         if verdict is not None and verdict["action"] == "drop":
@@ -998,25 +1024,92 @@ def _await_own_spans(cfg: dict, ctx: dict, verdicts: list) -> None:
         if left < 1:
             break
         span = f"[{entry.get('offset_from')}->{entry.get('offset_to')}]"
-        ok, detail = _await_extraction(op_id, bank, dict(cfg, verify_timeout=left))
-        if ok:
+        result, detail = _await_operation(op_id, bank, dict(cfg, verify_timeout=left))
+        if result == "ok":
             print(f"capture: earlier span {span} of this session confirmed stored ({detail})")
             if verdict is not None:
                 verdicts.remove(verdict)
             by_id[eid] = {"id": eid, "action": "drop"}
             verdicts.append(by_id[eid])
+        elif result == "timeout":
+            print(f"capture: earlier span {span} of this session not confirmed within this close's time ({detail})")
         else:
-            print(f"capture: earlier span {span} of this session not confirmed — {detail}")
+            print(f"capture: earlier span {span} of this session FAILED extraction — {detail}")
 
 
-def _unsettled_spans(cfg: dict, key: str) -> list:
-    """The [from->to] spans of this transcript still in the ledger, read under
-    the lock after section (c): what a close cannot yet call stored."""
+def _adopt_held_spans(cfg: dict, ctx: dict, until: float) -> list:
+    """Verification mode: this transcript's ledger entries another LIVE run
+    held when this run claimed (a tick of another clone's transcript claims
+    every unclaimed entry for its whole run, so they were not in the
+    snapshot). Poll the ledger, under the lock and with no network, until none
+    is held or `until`; each one released meanwhile (and still there) is
+    claimed for this run and returned, for the caller to settle. One still held
+    at `until` is left alone -- _capture_path says another capture is settling
+    it (review of plan 2 Task 10)."""
+    th, key, me = cfg["tenant_home"], ctx["key"], ctx["me"]
+    adopted = []
+    while True:
+        held = False
+        with _state_lock(th):
+            state = _load_state(th)
+            now = time.time()
+            changed = False
+            for entry in state["pending"]:
+                if not _of_transcript(entry, key):
+                    continue
+                claim = entry.get("claim")
+                if _is_mine(claim, me):
+                    continue
+                if claim is not None and _claim_live(claim, cfg, now):
+                    held = True
+                    continue
+                entry["claim"] = me
+                adopted.append(copy.deepcopy(entry))
+                changed = True
+            if changed:
+                _save_state(th, state)
+        left = until - time.time()
+        if not held or left <= 0:
+            return adopted
+        time.sleep(min(VERIFY_POLL_SEC, left))
+
+
+def _await_own_spans(cfg: dict, ctx: dict, verdicts: list) -> None:
+    """Verification mode (close.sh), section (b), no lock: wait out THIS
+    transcript's earlier spans -- the Stop ticks pushed most of the session on
+    the fast path, and a close promises the session is stored (PROP-002), not
+    only its last span. First the spans in this run's snapshot; then the ones
+    another live run held at the claim, once it lets them go (they are settled
+    and awaited the same way). One verification timeout is shared by all of
+    them and with the new span's own wait: they all stop at
+    cfg["verify_deadline"]. Anything not confirmed stays in the ledger, and
+    _capture_path then refuses to call the session stored."""
+    key = ctx["key"]
+    until = cfg.get("verify_deadline") or time.time() + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC)
+    _await_entries(cfg, [e for e in ctx["snapshot"] if _of_transcript(e, key)], verdicts, until)
+    adopted = _adopt_held_spans(cfg, ctx, until)
+    if adopted:
+        verdicts.extend(_reconcile_snapshot(cfg, adopted, ctx["offsets"], until))
+        _await_entries(cfg, adopted, verdicts, until)
+
+
+def _unsettled_spans(cfg: dict, ctx: dict) -> tuple:
+    """This transcript's spans still in the ledger, read under the lock after
+    section (c): what a close cannot yet call stored. Returns (unconfirmed,
+    settling): `settling` are the [from->to] spans another live run still
+    holds, `unconfirmed` the rest."""
     with _state_lock(cfg["tenant_home"]):
         pending = _load_state(cfg["tenant_home"])["pending"]
-    return [f"[{e.get('offset_from')}->{e.get('offset_to')}]" for e in pending
-            if e.get("transcript") is not None
-            and (e["transcript"] == key or _transcript_key(e["transcript"]) == key)]
+    now = time.time()
+    unconfirmed, settling = [], []
+    for e in pending:
+        if not _of_transcript(e, ctx["key"]):
+            continue
+        span = f"[{e.get('offset_from')}->{e.get('offset_to')}]"
+        claim = e.get("claim")
+        held = claim is not None and not _is_mine(claim, ctx["me"]) and _claim_live(claim, cfg, now)
+        (settling if held else unconfirmed).append(span)
+    return unconfirmed, settling
 
 
 def _capture_path(transcript: str, cfg: dict, throttle: int | None = None, wait: int = 0):
@@ -1070,10 +1163,14 @@ def _capture_path(transcript: str, cfg: dict, throttle: int | None = None, wait:
     finally:
         _finish_run(ctx, cfg, verdicts, new_entry, advance_to, transcript)
     if ok and cfg.get("verify_extraction"):
-        left = _unsettled_spans(cfg, ctx["key"])
-        if left:
-            print(f"capture: the session is not yet confirmed stored — {len(left)} earlier span(s) of it "
-                  f"are still unconfirmed: {', '.join(left)}; close again")
+        unconfirmed, settling = _unsettled_spans(cfg, ctx)
+        if settling:
+            print(f"capture: another capture is settling span {', '.join(settling)} of this session; "
+                  f"wait and close again")
+        if unconfirmed:
+            print(f"capture: the session is not yet confirmed stored — {len(unconfirmed)} span(s) of it "
+                  f"are still unconfirmed: {', '.join(unconfirmed)}; close again")
+        if settling or unconfirmed:
             return False
     return ok
 
