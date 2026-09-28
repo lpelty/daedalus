@@ -7,7 +7,7 @@ load fixtures/leases/setup.bash
 load fixtures/transcripts/setup.bash
 load fixtures/tty/setup.bash
 setup() { SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; F="$BATS_TEST_TMPDIR/t.jsonl"; T0="$(now)"; }
-teardown() { teardown_live; }
+teardown() { [ -z "${SCREEN_NAME:-}" ] || screen -S "$SCREEN_NAME" -X quit >/dev/null 2>&1 || true; teardown_live; }
 
 # probe_script — $PROBE: reads one line with tty_answer against $DAEDALUS_HOME and prints
 # GOT <line> | NOTAPERSON <why> | NOTERMINAL <why>.
@@ -109,6 +109,24 @@ PY
   run yes_check "$BATS_TEST_TMPDIR/none.jsonl" "yes" "$T0"; [ "$output" = "MISSING" ]
 }
 
+@test "fail closed (A12): a timestamp this build does not read — an offset instead of Z, epoch milliseconds — on the entries after the cut-off is UNREADABLE (the sentence that names tty), never NOTFOUND" {
+  tx "$F" operator "promote window 2" "$(plus "$T0" -60)" >/dev/null
+  tx "$F" assistant "Ready to promote window 02's work onto main." "$(plus "$T0" 1)" >/dev/null
+  said="$(tx "$F" operator "yes push it" "$(plus "$T0" 2)")"
+  run yes_check "$F" "yes push it" "$T0"; case "$output" in "ACCEPTED $said "*) : ;; *) echo "$output"; return 1 ;; esac
+  for form in offset epoch-ms; do
+    python3 - "$F" "$F.$form" "$form" <<'PY'
+import json, sys
+rows = [json.loads(ln) for ln in open(sys.argv[1]) if ln.strip()]
+for r in rows[1:]:
+    r["timestamp"] = r["timestamp"].replace("Z", "-00:00") if sys.argv[3] == "offset" else 1790000000000
+open(sys.argv[2], "w").write("".join(json.dumps(r) + "\n" for r in rows))
+PY
+    run yes_check "$F.$form" "yes push it" "$T0"
+    case "$output" in "UNREADABLE "*"shape this build does not read"*) : ;; *) echo "$form: $output"; return 1 ;; esac
+  done
+}
+
 @test "transcript_for prefers the SessionStart marker's transcript_path, else memory.transcript_dir, else the home's Claude Code project directory; transcript_dirs names both directories, resolved" {
   lease_fixture
   run python3 - "$SRC" "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR" <<'PY'
@@ -148,6 +166,7 @@ PY
   for q in "wait" "e" "no" "No, wait"; do
     run yes_check "$F" "$q" "$T0"; [ "$output" = "NOTFOUND" ] || { echo "$q: $output"; return 1; }
   done
+  tx "$F" assistant "F2 was a naming nit. Ready to promote window 02's work onto main. Say yes to push." "$(plus "$T0" 2.5)" >/dev/null
   tx "$F" operator "Yes — push it." "$(plus "$T0" 3)" >/dev/null
   run yes_check "$F" "yes" "$T0"; [ "$output" = "NOTFOUND" ] || { echo "$output"; return 1; }
   run yes_check "$F" "yes — push it" "$T0" 1 "Ready to promote window 02's work onto main"
@@ -160,6 +179,29 @@ assert tl.is_yes("Yes, push it.") and tl.is_yes("  YES") and tl.is_yes("yes")
 assert not tl.is_yes("no, wait") and not tl.is_yes("yesterday was fine") and not tl.is_yes("ok") and not tl.is_yes("")
 print("ok")' "$SRC"
   [ "$output" = "ok" ] || { echo "$output"; return 1; }
+}
+
+@test "the yes answers the block itself: after the operator's reply to the block (a no, a question, a queued prompt), a yes to a later question is NOTSHOWN; shown again, it is accepted; more text in the block's own turn does not matter" {
+  mark="Ready to promote window 02's work (poc-ui) onto main"
+  tx "$F" assistant "Ready to promote window 02's work (poc-ui) onto main. Say yes to push." "$(plus "$T0" 1)" >/dev/null
+  tx "$F" operator "No. What did the reviewer say about the low finding?" "$(plus "$T0" 2)" >/dev/null
+  tx "$F" assistant "It was a naming nit. Separately: shall I update the CHANGELOG entry now?" "$(plus "$T0" 3)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 4)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark"; [ "$output" = "NOTSHOWN" ] || { echo "no then yes: $output"; return 1; }
+  again="$(tx "$F" assistant "Ready to promote window 02's work (poc-ui) onto main. Say yes to push." "$(plus "$T0" 5)")"
+  said="$(tx "$F" operator "yes push it" "$(plus "$T0" 6)")"
+  run yes_check "$F" "yes push it" "$T0" 1 "$mark"; [ "$output" = "ACCEPTED $said $again" ] || { echo "shown again: $output"; return 1; }
+  rm -f "$F"
+  tx "$F" assistant "Ready to promote window 02's work (poc-ui) onto main." "$(plus "$T0" 1)" >/dev/null
+  tx "$F" queued "check the CHANGELOG too" "$(plus "$T0" 2)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 3)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark"; [ "$output" = "NOTSHOWN" ] || { echo "queued between: $output"; return 1; }
+  rm -f "$F"
+  block="$(tx "$F" assistant "Ready to promote window 02's work (poc-ui) onto main." "$(plus "$T0" 1)")"
+  tx "$F" tool-result "board read" "$(plus "$T0" 2)" >/dev/null
+  tx "$F" assistant "Say yes to push." "$(plus "$T0" 3)" >/dev/null
+  said="$(tx "$F" operator "yes" "$(plus "$T0" 4)")"
+  run yes_check "$F" "yes" "$T0" 1 "$mark"; [ "$output" = "ACCEPTED $said $block" ] || { echo "same turn: $output"; return 1; }
 }
 
 @test "tty_answer reads one line from the terminal it is typed at (raw reads — a text-mode r+ stream on /dev/tty cannot be opened); with no terminal it is NoTerminal" {
@@ -182,9 +224,34 @@ assert tl.seam_allowed(Path(sys.argv[2])), "a fixture home is under the temp dir
 assert not tl.seam_allowed(Path("/opt/somewhere/daedalus")), "a deployment home is not"
 print("ok")' "$SRC" "$DAEDALUS_HOME"
   [ "$output" = "ok" ] || { echo "$output"; return 1; }
+  # the temp directories are not the caller's to name: TMPDIR/TEMP/TMP pointing at a deployment's parent change nothing
+  run env TMPDIR=/opt/somewhere TEMP=/opt/somewhere TMP=/opt/somewhere python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; import transcriptlib as tl
+assert not tl.seam_allowed(Path("/opt/somewhere/daedalus")), "TMPDIR made a deployment home a temp home"
+assert Path("/opt/somewhere").resolve() not in tl.temp_roots()
+print("ok")' "$SRC"
+  [ "$output" = "ok" ] || { echo "$output"; return 1; }
 }
 
-@test "confirm_mode: transcribed by default (Larry, 2026-09-25); tty when configured; anything else is refused by name" {
+@test "tty_answer refuses inside a detached screen session — two stock commands an agent can run (screen -dm, then screen -X stuff yes) — and under a tmux process it cannot find attached; the seam unset" {
+  lease_fixture; probe_script
+  run under_named tmux python3 "$BATS_TEST_DIRNAME/fixtures/tty/type-into.py" "yes" "Type it: " -- python3 "$PROBE" "$SRC" "$DAEDALUS_HOME"
+  case "$output" in *"NOTAPERSON"*"tmux session with no terminal attached"*) : ;; *) echo "tmux: $output"; return 1 ;; esac
+  command -v screen >/dev/null || skip "screen is not installed"
+  SCREEN_NAME="daedalus-test-$$-$BATS_TEST_NUMBER-$RANDOM"; out="$BATS_TEST_TMPDIR/screen.out"
+  printf '#!/bin/bash\nunset DAEDALUS_TEST_TTY_ANCESTRY\npython3 "%s" "%s" "%s" > "%s.tmp" 2>&1; mv "%s.tmp" "%s"\n' \
+    "$PROBE" "$SRC" "$DAEDALUS_HOME" "$out" "$out" "$out" > "$BATS_TEST_TMPDIR/in-screen.sh"
+  chmod +x "$BATS_TEST_TMPDIR/in-screen.sh"
+  screen -dmS "$SCREEN_NAME" "$BATS_TEST_TMPDIR/in-screen.sh"
+  for _ in $(seq 1 50); do
+    [ -f "$out" ] && break
+    screen -S "$SCREEN_NAME" -p 0 -X stuff $'yes\r' >/dev/null 2>&1 || true
+    sleep 0.2
+  done
+  run cat "$out"
+  case "$output" in "NOTAPERSON"*"screen session with no terminal attached"*) : ;; *) echo "screen: $output"; return 1 ;; esac
+}
+
+@test "confirm_mode: transcribed by default (the operator's decision, 2026-09-25); tty when configured; anything else is refused by name" {
   lease_fixture
   m() { python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; import transcriptlib as tl
 try: print(tl.confirm_mode(Path(sys.argv[2])))

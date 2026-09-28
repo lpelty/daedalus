@@ -2,14 +2,15 @@
 """The operator's recorded yes, checked against the session's own transcript
 (spec §7.2 step 2, §7.4, §4.8 'Handover', §10 A12).
 
-`promote.confirm: transcribed` — the default, by Larry's decision of
+`promote.confirm: transcribed` — the default, by the operator's decision of
 2026-09-25 — records the prime's transcription of what the operator said; this
 module checks it. The words must be an entry the operator TYPED — the whole
 turn, not a fragment of one (plan 4 Decision 30) — after a cut-off (the
 promotion's primaries, Decision 35; for --skip-review the earlier REFUTED
 prepare; for `prime take --reason` the pen holder's bound_at) and — for
-promote — after an assistant entry with text that follows the cut-off and
-carries the block's opening words (the turn in which the prime showed it). A
+promote — as the operator's first reply to an assistant entry with text that
+follows the cut-off and carries the block's opening words (the turn in which
+the prime showed it; a turn between them answered the block instead). A
 transcript this build cannot read fails CLOSED, never a pass.
 
 One parser (A12): capture.scan_entries reads the lines; this module decides who
@@ -35,11 +36,12 @@ import calendar
 import functools
 import json
 import os
+import pwd
 import re
+import shutil
 import string
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
@@ -51,8 +53,10 @@ CONFIRM_MODES = ("transcribed", "tty")
 HARNESS_TAG = re.compile(r"^\s*<(system-reminder|command-name|command-message|command-args|local-command-[a-z-]+|"
                          r"task-notification|bash-[a-z-]+|user-prompt-submit-hook)\b")
 EDGES = string.punctuation + "\u201c\u201d\u2018\u2019\u00ab\u00bb\u2026\u2014\u2013 "
-TTY_PARENTS = ("login", "sshd", "tmux", "screen")
+TTY_PARENTS = ("login", "sshd")
+MULTIPLEXERS = {"screen": "screen", "SCREEN": "screen", "tmux": "tmux"}   # a pane's ancestor is the server
 AGENT_NAMES = ("claude",)
+TOOL_PATH = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
 
 
 class Unreadable(Exception):
@@ -72,7 +76,7 @@ class NotFound(Exception):
 
 
 class NotShown(Exception):
-    """The words were typed after the cut-off, but no assistant turn showing the block came between."""
+    """The words were typed after the cut-off, but not as the operator's first reply to a turn showing the block."""
 
 
 class NoTerminal(Exception):
@@ -233,19 +237,25 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     "text": the entry's own text} for the first operator-typed entry after `after`
     (epoch seconds) whose WHOLE normalized text equals the normalized quote
     (Decision 30: a fragment of a longer turn is not what the operator said) —
-    with require_shown, one that an assistant entry with text precedes, after the
-    cut-off, and when shown_text is given, an assistant entry whose normalized
-    text contains normalize(shown_text) (the block, not any reply); the latest
-    such entry is shown_ref. Raises Missing, Unreadable (A12, fail closed),
+    with require_shown, one that is the operator's FIRST turn after an assistant
+    entry with text that follows the cut-off (when shown_text is given, one whose
+    normalized text contains normalize(shown_text): the block, not any reply);
+    that entry is shown_ref. The yes answers the block itself: any user turn
+    between the block and the words (operator-typed, queued, or of unknown
+    provenance) was the reply to it, and words after it answer something else
+    unless the block is shown again. Raises Missing, Unreadable (A12, fail closed),
     NotShown or NotFound."""
     entries = _entries(path)
-    start = None
+    # The tail starts after the last user/assistant entry PROVABLY before the cut-off,
+    # so an entry whose timestamp this build writes in a form parse_ts does not read
+    # (an offset, epoch milliseconds) lands in it and fails closed as Unreadable —
+    # never silently outside it, which would read as "the words are not there" (A12).
+    last_before = -1
     for i, e in enumerate(entries):
         ts = parse_ts((e["data"] or {}).get("timestamp")) if e["type"] in ("user", "assistant") else None
-        if ts is not None and ts > after:
-            start = i
-            break
-    tail = entries[start:] if start is not None else []
+        if ts is not None and ts <= after:
+            last_before = i
+    tail = entries[last_before + 1:]
     bad = [e for e in tail if not e["readable"] or (e["type"] in ("user", "assistant") and (
         not isinstance(e["data"].get("uuid"), str) or parse_ts(e["data"].get("timestamp")) is None))]
     if bad:
@@ -263,20 +273,24 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
             if mark is None or mark in normalize(e["text"]):
                 shown = e
             continue
+        if kind not in ("operator", "queued", "unknown_provenance"):
+            continue
+        answers, shown = shown, None   # this turn is the reply to the block; a later one answers something else
         if normalize(e["text"]) != want:
             continue
         if kind == "operator":
-            if require_shown and shown is None:
+            if require_shown and answers is None:
                 not_shown = True
                 continue
-            return {"transcript_ref": _ref(e), "shown_ref": _ref(shown) if shown else None, "text": e["text"]}
+            return {"transcript_ref": _ref(e), "shown_ref": _ref(answers) if answers else None, "text": e["text"]}
         if kind == "unknown_provenance":
             unknown_hit = True
     if unknown_hit:
         raise Unreadable("the words are only in a user entry that carries no origin field, so who typed it "
                          "cannot be told")
     if not_shown:
-        raise NotShown("no assistant turn showing the block between the cut-off and the words")
+        raise NotShown("the words are not the operator's first reply to an assistant turn showing the block "
+                       "after the cut-off")
     raise NotFound("not an operator-typed entry after the cut-off")
 
 
@@ -289,12 +303,28 @@ def operator_entry(path: Path, uuid: str) -> Optional[str]:
     return None
 
 
+_CS_DARWIN_USER_TEMP_DIR = 65537   # <unistd.h>; Python's os.confstr has no name for it
+
+
+def temp_roots() -> Set[Path]:
+    """The system temp directories, resolved, WITHOUT the environment: /tmp,
+    /private/tmp, /var/tmp and, on macOS, the per-user temp directory as libc
+    reports it from the user's record (confstr). Never TMPDIR/TEMP/TMP
+    (tempfile.gettempdir honours them): the caller sets those."""
+    roots = {Path(p).resolve() for p in ("/tmp", "/private/tmp", "/var/tmp")}
+    if sys.platform == "darwin":
+        try:
+            roots.add(Path(os.confstr(_CS_DARWIN_USER_TEMP_DIR)).resolve())
+        except (ValueError, OSError, TypeError):
+            pass
+    return roots
+
+
 def seam_allowed(root: Path) -> bool:
-    """The suite's DAEDALUS_TEST_TTY_ANCESTRY=skip counts only for a home under the
+    """The suite's DAEDALUS_TEST_TTY_ANCESTRY=skip counts only for a home under a
     system temp directory — every bats fixture home, and no deployment (Decision 32)."""
     rr = Path(root).resolve()
-    temps = {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()}
-    return any(under(rr, t) for t in temps)
+    return any(under(rr, t) for t in temp_roots())
 
 
 def _ps(pid: int) -> Optional[Tuple[int, Set[str]]]:
@@ -314,13 +344,55 @@ def _ps(pid: int) -> Optional[Tuple[int, Set[str]]]:
     return int(a[0]), names
 
 
+def _clean_env() -> dict:
+    """An environment the caller did not choose (SCREENDIR, TMUX_TMPDIR, PATH are
+    theirs to set): the user's own home and name, a fixed PATH."""
+    pw = pwd.getpwuid(os.getuid())
+    return {"PATH": TOOL_PATH, "HOME": pw.pw_dir, "USER": pw.pw_name, "LOGNAME": pw.pw_name}
+
+
+def mux_attached(kind: str, pid: int) -> bool:
+    """Whether the screen or tmux server `pid` has a terminal attached, asked in
+    the default socket directory with a clean environment. Anything unclear —
+    no such tool, a server not found there, an error — is False (fail closed). A
+    detached session is what an agent can make with two stock commands
+    (`screen -dm …`, then `screen -X stuff yes`): measured 2026-09-28."""
+    tool = shutil.which(kind, path=TOOL_PATH)
+    if not tool:
+        return False
+    env = _clean_env()
+
+    def run(*args: str) -> str:
+        try:
+            return subprocess.run([tool, *args], capture_output=True, text=True, timeout=5, env=env,
+                                  stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    if kind == "screen":
+        m = re.search(r"^\s*%d\.\S*\s+\(([^)]*)\)" % pid, run("-ls"), re.M)
+        return bool(m) and m.group(1).strip().lower() in ("attached", "multi, attached")
+    sockets = Path("/tmp/tmux-%d" % os.getuid())
+    try:
+        candidates = sorted(sockets.iterdir())
+    except OSError:
+        return False
+    for sock in candidates:
+        if run("-S", str(sock), "display-message", "-p", "#{pid}").strip() == str(pid):
+            return bool(run("-S", str(sock), "list-clients", "-F", "#{client_pid}").strip())
+    return False
+
+
 def agent_ancestry(root: Path) -> Optional[str]:
     """Why this process is not a person's terminal session, or None (Decision 32):
     an ancestor is a Claude Code process (named claude, or a pid recorded in
-    $CLAUDE_CONFIG_DIR/sessions/), or the chain reaches launchd without a terminal
-    login (login, sshd, tmux, screen, or a name in promote.tty_parents) — a process
-    double-forked away from the agent. On one POSIX user this is a speed bump,
-    not a proof; §7.4 and Appendix E say so."""
+    $CLAUDE_CONFIG_DIR/sessions/); an ancestor is a screen or tmux server with no
+    terminal attached (a detached session an agent made and types into); or the
+    chain reaches launchd without a terminal login (login, sshd, an attached
+    screen or tmux, or a name in promote.tty_parents) — a process double-forked
+    away from the agent. On one POSIX user this is a speed bump, not a proof: a
+    program-made terminal running /usr/bin/login -pf <user> (which the user may
+    run for themselves) in a double-forked process still passes it, measured
+    2026-09-28; §7.4 and Appendix E say so."""
     if os.environ.get("DAEDALUS_TEST_TTY_ANCESTRY") == "skip" and seam_allowed(root):
         return None
     sessions = {int(p.stem) for p in (config_dir() / "sessions").glob("*.json") if p.stem.isdigit()}
@@ -335,14 +407,21 @@ def agent_ancestry(root: Path) -> Optional[str]:
         ppid, names = info
         if names & set(AGENT_NAMES) or (pid != os.getpid() and pid in sessions):
             return "a Claude Code session (process %d) started this process" % pid
+        mux = next((MULTIPLEXERS[n] for n in names if n in MULTIPLEXERS), None)
+        if mux:
+            if not mux_attached(mux, pid):
+                return ("this process runs inside a %s session with no terminal attached (process %d), which "
+                        "cannot be told from one an agent made; type the answer in a plain terminal window, or "
+                        "in an attached session" % (mux, pid))
+            terminal = True
         if names & parents:
             terminal = True
         if ppid <= 1:
             break
         pid = ppid
     if not terminal:
-        return ("this process does not descend from a terminal login (login, sshd, tmux or screen); if yours runs "
-                "under another program, name it in promote.tty_parents in config.yaml")
+        return ("this process does not descend from a terminal login (login, sshd, or an attached screen or tmux); "
+                "if yours runs under another program, name it in promote.tty_parents in config.yaml")
     return None
 
 

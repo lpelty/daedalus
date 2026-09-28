@@ -11,3 +11,6 @@ type_into() { local l="$1" p="$2"; shift 2; DAEDALUS_TEST_TTY_ANCESTRY=skip pyth
 # under_fake_agent <cmd...> — run <cmd> as the child of a process whose argv[0] is `claude`
 # (what the ancestry check looks for), with the seam unset.
 under_fake_agent() { env -u DAEDALUS_TEST_TTY_ANCESTRY bash -c 'exec -a claude /bin/bash -c "\"\$@\"; exit \$?" claude "$@"' _ "$@"; }
+# under_named <name> <cmd...> — run <cmd> as the child of a process whose argv[0] is <name>
+# (a stand-in for a multiplexer server in the ancestor chain), with the seam unset.
+under_named() { local n="$1"; shift; env -u DAEDALUS_TEST_TTY_ANCESTRY bash -c 'n="$1"; shift; exec -a "$n" /bin/bash -c "\"\$@\"; exit \$?" "$n" "$@"' _ "$n" "$@"; }
