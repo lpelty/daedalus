@@ -296,6 +296,31 @@ else
   log "NOTE     code context: check skipped (core/code-context.py absent)"
 fi
 
+# Direct calls (spec §8, §15): the direct_call: block, distribution-code
+# integrity (the launcher and promote refuse while core/, CLAUDE.md or
+# .claude/settings.json is modified) and receipts a launcher left active.
+# One reader, core/call_agent.py --doctor, so doctor and the launcher never
+# disagree about what is valid; it decides each line's kind and this block
+# counts the MISSING ones (here-string, not a pipe: see the leases block).
+# Skipped, visibly absent, when a fixture has no call_agent.py.
+if [ -f "$DAEDALUS_HOME/core/call_agent.py" ]; then
+  dc_out="$(python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor 2>/dev/null)"
+  dc_rc=$?
+  if [ "$dc_rc" -ne 0 ]; then
+    note_problem "direct calls: check failed (core/call_agent.py --doctor exited $dc_rc)"
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        "") ;;
+        "MISSING  "*) note_problem "${line#MISSING  }" ;;
+        *) log "$line" ;;
+      esac
+    done <<EOF
+$dc_out
+EOF
+  fi
+fi
+
 # Arm-state visibility: claims() returns [] until vault/evidence/ has at
 # least one dated *.md file, which is also what forces the first gates run
 # to happen at all. That is a real gap, not a bug — but a silent one, since

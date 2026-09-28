@@ -74,6 +74,11 @@ def main(argv: List[str]) -> int:
         for line in problems(root, None, None, None, live=False):
             print(line)
         return 0
+    # A visitor — a session this Daedalus was called into (DIRECT_CALL_ID, spec
+    # §8.5) — writes no claims, so it answers for none: a blocked Stop in a
+    # headless call spins until max_turns or the call's timeout.
+    if os.environ.get("DIRECT_CALL_ID"):
+        return 0
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
@@ -86,8 +91,8 @@ def main(argv: List[str]) -> int:
     since_time = None if marker else v.transcript_first_ts(payload.get("transcript_path", ""))
     # §4.9: a session answers only for its own window's claims. An unleased
     # session in a deployment with live leases cannot attribute anything, so
-    # any claim at all refuses its Stop; a visitor (DIRECT_CALL_ID) holds no
-    # lease by design and is not refused — it answers for lease-less claims.
+    # any claim at all refuses its Stop (a visitor never gets here: it returned
+    # above).
     # "Live" is liveness, not a file's existence: a stale lease (dead pid, its
     # session gone from the registry) holds nothing, and refusing on it would
     # point at the wrong remedy ("claim a lease" cannot clear a dead file;
@@ -101,7 +106,7 @@ def main(argv: List[str]) -> int:
         if ctx["unreadable"]:
             if v.claims(root, since_sha, since_time, lease="*"):
                 v.block(UNREADABLE_CLAIMS + ctx["unreadable"])
-        elif held and ctx["mine"] is None and not os.environ.get("DIRECT_CALL_ID"):
+        elif held and ctx["mine"] is None:
             if v.claims(root, since_sha, since_time, lease="*"):
                 v.block(UNLEASED_CLAIMS)
         bad = problems(root, since_sha, since_time, marker, live=True, lease=ctx["mine"])

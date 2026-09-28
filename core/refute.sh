@@ -3,31 +3,52 @@
 # assignment file named in $2, if any), the evidence summary ($3, or the
 # vault copy), the pitfalls that apply to the touched paths, and the diff
 # against the base — assembled per repository, the target and each
-# target.nested checkout, untracked files included — never the narrative. Writes the verdict beside the evidence and prints
-# REFUTED or STANDS. Runs after every PASS unless config says
-# `verify.refute: false` with a `verify.refute_off_reason` (gates.sh owns
-# that switch).
+# target.nested checkout, untracked files included — never the narrative.
+# Prints REFUTED or STANDS; exit 1 / 0, or 2 when the run cannot be
+# certified. Runs after every PASS unless config says `verify.refute: false`
+# with a `verify.refute_off_reason` (gates.sh owns that switch).
 #
-# The reviewer is the charter at core/agents/refuter.md — a Claude Code
-# subagent definition (Read/Grep/Glob only, no Bash, fresh context),
-# rendered by core/agentdef.py and passed with `--agents`:
-# `claude -p --agent <name>` resolves only from .claude/agents/ of the cwd,
-# which is a write surface Daedalus could edit; core/ is not. The model is
-# the charter's unless config verify.refute_model overrides it.
-#
-# claude runs from an EMPTY scratch directory with the target granted by
-# --add-dir, and the prompt names the target's absolute path. Two reasons,
-# both measured on Claude Code 2.1.282: (1) the charter's `omitClaudeMd`
-# does not stop `claude -p --agent` from loading the cwd's CLAUDE.md (a
-# sentinel placed there was quoted back by a tool-less refuter), while a
-# CLAUDE.md under an --add-dir directory is not loaded — so the reviewer
-# never sees Daedalus's or the target's project instructions; (2) the diff's
-# paths are target-relative and the reviewer needs an address to Read them
-# at (Read/Grep/Glob reach --add-dir paths by absolute path, verified).
+# This file ASSEMBLES the review; the direct-call launcher RUNS it (spec §6.1,
+# §8): `core/call-agent.sh --callee refuter --tree <checkout> --request-file
+# <prompt> --tag <run-id> --verdict-file vault/evidence/<run-id>-review.md`.
+# The launcher renders the charter (core/agents/refuter.md, through
+# core/agentdef.py), refuses while distribution code is modified, runs claude
+# from an empty temporary directory with the checkout granted by --add-dir,
+# user-level CLAUDE.md and auto memory excluded by --settings, no MCP and
+# Read/Grep/Glob only; owns the watchdog (verify.refute_timeout, the whole
+# process group killed on expiry), the receipt under state/direct-calls/, and
+# the write-once verdict file, whose frontmatter records call-id, fingerprint,
+# mode, request-sha, core-tree and charter-sha. Why the empty directory: the
+# charter's `omitClaudeMd` does not stop `claude -p --agent` from loading the
+# cwd's CLAUDE.md (measured on Claude Code 2.1.282), while a CLAUDE.md under an
+# --add-dir directory is not loaded; the prompt names the checkout's absolute
+# path so Read/Grep/Glob have an address.
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
-run_id="$1"; criteria="${2:-}"
+# refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]
+# --mode promote (spec §6.1, used by promote's prepare): the diff is the merge
+# that will be pushed, trunk_sha_at_prepare..merge_sha from the promotion's
+# run.json, in the merged tree (DAEDALUS_TARGET_OVERRIDE), with no uncommitted
+# part; the criteria come from the window's lease file, never argv; and the
+# inputs are pinned in run.json (core/review-inputs.py). --render-only prints
+# that prompt again, byte for byte, and runs nothing — confirm compares its
+# sha256 with the one the launcher recorded.
+mode=branch; render_only=0; pos=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --mode) mode="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
+    --render-only) render_only=1; shift ;;
+    --*) printf 'refute.sh: unknown flag %s\n' "$1" >&2; exit 2 ;;
+    *) pos+=("$1"); shift ;;
+  esac
+done
+case "$mode" in branch|promote) : ;; *) printf 'refute.sh: --mode is branch or promote (got: %s)\n' "$mode" >&2; exit 2 ;; esac
+if [ "$render_only" -eq 1 ] && [ "$mode" != promote ]; then
+  printf 'refute.sh: --render-only re-renders a promote review; pass --mode promote\n' >&2; exit 2
+fi
+run_id="${pos[0]:-}"; criteria="${pos[1]:-}"
+[ -n "$run_id" ] || { printf 'usage: refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]\n' >&2; exit 2; }
 target="$(target_path)"
 base="$(cfg target.branch 2>/dev/null || printf main)"
 ev="$DAEDALUS_HOME/vault/evidence"
@@ -37,12 +58,22 @@ ev="$DAEDALUS_HOME/vault/evidence"
 # before it, with `result: PASS`, is a PASS-labelled evidence file with no
 # manifest line and no run.json for as long as the review runs, and a
 # review killed from outside (a tool timeout) left it there for good.
-evidence_file="${3:-$ev/$run_id.md}"
+evidence_file="${pos[2]:-$ev/$run_id.md}"
+if [ "$mode" = promote ]; then
+  if [ -n "$criteria" ]; then
+    printf 'refute.sh --mode promote takes no criteria argument: a promotion'"'"'s criteria come from the window'"'"'s lease file (core/lease.sh update <NN> --criteria <file>)\n' >&2
+    exit 2
+  fi
+  run_json="$DAEDALUS_HOME/state/evidence/$run_id/run.json"
+  inputs="$(python3 "$DAEDALUS_HOME/core/review-inputs.py" shas "$run_json")" || exit 2
+  eval "$inputs"      # base_sha merge_sha lease_nn criteria (shell-quoted by review-inputs.py)
+  evidence_file="$ev/$run_id.md"
+fi
 [ -f "$evidence_file" ] || {
   printf 'evidence summary missing at %s — cannot run the rung-2 refuter\n' "$evidence_file" >&2
   exit 2
 }
-command -v claude >/dev/null 2>&1 || {
+[ "$render_only" -eq 1 ] || command -v claude >/dev/null 2>&1 || {
   printf 'claude not found on PATH — cannot run the rung-2 refuter\n' >&2
   exit 2
 }
@@ -50,24 +81,6 @@ command -v python3 >/dev/null 2>&1 || {
   printf 'python3 not found on PATH — cannot run the rung-2 refuter watchdog\n' >&2
   exit 2
 }
-charter="$DAEDALUS_HOME/core/agents/refuter.md"
-[ -f "$charter" ] || {
-  printf 'refuter charter missing at %s — cannot run the rung-2 refuter\n' "$charter" >&2
-  exit 2
-}
-agent_json="$(mktemp)"
-if ! python3 "$DAEDALUS_HOME/core/agentdef.py" "$charter" > "$agent_json" 2>/dev/null; then
-  rm -f "$agent_json"
-  printf 'refuter charter at %s does not render (python3 core/agentdef.py %s) — cannot run the rung-2 refuter\n' "$charter" "$charter" >&2
-  exit 2
-fi
-agent_name="$(python3 -c 'import json,sys; print(next(iter(json.load(open(sys.argv[1])))))' "$agent_json" 2>/dev/null)"
-[ -n "$agent_name" ] || {
-  rm -f "$agent_json"
-  printf 'refuter charter at %s names no agent — cannot run the rung-2 refuter\n' "$charter" >&2
-  exit 2
-}
-refute_model="$(cfg verify.refute_model 2>/dev/null || true)"
 # --- The diff, assembled per repository ------------------------------------
 # The target's write surface may be a nested repository (config
 # target.nested): on one deployment every change Daedalus makes lands in
@@ -153,20 +166,41 @@ for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
   outer_excl+=("$rel")
 done
 paths="$(mktemp)"; names_raw="$(mktemp)"; diff_file="$(mktemp)"
-outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
-printf '### . (against %s)\n' "${outer_base:-HEAD only — no base ref resolves}" >> "$diff_file"
-repo_diff "$target" "" "$names_raw" "$diff_file" "$outer_base" ${outer_excl[@]+"${outer_excl[@]}"}
-for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
-  nrepo="$target/$rel"
-  [ -d "$nrepo" ] || continue
-  git -C "$nrepo" rev-parse --git-dir >/dev/null 2>&1 || continue
-  nbase="$(base_ref "$nrepo" "$(nested_head "$nrepo" || true)" "@{u}" "origin/$base" "$base" || true)"
-  printf '\n### %s (against %s)\n' "$rel" "${nbase:-HEAD only — no base ref resolves}" >> "$diff_file"
-  repo_diff "$nrepo" "$rel/" "$names_raw" "$diff_file" "$nbase"
-done
+if [ "$mode" = promote ]; then
+  # What will be pushed, fixed by two shas per repository: no working tree,
+  # no index, nothing uncommitted (the merged tree is clean by construction).
+  outer_base="$base_sha"
+  promote_diff() {   # promote_diff <repo> <prefix> <base> <merge>
+    # A blank line before a nested repository's section, as in branch mode (a
+    # command substitution would strip it).
+    [ -z "$2" ] || printf '\n' >> "$diff_file"
+    printf '### %s (%s..%s)\n' "${2:-.}" "$3" "$4" >> "$diff_file"
+    git -C "$1" diff --name-only "$3" "$4" 2>/dev/null | sed "s|^|$2|" >> "$names_raw"
+    git -C "$1" diff "--src-prefix=a/$2" "--dst-prefix=b/$2" "$3" "$4" 2>/dev/null >> "$diff_file"
+  }
+  promote_diff "$target" "" "$base_sha" "$merge_sha"
+  while IFS="$(printf '\t')" read -r rel nb nm; do
+    [ -n "$rel" ] || continue
+    promote_diff "$target/$rel" "${rel%/}/" "$nb" "$nm"
+  done <<EOF
+$(python3 "$DAEDALUS_HOME/core/review-inputs.py" nested "$run_json")
+EOF
+else
+  outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
+  printf '### . (against %s)\n' "${outer_base:-HEAD only — no base ref resolves}" >> "$diff_file"
+  repo_diff "$target" "" "$names_raw" "$diff_file" "$outer_base" ${outer_excl[@]+"${outer_excl[@]}"}
+  for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
+    nrepo="$target/$rel"
+    [ -d "$nrepo" ] || continue
+    git -C "$nrepo" rev-parse --git-dir >/dev/null 2>&1 || continue
+    nbase="$(base_ref "$nrepo" "$(nested_head "$nrepo" || true)" "@{u}" "origin/$base" "$base" || true)"
+    printf '\n### %s (against %s)\n' "$rel" "${nbase:-HEAD only — no base ref resolves}" >> "$diff_file"
+    repo_diff "$nrepo" "$rel/" "$names_raw" "$diff_file" "$nbase"
+  done
+fi
 sort -u "$names_raw" > "$paths"; rm -f "$names_raw"
 if ! grep -q '^diff --git ' "$diff_file"; then
-  rm -f "$paths" "$diff_file" "$agent_json"
+  rm -f "$paths" "$diff_file"
   printf 'nothing to review — %s has no change against %s (committed, uncommitted or untracked%s); cannot certify a run with an empty diff\n' \
     "$target" "${outer_base:-$base}" "$([ "${#nested_rel[@]}" -gt 0 ] && printf ', in it or in %s' "${nested_rel[*]}")" >&2
   exit 2
@@ -176,136 +210,89 @@ fi
 # pitfalls apply" — and the run could still STAND on a review that never
 # saw the pitfalls. A non-zero exit is uncertifiable, like a charter that
 # does not render (exit 2), and the reason reaches the operator.
-pitfalls_err="$(mktemp)"
-pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$paths" 2>"$pitfalls_err")"
+pitfalls_err="$(mktemp)"; pinned="$(mktemp)"
+if [ "$mode" = promote ] && [ "$render_only" -eq 1 ]; then
+  # The pitfalls this review showed, exactly — refused if one has changed.
+  python3 "$DAEDALUS_HOME/core/review-inputs.py" verify "$run_json" "$evidence_file" "$criteria" "$pinned" \
+    || { rm -f "$paths" "$diff_file" "$pitfalls_err" "$pinned"; exit 2; }
+  pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" --only "$pinned" "$paths" 2>"$pitfalls_err")"
+else
+  pitfalls_text="$(python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" --list-out "$pinned" "$paths" 2>"$pitfalls_err")"
+fi
 pitfalls_rc=$?
 if [ "$pitfalls_rc" -ne 0 ]; then
   pitfalls_reason="$(tr '\n' ' ' < "$pitfalls_err" | tail -c 400)"
-  rm -f "$paths" "$diff_file" "$pitfalls_err" "$agent_json"
+  rm -f "$paths" "$diff_file" "$pitfalls_err" "$pinned"
   printf 'pitfall selector failed (python3 core/refute-pitfalls.py exited %s: %s) — cannot certify the run\n' "$pitfalls_rc" "${pitfalls_reason:-no message}" >&2
   exit 2
 fi
 rm -f "$pitfalls_err"
+if [ "$mode" = promote ] && [ "$render_only" -eq 0 ]; then
+  # Pinned before the launcher runs; an attempt it refuses may pin again
+  # (review-inputs.py refuses only once the verdict or prepared.json exists).
+  python3 "$DAEDALUS_HOME/core/review-inputs.py" record "$run_json" "$evidence_file" "$criteria" "$pinned" \
+      "$ev/$run_id-review.md" \
+    || { rm -f "$paths" "$diff_file" "$pinned"; exit 2; }
+fi
+rm -f "$pinned"
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
   printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n\n'
-  printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n\n' "$target"
+  printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n' "$target"
+  if [ "$mode" = promote ]; then
+    printf 'Review mode: promote — the merge that will be pushed to %s, exactly; nothing uncommitted.\n\n' "$base"
+  else
+    printf 'Review mode: branch — one window'"'"'s branch: its commits since the base, then its uncommitted and untracked work.\n\n'
+  fi
   printf '## Acceptance criteria\n'; [ -f "$criteria" ] && cat "$criteria" || printf '(none supplied)\n'
   printf '\n## Evidence\n'; cat "$evidence_file"
   printf '\n## Pitfalls that apply to the touched paths\n'
   if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
   printf '\n## Diff against %s\n' "$base"
-  # One section per repository (assembled above): committed work since the
-  # merge base, then uncommitted and untracked work against HEAD.
+  # One section per repository (assembled above). Branch: committed work since
+  # the merge base, then uncommitted and untracked work against HEAD. Promote:
+  # the merge, trunk_sha_at_prepare..merge_sha.
   cat "$diff_file"
 } > "$prompt"
 rm -f "$paths" "$diff_file"
+if [ "$render_only" -eq 1 ]; then
+  cat "$prompt"; rm -f "$prompt"; exit 0
+fi
 verdict_file="$ev/$run_id-review.md"
-# The refuter's exit code and output are both load-bearing. A claude that is
-# present but fails (or prints nothing) used to leave an empty verdict body,
-# the REFUTED grep missed, and the run stayed PASS — a crashed checker
-# reported as green, this repo's founding pitfall class. Unknown is exit 2,
-# never STANDS.
-body="$(mktemp)"
-# A claude that never returns used to hang gates.sh forever — no verdict, no
-# FAIL, no evidence, a stuck gate (the residual after crash and mute were
-# made loud). Bound the invocation to verify.refute_timeout seconds
-# (validated by lib.sh refute_timeout; gates.sh has already refused a bad
-# value before running any gate — this is the belt to that brace). On expiry
-# the whole process group is killed: claude spawns children (MCP servers,
-# tool processes), and a single-pid kill would orphan them, still running,
-# still writing to $body. The run then lands in the same uncertifiable exit 2
-# below. python3 because macOS ships no `timeout` and bash 3.2 has no clean
-# watchdog. The timeout is signalled by a marker file, not an exit code, so
-# a claude that itself exits 124 within the deadline is not misreported.
-timeout_s="$(refute_timeout)" || { rm -f "$prompt" "$body" "$agent_json"; exit 2; }
-timed_out="$body.timed-out"
-# The empty working directory claude runs from (see the header): no
-# CLAUDE.md, no .claude/, nothing of Daedalus's or the target's project
-# context — the target is reachable through --add-dir only.
-workdir="$(mktemp -d)"
-python3 - "$timeout_s" "$prompt" "$body" "$timed_out" "$agent_json" "$agent_name" "$refute_model" "$target" "$workdir" <<'PY'
-import os, signal, subprocess, sys
-secs, prompt, body, marker = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-agent_json, agent_name, model, target, workdir = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
-# The charter is passed as a rendered --agents file and selected with
-# --agent; hooks are off (the refuter is not the builder, and the builder's
-# hooks would snapshot and block around it). --model only when the operator
-# set verify.refute_model; otherwise the charter's model applies. --add-dir
-# grants the read-only tools the target checkout from the empty cwd.
-argv = ["claude", "-p", "--agent", agent_name, "--agents", agent_json,
-        "--settings", '{"disableAllHooks": true}', "--add-dir", target]
-if model:
-    argv += ["--model", model]
-
-def kill_group(p):
-    # TERM, a short grace, then KILL — unconditionally. The direct child is
-    # a shim that answers TERM at once; the hung descendant this exists for
-    # is exactly the process that may never service TERM (a node event loop
-    # that is blocked, a tool ignoring signals). Stopping once the child is
-    # reaped would report success while the group is still alive.
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(p.pid, sig)
-        except ProcessLookupError:
-            pass
-        try:
-            p.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-
-# A SIGTERM or SIGHUP to this watchdog — a Bash tool timeout killing
-# gates.sh's process group, a closed terminal — must ALSO run the finally
-# below. Python's default action for both is to die at once, skipping every
-# finally: the watchdog was gone and claude, in its own session, ran on
-# unowned — measured with a stub claude that outlived the watchdog by the
-# full length of its work. A handler that raises SystemExit unwinds through
-# the finally instead, and the exit code is the bash convention (128+n).
-for _sig, _code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129)):
-    signal.signal(_sig, lambda *_a, _c=_code: sys.exit(_c))
-
-with open(prompt) as i, open(body, "w") as o:
-    p = subprocess.Popen(argv, stdin=i, stdout=o, stderr=subprocess.DEVNULL, start_new_session=True, cwd=workdir)
-timed_out = False
-try:
-    p.wait(timeout=secs)
-except subprocess.TimeoutExpired:
-    timed_out = True
-finally:
-    # Every exit that leaves the group possibly alive kills it: the timeout,
-    # a Ctrl-C (claude sits in its own session now, so the terminal's SIGINT
-    # reaches this watchdog but never claude), a SIGTERM/SIGHUP (handled
-    # above), any exception. Nothing outlives the watchdog.
-    if p.poll() is None:
-        kill_group(p)
-if timed_out:
-    open(marker, "w").close()
-    sys.exit(124)
-rc = p.returncode
-# A signal death is negative here; report it bash-style (SIGKILL = 137, not 247).
-sys.exit(128 - rc if rc < 0 else rc)
-PY
-claude_rc=$?
-rm -f "$prompt" "$agent_json"
-rm -rf "$workdir"
-if [ -e "$timed_out" ]; then
-  rm -f "$body" "$timed_out"
-  printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$timeout_s" >&2
+# The launcher's exit code is load-bearing, and so is who spoke. 0 = the
+# verdict file was written. 124 with "timed out after" on its stderr = the
+# watchdog killed the reviewer. A refusal before launch (exit 2, no receipt
+# line) carries its own sentence — a missing or unrenderable charter,
+# modified distribution code, a review that already exists — and is passed on
+# as it is. So is a refusal after the review ran (exit 2, the sentence on the
+# orientation line after "exit: 2 — "): a verdict that appeared meanwhile
+# (write-once) or distribution code changed during the review. Anything else
+# is claude's own failure ("— failed: …"). All of them are exit 2 here:
+# unknown is never STANDS.
+launch_err="$(mktemp)"
+bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
+  --tag "$run_id" --verdict-file "$verdict_file" --mode "$mode" >/dev/null 2>"$launch_err"
+launch_rc=$?
+rm -f "$prompt"
+if [ "$launch_rc" -ne 0 ]; then
+  if [ "$launch_rc" -eq 124 ] && grep -q 'timed out after' "$launch_err"; then
+    printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$(refute_timeout 2>/dev/null || printf '?')" >&2
+  elif ! grep -q ' call [0-9a-f-]*.*; receipt ' "$launch_err"; then
+    sed 's/^daedalus: //' "$launch_err" >&2
+  elif refusal="$(sed -n 's/^.* orientation: .*; exit: 2 — //p' "$launch_err" | grep -v '^failed: ' | head -1)" \
+       && [ -n "$refusal" ]; then
+    printf '%s — cannot certify the run; receipt: %s\n' "$refusal" \
+      "$(sed -n 's/^.*; receipt //p' "$launch_err" | head -1)" >&2
+  else
+    printf 'refuter CLI failed (exit %s, %s output) — cannot certify the run; receipt: %s\n' "$launch_rc" \
+      "$(grep -q '(with output)' "$launch_err" && printf with || printf no)" \
+      "$(sed -n 's/^.*; receipt //p' "$launch_err" | head -1)" >&2
+  fi
+  rm -f "$launch_err"
   exit 2
 fi
-if [ "$claude_rc" -ne 0 ] || ! [ -s "$body" ]; then
-  had_output="$([ -s "$body" ] && printf 'with' || printf 'no')"
-  rm -f "$body"
-  printf 'refuter CLI failed (exit %s, %s output) — cannot certify the run\n' \
-    "$claude_rc" "$had_output" >&2
-  exit 2
-fi
-{
-  printf -- '---\ntype: evidence-review\nrun-id: %s\ncreated: %s\n---\n' "$run_id" "$(date +%Y-%m-%dT%H:%M:%S)"
-  cat "$body"
-} > "$verdict_file"
-rm -f "$body"
+rm -f "$launch_err"
 # Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
 # another window's gates run. The review file is written and manifested in the
 # same breath, so the RUNNING excuse covers the negligible window between.

@@ -206,3 +206,15 @@ claim_l() {  # claim_l <file> <lease-or-empty>
   run python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor; [ "$status" -eq 0 ]
   case "$output" in *"PROP-L.md"*) : ;; *) echo "leased claim dropped from the sweep: $output"; return 1 ;; esac
 }
+
+@test "a visitor (DIRECT_CALL_ID set) is never blocked by verify-hook at Stop: it writes no claims, so it answers for none — an unverified claim and an unreadable lease file included; the same Stop without it blocks" {
+  id="$(gate)"
+  claim PROP-V.md IMPLEMENTED daedalus 2026-12-01
+  run stop; [ "$status" -eq 2 ]                                   # control: a claim with no evidence-run blocks
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f stop); stop"
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "status=$status output=$output"; return 1; }
+  mkdir -p "$DAEDALUS_HOME/state/leases"; printf 'not json' > "$DAEDALUS_HOME/state/leases/02.json"
+  run stop; [ "$status" -eq 2 ]                                   # control: an unreadable lease file blocks a claim
+  run env DIRECT_CALL_ID=abc bash -c "$(declare -f stop); stop"
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "status=$status output=$output"; return 1; }
+}

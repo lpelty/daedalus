@@ -27,6 +27,27 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
   linked worktree as a repository.
 - Evidence: `run.json` is written first (`RUNNING`, with the window) and the
   manifest is appended under a lock (`core/manifest-append.py`).
+- **The direct-call launcher** (`core/call-agent.sh`, `core/call_agent.py`;
+  plan 3 of 5): `--callee agent` asks the target's own agent, named only in
+  `config.yaml` (`direct_call.callee_home` / `callee_name`, refused while
+  unset — the same code calls a different agent on each deployment);
+  `--callee self --caller <name>` lets an allowlisted agent ask this Daedalus
+  (`direct_call.callers`), as a visitor — whose Stop no verify check blocks;
+  `--callee refuter` runs the reviewer. The callee's own callers list is
+  honoured and an unreadable one refuses; a resume re-reads both. Answer on
+  stdout, a two-line receipt on stderr, receipts under `state/direct-calls/`,
+  `--resume <call-id>`, exit 0/2/3/124.
+- **The refuter is a Thing the launcher runs**: `core/refute.sh` only
+  assembles the review. The launcher refuses while distribution code is
+  modified, excludes every `CLAUDE.md` and auto memory, writes the review once
+  per run with the call id, fingerprint, mode, prompt sha and committed
+  `core/` tree in its frontmatter, and `--resume-review <NN>` lets the operator
+  ask the reviewer about a finding (advice, never a verdict). A canary with a
+  positive control proves the reviewer shares no context with the author
+  (stubbed in the suite; live per deployment with `DAEDALUS_LIVE_CANARY=1`).
+  `refute.sh --mode promote` and `--render-only` are ready for `promote`.
+- Doctor reports the `direct_call:` block, whether distribution code is
+  modified, and calls a launcher left marked active.
 - Session logs are named by window number and date; claim documents carry
   `lease:`; per-session dedup files; the document index is prime-only.
 - Doctor reports the lease directories, stale/released/finished windows,

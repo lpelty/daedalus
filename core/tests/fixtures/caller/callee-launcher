@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""A callee's own direct-call launcher (spec §8.4), as the fixture for
+direct_call.callee_launcher. Its argv contract mirrors the one real callee
+launcher this product has met (an agent engine's own direct-call launcher): argparse
+with --callee and --caller REQUIRED, and --artifact-dir, --request-file,
+--resume optional; anything missing or unknown exits 2 with a usage error and
+nothing on stdout, exactly as argparse does there. So a Daedalus that does
+not pass the tenant name (direct_call.callee_launcher_args) fails here as it
+would on the real launcher.
+
+Records its argv (one per line) and its DIRECT_CALL_*/CAPTURE_DEFER
+environment, then answers by the same contract: the answer on stdout, a
+receipt with its own call id on stderr.
+CALLEE_LAUNCHER_EXIT (default 0): 3 is "orientation not verified"; anything
+else non-zero is a failure.
+CALLEE_LAUNCHER_ANSWER (default "callee launcher answer"): set it empty for a
+launcher that prints no answer, as the real one does when claude reports an
+error but exits 0 (it then exits 3)."""
+import argparse, os, sys
+
+d = os.environ["FAKE_CLAUDE_DIR"]
+with open(os.path.join(d, "launcher-argv.txt"), "w") as f:
+    f.write("".join(a + "\n" for a in sys.argv[1:]))
+ap = argparse.ArgumentParser()
+ap.add_argument("--callee", required=True)
+ap.add_argument("--caller", required=True)
+ap.add_argument("--artifact-dir")
+ap.add_argument("--request-file")
+ap.add_argument("--resume")
+ap.parse_args()
+with open(os.path.join(d, "launcher-env.txt"), "w") as f:
+    f.write("".join("%s=%s\n" % kv for kv in sorted(os.environ.items())
+                    if kv[0].startswith(("DIRECT_CALL_", "CAPTURE_DEFER"))))
+code = int(os.environ.get("CALLEE_LAUNCHER_EXIT", "0"))
+answer = os.environ.get("CALLEE_LAUNCHER_ANSWER", "callee launcher answer")
+sys.stderr.write("Alpha call 0f0f0f0f-1111-2222-3333-444444444444; receipt /somewhere/state/direct-calls/x\n")
+if answer:
+    sys.stdout.write(answer + "\n")
+sys.stderr.write("Alpha orientation: %s; recall: skipped; capture: confirmed; exit: %s\n"
+                 % ("yes" if code == 0 else "no", code))
+sys.exit(code)

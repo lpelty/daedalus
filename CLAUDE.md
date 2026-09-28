@@ -297,7 +297,22 @@ a `REFUTED` verdict is a FAIL with the review as the log, and a green run the
 refuter could not certify (including one with nothing to review) is a FAIL
 too. The review takes minutes: run `core/gates.sh` with a Bash timeout of at
 least the gates' time plus `verify.refute_timeout` (600 s default), or in the
-background — a timeout kills the run mid-review and it must be re-done. Promotion is: gates green, commit on
+background — a timeout kills the run mid-review and it must be re-done. The review
+is a receipted call: to ask the reviewer about a finding, run
+`core/call-agent.sh --resume-review <NN> "<the operator's question>"` and repeat
+its answer — advice, never a new verdict. Promotion is: gates green, commit on
 your own branch, push, and the operator merges; the boundary hook enforces
 the branch, which is `target.branch` in `config.yaml`, never assumed to be
 `main`.
+
+## Direct calls
+
+`core/call-agent.sh --callee agent` asks the target's own agent — the one
+`config.yaml` names in `direct_call` — a read-only question, for context
+before you change something it owns. Give it the question and, if it needs
+to read something, `--artifact-dir <dir>`. Check the exit code and that the
+answer is not empty; the receipt line alone proves nothing. Exit 2 means it
+never ran (no callee configured, or you are not on its callers list); say so
+rather than guessing the answer. A call is a discussion, not a work order: it
+never changes anything on either side. When you are the one called (a
+session that started as a visitor), answer the question and change nothing.

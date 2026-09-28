@@ -32,12 +32,24 @@ EOF
 }
 
 # install_refuter — everything refute.sh needs beside gates.sh: the script,
-# the fingerprint, the charter, its renderer, and the pitfall selector with
-# the hook module it imports.
+# the fingerprint, the charter, its renderer, the pitfall selector with the
+# hook module it imports, and the direct-call launcher that runs the review
+# (spec §6.1). The launcher refuses while distribution code is modified, so
+# the fixture home is a git checkout with core/ committed and everything a
+# deployment ignores ignored. A test that replaces a core/ file after this
+# commits the replacement (commit_core).
 install_refuter() {
   mkdir -p "$DAEDALUS_HOME/core/agents"
-  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" "$SRC/verifylib.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" \
+     "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/call-agent.sh" "$SRC/call_agent.py" "$DAEDALUS_HOME/core/"
   cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
+  printf 'target/\nvault/\nstate/\nworktrees/\nconfig.yaml\n__pycache__/\n*.pyc\n' > "$DAEDALUS_HOME/.gitignore"
+  git init -q -b main "$DAEDALUS_HOME"
+  commit_core
+}
+commit_core() {
+  git -C "$DAEDALUS_HOME" add -A
+  git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m fixture
 }
 
 # git_target — make the fixture target a committed git repo, so the
@@ -922,6 +934,7 @@ if any(a.endswith("-review.md") for a in sys.argv[1:]):
     sys.stderr.write("simulated append failure\n"); sys.exit(1)
 sys.exit(subprocess.call([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest-append.real.py")] + sys.argv[1:]))
 PY
+  commit_core       # the stand-in is this fixture's distribution code; the launcher refuses a modified core/
   git_target
   write_config "  - true" "  refute: true"
   PATH="$BATS_TEST_TMPDIR/bin7:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
