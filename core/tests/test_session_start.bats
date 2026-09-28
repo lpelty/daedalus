@@ -486,3 +486,29 @@ EOF
   sleep 0.5
   if kill -0 "$child" 2>/dev/null; then kill "$child"; echo "the checkout child $child outlived the hook"; return 1; fi
 }
+
+@test "the one-time 'memory: block absent' note: said when settings.local.json wires capture.py and config.yaml has no memory:, not again on a repeat start of the session, never with a memory: block or without the old wiring" {
+  printf '{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/capture.py capture"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  note="memory: block absent from config.yaml — Stop-cadence capture is off; a SessionEnd capture wired in .claude/settings.local.json still runs"
+  run start sM startup; [ "$status" -eq 0 ]
+  # The hook's JSON escapes the em dash (\u2014): compare the decoded context, not the raw output.
+  ctx="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
+  case "$ctx" in *"$note"*) : ;; *) echo "$ctx"; return 1 ;; esac
+  run start sM startup
+  case "$output" in *"memory: block absent"*) echo "repeated: $output"; return 1 ;; *) : ;; esac
+  printf 'memory:\n  bank: b\n' >> "$DAEDALUS_HOME/config.yaml"
+  run start sN startup
+  case "$output" in *"memory: block absent"*) echo "said with a block: $output"; return 1 ;; *) : ;; esac
+  rm "$DAEDALUS_HOME/.claude/settings.local.json"
+  sed -i '' '/^memory:/,$d' "$DAEDALUS_HOME/config.yaml"
+  run start sO startup
+  case "$output" in *"memory: block absent"*) echo "said without the old wiring: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "the 'memory: block absent' note is not said when settings.local.json mentions capture.py only in a permission rule — a hook is judged as JSON, as doctor judges it" {
+  # A text search for "capture.py" counted an allow rule as a wired SessionEnd
+  # capture and told the agent one still runs (review, 2026-09-27).
+  printf '{"permissions":{"allow":["Bash(python3 core/capture.py status)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run start sP startup; [ "$status" -eq 0 ]
+  case "$output" in *"memory: block absent"*) echo "said for a permission rule: $output"; return 1 ;; *) : ;; esac
+}

@@ -28,6 +28,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # The tracked .claude/settings.json gives this hook 30 s (pinned in
 # test_session_start.bats). The worktree git calls get ADD_BUDGET_SECS of it,
@@ -67,6 +68,48 @@ def unverified(root: Path, marker: dict) -> list:
 def resolve_budget(started_at: float) -> int:
     left = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - (time.time() - started_at)
     return max(MIN_RESOLVE_SECS, int(left))
+
+
+MEMORY_ABSENT = ("memory: block absent from config.yaml — Stop-cadence capture is off; "
+                 "a SessionEnd capture wired in .claude/settings.local.json still runs")
+
+
+def _hook_commands(path: Path) -> list:
+    """Every hook command in a settings file, walked as JSON (hooks -> event
+    -> groups -> hooks -> command) — the walk doctor.sh's local_capture_wiring
+    makes, so the two never disagree. A text search counted a permission rule
+    (an allow entry for `python3 core/capture.py status`) as a wired hook."""
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    hooks = d.get("hooks") if isinstance(d, dict) else None
+    out = []
+    for groups in (hooks.values() if isinstance(hooks, dict) else []):
+        for g in (groups if isinstance(groups, list) else []):
+            for h in ((g.get("hooks") or []) if isinstance(g, dict) else []):
+                c = h.get("command") if isinstance(h, dict) else None
+                if isinstance(c, str):
+                    out.append(c)
+    return out
+
+
+def memory_note(root: Path) -> Optional[str]:
+    """§4.7: a memory-configured deployment that has not moved its capture
+    wiring into config.yaml's memory: block is told so at its first session
+    after the upgrade, not months later. Said when the session's marker is
+    first written (once per session), and only when a hook command in
+    settings.local.json still runs capture.py and config.yaml has no
+    top-level memory: line."""
+    if not any("capture.py" in c for c in _hook_commands(root / ".claude" / "settings.local.json")):
+        return None
+    try:
+        text = (root / "config.yaml").read_text()
+    except OSError:
+        return None
+    if any(line.startswith("memory:") for line in text.splitlines()):
+        return None
+    return MEMORY_ABSENT
 
 
 def main() -> int:
@@ -188,6 +231,9 @@ def main() -> int:
             }
             mp.parent.mkdir(parents=True, exist_ok=True)
             mp.write_text(json.dumps(marker, indent=2))
+            mem = memory_note(root)
+            if mem:
+                notes.append(mem)
             cutoff = time.time() - 7 * 86400
             for old in mp.parent.glob("session-*.json"):
                 try:

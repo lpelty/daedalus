@@ -842,3 +842,56 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
   case "$output" in *"OK       target checkout: $real_home/target/thing"*"deployment is wired correctly"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"no session — using the prime's checkout"*) echo "resolve's courtesy note must not be a doctor line: $output"; return 1 ;; esac
 }
+
+# --- episodic capture: the memory: block (spec §15) -------------------------
+doctor_memory_fixture() {
+  clone_target_with_default_branch main
+  doctor_config_with_branch main
+  mkdir -p "$DAEDALUS_HOME/.claude"
+  unset TENANT_HOME TENANT_BANK HINDSIGHT_API_URL TRANSCRIPT_DIR CAPTURE_INTERVAL \
+        HINDSIGHT_API_TENANT_API_KEY TENANT_USER_LABEL TENANT_ASSISTANT_LABEL
+}
+
+@test "doctor: no memory: block is a NOTE — worded for a settings.local.json that still wires capture.py — and doctor stays green" {
+  doctor_memory_fixture
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     memory: block absent from config.yaml — episodic capture is off (optional; see "Episodic memory capture" in README.md)'*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/capture.py capture"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
+  case "$output" in *"NOTE     memory: block absent from config.yaml — Stop-cadence capture is off; a SessionEnd capture wired in .claude/settings.local.json still runs"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: a usable memory: block is OK with its bank and interval; a missing transcript directory is a NOTE; a leftover capture line with TENANT_* is a NOTE; doctor stays green" {
+  doctor_memory_fixture
+  mkdir -p "$BATS_TEST_TMPDIR/tx"
+  printf 'memory:\n  bank: testbank\n  capture_interval: 90\n  transcript_dir: %s\n' "$BATS_TEST_TMPDIR/tx" >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       memory: bank testbank, capture every 90 s"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"transcript directory"*|*"settings.local.json"*) echo "unexpected note: $output"; return 1 ;; *) : ;; esac
+  rmdir "$BATS_TEST_TMPDIR/tx"
+  printf '{"hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/capture.py capture"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/recall-inject.py"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
+  case "$output" in *"NOTE     memory: transcript directory $BATS_TEST_TMPDIR/tx does not exist — set memory.transcript_dir in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     .claude/settings.local.json still runs capture.py with TENANT_* on its hook line — the memory: block in config.yaml now carries them and the tracked SessionEnd hook flushes; that line can be removed"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: the leftover-capture NOTE judges each hook command alone — a one-line settings.local.json whose TENANT_* prefix belongs to recall-inject.py and whose capture.py line has none is not flagged" {
+  doctor_memory_fixture
+  printf 'memory:\n  bank: testbank\n' >> "$DAEDALUS_HOME/config.yaml"
+  printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/recall-inject.py"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"python3 core/capture.py capture"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"still runs capture.py with TENANT_*"*) echo "flagged the recall line: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "doctor: a memory: block it cannot use is MISSING with the reason — no bank; a key file others can read — even when the operator's shell exports TENANT_BANK" {
+  doctor_memory_fixture
+  printf 'memory:\n  api_url: http://127.0.0.1:9\n' >> "$DAEDALUS_HOME/config.yaml"
+  export TENANT_BANK=fromshell
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  memory: episodic capture needs memory.bank in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  unset TENANT_BANK
+  mkdir -p "$DAEDALUS_HOME/state/hindsight"; printf 'k\n' > "$DAEDALUS_HOME/state/hindsight/api-key"; chmod 644 "$DAEDALUS_HOME/state/hindsight/api-key"
+  printf '  bank: b\n  api_key_file: state/hindsight/api-key\n' >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  memory: memory.api_key_file state/hindsight/api-key is readable by others (mode 644); run chmod 600 state/hindsight/api-key"*) : ;; *) echo "$output"; return 1 ;; esac
+}

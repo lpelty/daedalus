@@ -151,14 +151,73 @@ EOF
     n="$(ls "$registry"/*.json 2>/dev/null | wc -l | tr -d ' ')"
     log "OK       session registry: $registry/ present ($n entries)"
   else
-    # Deviates from §15's exact line ("first-up by terminal check"): hooks
-    # cannot open /dev/tty (Task 6), so the line says what a registry-absent
-    # build actually does instead of promising a check that never runs.
     log "NOTE     session registry absent — liveness by heartbeat only on this build; peer names unknown; no window numbers itself and nobody takes the pen at start (launch each window with DAEDALUS_LEASE=<NN>; core/lease.sh prime take gives one the pen)"
   fi
   for old in pitfall-seen.json code-context-seen.json; do
     [ -f "$DAEDALUS_HOME/state/$old" ] && log "NOTE     state/$old is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"
   done
+fi
+
+# Episodic capture (spec §4.7, §15). Optional, so an absent memory: block is a
+# NOTE. A block memory_env cannot use is MISSING: the Stop tick exits 0 by
+# design, so capture would be off, silently, on a deployment that asked for it.
+# The block is judged alone — the capture variables of whoever runs doctor are
+# cleared first, so an exported TENANT_BANK cannot hide a broken block.
+local_settings="$DAEDALUS_HOME/.claude/settings.local.json"
+# How settings.local.json still wires capture.py, judged one hook command at a
+# time by walking the JSON: prints "wired" when some command runs capture.py,
+# and "leftover" when such a command also carries a TENANT_* assignment. A line
+# grep over a one-line file matched a recall-inject.py TENANT_* prefix
+# followed, later on the same line, by an unprefixed capture.py command.
+local_capture_wiring() {
+  [ -f "$local_settings" ] || return 0
+  python3 - "$local_settings" <<'PY' 2>/dev/null || true
+import json, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+hooks = d.get("hooks") if isinstance(d, dict) else None
+cmds = []
+for groups in (hooks.values() if isinstance(hooks, dict) else []):
+    for g in (groups if isinstance(groups, list) else []):
+        for h in ((g.get("hooks") or []) if isinstance(g, dict) else []):
+            c = h.get("command") if isinstance(h, dict) else None
+            if isinstance(c, str) and "capture.py" in c:
+                cmds.append(c)
+out = []
+if cmds:
+    out.append("wired")
+if any(re.search(r"(^|\s)TENANT_[A-Z_]*=", c) for c in cmds):
+    out.append("leftover")
+print(" ".join(out))
+PY
+}
+local_capture="$(local_capture_wiring)"
+if memory_configured; then
+  mem_env="$( (unset $MEMORY_ENV_VARS; memory_env) 2>/dev/null )"
+  if [ $? -ne 0 ]; then
+    mem_err="$( (unset $MEMORY_ENV_VARS; memory_env) 2>&1 >/dev/null )"
+    note_problem "memory: ${mem_err#daedalus: }"
+  else
+    mem_vals="$( (eval "$mem_env"; printf '%s\t%s\t%s' "$TENANT_BANK" "$CAPTURE_INTERVAL" "$TRANSCRIPT_DIR") )"
+    mem_bank="$(printf '%s' "$mem_vals" | cut -f1)"
+    mem_interval="$(printf '%s' "$mem_vals" | cut -f2)"
+    mem_tdir="$(printf '%s' "$mem_vals" | cut -f3)"
+    log "OK       memory: bank $mem_bank, capture every $mem_interval s"
+    if [ ! -d "$mem_tdir" ]; then
+      log "NOTE     memory: transcript directory $mem_tdir does not exist — set memory.transcript_dir in config.yaml (a hook names its own transcript; this is the fallback core/close.sh uses)"
+    fi
+  fi
+  # Only the capture.py line: the recall-inject.py line keeps its TENANT_*
+  # prefixes until it moves onto memory_env (plan 5), so it must not be named.
+  if case " $local_capture " in *" leftover "*) true ;; *) false ;; esac; then
+    log "NOTE     .claude/settings.local.json still runs capture.py with TENANT_* on its hook line — the memory: block in config.yaml now carries them and the tracked SessionEnd hook flushes; that line can be removed"
+  fi
+elif [ -n "$local_capture" ]; then
+  log "NOTE     memory: block absent from config.yaml — Stop-cadence capture is off; a SessionEnd capture wired in .claude/settings.local.json still runs"
+else
+  log "NOTE     memory: block absent from config.yaml — episodic capture is off (optional; see \"Episodic memory capture\" in README.md)"
 fi
 
 # A healthy vault is either its own git repo (vault/.git exists — the
