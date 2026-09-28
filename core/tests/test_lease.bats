@@ -1193,3 +1193,54 @@ PY
   [ "$(python3 -c 'import json,sys; print("split_to" in json.load(open(sys.argv[1])))' "$DAEDALUS_HOME/state/leases/02.json")" = "False" ]
   DIRECT_CALL_ID=x run LS split 02 --repo sub; [ "$status" -ne 0 ]; case "$output" in *"(a visitor)"*"core/lease.sh split"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "split refuses a nested worktree that is not on lease/<NN> — a detached HEAD, or a rebase stopped on a conflict and resolved with nothing left to commit — naming the state, and leaves lease/02's commits where they were" {
+  window_02_both_repos; tip="$(git -C "$T/sub" rev-parse lease/02)"
+  git -C "$W/sub" checkout -q --detach HEAD
+  run LS split 02 --repo sub; [ "$status" -ne 0 ]
+  case "$output" in *"worktrees/02/thing/sub is not on branch lease/02 (its HEAD is detached)"*"git checkout lease/02"*"then split"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]; [ "$(git -C "$T/sub" rev-parse lease/02)" = "$tip" ]
+  git -C "$W/sub" checkout -q lease/02
+  # A rebase that stops on a conflict, resolved by keeping trunk's side: the
+  # worktree is mid-rebase with a detached HEAD and `git status` shows nothing.
+  sub_moves n.txt "sub trunk edits n.txt"
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x run LS rebase 02; [ "$status" -ne 0 ]
+  git -C "$W/sub" checkout -q --ours n.txt; git -C "$W/sub" add n.txt
+  [ -z "$(git -C "$W/sub" status --porcelain)" ]
+  run LS split 02 --repo sub; [ "$status" -ne 0 ]
+  case "$output" in *"worktrees/02/thing/sub is in the middle of a rebase"*"git rebase --continue"*"git rebase --abort"*"then split"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]; [ "$(git -C "$T/sub" rev-parse lease/02)" = "$tip" ]
+  [ -z "$(git -C "$T/sub" for-each-ref --format='%(refname)' 'refs/daedalus/split/')" ]
+}
+
+@test "split fetches with the lease lock free: a Bash or Edit|Write check in another window is never held behind split's network fetch; what changed during the fetch is checked again under the lock" {
+  window_02_both_repos
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/git" <<'SH'
+#!/usr/bin/env bash
+# On `fetch`, record whether the lease lock can be taken exclusively right now
+# (free) or not (held), then run the real git.
+self="$(cd "$(dirname "$0")" && pwd -P)"; real=""
+IFS=: ; for d in $PATH; do [ -n "$d" ] || continue; [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$self" ] && continue
+  if [ -x "$d/git" ]; then real="$d/git"; break; fi; done; unset IFS
+for a in "$@"; do if [ "$a" = fetch ]; then
+  python3 -c 'import fcntl,os,sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print("free")
+except BlockingIOError:
+    print("held")' "$DAEDALUS_HOME/state/leases/.lock" >> "$FETCH_PROBE"
+  [ -z "${FETCH_DIRTIES:-}" ] || printf 'during fetch\n' >> "$FETCH_DIRTIES"; break; fi; done
+exec "$real" "$@"
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/git"
+  # The window edits a file while split fetches: the check under the lock sees it.
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FETCH_PROBE="$BATS_TEST_TMPDIR/probe" FETCH_DIRTIES="$W/a.txt" run LS split 02 --repo sub
+  [ "$status" -ne 0 ]; case "$output" in *"Window 02 has uncommitted changes in worktrees/02/thing (a.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]
+  git -C "$W" checkout -q -- a.txt
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" FETCH_PROBE="$BATS_TEST_TMPDIR/probe" run LS split 02 --repo sub
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -s "$BATS_TEST_TMPDIR/probe" ]
+  ! grep -q held "$BATS_TEST_TMPDIR/probe" || { cat "$BATS_TEST_TMPDIR/probe"; return 1; }
+}

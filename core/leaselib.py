@@ -1284,6 +1284,68 @@ def _discard_locked(root: Path, nn: str, trunks: Dict[str, str]) -> None:
     _remove_lease_files(root, nn)
 
 
+# Git operations that leave a worktree mid-way, each with the words that finish
+# or undo it (checked by the marker git keeps in the worktree's own git dir).
+_IN_PROGRESS = (("rebase-merge", "rebase", "rebase"), ("rebase-apply", "rebase", "rebase"),
+                ("MERGE_HEAD", "merge", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick", "cherry-pick"),
+                ("REVERT_HEAD", "revert", "revert"))
+
+
+def _on_lease_branch(root: Path, nn: str, repo: str) -> None:
+    """Refuse unless worktrees/<nn>/<repo> is on branch lease/<nn> with no git
+    operation stopped half-way. split resets whatever HEAD points to: on a
+    detached HEAD (a rebase stopped on a conflict and resolved with nothing
+    left to commit shows a clean `git status`) lease/<nn> would keep every
+    commit it just copied to the new window."""
+    wt, where = root / "worktrees" / nn / repo, "worktrees/%s/%s" % (nn, repo)
+    for marker, what, cmd in _IN_PROGRESS:
+        code, out, _ = _git(wt, "rev-parse", "--git-path", marker)
+        path = Path(out.strip()) if code == 0 and out.strip() else None
+        if path is not None and not path.is_absolute():
+            path = wt / path
+        if path is not None and path.exists():
+            raise Refused("%s is in the middle of a %s. Finish it there with `git %s --continue`, or undo it with "
+                          "`git %s --abort`, then split; split moves finished commits only." % (where, what, cmd, cmd))
+    code, out, _ = _git(wt, "symbolic-ref", "-q", "HEAD")
+    head = out.strip() if code == 0 else ""
+    if head != "refs/heads/lease/%s" % nn:
+        state = ("its HEAD is on branch %s" % head[len("refs/heads/"):] if head.startswith("refs/heads/")
+                 else "its HEAD is detached")
+        raise Refused("%s is not on branch lease/%s (%s). Run `git checkout lease/%s` there, then split; split moves "
+                      "lease/%s's commits and resets that branch." % (where, nn, state, nn, nn))
+
+
+def _split_checks(root: Path, nn: str, lease: dict, sid: Optional[str], nested: str) -> Tuple[Dict[str, str], str]:
+    """What split refuses from the lease alone and the window's worktrees:
+    run once before the fetch (no network for a refusal) and again under the
+    exclusive lock after it, because the window may have moved meanwhile.
+    Returns (trunks, key)."""
+    _holder_or_shell(root, nn, lease, sid, "split")
+    if lease.get("worktree_ready") is False:
+        raise Refused("window %s's worktree was not finished at start; run `core/lease.sh claim %s` to finish it"
+                      % (nn, nn))
+    trunks = lease.get("trunks") or trunks_of(root, root / "target")
+    outer = next(iter(trunks))
+    key = "%s/%s" % (outer, nested.strip("/"))
+    if key not in trunks:
+        names = [k.split("/", 1)[1] for k in trunks if "/" in k]
+        raise Refused("Window %s has no nested repo %s (its nested repos: %s)."
+                      % (nn, nested, ", ".join(names) or "none"))
+    # A worktree that is not there reads clean to dirty_files and cannot be
+    # reset: refuse it before anything is allocated (as rebase does).
+    for repo in trunks:
+        if not (root / "worktrees" / nn / repo).is_dir():
+            raise Refused("worktrees/%s/%s is missing; run `core/lease.sh claim %s` to finish window %s's "
+                          "worktree, then split" % (nn, repo, nn, nn))
+    _on_lease_branch(root, nn, key)
+    for repo in trunks:
+        files = dirty_files(root / "worktrees" / nn / repo)
+        if files:
+            raise Refused("Window %s has uncommitted changes in worktrees/%s/%s (%s). Commit them first; split "
+                          "moves commits only." % (nn, nn, repo, ", ".join(files)))
+    return trunks, key
+
+
 def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
     """`lease.sh split <NN> --repo <nested>` (spec §7.1 step 2, §4.2): the nested
     repo's commits origin/<trunk>..lease/<NN> become a new numbered window (as
@@ -1291,45 +1353,36 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
     released afterwards); the original window's branch in that repo is reset
     to origin/<trunk>, its old tip kept as refs/daedalus/split/<NN>-<stamp>
     until `release --remove`. The outer repo is not touched. Refuses when
-    either worktree is dirty; a cherry-pick that does not apply rolls the new
-    window back. Everything under one lock (allocate_locked needs it)."""
-    with lock(root):
+    either worktree is dirty or the nested one is not on lease/<NN>; a
+    cherry-pick that does not apply rolls the new window back.
+
+    The fetch runs with no lock held, as rebase's does: guard-bash and the
+    Edit|Write boundary hook take the lock shared under 5 s hook timeouts, and
+    a network fetch under the exclusive lock would stall every window's
+    checks. Every check is then repeated under the exclusive lock, which
+    holds only local work: allocation, cherry-pick, reset, the lease writes."""
+    with lock(root, shared=True):
         leases = read_all(root)
-        nn = number_of(leases, token, "split")
-        lease = leases.get(nn)
+    nn = number_of(leases, token, "split")
+    lease = leases.get(nn)
+    if lease is None:
+        raise Refused("There is no window %s." % nn)
+    trunks, key = _split_checks(root, nn, lease, sid, nested)
+    ntrunk, src = trunks[key], root / "target" / key
+    code, _, err = _git(src, "fetch", "--quiet", "origin", timeout=120)
+    if code != 0:
+        last = err.strip().splitlines()[-1:] or ["no output"]
+        raise Refused("could not fetch origin in target/%s (%s); nothing was split" % (key, last[0]))
+    with lock(root):
+        lease = read_all(root).get(nn)
         if lease is None:
-            raise Refused("There is no window %s." % nn)
-        _holder_or_shell(root, nn, lease, sid, "split")
-        if lease.get("worktree_ready") is False:
-            raise Refused("window %s's worktree was not finished at start; run `core/lease.sh claim %s` to finish it"
-                          % (nn, nn))
-        trunks = lease.get("trunks") or trunks_of(root, root / "target")
-        outer = next(iter(trunks))
-        key = "%s/%s" % (outer, nested.strip("/"))
-        if key not in trunks:
-            names = [k.split("/", 1)[1] for k in trunks if "/" in k]
-            raise Refused("Window %s has no nested repo %s (its nested repos: %s)."
-                          % (nn, nested, ", ".join(names) or "none"))
-        # A worktree that is not there reads clean to dirty_files and cannot be
-        # reset: refuse it before anything is allocated (as rebase does).
-        for repo in trunks:
-            if not (root / "worktrees" / nn / repo).is_dir():
-                raise Refused("worktrees/%s/%s is missing; run `core/lease.sh claim %s` to finish window %s's "
-                              "worktree, then split" % (nn, repo, nn, nn))
+            raise Refused("Window %s was released while its trunk was being fetched; nothing was split." % nn)
+        trunks, key = _split_checks(root, nn, lease, sid, nested)
         ntrunk, src = trunks[key], root / "target" / key
-        code, _, err = _git(src, "fetch", "--quiet", "origin", timeout=120)
-        if code != 0:
-            last = err.strip().splitlines()[-1:] or ["no output"]
-            raise Refused("could not fetch origin in target/%s (%s); nothing was split" % (key, last[0]))
         subjects = list(reversed(waiting_work(src, ntrunk, nn)))
         if not subjects:
             raise Refused("Window %s has no commits in %s that are not already on %s; nothing to split."
                           % (nn, key, ntrunk))
-        for repo in trunks:
-            files = dirty_files(root / "worktrees" / nn / repo)
-            if files:
-                raise Refused("Window %s has uncommitted changes in worktrees/%s/%s (%s). Commit them first; split "
-                              "moves commits only." % (nn, nn, repo, ", ".join(files)))
         new_nn, data = allocate_locked(root, None, note="split from window %s (%s)" % (nn, key))
         new_trunks = data.get("trunks") or trunks
         dest = root / "worktrees" / new_nn / key
