@@ -1247,9 +1247,14 @@ def prime_take(root: Path, sid: str, reason: Optional[str]) -> str:
     holder, or no prime.json at all (a registry-absent build that never
     first-upped), needs none. The take is a compare-and-swap on the
     session_id the taker read (§4.1); LEASE_TEST_CAS_EXPECT lets a test
-    simulate a stale read. The transcribed-mode check of --reason against
-    the taker's transcript is plan 4 (it needs the promote transcript parser);
-    this release records the reason as given."""
+    simulate a stale read.
+
+    DEFERRED to plan 4 (spec §4.8 'Handover', which records the deferral): in
+    `transcribed` mode a --reason given over a live holder must appear in the
+    TAKER's own transcript as words the operator typed after the holder's
+    bound_at. That check needs plan 4's transcript machinery (the parser the
+    promote confirm uses, §7.2 step 2). Until it lands, the reason is recorded
+    in prime.json's history exactly as given and nothing verifies it."""
     with lock(root):
         leases = read_all(root)
         mine, _ = lease_of_session(leases, sid)
@@ -1283,6 +1288,14 @@ def prime_take(root: Path, sid: str, reason: Optional[str]) -> str:
 UNLEASED_NAG = ("This session holds no lease. If the operator told you your window number, run `core/lease.sh claim <NN>`; "
                 "otherwise run `core/lease.sh create` and then `claim` the number it prints.")
 VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take the pen."
+# §4.8: a visitor never creates, claims or binds any lease, and cannot take the
+# pen. Every lease.sh command that changes state/leases/ is refused for it —
+# not only create/claim/spawn: sweep and release delete lease files, and
+# `prime take` would move the pen to a read-only headless session that exits
+# in minutes. list/status stay allowed (they read).
+VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime")
+VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
+                   "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
                 "from this board) before changing it.")
 
@@ -1561,6 +1574,10 @@ def main(argv: list) -> int:
         sys.stderr.write("usage: leaselib.py <command> ...\n")
         return 2
     cmd, args = argv[1], argv[2:]
+    if cmd in VISITOR_REFUSED and os.environ.get("DIRECT_CALL_ID"):
+        # Before recompute_all_changed and every lock: a visitor writes nothing.
+        sys.stderr.write("daedalus: %s\n" % (VISITOR_REFUSAL % cmd))
+        return 1
     if cmd == "validate-id":
         return 0 if args and valid_id(args[0]) else 1
     if cmd == "validate-alias":

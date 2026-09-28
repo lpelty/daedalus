@@ -759,3 +759,29 @@ PY
   CLAUDE_CODE_SESSION_ID=sB run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert h[-1]["reason"]=="previous holder gone", h' "$DAEDALUS_HOME/state/leases/prime.json"
 }
+
+@test "a visitor (DIRECT_CALL_ID set) never creates, claims, spawns, changes or sweeps a window and cannot take the pen: each refused in plain words before anything is written; list still works" {
+  # A claude that only leaves a mark: if `spawn` ever dropped out of the
+  # refused list, this test must not start a real `claude --bg` (leaselib's
+  # spawn() runs `claude` from PATH).
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\n: > "%s/claude-ran"\nexit 1\n' "$BATS_TEST_TMPDIR" > "$BATS_TEST_TMPDIR/bin/claude"
+  chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  LS create >/dev/null                        # window 01, unbound, made from an operator shell
+  snap() { ( cd "$DAEDALUS_HOME/state/leases" && ls -A | sort && cat ./*.json ./*.changed 2>/dev/null ) | shasum; }
+  before="$(snap)"
+  for args in "create" "claim 01" "spawn do-a-thing" "prime take" "alias 01 poc" "note 01 x" "update 01 --criteria c.md" "release 01" "done 01 --summary s" "sweep"; do
+    DIRECT_CALL_ID=call-1 CLAUDE_CODE_SESSION_ID=sV run LS $args
+    [ "$status" -eq 1 ] || { echo "$args -> status $status: $output"; return 1; }
+    case "$output" in
+      *"This is a direct-call session (a visitor): it never creates, claims or changes a window and cannot take the pen."*"core/lease.sh ${args%% *}"*) : ;;
+      *) echo "$args: $output"; return 1 ;;
+    esac
+  done
+  [ "$(snap)" = "$before" ]
+  [ ! -e "$BATS_TEST_TMPDIR/claude-ran" ] || { echo "a claude was started"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  DIRECT_CALL_ID=call-1 CLAUDE_CODE_SESSION_ID=sV run LS list
+  [ "$status" -eq 0 ]
+}

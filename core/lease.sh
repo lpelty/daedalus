@@ -7,6 +7,8 @@
 #   core/lease.sh spawn "<task>" [--note "..."] | list [--stale] | status
 #   core/lease.sh release <NN> [--remove [--force]] | done <NN> --summary "..." | sweep [--force <NN>]
 #   core/lease.sh prime take [--reason "..."]
+# A direct-call session (DIRECT_CALL_ID set — spec §4.8, a visitor) is refused
+# every command that changes state/leases/; list and status still work.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 [ $# -ge 1 ] || die "usage: core/lease.sh <create|claim|alias|note|update|spawn|list|status|release|done|sweep|prime> ..."
