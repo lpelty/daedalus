@@ -6,16 +6,16 @@
 #   core/lease.sh claim <NN> | alias <NN> <word> [--clear] | note <NN> "..." | update <NN> --criteria <file>
 #   core/lease.sh spawn "<task>" [--note "..."] | list [--stale] | status
 #   core/lease.sh release <NN> [--remove [--force]] | done <NN> --summary "..." | sweep [--force <NN>]
-#   core/lease.sh prime take [--reason "..."]
+#   core/lease.sh prime take [--reason "..."] | rebase <NN>
 # A direct-call session (DIRECT_CALL_ID set — spec §4.8, a visitor) is refused
 # every command that changes state/leases/; list and status still work.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-[ $# -ge 1 ] || die "usage: core/lease.sh <create|claim|alias|note|update|spawn|list|status|release|done|sweep|prime> ..."
+[ $# -ge 1 ] || die "usage: core/lease.sh <create|claim|alias|note|update|spawn|list|status|release|done|sweep|prime|rebase> ..."
 cmd="$1"; shift
 case "$cmd" in
-  create|claim|alias|note|update|spawn|list|status|release|done|sweep|prime) ;;
-  rebase|split|adopt) die "core/lease.sh $cmd is not in this release yet" ;;
+  create|claim|alias|note|update|spawn|list|status|release|done|sweep|prime|rebase) ;;
+  split|adopt) die "core/lease.sh $cmd is not in this release yet" ;;
   *) die "unknown command: $cmd" ;;
 esac
 exec python3 "$DAEDALUS_HOME/core/leaselib.py" "$cmd" "$@"

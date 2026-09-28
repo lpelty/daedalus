@@ -389,7 +389,7 @@ PY
 
 @test "an adopted lease branch whose fast-forward to origin/<trunk> fails says so on stderr instead of staying silently behind" {
   LS create >/dev/null                                  # 01 at origin/main; lease/01 stays an ancestor (merged), so 01 is free once swept
-  printf 'trunk\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am "trunk moved"; git -C "$T" push -q origin main
+  trunk_moves a.txt "trunk moved"
   W="$DAEDALUS_HOME/worktrees/01/thing"
   printf 'local edit\n' >> "$W/a.txt"                  # uncommitted, on the same file: ff-only refuses to overwrite it
   rm -f "$DAEDALUS_HOME/state/leases/01.json"
@@ -1048,4 +1048,41 @@ two_windows_prime_01() {
   tx "$X" operator "new words after the pen was taken" >/dev/null
   TZ=Etc/GMT-14 CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "new words after the pen was taken"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
+}
+
+@test "rebase: a clean lease fast-forwards onto a moved trunk; a lease with commits has them replayed onto it, subjects kept" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  trunk_moves b.txt "trunk moved"
+  run LS rebase 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 is up to date with trunk (thing fast-forwarded to origin/main; thing/sub already up to date). Run core/gates.sh before asking for promote."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" rev-parse HEAD)" = "$(git -C "$T" rev-parse origin/main)" ]
+  printf 'mine\n' > "$W/c.txt"; git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m "window work"
+  trunk_moves b.txt "trunk again"
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x run LS rebase 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"thing: 1 commit replayed onto origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" rev-parse HEAD^)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(git -C "$W" log -1 --format=%s)" = "window work" ]
+}
+
+@test "rebase: a conflict stops with the path named and a non-zero exit, and the worktree is left mid-rebase for the window to resolve" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'window line\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "window edits a.txt"
+  trunk_moves a.txt "trunk edits a.txt"
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"Window 01's rebase stopped on a conflict in thing: a.txt. Resolve it in worktrees/01/thing, \`git add\` the file, then \`git rebase --continue\`; run core/gates.sh when it finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$(git -C "$W" rev-parse --git-path rebase-merge)" ] || [ -d "$(git -C "$W" rev-parse --git-path rebase-apply)" ]
+}
+
+@test "rebase refuses uncommitted work (naming it), another live window's lease (naming its peer), an alias (naming the number) and a visitor" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'dirty\n' >> "$W/a.txt"
+  run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"Window 01 has uncommitted changes in worktrees/01/thing (a.txt). Commit them on lease/01 first; rebase moves commits only."*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W" checkout -q -- a.txt
+  p="$(live_pid)"; registry_entry "$p" sA interactive cli daedalus-01; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  CLAUDE_CODE_SESSION_ID=sZ run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"Window 01 is held by a live session (peer name daedalus-01)"*) : ;; *) echo "$output"; return 1 ;; esac
+  CLAUDE_CODE_SESSION_ID=sA LS alias 01 poc >/dev/null
+  run LS rebase poc; [ "$status" -ne 0 ]; case "$output" in *"poc is an alias; window 01 carries it — say \`rebase 01\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  DIRECT_CALL_ID=x run LS rebase 01; [ "$status" -ne 0 ]; case "$output" in *"(a visitor)"*"core/lease.sh rebase"*) : ;; *) echo "$output"; return 1 ;; esac
 }

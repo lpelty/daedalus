@@ -1185,6 +1185,72 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
         return "\n".join(out)
 
 
+def _holder_or_shell(root: Path, nn: str, lease: dict, sid: Optional[str], cmd: str) -> None:
+    """rebase / split are the window's own (spec §4.11: "run by the clone"): its
+    holder, or an operator shell, or anyone once the holder is stale — never
+    another live session (plan 4 Decision 26)."""
+    holder = lease.get("session_id")
+    if sid is not None and holder and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+        raise _held_by_live(nn, lease, "Say '%s %s' to that window; it runs it in its own worktree." % (cmd, nn))
+
+
+def _count(repo: Path, spec: str) -> int:
+    code, out, _ = _git(repo, "rev-list", "--count", spec)
+    return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
+
+
+def rebase(root: Path, token: str, sid: Optional[str]) -> str:
+    """`lease.sh rebase <NN>` (spec §7.1 step 4, §4.2): fetch origin in every repo of
+    the window, then `git rebase origin/<trunk>` in each of its worktrees,
+    outer first. A conflict stops there, names the paths and leaves the
+    worktree mid-rebase for the window to resolve (`git rebase --continue`),
+    exit non-zero. Uncommitted work is refused first, before any fetch
+    (rebase moves commits only). The lock is held only to read the lease:
+    git runs outside it."""
+    with lock(root, shared=True):
+        leases = read_all(root)
+    nn = number_of(leases, token, "rebase")
+    lease = leases.get(nn)
+    if lease is None:
+        raise Refused("There is no window %s." % nn)
+    _holder_or_shell(root, nn, lease, sid, "rebase")
+    trunks = lease.get("trunks") or trunks_of(root, root / "target")
+    for repo in trunks:
+        files = dirty_files(root / "worktrees" / nn / repo)
+        if files:
+            raise Refused("Window %s has uncommitted changes in worktrees/%s/%s (%s). Commit them on lease/%s first; "
+                          "rebase moves commits only." % (nn, nn, repo, ", ".join(files), nn))
+    for repo in trunks:
+        code, _, err = _git(root / "target" / repo, "fetch", "--quiet", "origin", timeout=120)
+        if code != 0:
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("could not fetch origin in target/%s (%s); window %s was not rebased" % (repo, last[0], nn))
+    report = []
+    for repo, trunk in trunks.items():
+        wt = root / "worktrees" / nn / repo
+        ahead, behind = _count(wt, "origin/%s..HEAD" % trunk), _count(wt, "HEAD..origin/%s" % trunk)
+        if behind == 0:
+            report.append("%s already up to date" % repo)
+            continue
+        code, _, err = _git(wt, "rebase", "--quiet", "origin/" + trunk, timeout=300)
+        if code != 0:
+            _, unmerged, _ = _git(wt, "diff", "--name-only", "--diff-filter=U")
+            conflicts = [f for f in unmerged.splitlines() if f.strip()]
+            if conflicts:
+                raise Refused("Window %s's rebase stopped on a conflict in %s: %s. Resolve it in worktrees/%s/%s, "
+                              "`git add` the file, then `git rebase --continue`; run core/gates.sh when it finishes."
+                              % (nn, repo, ", ".join(conflicts), nn, repo))
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("git rebase in worktrees/%s/%s failed (%s)" % (nn, repo, last[0]))
+        report.append("%s fast-forwarded to origin/%s" % (repo, trunk) if ahead == 0 else
+                      "%s: %d commit%s replayed onto origin/%s" % (repo, ahead, "" if ahead == 1 else "s", trunk))
+    try:
+        recompute_changed(root, nn)
+    except Refused:
+        pass
+    return "Window %s is up to date with trunk (%s). Run core/gates.sh before asking for promote." % (nn, "; ".join(report))
+
+
 def mark_done(root: Path, token: str, sid: str, summary: str) -> str:
     """A spawned clone reports completion: finished: <time> and summary: in
     the lease, holder only, under the lock. The board renders FINISHED from
@@ -1608,7 +1674,8 @@ VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take
 # not only create/claim/spawn: sweep and release delete lease files, and
 # `prime take` would move the pen to a read-only headless session that exits
 # in minutes. list/status stay allowed (they read).
-VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime")
+VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime",
+                   "rebase")
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
@@ -1999,7 +2066,7 @@ def main(argv: list) -> int:
     # and releases LOCK_SH itself. list/status do it through the board (Task 8);
     # create and resolve do not (a spawner's create may run hook-adjacent, and
     # resolve is on every target_path).
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime"):
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase"):
         try:
             recompute_all_changed(root)
         except Refused as e:
@@ -2034,7 +2101,7 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
         return 0
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime"):
+    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase"):
         def _refused(fn):
             try:
                 out = fn()
@@ -2088,6 +2155,8 @@ def main(argv: list) -> int:
                 sys.stderr.write("daedalus: %s\n" % e); return 1
             return _refused(lambda: prime_take(root, require_session(sid, "prime take"),
                                                _after("--reason") if "--reason" in args else None, mode=mode))
+        if cmd == "rebase":
+            return _refused(lambda: rebase(root, args[0], sid))
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)

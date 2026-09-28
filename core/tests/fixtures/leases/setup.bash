@@ -92,3 +92,17 @@ hook_json() {   # hook_json <event> <session-id> [extra-json-fields]
     "$1" "$2" "$BATS_TEST_TMPDIR" "$2" "${3:+,$3}"
 }
 lease_json() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2]))' "$DAEDALUS_HOME/state/leases/$1.json" "$2"; }
+
+# trunk_moves [file] [line] — someone else moves origin/main, from a separate clone
+# (the way trunk moves in real life), and target/thing fetches it. Never a push from
+# target/thing: once a window exists its pre-push hook refuses a trunk push that no
+# promotion confirmed (spec §7.3).
+trunk_moves() {
+  local o="$BATS_TEST_TMPDIR/elsewhere" f="${1:-b.txt}" msg="${2:-trunk moved}"
+  [ -d "$o/.git" ] || git clone -q "$BATS_TEST_TMPDIR/origin.git" "$o"
+  git -C "$o" pull -q --ff-only origin main
+  printf '%s\n' "$msg" >> "$o/$f"
+  git -C "$o" add -A; git -C "$o" -c user.email=t@x -c user.name=t commit -q -m "$msg"
+  git -C "$o" push -q origin HEAD:main
+  git -C "$DAEDALUS_HOME/target/thing" fetch -q origin
+}
