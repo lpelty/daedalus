@@ -229,8 +229,13 @@ PY
   printf 'target/\nconfig.yaml\nstate/\n.claude/settings.local.json\n__pycache__/\n' > "$DAEDALUS_HOME/.gitignore"
   git -C "$DAEDALUS_HOME" add .gitignore
   mkdir -p "$DAEDALUS_HOME/core/agents" "$BATS_TEST_TMPDIR/bin"
-  cp "$SRC/refute.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/refute.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" \
+     "$SRC/call-agent.sh" "$SRC/call_agent.py" "$SRC/leaselib.py" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
   cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
+  # The launcher that runs the review refuses while core/ differs from the
+  # committed version (spec §6.1): commit the files this test just added.
+  git -C "$DAEDALUS_HOME" add core
+  git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m "refuter and launcher"
   printf '#!/usr/bin/env bash\ncat > /dev/null\nprintf "VERDICT: STANDS\\n"\n' > "$BATS_TEST_TMPDIR/bin/claude"
   chmod +x "$BATS_TEST_TMPDIR/bin/claude"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'

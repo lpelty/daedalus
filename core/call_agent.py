@@ -691,8 +691,169 @@ def launch_agent(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, re
             "settings": s, "cleanup": []}
 
 
-PREPARE = {"self": prepare_self, "agent": prepare_agent}
-LAUNCH = {"self": launch_self, "agent": launch_agent}
+def render_charter(root: Path) -> Tuple[str, str]:
+    """(path of the rendered --agents file, agent name). The charter is
+    distribution code under core/ (never .claude/agents/, a write surface)."""
+    charter = root / "core" / "agents" / "refuter.md"
+    if not charter.is_file():
+        raise Refusal("refuter charter missing at %s — cannot run the rung-2 refuter" % charter)
+    p = subprocess.run([sys.executable, str(root / "core" / "agentdef.py"), str(charter)],
+                       capture_output=True, text=True, timeout=20)
+    if p.returncode != 0:
+        raise Refusal("refuter charter at %s does not render (python3 core/agentdef.py %s) — cannot run the "
+                      "rung-2 refuter" % (charter, charter))
+    try:
+        name = next(iter(json.loads(p.stdout)))
+    except (ValueError, StopIteration):
+        raise Refusal("refuter charter at %s names no agent — cannot run the rung-2 refuter" % charter)
+    fd, path = tempfile.mkstemp(prefix="daedalus-refuter-", suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(p.stdout)
+    return path, name
+
+
+def check_tree(root: Path, raw: Optional[str], review_mode: str) -> Path:
+    if not raw:
+        raise Refusal("--callee refuter needs --tree <absolute path>: the checkout under review")
+    if not raw.startswith("/"):
+        raise Refusal("--tree must be an absolute path (got: %s)" % raw)
+    tree = Path(raw).resolve()
+    if not tree.is_dir():
+        raise Refusal("--tree is not a directory: %s" % raw)
+    under = None
+    for r in TREE_ROOTS:
+        try:
+            tree.relative_to(root / r)
+            under = r
+            break
+        except ValueError:
+            continue
+    if under is None:
+        raise Refusal("--tree must be under worktrees/, target/ or state/promote/ of this Daedalus (got: %s)" % raw)
+    if review_mode == "promote" and under != "state/promote":
+        raise Refusal("a promote review reads the merged tree under state/promote/ (got: %s)" % raw)
+    if review_mode == "branch" and under == "state/promote":
+        raise Refusal("a tree under state/promote/ is a promote review: pass --mode promote")
+    return tree
+
+
+def tree_fingerprint(root: Path, tree: Path, review_mode: str) -> str:
+    """fingerprint.sh of the tree under review, before the call (spec §6.1). A
+    branch review must be of the caller's own tree (lib.sh target_path); a
+    promote review fingerprints the merged tree through the override."""
+    env = lib_env(root)
+    if review_mode == "promote":
+        env["DAEDALUS_TARGET_OVERRIDE"] = str(tree)
+    else:
+        env.pop("DAEDALUS_TARGET_OVERRIDE", None)
+        p = subprocess.run(["bash", "-c", TARGET_SNIPPET], capture_output=True, text=True, timeout=30, env=env)
+        mine = p.stdout.strip()
+        if p.returncode != 0 or not mine:
+            raise Refusal("cannot resolve this session's tree (%s)" % (p.stderr.strip() or "target_path failed"))
+        if Path(mine).resolve() != tree:
+            raise Refusal("the tree under review (%s) is not this session's tree (%s); a verdict names the tree "
+                          "it reviewed" % (tree, mine))
+    p = subprocess.run(["bash", str(root / "core" / "fingerprint.sh")], capture_output=True, text=True,
+                       timeout=600, env=env)
+    lines = p.stdout.strip().splitlines()
+    fp = lines[-1] if lines else "null"
+    if not re.fullmatch(r"[0-9a-f]{64}", fp):
+        raise Refusal("could not fingerprint the tree under review (%s): %s"
+                      % (tree, p.stderr.strip()[-300:] or "fingerprint.sh printed null"))
+    return fp
+
+
+def check_verdict_file(root: Path, raw: str, tag: Optional[str]) -> str:
+    if not tag:
+        raise Refusal("--verdict-file needs --tag <run-id>: the run the verdict belongs to")
+    p = Path(raw)
+    ev = (root / "vault" / "evidence").resolve()
+    if not p.is_absolute() or p.parent.resolve() != ev or p.name != "%s-review.md" % tag:
+        raise Refusal("--verdict-file must be vault/evidence/%s-review.md (got: %s)" % (tag, raw))
+    if (ev / p.name).exists():
+        raise Refusal(WRITE_ONCE)
+    try:
+        pid = json.loads((root / "state" / "evidence" / tag / "run.json").read_text()).get("promote_id")
+    except (OSError, ValueError):
+        pid = None
+    if pid and (root / "state" / "promote" / str(pid) / "prepared.json").exists():
+        raise Refusal(WRITE_ONCE)
+    return str(ev / p.name)
+
+
+# Claude Code's managed policy CLAUDE.md (memory docs): the organization's,
+# loaded in every session, and "Managed policy CLAUDE.md files cannot be
+# excluded". The refuter cannot keep it out, so the receipt names it
+# (spec §6.1; Decision 17).
+MANAGED_CLAUDE_MD = ("/Library/Application Support/ClaudeCode/CLAUDE.md", "/etc/claude-code/CLAUDE.md")
+
+
+def managed_claude_md() -> Optional[str]:
+    """The managed policy CLAUDE.md present on this machine, or None.
+    DAEDALUS_MANAGED_CLAUDE_MD_PATHS (colon separated) replaces the list — the
+    suite's seam; it changes what the receipt names, never what loads."""
+    raw = os.environ.get("DAEDALUS_MANAGED_CLAUDE_MD_PATHS")
+    for p in (raw.split(":") if raw is not None else MANAGED_CLAUDE_MD):
+        if p and Path(p).is_file():
+            return p
+    return None
+
+
+def run_lease(root: Path, tag: Optional[str]) -> Optional[str]:
+    if not tag:
+        return None
+    try:
+        return json.loads((root / "state" / "evidence" / tag / "run.json").read_text()).get("lease") or None
+    except (OSError, ValueError):
+        return None
+
+
+def prepare_refuter(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dict) -> dict:
+    rs, problems = refuter_settings(conf)
+    first(problems)
+    if args.caller:
+        raise Refusal("--caller is for --callee self; the refuter is called by refute.sh")
+    review_mode = args.mode or "branch"
+    tree = check_tree(root, args.tree, review_mode)
+    verdict = check_verdict_file(root, args.verdict_file, args.tag) if args.verdict_file else None
+    fp = tree_fingerprint(root, tree, review_mode)
+    return {"caller": SELF_NAME, "callee": "refuter", "tree": args.tree, "tag": args.tag,
+            "review_mode": review_mode, "verdict_file": verdict, "fingerprint": fp,
+            "window": run_lease(root, args.tag) or view.get("mine"),
+            "managed_claude_md": managed_claude_md()}
+
+
+def launch_refuter(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, request: bytes, resumed: bool) -> dict:
+    """No frame prompt: the charter is the whole system prompt and the request
+    is the prompt file (spec §6.1). The full launch set is passed on every
+    attempt, a resume included: a resumed session does not restore a CLI
+    --agents definition, --settings or (on Bedrock) the model."""
+    rs, problems = refuter_settings(conf)
+    first(problems)
+    agents, name = render_charter(root)
+    workdir = tempfile.mkdtemp(prefix="daedalus-refuter-")
+    try:
+        Path(workdir).resolve().relative_to(root)
+    except ValueError:
+        pass
+    else:
+        os.rmdir(workdir)
+        os.unlink(agents)
+        raise Refusal("the refuter's empty working directory landed inside %s; set TMPDIR outside it" % root)
+    cmd = ["claude", "-p", "--agents", agents, "--agent", name, "--settings", REFUTER_SETTINGS,
+           "--strict-mcp-config", "--tools", ",".join(READ_ONLY_TOOLS), "--add-dir", rec["tree"]]
+    if rs["model"]:
+        cmd += ["--model", rs["model"]]
+    cmd += ["--resume", rec["session_id"]] if resumed else ["--session-id", rec["session_id"]]
+    env = child_env(rec["call_id"], call_dir, SELF_NAME)
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    return {"cmd": cmd, "cwd": Path(workdir), "timeout": rs["timeout"], "env": env, "output": "text",
+            "stdin": request, "marker": None, "transcript": None, "settings": None,
+            "cleanup": [agents, workdir]}
+
+
+PREPARE = {"self": prepare_self, "agent": prepare_agent, "refuter": prepare_refuter}
+LAUNCH = {"self": launch_self, "agent": launch_agent, "refuter": launch_refuter}
 
 
 # --- running one attempt --------------------------------------------------------------
@@ -1031,6 +1192,9 @@ def new_call(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: d
         raise Refusal("--tree and --mode are for --callee refuter")
     if mode not in PREPARE:
         raise Refusal("--callee %s is not available in this build" % mode)
+    if mode == "refuter":
+        render_path, _ = render_charter(root)       # the charter's own refusals come first (v0.6.1 order)
+        os.unlink(render_path)
     dist = require_clean_distribution(root)
     request = read_request(args)
     if args.artifact_dir and not Path(args.artifact_dir).is_dir():

@@ -52,3 +52,45 @@ direct_call() {
 
 # calls — how many times the fake claude ran.
 calls() { ls "$FAKE_CLAUDE_DIR"/*.argv 2>/dev/null | wc -l | tr -d ' '; }
+
+# refuter_fixture — a fresh caller_fixture with something to review in the
+# target (an uncommitted edit), an evidence summary outside the evidence tree
+# (as gates.sh hands one over) and run r1's run.json; the fake claude answers
+# STANDS. review [run-id] runs refute.sh on it.
+refuter_fixture() {
+  rm -rf "$BATS_TEST_TMPDIR/dae" "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/sub-origin.git" "$BATS_TEST_TMPDIR/fake"
+  caller_fixture
+  T="$DAEDALUS_HOME/target/thing"
+  printf 'changed\n' >> "$T/a.txt"                          # something to review
+  printf -- '---\ntype: evidence\nrun-id: r1\nresult: PASS\n---\n# Gate run r1 — PASS\n' > "$BATS_TEST_TMPDIR/evidence.md"
+  mkdir -p "$DAEDALUS_HOME/state/evidence/r1"
+  printf '{"run_id":"r1","lease":null,"result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  export FAKE_ANSWER="F1 — nothing found.
+VERDICT: STANDS"
+  # No managed policy CLAUDE.md, whatever machine runs the suite (Decision 17).
+  export DAEDALUS_MANAGED_CLAUDE_MD_PATHS="$BATS_TEST_TMPDIR/no-managed-CLAUDE.md"
+}
+review() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" "${1:-r1}" "" "$BATS_TEST_TMPDIR/evidence.md"; }
+
+# isolation_problems <n> — every isolation property of the reviewer's launch
+# (spec §6.1) that the fake claude's call n lacks, one per line; empty when
+# all hold. One definition for the launch test and for the mutation test
+# that proves these assertions catch a launcher with a property removed.
+isolation_problems() {
+  python3 - "$FAKE_CLAUDE_DIR/$1.argv" "$FAKE_CLAUDE_DIR/$1.env.json" "$T" <<'PY'
+import json, sys
+argv = open(sys.argv[1]).read().split("\n"); pairs = list(zip(argv, argv[1:]))
+env = json.load(open(sys.argv[2])); out = []
+raw = [b for a, b in pairs if a == "--settings"]
+s = json.loads(raw[0]) if raw else {}
+if s.get("disableAllHooks") is not True: out.append("hooks: disableAllHooks is not true")
+if s.get("autoMemoryEnabled") is not False: out.append("auto memory: autoMemoryEnabled is not false")
+if set(s.get("claudeMdExcludes") or []) != {"**/CLAUDE.md", "**/CLAUDE.local.md", "**/.claude/rules/**", "**/AGENTS.md"}:
+    out.append("CLAUDE.md: claudeMdExcludes is not the four globs")
+if env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY") != "1": out.append("auto memory: CLAUDE_CODE_DISABLE_AUTO_MEMORY is not 1")
+if "--strict-mcp-config" not in argv: out.append("MCP: no --strict-mcp-config")
+if ("--tools", "Read,Grep,Glob") not in pairs: out.append("tools: not Read,Grep,Glob")
+if ("--add-dir", sys.argv[3]) not in pairs: out.append("tree: no --add-dir pair for the tree")
+print("\n".join(out))
+PY
+}

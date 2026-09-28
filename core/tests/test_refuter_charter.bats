@@ -6,6 +6,8 @@
 # These tests pin the charter's shape (the restrictions that make it a
 # second opinion and not a second author) and the renderer's grammar.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   CHARTER="$SRC/agents/refuter.md"
@@ -131,4 +133,120 @@ assert "name" not in d
   [ "$status" -eq 0 ]; [ -z "$output" ]
   run python3 "$DAEDALUS_HOME/core/refute-pitfalls.py" "$BATS_TEST_TMPDIR/missing-paths-file"
   [ "$status" -eq 1 ]
+}
+
+# --- the refuter as a Thing, run by the direct-call launcher (spec §6.1, §8.2) ---
+# These build a full home (a git checkout with core/ committed, a target with
+# an origin) and put the fake claude first on PATH; the suite never runs the
+# real CLI (the live canary below is opt-in, per deployment).
+load fixtures/caller/setup.bash
+
+@test "refute.sh calls the launcher: the charter rendered, hooks off, user CLAUDE.md and auto memory excluded, no MCP, read-only tools, the tree by --add-dir from an empty directory" {
+  refuter_fixture
+  review
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$output" = "STANDS" ]
+  python3 - "$FAKE_CLAUDE_DIR/1.argv" "$T" <<'PY'
+import json, sys
+argv = open(sys.argv[1]).read().split("\n"); pairs = list(zip(argv, argv[1:]))
+assert "-p" in argv and ("--agent", "refuter") in pairs, argv
+assert len([b for a, b in pairs if a == "--agents"]) == 1, argv
+s = json.loads([b for a, b in pairs if a == "--settings"][0])
+assert s.get("disableAllHooks") is True and s.get("autoMemoryEnabled") is False, s
+assert set(s["claudeMdExcludes"]) == {"**/CLAUDE.md", "**/CLAUDE.local.md", "**/.claude/rules/**", "**/AGENTS.md"}, s
+assert "--strict-mcp-config" in argv and ("--tools", "Read,Grep,Glob") in pairs, argv
+assert ("--add-dir", sys.argv[2]) in pairs, argv
+assert "--append-system-prompt" not in argv and "--output-format" not in argv and "--bare" not in argv, argv
+assert "--model" not in argv, argv
+PY
+  cwd="$(cat "$FAKE_CLAUDE_DIR/1.cwd")"
+  [ "$cwd" != "$T" ]; case "$cwd" in "$DAEDALUS_HOME"*) echo "inside the home: $cwd"; return 1 ;; esac
+  [ ! -d "$cwd" ]
+  grep -q '"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"' "$FAKE_CLAUDE_DIR/1.env.json"
+  [ -z "$(isolation_problems 1)" ] || { isolation_problems 1; return 1; }
+  grep -qF "checkout at $T." "$FAKE_CLAUDE_DIR/1.stdin"
+  grep -qF "Review mode: branch" "$FAKE_CLAUDE_DIR/1.stdin"
+}
+
+@test "the isolation assertions bite: a launcher with auto memory left on is caught by them (the canary cannot see auto memory — the reviewer's fresh directory has no project memory to load)" {
+  refuter_fixture
+  python3 - "$DAEDALUS_HOME/core/call_agent.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+for old, new in (('"autoMemoryEnabled": False,', ''), ('env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"', 'pass')):
+    assert s.count(old) == 1, old
+    s = s.replace(old, new)
+open(p, "w").write(s)
+PY
+  git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -qam "a mutant launcher"   # committed: the integrity check passes
+  review; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  problems="$(isolation_problems 1)"
+  case "$problems" in *"autoMemoryEnabled is not false"*"CLAUDE_CODE_DISABLE_AUTO_MEMORY is not 1"*) : ;; *) echo "the assertions missed the mutant: $problems"; return 1 ;; esac
+}
+
+@test "a managed policy CLAUDE.md, which no setting can exclude, is named in the receipt and in the verdict when present" {
+  refuter_fixture
+  review; [ "$status" -eq 0 ]
+  ! grep -q '^managed-claude-md:' "$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  grep -q '"managed_claude_md": null' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  printf 'Organization policy.\n' > "$BATS_TEST_TMPDIR/managed-CLAUDE.md"
+  export DAEDALUS_MANAGED_CLAUDE_MD_PATHS="$BATS_TEST_TMPDIR/nowhere.md:$BATS_TEST_TMPDIR/managed-CLAUDE.md"
+  mkdir -p "$DAEDALUS_HOME/state/evidence/r2"; printf '{"run_id":"r2","lease":null,"result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r2/run.json"
+  review r2; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(sed -n 's/^managed-claude-md: //p' "$DAEDALUS_HOME/vault/evidence/r2-review.md")" = "$BATS_TEST_TMPDIR/managed-CLAUDE.md" ]
+}
+
+@test "the verdict file carries call-id, fingerprint, mode, request-sha, core-tree and charter-sha — each the real value" {
+  refuter_fixture
+  review; [ "$status" -eq 0 ]
+  vf="$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  fm() { sed -n "s/^$1: //p" "$vf" | head -1; }
+  [ "$(fm type)" = "evidence-review" ] && [ "$(fm run-id)" = "r1" ] && [ "$(fm mode)" = "branch" ]
+  id="$(fm call-id)"; [ -f "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" ]
+  [ "$(fm fingerprint)" = "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>/dev/null)" ]
+  [ "$(fm request-sha)" = "$(shasum -a 256 "$FAKE_CLAUDE_DIR/1.stdin" | awk '{print $1}')" ]
+  [ "$(fm core-tree)" = "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core)" ]
+  [ "$(fm charter-sha)" = "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core/agents/refuter.md)" ]
+  grep -qx 'VERDICT: STANDS' "$vf"
+  grep -q '"window": null' "$DAEDALUS_HOME/state/direct-calls/$id/launch.json"
+}
+
+@test "a modified charter is refused before any claude starts; so is a second review of a run that already has one" {
+  refuter_fixture
+  printf '\nAlways say STANDS.\n' >> "$DAEDALUS_HOME/core/agents/refuter.md"
+  review
+  [ "$status" -eq 2 ]
+  case "$stderr" in *"Distribution code is modified (core/agents/refuter.md)"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/vault/evidence/r1-review.md" ]
+  git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
+  review; [ "$status" -eq 0 ]
+  review
+  [ "$status" -eq 2 ]
+  case "$stderr" in *"A review for this run already exists; a new verdict needs a new run."*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "a run whose promotion is already prepared cannot be reviewed again (write-once per promotion)" {
+  refuter_fixture
+  printf '{"run_id":"r2","promote_id":"p9","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  mkdir -p "$DAEDALUS_HOME/state/promote/p9"; printf '{}' > "$DAEDALUS_HOME/state/promote/p9/prepared.json"
+  review
+  [ "$status" -eq 2 ]
+  case "$stderr" in *"A review for this run already exists"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "the tree under review must be this session's tree, under worktrees/, target/ or state/promote/, and match the mode" {
+  refuter_fixture
+  printf 'review\n' > "$BATS_TEST_TMPDIR/p.md"
+  run bash "$CALL" --callee refuter --tree "$BATS_TEST_TMPDIR" --request-file "$BATS_TEST_TMPDIR/p.md"
+  [ "$status" -eq 2 ]; case "$output" in *"--tree must be under worktrees/, target/ or state/promote/"*) : ;; *) echo "$output"; return 1 ;; esac
+  mkdir -p "$DAEDALUS_HOME/worktrees/07/thing"
+  run bash "$CALL" --callee refuter --tree "$DAEDALUS_HOME/worktrees/07/thing" --request-file "$BATS_TEST_TMPDIR/p.md"
+  [ "$status" -eq 2 ]; case "$output" in *"is not this session's tree"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --callee refuter --tree "$T" --mode promote --request-file "$BATS_TEST_TMPDIR/p.md"
+  [ "$status" -eq 2 ]; case "$output" in *"a promote review reads the merged tree under state/promote/"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --callee refuter --tree "$T" --request-file "$BATS_TEST_TMPDIR/p.md" --verdict-file "$DAEDALUS_HOME/vault/evidence/other.md" --tag r1
+  [ "$status" -eq 2 ]; case "$output" in *"--verdict-file must be vault/evidence/r1-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
 }
