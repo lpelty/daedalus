@@ -410,21 +410,23 @@ def _extract_text(message: dict) -> str:
     return ""
 
 
-def _scan_transcript(raw_lines: list[str], user_label: str = "User",
-                     assistant_label: str = "Assistant") -> tuple:
-    """Turn transcript .jsonl lines into '<user_label>:' / '<assistant_label>:'
-    turns, and count the entries this build cannot read. Returns (convo,
-    unknown, total). Tool calls and tool results are skipped -- episodic
-    memory wants the reasoning and decisions, not raw tool dumps.
+def scan_entries(raw_lines: list[str]) -> tuple:
+    """Every transcript line, parsed once — the one transcript parser (spec
+    §10 A12): capture turns the entries into text; core/transcriptlib.py judges
+    which entry the operator typed (the recorded yes, §7.2 step 2). Returns
+    (entries, unknown, total). Each entry is {"n": line index, "data": the JSON
+    object or None, "type": its type or None, "text": the text blocks joined
+    (user/assistant), "readable": False for a shape this build does not read,
+    "tool_result": True when a content list holds a tool_result block}.
 
-    An entry is UNKNOWN (spec §10 A12: the transcript format is internal and
-    changes between versions) when it is not a JSON object, has no string
-    "type", or is a user/assistant entry whose "message" is not an object or
-    whose "content" is neither a string nor a list. Other types (summaries,
-    snapshots, system lines) are known, and skipped."""
-    turns = []
+    An entry is UNKNOWN (the format is internal to Claude Code and changes
+    between versions) when it is not a JSON object, has no string "type", or
+    is a user/assistant entry whose "message" is not an object or whose
+    "content" is neither a string nor a list. Other types (summaries,
+    snapshots, system lines, attachments) are known, and carry no text."""
+    entries = []
     unknown = total = 0
-    for line in raw_lines:
+    for n, line in enumerate(raw_lines):
         line = line.strip()
         if not line:
             continue
@@ -433,22 +435,38 @@ def _scan_transcript(raw_lines: list[str], user_label: str = "User",
             d = json.loads(line)
         except json.JSONDecodeError:
             unknown += 1
+            entries.append({"n": n, "data": None, "type": None, "text": "", "readable": False, "tool_result": False})
             continue
         if not isinstance(d, dict) or not isinstance(d.get("type"), str):
             unknown += 1
+            entries.append({"n": n, "data": d if isinstance(d, dict) else None, "type": None, "text": "",
+                            "readable": False, "tool_result": False})
             continue
-        t = d["type"]
-        if t not in ("user", "assistant"):
-            continue
-        message = d.get("message")
-        if not isinstance(message, dict) or not isinstance(message.get("content"), (str, list)):
-            unknown += 1
-            continue
-        text = _extract_text(message).strip()
-        if not text:
-            continue
-        who = user_label if t == "user" else assistant_label
-        turns.append(f"{who}: {text}")
+        e = {"n": n, "data": d, "type": d["type"], "text": "", "readable": True, "tool_result": False}
+        if d["type"] in ("user", "assistant"):
+            message = d.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("content"), (str, list)):
+                unknown += 1
+                e["readable"] = False
+            else:
+                e["text"] = _extract_text(message).strip()
+                c = message["content"]
+                e["tool_result"] = isinstance(c, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
+        entries.append(e)
+    return entries, unknown, total
+
+
+def _scan_transcript(raw_lines: list[str], user_label: str = "User",
+                     assistant_label: str = "Assistant") -> tuple:
+    """Turn transcript .jsonl lines into '<user_label>:' / '<assistant_label>:'
+    turns, and count the entries this build cannot read. Returns (convo,
+    unknown, total). Tool calls and tool results are skipped -- episodic
+    memory wants the reasoning and decisions, not raw tool dumps. Built on
+    scan_entries, the one parser."""
+    entries, unknown, total = scan_entries(raw_lines)
+    turns = [f"{user_label if e['type'] == 'user' else assistant_label}: {e['text']}"
+             for e in entries if e["readable"] and e["type"] in ("user", "assistant") and e["text"]]
     return "\n\n".join(turns), unknown, total
 
 
