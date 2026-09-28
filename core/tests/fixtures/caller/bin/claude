@@ -25,7 +25,7 @@ argv = sys.argv[1:]
 (d / ("%d.cwd" % n)).write_text(os.getcwd() + "\n")
 data = sys.stdin.buffer.read()
 (d / ("%d.stdin" % n)).write_bytes(data)
-keep = re.compile(r"^(DIRECT_CALL_|CAPTURE_|CLAUDE_CODE_|DAEDALUS_|TENANT_|AWS_)")
+keep = re.compile(r"^(DIRECT_CALL_|CAPTURE_|CLAUDE_CODE_|DAEDALUS_|TENANT_|AWS_|PYTHONDONTWRITEBYTECODE$|PYTHONPYCACHEPREFIX$)")
 (d / ("%d.env.json" % n)).write_text(json.dumps({k: v for k, v in os.environ.items() if keep.match(k)}))
 
 

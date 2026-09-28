@@ -27,8 +27,9 @@ if out:
 print(os.environ.get("STUB_CAPTURE_OUT", "capture: extraction confirmed (stub)"))
 sys.exit(int(os.environ.get("STUB_CAPTURE_EXIT", "0")))
 PY
-  # The product repo ignores bytecode (.gitignore: __pycache__/); so must the
-  # fixture, or importing verifylib reads as modified distribution code.
+  # The product repo ignores bytecode (.gitignore: __pycache__/); so does the
+  # fixture, keeping git status quiet. The integrity check never asks git what
+  # is ignored: it skips __pycache__/ itself and nothing it launches reads one.
   printf '__pycache__/\n*.pyc\n' >> "$DAEDALUS_HOME/.gitignore"
   git -C "$DAEDALUS_HOME" add -A
   git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m caller

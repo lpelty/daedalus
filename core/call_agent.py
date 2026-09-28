@@ -36,6 +36,7 @@ import os
 import pwd
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,17 @@ import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Bytecode caches are not distribution code (the integrity check below skips
+# __pycache__/), so nothing this launcher runs may read one: a cache planted
+# beside a clean source, its header forged to match, would run in the source's
+# place. A cache path under a device file can never exist, so every module —
+# here, in claude and in every hook it starts — compiles from its source and no
+# cache is read or written (spec §6.1).
+NO_PYCACHE = "/dev/null/daedalus-no-pycache"
+sys.dont_write_bytecode = True
+sys.pycache_prefix = NO_PYCACHE
+os.environ.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPYCACHEPREFIX=NO_PYCACHE)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
@@ -260,22 +272,97 @@ def first(problems: List[str]) -> None:
 
 # --- integrity (spec §6.1) -------------------------------------------------------
 
+def integrity_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    """git for the integrity check: no GIT_* variable from the caller (GIT_DIR,
+    GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_CONFIG_*) can point
+    it at another repository or inject config, and replacement objects are off,
+    so HEAD's tree is this checkout's committed tree."""
+    env = {k: val for k, val in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return subprocess.run(["git", "-C", str(root)] + list(args), capture_output=True, env=env, timeout=20)
+
+
+def blob_id(data: bytes, algo: str) -> str:
+    h = hashlib.new(algo)
+    h.update(b"blob %d\0" % len(data))
+    h.update(data)
+    return h.hexdigest()
+
+
+def disk_entry(path: Path, algo: str) -> Tuple[str, str]:
+    """(git mode, blob id) of one path on disk, never following a symlink."""
+    st = os.lstat(str(path))
+    if stat.S_ISLNK(st.st_mode):
+        return "120000", blob_id(os.fsencode(os.readlink(str(path))), algo)
+    if not stat.S_ISREG(st.st_mode):
+        return "special", ""
+    with open(str(path), "rb") as fh:
+        return ("100755" if st.st_mode & 0o100 else "100644"), blob_id(fh.read(), algo)
+
+
 def distribution_state(root: Path) -> Tuple[str, str]:
     """('clean' | 'modified' | 'unknown', detail). The reviewer that ran must be
     the reviewer that is tracked: a modified core/, CLAUDE.md or
     .claude/settings.json — whoever changed it — means nothing this launcher
-    runs can be trusted to be the distribution's."""
-    at_root = git_out(root, "rev-parse", "--is-inside-work-tree", "--show-prefix")
-    if at_root != "true":
+    runs can be trusted to be the distribution's.
+
+    Every file on disk under those paths is compared by content with HEAD's
+    tree, never through git status: status trusts the index (skip-worktree,
+    assume-unchanged, the stat cache, fsmonitor) and the exclude rules
+    (.gitignore at any level, .git/info/exclude, core.excludesFile,
+    status.showUntrackedFiles), and each of those can hide a change. So an
+    ignored file is modified like any other. Skipped: __pycache__/ directories,
+    which nothing this launcher runs reads (NO_PYCACHE above), and Finder's
+    .DS_Store files."""
+    top = integrity_git(root, "rev-parse", "--is-inside-work-tree", "--show-prefix")
+    if top.returncode != 0 or top.stdout.decode("utf-8", "replace").strip() != "true":
         return "unknown", "%s is not the root of a git checkout" % root
-    if not git_out(root, "ls-files", "--", "core"):
+    fmt = integrity_git(root, "rev-parse", "--show-object-format")
+    algo = fmt.stdout.decode().strip() if fmt.returncode == 0 and fmt.stdout.strip() else "sha1"
+    if algo not in ("sha1", "sha256"):
+        return "unknown", "unsupported git object format %s in %s" % (algo, root)
+    ls = integrity_git(root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", *DIST_PATHS)
+    if ls.returncode != 0:
+        return "unknown", "cannot read the committed tree in %s (%s)" % (
+            root, ls.stderr.decode("utf-8", "replace").strip())
+    committed: Dict[str, Tuple[str, str]] = {}
+    for rec in ls.stdout.split(b"\0"):
+        if not rec:
+            continue
+        meta, _, name = rec.partition(b"\t")
+        mode, kind, oid = meta.decode().split(" ")
+        if kind != "blob":
+            return "unknown", "%s is a %s in HEAD, not a file" % (os.fsdecode(name), kind)
+        committed[os.fsdecode(name)] = (mode, oid)
+    if not any(n.startswith("core/") for n in committed):
         return "unknown", "core/ is not tracked in %s" % root
-    st = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--"] + list(DIST_PATHS),
-                        capture_output=True, text=True, timeout=20)
-    if st.returncode != 0:
-        return "unknown", "git status failed in %s (%s)" % (root, st.stderr.strip())
-    paths = [ln[3:] for ln in st.stdout.splitlines() if ln.strip()]
-    return ("modified", ", ".join(paths)) if paths else ("clean", "")
+    on_disk: Dict[str, Tuple[str, str]] = {}
+    try:
+        for rel in DIST_PATHS:
+            full = root / rel
+            if not os.path.lexists(str(full)):
+                continue
+            if full.is_symlink() or not full.is_dir():
+                on_disk[rel] = disk_entry(full, algo)
+                continue
+            for d, dirs, files in os.walk(str(full)):
+                base = Path(d).relative_to(root).as_posix()
+                for name in list(dirs):
+                    if os.path.islink(os.path.join(d, name)):
+                        dirs.remove(name)
+                        files.append(name)   # a directory symlink is a file to git
+                    elif name == "__pycache__":
+                        dirs.remove(name)
+                for name in files:
+                    if name != ".DS_Store":   # Finder's folder metadata: nothing loads it
+                        on_disk["%s/%s" % (base, name)] = disk_entry(Path(d) / name, algo)
+    except OSError as e:
+        return "unknown", "cannot read %s (%s)" % (e.filename or root, e.strerror or e)
+    changed = sorted(n for n in set(committed) | set(on_disk) if committed.get(n) != on_disk.get(n))
+    if not changed:
+        return "clean", ""
+    shown = ", ".join(changed[:10])
+    return "modified", shown + (" and %d more" % (len(changed) - 10) if len(changed) > 10 else "")
 
 
 def require_clean_distribution(root: Path) -> Dict[str, Optional[str]]:
@@ -285,8 +372,11 @@ def require_clean_distribution(root: Path) -> Dict[str, Optional[str]]:
                       "Nothing was launched." % detail)
     if state == "unknown":
         raise Refusal("Cannot tell whether distribution code is modified: %s. Nothing was launched." % detail)
-    return {"core_tree": git_out(root, "rev-parse", "HEAD:core"),
-            "charter_sha": git_out(root, "rev-parse", "HEAD:core/agents/refuter.md")}
+
+    def committed(spec: str) -> Optional[str]:
+        p = integrity_git(root, "rev-parse", spec)
+        return p.stdout.decode().strip() if p.returncode == 0 else None
+    return {"core_tree": committed("HEAD:core"), "charter_sha": committed("HEAD:core/agents/refuter.md")}
 
 
 # --- who is asking ---------------------------------------------------------------
