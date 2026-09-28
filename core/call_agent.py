@@ -258,6 +258,37 @@ def first(problems: List[str]) -> None:
         raise Refusal(problems[0])
 
 
+# --- integrity (spec §6.1) -------------------------------------------------------
+
+def distribution_state(root: Path) -> Tuple[str, str]:
+    """('clean' | 'modified' | 'unknown', detail). The reviewer that ran must be
+    the reviewer that is tracked: a modified core/, CLAUDE.md or
+    .claude/settings.json — whoever changed it — means nothing this launcher
+    runs can be trusted to be the distribution's."""
+    at_root = git_out(root, "rev-parse", "--is-inside-work-tree", "--show-prefix")
+    if at_root != "true":
+        return "unknown", "%s is not the root of a git checkout" % root
+    if not git_out(root, "ls-files", "--", "core"):
+        return "unknown", "core/ is not tracked in %s" % root
+    st = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--"] + list(DIST_PATHS),
+                        capture_output=True, text=True, timeout=20)
+    if st.returncode != 0:
+        return "unknown", "git status failed in %s (%s)" % (root, st.stderr.strip())
+    paths = [ln[3:] for ln in st.stdout.splitlines() if ln.strip()]
+    return ("modified", ", ".join(paths)) if paths else ("clean", "")
+
+
+def require_clean_distribution(root: Path) -> Dict[str, Optional[str]]:
+    state, detail = distribution_state(root)
+    if state == "modified":
+        raise Refusal("Distribution code is modified (%s); restore it before a review or a promote runs. "
+                      "Nothing was launched." % detail)
+    if state == "unknown":
+        raise Refusal("Cannot tell whether distribution code is modified: %s. Nothing was launched." % detail)
+    return {"core_tree": git_out(root, "rev-parse", "HEAD:core"),
+            "charter_sha": git_out(root, "rev-parse", "HEAD:core/agents/refuter.md")}
+
+
 # --- who is asking ---------------------------------------------------------------
 
 def lease_view(root: Path) -> dict:
@@ -643,6 +674,7 @@ def new_call(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: d
         raise Refusal("--tree and --mode are for --callee refuter")
     if mode not in PREPARE:
         raise Refusal("--callee %s is not available in this build" % mode)
+    dist = require_clean_distribution(root)
     request = read_request(args)
     if args.artifact_dir and not Path(args.artifact_dir).is_dir():
         raise Refusal("--artifact-dir is not a directory: %s" % args.artifact_dir)
@@ -654,6 +686,7 @@ def new_call(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: d
            "orientation": "unverified", "capture": {"status": "skipped", "exit_code": None, "detail": ""},
            "attempts": []}
     rec.update(fields)
+    rec.update(dist)
     need_claude(rec)
     base = root / "state" / "direct-calls"
     call_dir = base / call_id
@@ -697,6 +730,32 @@ def doctor(root: Path) -> int:
             print("NOTE     direct call: no callee configured (optional) — core/call-agent.sh --callee agent is "
                   "refused until direct_call.callee_home and callee_name are set in config.yaml; callers of this "
                   "Daedalus: %s" % callers)
+    state, detail = distribution_state(root)
+    if state == "clean":
+        print("OK       distribution code: core/, CLAUDE.md, .claude/settings.json unmodified")
+    elif state == "modified":
+        print("MISSING  distribution code is modified: %s — restore it; reviews and promotes refuse until it is "
+              "clean" % detail)
+    else:
+        print("NOTE     distribution code: cannot tell whether it is modified — %s" % detail)
+    base = root / "state" / "direct-calls"
+    if base.is_dir():
+        rs, _ = refuter_settings(conf)
+        recs = []
+        for rj in sorted(base.glob("*/launch.json")):
+            try:
+                recs.append(json.loads(rj.read_text()))
+            except (OSError, ValueError):
+                print("NOTE     direct calls: unreadable receipt %s — inspect" % rj.relative_to(root))
+        print("OK       direct calls: state/direct-calls/ (%d call%s)" % (len(recs), "" if len(recs) == 1 else "s"))
+        for rec in recs:
+            if rec.get("status") != "active":
+                continue
+            limit = (rs["timeout"] if rec.get("mode") == "refuter" else s["timeout"]) + 120
+            age = time.time() - float(rec.get("started_ts") or rec.get("created_ts") or 0)
+            if age > limit:
+                print("NOTE     direct calls: 1 call still active for %d min (state/direct-calls/%s) — a timed-out "
+                      "launcher should have marked it; inspect" % (age // 60, rec.get("call_id")))
     return 0
 
 

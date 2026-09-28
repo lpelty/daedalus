@@ -276,3 +276,48 @@ PY
   case "$output" in "Daedalus session orientation: visitor, "*) : ;; *) echo "$output"; return 1 ;; esac
   [ -z "$(ls "$DAEDALUS_HOME/state/leases/"*.json 2>/dev/null)" ]
 }
+
+# --- distribution integrity (Task 3, spec §6.1) -------------------------------------
+
+@test "modified distribution code is refused before any claude starts — a changed file, an untracked file, a home that is not a checkout" {
+  direct_call "callers: Peer"
+  printf '# local patch\n' >> "$DAEDALUS_HOME/core/agents/refuter.md"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *"Distribution code is modified (core/agents/refuter.md); restore it before a review or a promote runs."*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
+  printf 'x\n' > "$DAEDALUS_HOME/core/extra.sh"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"(core/extra.sh)"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/core/extra.sh"; rm -rf "$DAEDALUS_HOME/.git"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"Cannot tell whether distribution code is modified"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 0 ]
+  [ ! -d "$DAEDALUS_HOME/state/direct-calls" ]
+}
+
+@test "doctor: distribution code OK when clean, MISSING when modified — printed even when config cannot be read; a receipt left active past its timeout is a NOTE" {
+  DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/nowhere.yaml" run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  case "$output" in *"MISSING  direct call: config "*"OK       distribution code: core/, CLAUDE.md, .claude/settings.json unmodified"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  case "$output" in *"OK       distribution code: core/, CLAUDE.md, .claude/settings.json unmodified"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '# local patch\n' >> "$DAEDALUS_HOME/core/agents/refuter.md"
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  case "$output" in *"MISSING  distribution code is modified: core/agents/refuter.md — restore it; reviews and promotes refuse until it is clean"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
+  mkdir -p "$DAEDALUS_HOME/state/direct-calls/0a0a0a0a-0000-0000-0000-000000000001"
+  printf '{"call_id":"0a0a0a0a-0000-0000-0000-000000000001","mode":"self","status":"active","started_ts":%s}' \
+    "$(( $(date +%s) - 2400 ))" > "$DAEDALUS_HOME/state/direct-calls/0a0a0a0a-0000-0000-0000-000000000001/launch.json"
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  case "$output" in *"NOTE     direct calls: 1 call still active for 40 min (state/direct-calls/0a0a0a0a-0000-0000-0000-000000000001) — a timed-out launcher should have marked it; inspect"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "every receipt records the committed core/ tree and charter" {
+  direct_call "callers: Peer"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  python3 - "$DAEDALUS_HOME"/state/direct-calls/*/launch.json "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core)" "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core/agents/refuter.md)" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["core_tree"] == sys.argv[2] and r["charter_sha"] == sys.argv[3], r
+PY
+}
