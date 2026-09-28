@@ -841,6 +841,31 @@ assert r["attempts"][1]["advisory"] is True and r["attempts"][1]["resumed_by"] =
 PY
 }
 
+@test "A6: a resumed review runs under the same charter with the full launch set — the resume's --agents file is byte-identical to the first attempt's and its prompt is the refuter charter" {
+  refuter_fixture
+  printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  review r1; [ "$status" -eq 0 ]
+  FAKE_ANSWER="advice only" run --separate-stderr bash "$CALL" --resume-review 02 "Why F1?"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ -f "$FAKE_CLAUDE_DIR/1.agents.json" ]; [ -f "$FAKE_CLAUDE_DIR/2.agents.json" ]
+  cmp "$FAKE_CLAUDE_DIR/1.agents.json" "$FAKE_CLAUDE_DIR/2.agents.json"
+  python3 - "$FAKE_CLAUDE_DIR/2.agents.json" "$DAEDALUS_HOME/core/agents/refuter.md" "$FAKE_CLAUDE_DIR/2.argv" <<'PY'
+import json, sys
+agents = json.load(open(sys.argv[1]))
+lines = open(sys.argv[2]).read().split("\n")
+end = lines.index("---", 1)
+body = "\n".join(lines[end + 1:]).strip()
+assert list(agents) == ["refuter"], list(agents)
+assert agents["refuter"]["prompt"].strip() == body, "the resumed agent's prompt is not the charter body"
+argv = open(sys.argv[3]).read().split("\n"); pairs = list(zip(argv, argv[1:]))
+for flag in ("--agents", "--settings", "--strict-mcp-config", "--add-dir", "--resume"):
+    assert flag in argv, flag
+assert ("--agent", "refuter") in pairs and ("--tools", "Read,Grep,Glob") in pairs, argv
+settings = json.loads([b for a, b in pairs if a == "--settings"][0])
+assert settings["disableAllHooks"] is True and settings["autoMemoryEnabled"] is False, settings
+PY
+}
+
 @test "--resume-review names the resumer (the prime), refuses an alias with its number, and says when a window has no review" {
   refuter_fixture
   printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
