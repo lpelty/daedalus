@@ -507,3 +507,93 @@ CASES
   run bash "$CALL" --callee agent "hello"; [ "$status" -eq 3 ]
   FAKE_MARKER="Session orientation: Alpha, ready" run bash "$CALL" --callee agent "hello"; [ "$status" -eq 0 ]
 }
+
+# --- --resume (Task 5) --------------------------------------------------------------
+
+@test "--resume reuses the session id, re-passes the launch set, marks the attempt advisory and names who resumed" {
+  direct_call "callers: Peer"
+  FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"
+  FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --resume "$id" "and a follow-up"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "${stderr_lines[0]}" = "Daedalus call $id (resumed from an operator shell); receipt state/direct-calls/$id" ]
+  python3 - "$FAKE_CLAUDE_DIR/2.argv" "$id" <<'PY'
+import sys
+argv = open(sys.argv[1]).read().split("\n"); cid = sys.argv[2]
+pairs = list(zip(argv, argv[1:]))
+assert ("--resume", cid) in pairs and "--session-id" not in argv, argv
+assert ("--tools", "Read,Grep,Glob") in pairs and "--strict-mcp-config" in argv and ("--output-format", "json") in pairs, argv
+frame = [b for a, b in pairs if a == "--append-system-prompt"][0]
+assert "(call %s, resumed)" % cid in frame, frame
+PY
+  [ "$(head -1 "$FAKE_CLAUDE_DIR/2.stdin")" = "# Direct call from Peer — call $id (resumed)" ]
+  python3 - "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert len(r["attempts"]) == 2 and r["attempts"][1]["advisory"] is True, r
+assert r["attempts"][1]["resumed_by"] == "operator-shell", r
+PY
+}
+
+@test "--resume refuses an unknown id, a callee mismatch, another caller, a verdict file, and a second concurrent invocation" {
+  direct_call "callers: Peer, Other"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"
+  run bash "$CALL" --resume 00000000-0000-0000-0000-000000000000 "x"
+  [ "$status" -eq 2 ]; case "$output" in *"unknown call"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --resume ../../etc "x"; [ "$status" -eq 2 ]
+  run bash "$CALL" --resume "$id" --callee agent "x"
+  [ "$status" -eq 2 ]; case "$output" in *"is a --callee self call, not --callee agent"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --resume "$id" --caller Other "x"
+  [ "$status" -eq 2 ]; case "$output" in *"was made by Peer, not Other"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --resume "$id" --verdict-file "$DAEDALUS_HOME/vault/evidence/r-review.md" "x"
+  [ "$status" -eq 2 ]; case "$output" in *"--verdict-file is refused on resume"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"w"); fcntl.flock(f, fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(5)' \
+    "$DAEDALUS_HOME/state/direct-calls/$id/invocation.lock" "$BATS_TEST_TMPDIR/locked" 3>&- &
+  for _ in $(seq 1 50); do [ -f "$BATS_TEST_TMPDIR/locked" ] && break; sleep 0.1; done
+  run bash "$CALL" --resume "$id" "x"
+  [ "$status" -eq 2 ]; case "$output" in *"is already running"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+  wait
+}
+
+@test "--resume of a --callee agent call re-reads the configuration: refused once Daedalus is off the callee's list, the callee changed, or no callee is configured" {
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha"
+  run --separate-stderr bash "$CALL" --callee agent "first"
+  [ "$status" -eq 3 ] || { echo "$stderr"; return 1; }
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Alpha call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  printf 'Peer\n' > "$CALLEE/.direct-callers"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"Daedalus is no longer on Alpha's callers list (.direct-callers)"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$CALLEE/.direct-callers"
+  sed -i.bak 's/callee_name: Alpha/callee_name: Beta/' "$DAEDALUS_HOME/config.yaml"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"the configured callee changed since call $id; start a new call"*) : ;; *) echo "$output"; return 1 ;; esac
+  sed -i.bak '/callee_home:/d; /callee_name:/d' "$DAEDALUS_HOME/config.yaml"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"no callee is configured"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 1 ]
+}
+
+@test "--resume of a call through the callee's own launcher resumes by its receipt id with the same arguments; a changed launcher or launcher arguments is a changed callee" {
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$CALLEE/launcher"
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "callee_launcher: $CALLEE/launcher" "callee_launcher_args: --callee alpha"
+  run --separate-stderr bash "$CALL" --callee agent "first"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Alpha call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  run --separate-stderr bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "${stderr_lines[0]}" = "Alpha call $id (resumed from an operator shell); receipt state/direct-calls/$id" ]
+  [ "$(sed -n 1,4p "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tr '\n' ' ')" = "--callee alpha --caller Daedalus " ]
+  [ "$(grep -A1 -x -- '--resume' "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tail -1)" = "0f0f0f0f-1111-2222-3333-444444444444" ]
+  ! grep -qx -- '--artifact-dir' "$FAKE_CLAUDE_DIR/launcher-argv.txt"
+  sed -i.bak 's/callee_launcher_args: --callee alpha/callee_launcher_args: --callee beta/' "$DAEDALUS_HOME/config.yaml"
+  rm -f "$FAKE_CLAUDE_DIR/launcher-argv.txt"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"the configured callee changed since call $id; start a new call"*) : ;; *) echo "$output"; return 1 ;; esac
+  sed -i.bak '/callee_launcher:/d; /callee_launcher_args:/d' "$DAEDALUS_HOME/config.yaml"
+  run bash "$CALL" --resume "$id" "again"
+  [ "$status" -eq 2 ]; case "$output" in *"the configured callee changed since call $id; start a new call"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$FAKE_CLAUDE_DIR/launcher-argv.txt" ]
+  [ "$(calls)" -eq 0 ]
+}

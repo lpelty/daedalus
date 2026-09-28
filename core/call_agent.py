@@ -443,6 +443,18 @@ def invoker_evidence(view: dict) -> dict:
             "session_id": view.get("sid")}
 
 
+def resumer_phrase(view: dict) -> str:
+    """Who resumed, for the receipt line (spec §6.1: a prime-initiated resume
+    is visible to the operator)."""
+    if view.get("sid") is None:
+        return "resumed from an operator shell"
+    if view.get("prime_sid") and view["prime_sid"] == view["sid"]:
+        return "resumed by the prime session"
+    if view.get("mine"):
+        return "resumed by window %s" % view["mine"]
+    return "resumed by a session with no window"
+
+
 # --- the request -------------------------------------------------------------------
 
 def read_request(args: argparse.Namespace) -> bytes:
@@ -984,6 +996,61 @@ def need_claude(rec: dict) -> None:
         raise Refusal("claude not found on PATH — cannot launch the call")
 
 
+def recheck_agent(conf: Dict[str, str], rec: dict) -> None:
+    """A resume of --callee agent is still a call to the configured agent
+    (Decision 16): the receipt says who was called, config says who may be.
+    Refused when no callee is configured now, when the callee — its home, its
+    name, its launcher or the arguments that launcher is given — differs from
+    the receipt's, or, with no callee launcher, when its list no longer names
+    Daedalus. (--callee self re-checks its own list in launch_self.)"""
+    if not (conf.get("direct_call.callee_home") and conf.get("direct_call.callee_name")):
+        raise Refusal("no callee is configured: set direct_call.callee_home and callee_name in config.yaml")
+    s, problems = direct_call_settings(conf)
+    first(problems)
+    now_callee = (s["callee_home"], s["callee_name"], s["callee_launcher"], s["callee_launcher_args"])
+    was_callee = (rec.get("callee_home"), rec.get("callee"), rec.get("callee_launcher"),
+                  rec.get("callee_launcher_args") or [])
+    if now_callee != was_callee:
+        raise Refusal("the configured callee changed since call %s; start a new call" % rec["call_id"])
+    if not s["callee_launcher"]:
+        names, source = callee_callers(Path(s["callee_home"]), s["callee_name"])
+        if names is not None and SELF_NAME not in names:
+            raise Refusal("%s is no longer on %s's callers list (%s)" % (SELF_NAME, s["callee_name"], source))
+
+
+def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dict) -> int:
+    """--resume <call-id> (spec §6.1, §8.3): the same session, the full launch
+    set re-passed (a resumed session restores neither its tools nor
+    --settings), every later attempt advisory and naming who resumed it."""
+    call_id = args.resume
+    if not CALL_ID_RE.fullmatch(call_id or ""):
+        raise Refusal("unknown call %s: a call id is the 36-character id in the receipt line" % call_id)
+    call_dir = root / "state" / "direct-calls" / call_id
+    try:
+        rec = json.loads((call_dir / "launch.json").read_text())
+    except (OSError, ValueError):
+        raise Refusal("unknown call %s: no receipt at state/direct-calls/%s" % (call_id, call_id))
+    mode = rec.get("mode")
+    if args.callee and args.callee != mode:
+        raise Refusal("call %s is a --callee %s call, not --callee %s" % (call_id, mode, args.callee))
+    if args.verdict_file:
+        raise Refusal("a resumed call never writes a verdict: --verdict-file is refused on resume "
+                      "(a new verdict needs a new run)")
+    if args.tree or args.tag or args.artifact_dir or args.mode:
+        raise Refusal("a resumed call keeps its original tree, tag, mode and directories")
+    if args.caller and args.caller != rec.get("caller"):
+        raise Refusal("call %s was made by %s, not %s" % (call_id, rec.get("caller"), args.caller))
+    if mode not in LAUNCH:
+        raise Refusal("call %s is a --callee %s call, which this build cannot resume" % (call_id, mode))
+    if mode == "agent":
+        recheck_agent(conf, rec)
+    require_clean_distribution(root)
+    request = read_request(args)
+    need_claude(rec)
+    launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
+    return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell", resumer_phrase(view))
+
+
 # --- doctor (spec §15) -------------------------------------------------------------------
 
 def doctor(root: Path) -> int:
@@ -1071,6 +1138,8 @@ def main(argv: List[str]) -> int:
     try:
         conf = read_config(root)
         view = lease_view(root)
+        if args.resume:
+            return resume(root, conf, args, view)
         return new_call(root, conf, args, view)
     except Refusal as e:
         sys.stderr.write("daedalus: %s\n" % e)
