@@ -6,6 +6,36 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
 set -uo pipefail
 
+# A promotion's gate run (spec §7.1 step 7): `DAEDALUS_TARGET_OVERRIDE=<merged tree>
+# core/gates.sh --no-refute --promote <promote-id>`, run by core/promote.sh only. The
+# reviewer is skipped here because promote runs it itself on the merged diff; run.json
+# then says refuter: deferred-to-promote and carries NO reason field (two fields, never
+# one: an operator's --skip-review reason lives only in promote's own promotion object).
+# --no-refute alone is refused: switching the branch reviewer off takes a written
+# reason in config (verify.refute_off_reason). Validated before any side effect.
+promote_id=""; no_refute=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --promote) promote_id="${2:-}"; [ -n "$promote_id" ] || die "--promote needs a promotion id"; shift 2 ;;
+    --no-refute) no_refute=1; shift ;;
+    *) die "usage: core/gates.sh [--no-refute --promote <promote-id>]" ;;
+  esac
+done
+promo_ctx=""
+if [ "$no_refute" -eq 1 ] && [ -z "$promote_id" ]; then
+  die "--no-refute is only for a promotion (--promote <id>): promote reviews the merged diff itself; a plain run's reviewer is switched off only in config.yaml, with verify.refute_off_reason"
+fi
+if [ -n "$promote_id" ]; then
+  case "$promote_id" in *[!A-Za-z0-9-]*) die "--promote: not a promotion id: $promote_id" ;; esac
+  promo_ctx="$DAEDALUS_HOME/state/promote/$promote_id/context.json"
+  [ -f "$promo_ctx" ] || die "--promote $promote_id: no state/promote/$promote_id/context.json — only core/promote.sh runs a promotion's gates"
+  home_p="$(cd "$DAEDALUS_HOME" && pwd -P)"
+  case "${DAEDALUS_TARGET_OVERRIDE:-}" in
+    "$DAEDALUS_HOME/state/promote/$promote_id/"*|"$home_p/state/promote/$promote_id/"*) : ;;
+    *) die "--promote $promote_id runs on the merged tree: DAEDALUS_TARGET_OVERRIDE must point under state/promote/$promote_id/" ;;
+  esac
+fi
+
 # The gate definition must live inside this deployment. A config elsewhere
 # is a gate the operator did not write.
 home_real="$(cd "$DAEDALUS_HOME" && pwd -P)"
@@ -64,6 +94,8 @@ case "$refute_cfg" in
     ;;
   *) die "config verify.refute must be true or false (got: $refute_cfg) — refusing before any gate runs" ;;
 esac
+# A promotion's reviewer runs in core/promote.sh (spec §7.1 step 8), whatever verify.refute says.
+[ -n "$promote_id" ] && refute_on=0
 
 # The refuter's timeout is operator config too. Discovered late — inside
 # refute.sh, after every gate has run — a typo there records a FAIL run.json
@@ -92,11 +124,16 @@ started="$(date +%Y-%m-%dT%H:%M:%S)"
 # gates at once used to interleave `>>` appends into half paths.
 lease_nn="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease 2>/dev/null || true)"
 session_id="${DAEDALUS_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" <<'PY'
+python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" "$promo_ctx" <<'PY'
 import json, sys
-out, run_id, started, lease, sid = sys.argv[1:6]
+out, run_id, started, lease, sid, ctx = sys.argv[1:7]
+rec = {"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING"}
+if ctx:
+    c = json.load(open(ctx))
+    rec.update({k: c.get(k) for k in ("promote_id", "merge_sha", "trunk_sha_at_prepare", "repo", "nested")})
+    rec.update({"lease": c.get("lease"), "tree": "promote-scratch", "refuter": "deferred-to-promote"})
 with open(out, "w") as fh:
-    json.dump({"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING"}, fh, indent=2)
+    json.dump(rec, fh, indent=2)
 PY
 python3 "$DAEDALUS_HOME/core/manifest-append.py" "$ev_state/run.json" "$ev_vault/$run_id.md" || die "cannot append to the evidence manifest"
 
@@ -162,7 +199,9 @@ write_summary() {   # write_summary <path> <result>
   {
     printf -- '---\ntype: evidence\nrun-id: %s\nresult: %s\nfingerprint: %s\nconfig-sha: %s\ncreated: %s\n---\n' \
       "$run_id" "$2" "$fp_before" "$config_sha" "$started"
-    printf '# Gate run %s — %s\n\n| # | command | exit | seconds | log |\n|---|---|---|---|---|\n' "$run_id" "$2"
+    printf '# Gate run %s — %s\n\n' "$run_id" "$2"
+    if [ -n "$promote_id" ]; then printf 'Reviewer: runs on the merged diff in this promotion\n\n'; fi
+    printf '| # | command | exit | seconds | log |\n|---|---|---|---|---|\n'
     printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r n code dur logf cmd; do
       [ -n "$n" ] || continue
       printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
@@ -225,9 +264,9 @@ rm -f "$summary_tmp"
 # recorded here.
 rows_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rows" > "$rows_tmp"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" <<'PY'
+python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" <<'PY'
 import json, sys, time
-out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid = sys.argv[1:11]
+out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx = sys.argv[1:12]
 gates = []
 with open(rows_path) as fh:
     data = fh.read()
@@ -239,6 +278,10 @@ for line in data.splitlines():
 rec = {"run_id": run_id, "started": started, "fingerprint": fp, "fingerprint_secs": int(fp_secs or 0),
        "config_sha": config_sha, "gates": gates, "result": result,
        "lease": lease or None, "session_id": sid or None}
+if ctx:
+    c = json.load(open(ctx))
+    rec.update({k: c.get(k) for k in ("promote_id", "merge_sha", "trunk_sha_at_prepare", "repo", "nested")})
+    rec.update({"lease": c.get("lease"), "tree": "promote-scratch", "refuter": "deferred-to-promote"})
 rec["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 with open(out, "w") as fh:
     json.dump(rec, fh, indent=2)

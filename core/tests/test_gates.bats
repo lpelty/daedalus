@@ -950,3 +950,57 @@ PY
   [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ] || { echo "an unmanifested review file was left under vault/evidence"; return 1; }
   ! grep -q -- "-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest"
 }
+
+# promote_run_fixture — what core/promote.sh hands gates.sh: a merged tree under
+# state/promote/<id>/thing (a git checkout, so the fingerprint is real), the promotion's
+# context.json, the resolution machinery DAEDALUS_TARGET_OVERRIDE goes through, and a
+# claude on PATH that leaves a mark if anything runs it.
+promote_run_fixture() {
+  cp "$SRC/leaselib.py" "$SRC/verifylib.py" "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  PID=02-20260928-120000-abc; PT="$DAEDALUS_HOME/state/promote/$PID/thing"
+  git init -q -b main "$PT"; printf 'm\n' > "$PT/m.txt"; git -C "$PT" add -A; git -C "$PT" -c user.email=t@x -c user.name=t commit -q -m merged
+  printf '{"promote_id":"%s","lease":"02","repo":"thing","trunk_sha_at_prepare":"aaaaaaa","merge_sha":"%s","nested":{}}' \
+    "$PID" "$(git -C "$PT" rev-parse HEAD)" > "$DAEDALUS_HOME/state/promote/$PID/context.json"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/sh\ntouch "%s/claude-ran"\necho "VERDICT: STANDS"\n' "$BATS_TEST_TMPDIR" > "$BATS_TEST_TMPDIR/bin/claude"; chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+}
+
+@test "--promote: run.json, started and final, carries the promotion — id, shas, repo, nested, the promoted window as lease, tree promote-scratch, refuter deferred-to-promote and no reason field; the summary says the reviewer runs on the merged diff; nothing runs a reviewer, even with verify.refute on" {
+  write_config "  - true" "  refute: true"
+  promote_run_fixture
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  rid="$(printf '%s\n' "$output" | tail -1)"
+  python3 - "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$(git -C "$PT" rev-parse HEAD)" "$PID" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["result"] == "PASS" and r["promote_id"] == sys.argv[3] and r["lease"] == "02", r
+assert r["merge_sha"] == sys.argv[2] and r["trunk_sha_at_prepare"] == "aaaaaaa" and r["nested"] == {} and r["repo"] == "thing", r
+assert r["tree"] == "promote-scratch" and r["refuter"] == "deferred-to-promote", r
+assert not [k for k in r if "reason" in k], sorted(r)
+PY
+  grep -qxF 'Reviewer: runs on the merged diff in this promotion' "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  ! grep -qi 'reviewer.*off' "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  [ ! -e "$BATS_TEST_TMPDIR/claude-ran" ]
+}
+
+@test "--no-refute without --promote, a --promote with no context.json, and a --promote whose tree is not under state/promote/<id>/ all die before any run exists" {
+  write_config "  - true"
+  run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute; [ "$status" -ne 0 ]
+  case "$output" in *"--no-refute is only for a promotion (--promote <id>)"*) : ;; *) echo "$output"; return 1 ;; esac
+  promote_run_fixture
+  run env DAEDALUS_TARGET_OVERRIDE="$PT" bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote 02-nope
+  [ "$status" -ne 0 ]; case "$output" in *"no state/promote/02-nope/context.json"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -ne 0 ]; case "$output" in *"DAEDALUS_TARGET_OVERRIDE must point under state/promote/$PID/"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/evidence")" ]
+}
+
+@test "refute.sh --verdict-of reads a review with the grammar the run uses: STANDS 0, REFUTED 1, no verdict line 2 — dressing allowed, an echoed instruction line matches neither" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$1"; }
+  printf 'F1 — nothing.\n**VERDICT**: STANDS\n' > "$f"; vo "$f"; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  printf '> VERDICT: **REFUTED**\n' > "$f"; vo "$f"; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  printf 'End with a line VERDICT: REFUTED or VERDICT: STANDS.\n' > "$f"; vo "$f"; [ "$status" -eq 2 ]; [ "$output" = NONE ]
+  vo "$BATS_TEST_TMPDIR/none.md"; [ "$status" -eq 2 ]
+}

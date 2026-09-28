@@ -26,6 +26,22 @@
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 set +e
+# The verdict grammar — one definition, used below for this run and by promote's
+# confirm to re-parse a review (spec §7.2 step 3). Markdown dressing allowed before
+# the word (bold, heading, blockquote, list markers) and around the colon and verdict
+# ("**VERDICT**: REFUTED", "> VERDICT: STANDS", "1. VERDICT: **REFUTED**"), and the
+# line must END at the verdict — an echoed instruction line ("VERDICT: REFUTED or
+# VERDICT: STANDS") must match neither.
+V='^[*#>0-9.[:space:]-]*VERDICT[*[:space:]]*:?[*[:space:]]*'
+E='[*[:space:].!]*$'
+# refute.sh --verdict-of <review file>: STANDS (exit 0), REFUTED (1), NONE (2). Runs nothing.
+if [ "${1:-}" = "--verdict-of" ]; then
+  f="${2:-}"
+  [ -f "$f" ] || { printf 'refute.sh --verdict-of: no review file at %s\n' "$f" >&2; exit 2; }
+  if grep -qE "${V}REFUTED${E}" "$f"; then printf 'REFUTED\n'; exit 1; fi
+  if grep -qE "${V}STANDS${E}" "$f"; then printf 'STANDS\n'; exit 0; fi
+  printf 'NONE\n'; exit 2
+fi
 # refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]
 # --mode promote (spec §6.1, used by promote's prepare): the diff is the merge
 # that will be pushed, trunk_sha_at_prepare..merge_sha from the promotion's
@@ -307,13 +323,7 @@ python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
   printf 'cannot append the review file to the evidence manifest — cannot certify the run; the review file was removed rather than left unmanifested (%s)\n' "$verdict_file" >&2
   exit 2
 }
-# Verdict grammar: markdown dressing allowed before the word (bold, heading,
-# blockquote, list markers) and around the colon and verdict
-# ("**VERDICT**: REFUTED", "> VERDICT: STANDS", "1. VERDICT: **REFUTED**"),
-# and the line must END at the verdict — an echoed instruction line
-# ("VERDICT: REFUTED or VERDICT: STANDS") must match neither.
-V='^[*#>0-9.[:space:]-]*VERDICT[*[:space:]]*:?[*[:space:]]*'
-E='[*[:space:].!]*$'
+# Verdict grammar: V and E, defined at the top of this file.
 if grep -qE "${V}REFUTED${E}" "$verdict_file"; then printf 'REFUTED\n'; exit 1; fi
 if grep -qE "${V}STANDS${E}" "$verdict_file"; then printf 'STANDS\n'; exit 0; fi
 printf 'refuter wrote no VERDICT line — cannot certify the run (%s)\n' "$verdict_file" >&2
