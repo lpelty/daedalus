@@ -287,3 +287,15 @@ EOF
   grep -q 'session session-a' "$BATS_TEST_TMPDIR/posts.jsonl"
   run grep -q 'session-z' "$BATS_TEST_TMPDIR/posts.jsonl"; [ "$status" -ne 0 ]
 }
+
+@test "close --transcript naming a file that is not there fails, says nothing was flushed, never says close complete, never commits, posts nothing" {
+  printf '#!/usr/bin/env bash\necho VAULT-COMMIT-RAN\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
+  configure_capture; start_stub
+  unset CLAUDE_CODE_SESSION_ID
+  missing="$BATS_TEST_TMPDIR/transcripts/sesion-a.jsonl"     # a typo of session-a
+  run bash "$CLOSE" --transcript "$missing" --commit
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$missing"*) : ;; *) echo "must name the path: $output"; return 1 ;; esac
+  case "$output" in *"close complete"*|*VAULT-COMMIT-RAN*) echo "$output"; return 1 ;; *) : ;; esac
+  [ ! -s "$BATS_TEST_TMPDIR/posts.jsonl" ]
+}

@@ -942,6 +942,20 @@ PY
   [ "$(post_count)" -eq 1 ]
 }
 
+@test "--transcript naming a file that is not there is refused with one plain sentence naming the path; a hook payload's missing transcript still settles the ledger and exits 0" {
+  unset CLAUDE_CODE_SESSION_ID
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture --transcript "$BATS_TEST_TMPDIR/no-such.jsonl" </dev/null
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"capture: the transcript you named is not there: $BATS_TEST_TMPDIR/no-such.jsonl"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 0 ]
+  # A hook payload whose transcript is gone (a session that never wrote one):
+  # nothing to capture, but a pending span of a past transcript still settles.
+  run python3 "$CAPTURE" capture <<< "{\"session_id\":\"x\",\"transcript_path\":\"$BATS_TEST_TMPDIR/gone.jsonl\"}"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"capture: no transcript"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "a session id whose derived transcript does not exist is refused, naming the path and memory.transcript_dir" {
   start_op_stub "running"
   CLAUDE_CODE_SESSION_ID=no-such-session run python3 "$CAPTURE" capture

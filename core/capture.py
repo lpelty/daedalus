@@ -665,13 +665,16 @@ def _safe_sid(sid: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", str(sid or "")) or "none"
 
 
-def _resolve_transcript(args: list[str], cfg: dict) -> tuple[str | None, bool]:
+def _resolve_transcript(args: list[str], cfg: dict) -> tuple[str | None, str | None]:
     """Which transcript is this session's (spec §4.7 'the transcript is named,
-    never guessed'). Returns (path, derived). Order: --transcript; the hook
-    payload's transcript_path (--hook-json F, else stdin); a session id — the
+    never guessed'). Returns (path, source), source being where the path came
+    from: 'given' (--transcript), 'payload' (the hook payload's
+    transcript_path, --hook-json F else stdin), 'marker' (a session id — the
     payload's, else --session-id, else CLAUDE_CODE_SESSION_ID — through the
-    SessionStart marker's transcript_path, else TRANSCRIPT_DIR/<sid>.jsonl
-    (derived=True). Nothing to go on -> (None, False) and the caller refuses.
+    SessionStart marker's transcript_path) or 'derived' (TRANSCRIPT_DIR/
+    <sid>.jsonl). Nothing to go on -> (None, None) and the caller refuses.
+    The caller needs the source because a missing path means different things:
+    only a hook payload may name a transcript that was never written.
 
     There is no 'newest transcript' fallback any more: on a live machine it
     named a session from days earlier, so close.sh could flush the wrong
@@ -679,7 +682,7 @@ def _resolve_transcript(args: list[str], cfg: dict) -> tuple[str | None, bool]:
     to 'newest'."""
     given = _flag(args, "--transcript")
     if given:
-        return given, False
+        return given, "given"
     payload: object = {}
     hook_json = _flag(args, "--hook-json")
     if hook_json:
@@ -699,27 +702,34 @@ def _resolve_transcript(args: list[str], cfg: dict) -> tuple[str | None, bool]:
     if not isinstance(payload, dict):
         payload = {}
     if payload.get("transcript_path"):
-        return str(payload["transcript_path"]), False
+        return str(payload["transcript_path"]), "payload"
     sid = payload.get("session_id") or _flag(args, "--session-id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
-        return None, False
+        return None, None
     marker = cfg["tenant_home"] / "state" / f"session-{_safe_sid(sid)}.json"
     try:
         recorded = json.loads(marker.read_text()).get("transcript_path")
     except (OSError, ValueError, AttributeError):
         recorded = None
     if recorded and Path(recorded).exists():
-        return str(recorded), False
-    return str(cfg["transcript_dir"] / f"{sid}.jsonl"), True
+        return str(recorded), "marker"
+    return str(cfg["transcript_dir"] / f"{sid}.jsonl"), "derived"
 
 
 def cmd_capture(args: list[str], cfg: dict):
-    transcript, derived = _resolve_transcript(args, cfg)
+    transcript, source = _resolve_transcript(args, cfg)
     if not transcript:
         print(REFUSE_GUESS)
         return False
     if not Path(transcript).exists():
-        if derived:
+        if source == "given":
+            # An operator typed this path (close.sh --transcript) — a typo, a
+            # wrong id, a relative path from the wrong directory. Reporting
+            # success here would let close.sh say "close complete" (and, with
+            # --commit, commit the vault) for a session that went unrecorded.
+            print(f"capture: the transcript you named is not there: {transcript}")
+            return False
+        if source == "derived":
             # A derived path that is not there means the directory is wrong,
             # not that the session said nothing: refuse rather than report a
             # close that recorded nothing.
@@ -727,7 +737,8 @@ def cmd_capture(args: list[str], cfg: dict):
                   f"session id and TRANSCRIPT_DIR); set memory.transcript_dir in config.yaml or "
                   f"pass --transcript")
             return False
-        # Still settle the ledger. A pending span belongs to a PAST transcript,
+        # A hook payload named it: the session may simply never have written
+        # one. Still settle the ledger. A pending span belongs to a PAST transcript,
         # so its fate does not depend on there being a current one.
         state = _load_state(cfg["tenant_home"])
         _reconcile_pending(cfg, state)

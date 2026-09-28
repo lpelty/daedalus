@@ -35,6 +35,11 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+# A path the operator typed that is not there is a typo, not an empty
+# session: stop before capture, and so before any vault commit. (capture.py
+# refuses it too; this says it in close's own words.)
+[ -z "$transcript" ] || [ -f "$transcript" ] \
+  || die "no transcript at $transcript — nothing was flushed"
 phases=1; [ "$commit" -eq 1 ] && phases=2
 
 log "phase 1/$phases: episodic capture"
