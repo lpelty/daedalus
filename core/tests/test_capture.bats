@@ -1546,6 +1546,27 @@ assert len(end) == 1 and end[0]["timeout"] == 5, end
 PY
 }
 
+@test "capture-tick.sh --dry-run prints the bank, server, transcript directory and what a tick would capture — and touches nothing (the upgrade predicate)" {
+  tick_home; start_op_stub "running"; with_memory
+  run tick --dry-run; [ "$status" -eq 0 ]
+  case "$output" in *"capture-tick (dry run): bank tickbank, server http://127.0.0.1:"*", transcript directory $TICK_TRANSCRIPTS, one capture per transcript every 120 s"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"would capture $TRANSCRIPT unless it was captured in the last 120 s"*) : ;; *) echo "$output"; return 1 ;; esac
+  run tick --final --dry-run; [ "$status" -eq 0 ]
+  case "$output" in *"would flush $TRANSCRIPT, waiting out a capture in flight"*) : ;; *) echo "$output"; return 1 ;; esac
+  sleep 1
+  [ "$(post_count)" -eq 0 ]; [ ! -e "$TH/.capture.log" ]; [ ! -e "$TH/state/hindsight" ]
+}
+
+@test "capture-tick.sh --dry-run without a memory: block, or with one it cannot use, says a tick would do nothing" {
+  tick_home
+  run tick --dry-run; [ "$status" -eq 0 ]
+  [ "$output" = "capture-tick (dry run): no memory: block in config.yaml — a tick would do nothing." ]
+  printf 'memory:\n  capture_interval: 120\n' >> "$TH/config.yaml"
+  run tick --dry-run; [ "$status" -eq 0 ]
+  case "$output" in *"capture-tick (dry run): episodic capture needs memory.bank in config.yaml"*"— a tick would do nothing."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$TH/.capture.log" ]
+}
+
 # Spec A12: the shape capture reads, pinned to a transcript of the live build.
 @test "the live-shape fixture transcript reads with no unknown entries: capture turns its operator and assistant text into turns" {
   F="$BATS_TEST_DIRNAME/fixtures/transcripts/live.jsonl"

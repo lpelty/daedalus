@@ -16,14 +16,35 @@
 # the push and its polling run on. The transcript is the payload's
 # transcript_path, else the payload's session id (capture.py resolves it
 # through this session's SessionStart marker, spec A7) — never the newest file.
+# --dry-run: print what a tick would do and exit; nothing is written.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 set +e
-final=0
-[ "${1:-}" = "--final" ] && final=1
-payload="$(cat)"
-memory_configured || exit 0
+final=0; dry=0
+for a in "$@"; do
+  case "$a" in
+    --final) final=1 ;;
+    --dry-run) dry=1 ;;   # prints what a tick would do; touches nothing (the upgrade predicate, spec §14 step 5)
+  esac
+done
+if [ "$dry" -eq 1 ]; then
+  # A dry run is typed at a shell or a Bash tool, whose stdin may never close:
+  # wait at most a second for a payload, as capture.py does.
+  payload="$(python3 -c 'import select, sys
+r, _, _ = select.select([sys.stdin], [], [], 1.0)
+sys.stdout.write(sys.stdin.read() if r else "")' 2>/dev/null)"
+else
+  payload="$(cat)"
+fi
+if ! memory_configured; then
+  [ "$dry" -eq 1 ] && printf 'capture-tick (dry run): no memory: block in config.yaml — a tick would do nothing.\n'
+  exit 0
+fi
 logf="$DAEDALUS_HOME/.capture.log"
-env_lines="$(memory_env 2>>"$logf")" || exit 0
+if [ "$dry" -eq 1 ]; then
+  env_lines="$(memory_env 2>&1)" || { printf 'capture-tick (dry run): %s — a tick would do nothing.\n' "${env_lines#daedalus: }"; exit 0; }
+else
+  env_lines="$(memory_env 2>>"$logf")" || exit 0
+fi
 eval "$env_lines"
 fields="$(printf '%s' "$payload" | python3 -c 'import json, sys
 try:
@@ -38,6 +59,21 @@ print(",".join(sorted(d)))' 2>/dev/null)"
 transcript="$(printf '%s\n' "$fields" | sed -n 1p)"
 sid="$(printf '%s\n' "$fields" | sed -n 2p)"
 keys="$(printf '%s\n' "$fields" | sed -n 3p)"
+if [ "$dry" -eq 1 ]; then
+  printf 'capture-tick (dry run): bank %s, server %s, transcript directory %s, one capture per transcript every %s s\n' \
+    "$TENANT_BANK" "$HINDSIGHT_API_URL" "$TRANSCRIPT_DIR" "$CAPTURE_INTERVAL"
+  if [ -n "$transcript" ]; then what="$transcript"
+  elif [ -n "$sid" ]; then what="session $sid (its SessionStart marker's transcript, else $TRANSCRIPT_DIR/$sid.jsonl)"
+  else what=""; fi
+  if [ -z "$what" ]; then
+    printf 'capture-tick (dry run): no hook payload names a transcript — a real tick takes it from its payload\n'
+  elif [ "$final" -eq 1 ]; then
+    printf 'capture-tick (dry run): would flush %s, waiting out a capture in flight\n' "$what"
+  else
+    printf 'capture-tick (dry run): would capture %s unless it was captured in the last %s s\n' "$what" "$CAPTURE_INTERVAL"
+  fi
+  exit 0
+fi
 # A7: the first payload's keys, once per deployment, so a build whose Stop
 # payload lacks transcript_path is visible in the log rather than guessed at.
 stamp="$DAEDALUS_HOME/state/hindsight/tick-payload-keys"
