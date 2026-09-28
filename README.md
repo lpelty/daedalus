@@ -339,9 +339,12 @@ the fingerprint of the tree reviewed, the mode, the sha256 of the exact
 prompt, and the committed `core/` tree and charter.
 
 **Proving the reviewer shares nothing with the author** is a canary with a
-positive control, in `core/tests/test_refuter_charter.bats`. The suite runs
-it on every build against a stand-in `claude` that models how Claude Code
-loads context. Run it once per deployment against the real CLI —
+positive control, in `core/tests/test_refuter_charter.bats`. The canary in the
+test suite is stubbed: it runs on every build against a stand-in `claude` that
+models how Claude Code loads context, so it proves the launcher's wiring, not
+what the real CLI loads. The live canary, with its positive control, is the
+per-deployment check the operator runs, once per deployment and again after a
+Claude Code upgrade, against the real CLI —
 `DAEDALUS_LIVE_CANARY=1 bats core/tests/test_refuter_charter.bats -f 'canary \(live'`
 — and read the result: the control (the charter run from the tree, no
 exclusions) must answer `PINEAPPLE` or the test fails as inconclusive; the

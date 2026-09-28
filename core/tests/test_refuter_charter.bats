@@ -499,3 +499,12 @@ control() {
   ! grep -q PINEAPPLE "$DAEDALUS_HOME/vault/evidence/r1-review.md"
   [ -z "$live" ] || rm -f "$live/CLAUDE.md"
 }
+
+@test "README says plainly that the suite's canary is stubbed and the live canary with its positive control is the per-deployment operator check" {
+  R="$BATS_TEST_DIRNAME/../.."
+  # the README wraps its lines: read it with the line breaks folded to spaces
+  flat="$(tr '\n' ' ' < "$R/README.md" | tr -s ' ')"
+  case "$flat" in *'The canary in the test suite is stubbed'*) : ;; *) echo "no 'stubbed' sentence"; return 1 ;; esac
+  case "$flat" in *'The live canary, with its positive control, is the per-deployment check the operator runs'*) : ;; *) echo "no per-deployment sentence"; return 1 ;; esac
+  grep -qF 'DAEDALUS_LIVE_CANARY=1' "$R/README.md"
+}
