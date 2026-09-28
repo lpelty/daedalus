@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# A git that fails the first $FAKE_GIT_LOCK_FAILS lock-taking calls (fetch, worktree add, push) the
+# way a shared .git mid-operation does — a "cannot lock ref … Unable to create …lock" line, exit 128 —
+# then runs the real git ($REAL_GIT) for everything. For spec §7.1 step 3's retry.
+# promote.sh checks core/distcheck.py with git under a cleared environment (env -i: only PATH
+# and HOME), so REAL_GIT and BATS_TEST_TMPDIR may be unset: find the next git on PATH after
+# this one, and fail nothing without a counter file.
+if [ -z "${REAL_GIT:-}" ]; then
+  self="$(cd "$(dirname "$0")" && pwd -P)"; IFS=:
+  for d in $PATH; do [ -x "$d/git" ] && [ "$(cd "$d" 2>/dev/null && pwd -P)" != "$self" ] && { REAL_GIT="$d/git"; break; }; done
+  unset IFS
+fi
+[ -n "${BATS_TEST_TMPDIR:-}" ] || exec "$REAL_GIT" "$@"
+count="$BATS_TEST_TMPDIR/git-lock-fails"
+case " $* " in
+  *" fetch "*|*" worktree add "*|*" push "*)
+    n="$(cat "$count" 2>/dev/null || echo 0)"
+    if [ "$n" -lt "${FAKE_GIT_LOCK_FAILS:-0}" ]; then
+      echo $((n + 1)) > "$count"
+      echo "error: cannot lock ref 'refs/remotes/origin/main': Unable to create '/x/.git/refs/remotes/origin/main.lock': File exists." >&2
+      exit 128
+    fi ;;
+esac
+exec "$REAL_GIT" "$@"
