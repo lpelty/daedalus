@@ -60,7 +60,8 @@ proposals:
 
 verify:
   # Rung 2: a fresh-context refuter (core/agents/refuter.md — Read/Grep/Glob
-  # only, no Bash, no CLAUDE.md, no memory) reviews every PASS and ends with
+  # only, no Bash, no CLAUDE.md, no memory; run by core/call-agent.sh
+  # --callee refuter) reviews every PASS and ends with
   # VERDICT: REFUTED or STANDS. REFUTED flips the run to FAIL with the review
   # as the log; a crashed, timed-out or verdict-less review is uncertifiable
   # and FAILs too — never STANDS. ON by default: omitting this key means true.

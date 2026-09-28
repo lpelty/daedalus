@@ -850,3 +850,16 @@ PY
   run bash "$CALL" --resume-review 02 --verdict-file "$DAEDALUS_HOME/vault/evidence/r1-review.md" "why?"
   [ "$status" -eq 2 ]; case "$output" in *"--verdict-file is refused on resume"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- the distribution docs (Task 10) ------------------------------------------------
+
+@test "README, CLAUDE.md and CHANGELOG describe the launcher, the callee-from-config rule, the receipt and --resume-review — in plain language" {
+  R="$BATS_TEST_DIRNAME/../.."
+  for s in 'core/call-agent.sh' 'direct_call.callee_home' '--resume-review 02' 'DAEDALUS_LIVE_CANARY=1' 'orientation: yes; capture: confirmed; exit: 0'; do
+    grep -qF -- "$s" "$R/README.md" || { echo "README lacks: $s"; return 1; }
+  done
+  grep -qF -- '--resume-review <NN>' "$R/CLAUDE.md"
+  grep -qF '## Direct calls' "$R/CLAUDE.md"
+  grep -qF 'The direct-call launcher' "$R/CHANGELOG.md"
+  ! grep -qF 'keep it free of anything that would steer a reviewer' "$R/README.md"
+}

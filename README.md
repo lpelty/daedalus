@@ -261,17 +261,48 @@ no PASS-labelled evidence behind; but the run is lost and must be re-done.
 
 The charter lives under `core/` because `claude -p --agent <name>` resolves
 only from `.claude/agents/` of the working directory, which is one of
-Daedalus's write surfaces; `core/` is not. `refute.sh` renders it with
-`core/agentdef.py` and passes the result to `claude --agents`, and runs
-`claude` from an empty temporary directory with the target granted through
-`--add-dir`. That is what keeps project instructions out of the review: the
-charter requests `omitClaudeMd`, but measured on Claude Code 2.1.282 that
-key in an `--agents` definition does not stop `claude -p --agent` from
-loading the working directory's `CLAUDE.md`, whereas a `CLAUDE.md` under an
-`--add-dir` directory is not loaded. So neither Daedalus's nor the target's
-`CLAUDE.md` reaches the reviewer. The user-level `~/.claude/CLAUDE.md` of the
-account running Daedalus still does (also measured); if that matters on
-your deployment, keep it free of anything that would steer a reviewer.
+Daedalus's write surfaces; `core/` is not. `refute.sh` assembles the review
+and the direct-call launcher runs it: `core/call-agent.sh --callee refuter`
+renders the charter with `core/agentdef.py`, refuses while `core/`,
+`CLAUDE.md` or `.claude/settings.json` differ from the committed version (a
+modified reviewer cannot certify anything), and runs `claude` from an empty
+temporary directory with the checkout granted through `--add-dir`, hooks
+off, no MCP servers, `Read`/`Grep`/`Glob` only, and `--settings` excluding
+every `CLAUDE.md` and turning auto memory off. Measured on Claude Code
+2.1.282: the charter's `omitClaudeMd` does not stop `claude -p --agent` from
+loading the working directory's `CLAUDE.md`, a `CLAUDE.md` under an
+`--add-dir` directory is not loaded, and the account's user-level
+`~/.claude/CLAUDE.md` and auto memory still load from an empty directory —
+which is what the exclusions are for. The review is written once per run to
+`vault/evidence/<run-id>-review.md`, whose frontmatter records the call id,
+the fingerprint of the tree reviewed, the mode, the sha256 of the exact
+prompt, and the committed `core/` tree and charter.
+
+**Proving the reviewer shares nothing with the author** is a canary with a
+positive control, in `core/tests/test_refuter_charter.bats`. The suite runs
+it on every build against a stand-in `claude` that models how Claude Code
+loads context. Run it once per deployment against the real CLI —
+`DAEDALUS_LIVE_CANARY=1 bats core/tests/test_refuter_charter.bats -f 'canary \(live'`
+— and read the result: the control (the charter run from the tree, no
+exclusions) must answer `PINEAPPLE` or the test fails as inconclusive; the
+launcher's review must not, and must refute the seeded defect. The live
+canary rests on that answer alone; in the suite the stand-in also records
+every file it loaded, and the reviewer's list must be empty. Neither canary
+exercises auto memory — the reviewer runs from a fresh directory, which has
+no project memory to load — so the auto-memory switches are pinned by the
+launch assertions in the same file instead. If the control fires and the
+review leaks, the build loads context the exclusions do not reach; say so as
+a proposal before trusting a review there. A managed policy `CLAUDE.md` (the
+organization's) cannot be excluded by any setting; when one is present the
+review names it (`managed-claude-md:`).
+
+**Asking the reviewer about a finding.** Every review is a receipted call
+(`state/direct-calls/<call-id>/`). To ask the reviewer that found a defect
+what it meant — the same session, with its findings in context —
+`core/call-agent.sh --resume-review 02 "Finding F2 says the lock is not
+released on the error path. Show me the line."` resumes the most recent
+review of window 02. The answer is advice, never a verdict: a resumed review
+cannot write the review file, and a new verdict needs a new run.
 
 It is **on by default**: an unset `verify.refute` means `true`. To turn it
 off, set `verify.refute: false` *and* a non-empty `verify.refute_off_reason`
@@ -300,3 +331,42 @@ instead — but do that *before* you start, not mid-session: the boundary
 hook's check 2 hashes that file's `hooks` and `disableAllHooks` keys against
 the session-start snapshot, so setting it after the session has already
 begun reads as tampering and blocks.
+
+## Direct calls (`core/call-agent.sh`)
+
+One launcher, three callees, one receipt format:
+
+- `--callee agent` asks the target's own agent — the one whose home and name
+  `config.yaml` sets in `direct_call.callee_home` and `direct_call.callee_name`
+  — a read-only question ("what is this hook for, before I change it?"). The
+  call runs in that agent's home with its hooks, so its own identity loads.
+  Nothing else can name the callee: there is no default and no command-line
+  flag for it, and the call is refused while the two keys are unset. If the
+  agent publishes a callers list (`direct_calls.callers` in its `agent.yaml`,
+  or a `.direct-callers` file), Daedalus must be on it; with
+  `direct_call.callee_launcher` the agent's own launcher runs instead and
+  applies its own list, receipt and capture.
+- `--callee self --caller <name>` is how another agent asks this Daedalus;
+  the name must be in `direct_call.callers`. The called session is a
+  visitor: it never takes a window number or the pen.
+- `--callee refuter` is the reviewer (above); only `core/refute.sh` calls it.
+
+The answer is on stdout and a two-line receipt on stderr:
+
+```
+Daedalus call 4f1c…; receipt state/direct-calls/4f1c…
+Daedalus orientation: yes; capture: confirmed; exit: 0
+```
+
+On a failure the second line says why, after the exit code. Exit codes: `0`
+answered and the callee's identity verified; `2` refused before anything ran
+(unlisted caller, no callee configured, a config other than this
+deployment's `config.yaml`, bad arguments, modified distribution code); `3`
+answered but the identity marker was not found; `124` timed out and killed;
+anything else is `claude`'s own failure.
+Check the exit code and that the answer is not empty — never the receipt
+line alone. `--resume <call-id>` continues a call. Every call is read-only:
+`Read`, `Grep` and `Glob`, no MCP servers, and a frame prompt that says it
+is a discussion, not a work order. With a `memory:` block, the launcher
+captures the call afterwards with the caller and the callee as the speakers;
+the called session's own capture stands down.
