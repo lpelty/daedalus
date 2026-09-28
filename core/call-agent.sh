@@ -17,7 +17,14 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v python3 >/dev/null 2>&1 || { printf 'daedalus: python3 not found on PATH — cannot launch the call\n' >&2; exit 2; }
 # The integrity check FIRST (spec §6.1): before lib.sh is sourced and before
-# call_agent.py imports anything, so modified distribution code never runs.
+# call_agent.py imports anything, so no modified distribution code runs AFTER
+# this point and nothing is launched from it. What it cannot cover: this file
+# itself (bash has read it before any check), and whatever ran before it —
+# a review entered through gates.sh or refute.sh has already sourced lib.sh in
+# those processes (as has every other entry script that sources lib.sh). The
+# guarantee holds from call-agent.sh and promote.sh onward; the authority is
+# the core_tree recorded in each verdict and promote's re-check at confirm
+# (plan 4 Decision 41; spec Appendix E).
 # Isolated python (-I: no PYTHON* variables, no script directory or user site
 # on sys.path; -B: no bytecode written). call_agent.py repeats the check at the
 # points the spec names (before the launch, after the review).
