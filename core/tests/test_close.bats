@@ -299,3 +299,61 @@ EOF
   case "$output" in *"close complete"*|*VAULT-COMMIT-RAN*) echo "$output"; return 1 ;; *) : ;; esac
   [ ! -s "$BATS_TEST_TMPDIR/posts.jsonl" ]
 }
+
+# --- close waits out a capture in flight and confirms the whole session (spec §4.7, PROP-002) ---
+ps_ms() { python3 -c 'import subprocess,sys,time
+out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
+print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
+
+@test "close exits non-zero while another capture of this session is still in flight, saying to wait and close again — never 'close complete'" {
+  configure_capture; start_stub
+  sleep 300 & sp=$!
+  mkdir -p "$DAEDALUS_HOME/state/hindsight"
+  python3 - "$DAEDALUS_HOME/state/hindsight/offsets.json" "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl" "$sp" "$(ps_ms "$sp")" <<'PY'
+import json, os, sys, time
+json.dump({"offsets": {}, "pending": [], "transcripts": {os.path.realpath(sys.argv[2]): {"in_flight": {
+    "offset": 0, "pid": int(sys.argv[3]), "proc_started": int(sys.argv[4]), "started": time.time()}}}},
+    open(sys.argv[1], "w"))
+PY
+  CLOSE_WAIT_IN_FLIGHT_SECS=2 run bash "$CLOSE"
+  kill "$sp"
+  [ "$status" -ne 0 ]
+  case "$output" in *"a capture is still in flight after 2 s; wait and close again"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close complete"*) echo "$output"; return 1 ;; *) : ;; esac
+}
+
+@test "close confirms the whole session: an earlier Stop-tick span still extracting keeps close from saying close complete; once it is stored, close again succeeds" {
+  # Review reproduction: a fast-path span [0->77] pending under op-1 'running',
+  # then a verified run confirmed only its own new span (op-2) and exited 0 —
+  # "close complete" over a span the server had not stored.
+  configure_capture; start_stub
+  printf 'stub-op-1\n' > "$BATS_TEST_TMPDIR/running_ops"
+  run python3 "$DAEDALUS_HOME/core/capture.py" capture          # a Stop tick's fast path: pending under stub-op-1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  CAPTURE_VERIFY_TIMEOUT_SEC=2 run bash "$CLOSE"
+  [ "$status" -ne 0 ]
+  case "$output" in *"the session is not yet confirmed stored"*"[0->"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close complete"*) echo "$output"; return 1 ;; *) : ;; esac
+  rm "$BATS_TEST_TMPDIR/running_ops"                              # the server finishes op-1
+  CAPTURE_VERIFY_TIMEOUT_SEC=2 run bash "$CLOSE"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"close complete"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "close shares one verification timeout across the session's spans: two spans still extracting and a 6 s timeout, close gives up in about 8 s, not 12" {
+  # Review: the earlier spans got a full timeout and the new span another, so
+  # one close could run about six minutes at production values (Decision 21).
+  # The poll interval is 2 s: shared, the new span's wait is its 1 s floor
+  # rounded up to one poll (~6 + 2 s); separate, ~6 + 6 s.
+  configure_capture; start_stub
+  printf 'stub-op-1\nstub-op-2\n' > "$BATS_TEST_TMPDIR/running_ops"
+  run python3 "$DAEDALUS_HOME/core/capture.py" capture          # a Stop tick's fast path: pending under stub-op-1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  t0="$(date +%s)"
+  CAPTURE_VERIFY_TIMEOUT_SEC=6 run bash "$CLOSE"
+  t1="$(date +%s)"
+  [ "$status" -ne 0 ]
+  [ $((t1 - t0)) -lt 11 ] || { echo "close took $((t1 - t0)) s: each span got its own timeout"; return 1; }
+}

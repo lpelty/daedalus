@@ -1,27 +1,38 @@
 """Vendored copy: originally written for another harness's SessionEnd hook,
-copied here as-is. Stdlib-only (no third-party or cross-harness imports);
-configured entirely via environment variables. This is a fork with no
-automatic sync path back to its origin — changes here and there diverge
-independently unless someone ports them by hand.
+copied here and since extended. Stdlib-only (no third-party or cross-harness
+imports, and nothing from core/ — recall-inject.py imports this file);
+configured entirely via environment variables, which lib.sh memory_env derives
+from config.yaml's memory: block. This is a fork with no automatic sync path
+back to its origin — changes here and there diverge independently unless
+someone ports them by hand.
 
-Hindsight capture hook (SessionEnd).
+Hindsight capture: the Stop tick and the session-end flush (core/capture-tick.sh)
+and the explicit close (core/close.sh).
 
 Ingests new transcript bytes -> retain, for a single tenant bank. Tracks a
 byte offset per transcript file so re-running over unchanged transcripts posts
-nothing; a re-run after new bytes are appended posts only the delta.
+nothing; a re-run after new bytes are appended posts only the delta. One run
+of a transcript at a time: a run claims it in state/hindsight/offsets.json
+(in_flight) and never holds the file's lock across a network call.
 
 Consumes env (all required unless noted): TENANT_HOME, TENANT_BANK,
-TRANSCRIPT_DIR, HINDSIGHT_API_URL (default http://127.0.0.1:8888).
+TRANSCRIPT_DIR, HINDSIGHT_API_URL (default http://127.0.0.1:8888),
+CAPTURE_INTERVAL (default 120), CAPTURE_DEFER_TO_CALLER (direct calls).
 
 Cursors persist at $TENANT_HOME/state/hindsight/offsets.json.
 
-Commands (run via `uv run --project <engine>/services/hindsight python capture.py ...`):
-    capture             Ingest new transcript bytes -> retain (SessionEnd hook uses this)
+Commands (python3 core/capture.py ...):
+    capture             Ingest new transcript bytes -> retain
         [--transcript P | --session-id S | --hook-json F]
                         the transcript: P; else a hook payload (file F, else
                         stdin); else session S / CLAUDE_CODE_SESSION_ID via its
                         SessionStart marker or TRANSCRIPT_DIR/<S>.jsonl. Never
                         "the newest transcript": with nothing named it refuses.
+        [--throttle SECS]
+                        skip a transcript captured less than SECS ago (Stop tick)
+        [--wait-in-flight SECS]
+                        wait up to SECS for a capture in flight, then capture;
+                        fail past that (close.sh, the session-end flush)
     recall "<query>"    Query memory; --types world,experience,observation
     retain "<text>"     Manually store a fact
     status              Server health + bank stats + token usage + offsets
@@ -849,7 +860,7 @@ def _push_span(transcript: str, offset: int, cfg: dict, ctx: dict | None = None)
             print("capture: retain accepted but returned no operation id; "
                   "offset NOT advanced (cannot verify extraction)")
             return False, None, None
-        ok, detail = _await_extraction(op_id, bank, cfg)
+        ok, detail = _await_extraction(op_id, bank, _verify_cfg(cfg))
         if not ok:
             print(f"capture: extraction FAILED — {detail}. Offset NOT advanced "
                   f"(offset stays {offset}); the span will be retried.")
@@ -945,14 +956,91 @@ def _finish_run(ctx: dict, cfg: dict, verdicts: list, new_entry: dict | None,
         _save_state(th, state)
 
 
-def _capture_path(transcript: str, cfg: dict):
+def _verify_cfg(cfg: dict) -> dict:
+    """The cfg an extraction wait gets. With a shared verify_deadline (set
+    once per run by _capture_path in verification mode -- plan 2 Decision 21)
+    its verify_timeout is what is left of that deadline, at least 1 s;
+    otherwise cfg as it is. Only the wait sees the reduced value:
+    _in_flight_ceiling keeps reading the configured verify_timeout, so this
+    run's view of its own claim's ceiling does not shrink."""
+    dl = cfg.get("verify_deadline")
+    if dl is None:
+        return cfg
+    return dict(cfg, verify_timeout=max(1, int(dl - time.time())))
+
+
+def _await_own_spans(cfg: dict, ctx: dict, verdicts: list) -> None:
+    """Verification mode (close.sh), section (b), no lock: wait out THIS
+    transcript's earlier spans in the snapshot -- the Stop ticks pushed most of
+    the session on the fast path, and a close promises the session is stored
+    (PROP-002), not only its last span. One verification timeout is shared by
+    all of them and with the new span's own wait: they all stop at
+    cfg["verify_deadline"]. A span confirmed stored becomes a "drop" verdict;
+    one re-pushed this run is awaited under its new operation id; anything
+    else stays in the ledger, and _capture_path then refuses to call the
+    session stored."""
+    key = ctx["key"]
+    bank = cfg["bank"]
+    by_id = {v["id"]: v for v in verdicts}
+    until = cfg.get("verify_deadline") or time.time() + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC)
+    for entry in ctx["snapshot"]:
+        tr = entry.get("transcript")
+        if tr is None or (tr != key and _transcript_key(tr) != key):
+            continue
+        eid = _entry_id(entry)
+        verdict = by_id.get(eid)
+        if verdict is not None and verdict["action"] == "drop":
+            continue
+        op_id = (verdict["entry"] if verdict is not None else entry).get("operation_id")
+        if not op_id:
+            continue
+        left = int(until - time.time())
+        if left < 1:
+            break
+        span = f"[{entry.get('offset_from')}->{entry.get('offset_to')}]"
+        ok, detail = _await_extraction(op_id, bank, dict(cfg, verify_timeout=left))
+        if ok:
+            print(f"capture: earlier span {span} of this session confirmed stored ({detail})")
+            if verdict is not None:
+                verdicts.remove(verdict)
+            by_id[eid] = {"id": eid, "action": "drop"}
+            verdicts.append(by_id[eid])
+        else:
+            print(f"capture: earlier span {span} of this session not confirmed — {detail}")
+
+
+def _unsettled_spans(cfg: dict, key: str) -> list:
+    """The [from->to] spans of this transcript still in the ledger, read under
+    the lock after section (c): what a close cannot yet call stored."""
+    with _state_lock(cfg["tenant_home"]):
+        pending = _load_state(cfg["tenant_home"])["pending"]
+    return [f"[{e.get('offset_from')}->{e.get('offset_to')}]" for e in pending
+            if e.get("transcript") is not None
+            and (e["transcript"] == key or _transcript_key(e["transcript"]) == key)]
+
+
+def _capture_path(transcript: str, cfg: dict, throttle: int | None = None, wait: int = 0):
     """One capture of one transcript in three sections (spec §4.7): claim it,
-    settle and push with no lock, apply what this run still holds. A second
-    run while one is in flight skips; a claim is always released, even when
-    the push raises."""
-    status, info = _claim_run(transcript, cfg, None)
+    settle and push with no lock, apply what this run still holds. `throttle`
+    (the Stop tick) skips a transcript captured less than that many seconds
+    ago. A run that finds a live in-flight claim skips -- or, with `wait`
+    (close.sh, the session-end flush), polls once a second until the claim
+    clears and then captures, failing after `wait` seconds so a close never
+    reports a session it did not flush. In verification mode (close.sh) the
+    run also waits out this transcript's earlier spans and succeeds only when
+    none is left in the ledger (Decision 15). A claim is always released, even
+    when the push raises."""
+    status, info = _claim_run(transcript, cfg, throttle)
+    until = time.time() + wait
+    while status == "busy" and time.time() < until:
+        time.sleep(1)
+        status, info = _claim_run(transcript, cfg, None)
     if status == "busy":
         started = time.strftime("%H:%M", time.localtime(info.get("started") or 0))
+        if wait:
+            print(f"capture: a capture is still in flight after {wait} s; wait and close again "
+                  f"(pid {info.get('pid')}, started {started})")
+            return False
         if cfg.get("verify_extraction"):
             # A close must not report "close complete" while another run still
             # holds this transcript: that run's span is at best queued, not
@@ -963,14 +1051,30 @@ def _capture_path(transcript: str, cfg: dict):
         print(f"capture: a capture of this transcript is in flight (pid {info.get('pid')}, "
               f"started {started}) — skipping")
         return True
+    if status == "throttled":
+        print(f"capture: throttled — this transcript was captured {info} s ago (interval {throttle} s)")
+        return True
     ctx = info
+    if cfg.get("verify_extraction"):
+        # One verification deadline for the whole close (Decision 21): the
+        # earlier spans and the new span share it, so a close cannot spend a
+        # full verify_timeout on each.
+        cfg = dict(cfg, verify_deadline=time.time() + cfg.get("verify_timeout", VERIFY_TIMEOUT_SEC))
     ok, new_entry, advance_to, verdicts = False, None, None, []
     try:
         verdicts = _reconcile_snapshot(cfg, ctx["snapshot"], ctx["offsets"],
                                        time.time() + RECONCILE_BUDGET_SEC)
+        if cfg.get("verify_extraction"):
+            _await_own_spans(cfg, ctx, verdicts)
         ok, new_entry, advance_to = _push_span(transcript, ctx["offset"], cfg, ctx)
     finally:
         _finish_run(ctx, cfg, verdicts, new_entry, advance_to, transcript)
+    if ok and cfg.get("verify_extraction"):
+        left = _unsettled_spans(cfg, ctx["key"])
+        if left:
+            print(f"capture: the session is not yet confirmed stored — {len(left)} earlier span(s) of it "
+                  f"are still unconfirmed: {', '.join(left)}; close again")
+            return False
     return ok
 
 
@@ -1006,6 +1110,18 @@ def _flag(args: list[str], name: str) -> str | None:
         print(f"capture: {name} needs a value", file=sys.stderr)
         sys.exit(2)
     return args[i + 1]
+
+
+def _secs_flag(args: list[str], name: str) -> int | None:
+    """A flag whose value is a whole number of seconds (--throttle,
+    --wait-in-flight); anything else is a usage error (exit 2)."""
+    raw = _flag(args, name)
+    if raw is None:
+        return None
+    if not raw.isdigit():
+        print(f"capture: {name} needs a whole number of seconds (got {raw!r})", file=sys.stderr)
+        sys.exit(2)
+    return int(raw)
 
 
 def _safe_sid(sid: str) -> str:
@@ -1080,6 +1196,8 @@ def cmd_capture(args: list[str], cfg: dict):
     if os.environ.get("CAPTURE_DEFER_TO_CALLER") == "1" or os.environ.get("DIRECT_CALL_ID"):
         print("capture: deferred to caller (direct call) — no post, offset unchanged")
         return True
+    throttle = _secs_flag(args, "--throttle")
+    wait = _secs_flag(args, "--wait-in-flight") or 0
     transcript, source = _resolve_transcript(args, cfg)
     if not transcript:
         print(REFUSE_GUESS)
@@ -1106,7 +1224,7 @@ def cmd_capture(args: list[str], cfg: dict):
         _settle_ledger(cfg)
         print(f"capture: no transcript ({transcript})")
         return True
-    return _capture_path(transcript, cfg)
+    return _capture_path(transcript, cfg, throttle=throttle, wait=wait)
 
 
 def cmd_recall(args: list[str], cfg: dict):

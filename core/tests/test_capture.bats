@@ -1343,3 +1343,46 @@ PY
   size=$(python3 -c "import os,sys; print(os.path.getsize(sys.argv[1]))" "$TRANSCRIPT")
   [ "$(stored_offset)" = "$size" ]
 }
+
+# --- cadence and waiting (spec §4.7) ----------------------------------------
+@test "--throttle: a second capture inside the interval posts nothing even with new bytes; once the interval has passed it captures" {
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture --throttle 120; [ "$status" -eq 0 ]; [ "$(post_count)" -eq 1 ]
+  printf '{"type":"user","message":{"role":"user","content":"later"}}\n' >> "$TRANSCRIPT"
+  run python3 "$CAPTURE" capture --throttle 120; [ "$status" -eq 0 ]
+  case "$output" in *"capture: throttled — this transcript was captured "*" s ago (interval 120 s)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 1 ]
+  python3 - "$OFFSETS" "$TRANSCRIPT" <<'PY'
+import json, os, sys, time
+p = sys.argv[1]; d = json.load(open(p))
+d["transcripts"][os.path.realpath(sys.argv[2])]["last_capture"] = time.time() - 200
+open(p, "w").write(json.dumps(d))
+PY
+  run python3 "$CAPTURE" capture --throttle 120; [ "$status" -eq 0 ]; [ "$(post_count)" -eq 2 ]
+}
+
+@test "--wait-in-flight polls until a live claim clears, then captures" {
+  start_op_stub "running"
+  sleep 2 & sp=$!
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(date +%s)"
+  run python3 "$CAPTURE" capture --wait-in-flight 10
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(post_count)" -eq 1 ]
+}
+
+@test "--wait-in-flight gives up at its limit with the close sentence, exits non-zero and leaves the offset where it was" {
+  start_op_stub "running"
+  sleep 300 & sp=$!
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(date +%s)"
+  run python3 "$CAPTURE" capture --wait-in-flight 2
+  kill "$sp"
+  [ "$status" -ne 0 ]
+  case "$output" in *"capture: a capture is still in flight after 2 s; wait and close again"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(stored_offset)" = "0" ]; [ "$(post_count)" -eq 0 ]
+}
+
+@test "--throttle and --wait-in-flight take whole seconds only" {
+  run python3 "$CAPTURE" capture --throttle 2m
+  [ "$status" -eq 2 ]
+  case "$output" in *"capture: --throttle needs a whole number of seconds"*) : ;; *) echo "$output"; return 1 ;; esac
+}

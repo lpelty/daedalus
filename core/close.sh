@@ -50,12 +50,22 @@ log "phase 1/$phases: episodic capture"
 # makes the header comment above true rather than aspirational.
 # The transcript (spec §4.7 (2)): --transcript when given; else capture.py
 # resolves it from CLAUDE_CODE_SESSION_ID (the SessionStart marker, then the
-# derivation) and refuses when there is nothing to go on. </dev/null:
-# close.sh never carries a hook payload, and a Bash tool's stdin may be a
-# socket that never closes.
+# derivation) and refuses when there is nothing to go on.
+# A Stop tick or the session-end flush may still be sending this session
+# (spec §4.7): wait for it, then capture. Past the limit capture prints "a
+# capture is still in flight after N s; wait and close again" and this dies —
+# a close never reports a session it did not flush. Verification covers the
+# whole session: the spans earlier Stop captures sent are waited out too, and
+# while one is unconfirmed capture says which and fails (plan 2 Decision 15).
+wait_secs="${CLOSE_WAIT_IN_FLIGHT_SECS:-90}"
+case "$wait_secs" in
+  ''|*[!0-9]*) die "CLOSE_WAIT_IN_FLIGHT_SECS must be a whole number of seconds (got: $wait_secs)" ;;
+esac
+# </dev/null: close.sh never carries a hook payload, and a Bash tool's stdin
+# may be a socket that never closes.
 CAPTURE_VERIFY_EXTRACTION=1 \
-python3 "$DAEDALUS_HOME/core/capture.py" capture ${transcript:+--transcript "$transcript"} </dev/null \
-  || die "capture failed — the session is unrecorded"
+python3 "$DAEDALUS_HOME/core/capture.py" capture ${transcript:+--transcript "$transcript"} --wait-in-flight "$wait_secs" </dev/null \
+  || die "capture failed or is not yet confirmed — the session is not recorded yet; see the capture lines above and close again"
 # --commit: the prime's vault commit (spec §4.7) runs only after the capture
 # succeeded — a failed capture stops the close before anything is committed.
 if [ "$commit" -eq 1 ]; then
