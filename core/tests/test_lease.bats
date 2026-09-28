@@ -836,7 +836,7 @@ esac'
   [ "$(lease_json 01 worktree_ready)" = "False" ]
 }
 
-@test "an add interrupted mid-checkout (registered, locked 'initializing', half-written) is refused while its checkout may still be writing, then removed and re-added from its branch by claim — never adopted as it stands" {
+@test "an add interrupted mid-checkout (registered, locked 'initializing', half-written) whose add is no longer running is removed and re-added from its branch by claim at once, a fresh index.lock notwithstanding — never adopted as it stands" {
   # Measured 2026-09-27 (git 2.50.1): a worktree add killed mid-checkout leaves
   # the worktree registered, locked with reason "initializing", its branch
   # created, and a tree whose status lists every file deleted. Plan 1 adopted
@@ -846,12 +846,7 @@ esac'
   gd="$(git -C "$wt" rev-parse --absolute-git-dir)"
   printf 'initializing\n' > "$gd/locked"; rm -f "$wt/a.txt" "$gd/index"
   python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["worktree_ready"]=False; open(p,"w").write(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json"
-  : > "$gd/index.lock"                       # as far as git can tell, a checkout is still writing
-  CLAUDE_CODE_SESSION_ID=sC run LS claim 01
-  [ "$status" -ne 0 ]
-  case "$output" in *"window 01 is still being checked out"*"run \`core/lease.sh claim 01\` again in a minute"*) : ;; *) echo "$output"; return 1 ;; esac
-  [ -d "$wt" ]                               # nothing was removed under a live writer
-  touch -t 200001010000 "$gd/index.lock"     # long stale: the writer is gone
+  : > "$gd/index.lock"      # left by the killed checkout; no `worktree add` process is alive, so nothing is writing
   CLAUDE_CODE_SESSION_ID=sC run LS claim 01
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ -f "$wt/a.txt" ]
@@ -860,6 +855,62 @@ esac'
   case "$output" in *"locked initializing"*) echo "still locked: $output"; return 1 ;; *) : ;; esac
   [ -z "$(git -C "$wt" status --porcelain)" ]
   [ "$(lease_json 01 worktree_ready)" = "None" ]
+}
+
+# slow_checkout — commit slow.txt to the target under a smudge filter that
+# sleeps $SLOW_SMUDGE seconds (default 0), so a `worktree add` spends that
+# long mid-checkout — its index.lock held, its tree half-written — in a
+# grandchild of the add, in the add's own process group. One file stands in
+# for the 40k-file repo the review measured on.
+slow_checkout() {
+  local T="$DAEDALUS_HOME/target/thing"
+  git -C "$T" config filter.slow.smudge 'sleep "${SLOW_SMUDGE:-0}"; cat'
+  git -C "$T" config filter.slow.clean cat
+  printf 'slow.txt filter=slow\n' > "$T/.gitattributes"; printf 's\n' > "$T/slow.txt"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m slow; git -C "$T" push -q origin main
+}
+
+@test "a checkout Daedalus cut off at its own budget is dead, not still writing: an immediate claim removes the half-written tree and re-adds it, with no minute's wait" {
+  # Review reproduction (git 2.50.1): the kill leaves the worktree's index.lock
+  # behind, and plan 2's lock-age test refused this claim for up to 60 s with
+  # "still being checked out" although no git process was alive.
+  slow_checkout
+  SLOW_SMUDGE=5 LEASE_WORKTREE_TIMEOUT=1 run LS create
+  [ "$status" -eq 0 ]; [ "$(lease_json 01 worktree_ready)" = "False" ]
+  wt="$DAEDALUS_HOME/worktrees/01/thing"
+  run git -C "$DAEDALUS_HOME/target/thing" worktree list --porcelain
+  case "$output" in *"locked initializing"*) : ;; *) echo "the add was not cut off mid-checkout: $output"; return 1 ;; esac
+  ls "$DAEDALUS_HOME/target/thing/.git/worktrees/thing/index.lock"     # the orphaned lock is there
+  CLAUDE_CODE_SESSION_ID=sC run LS claim 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$wt/slow.txt" ]; [ -f "$wt/a.txt" ]; [ -f "$wt/sub/n.txt" ]
+  [ -z "$(git -C "$wt" status --porcelain)" ]
+  [ "$(lease_json 01 worktree_ready)" = "None" ]
+}
+
+@test "an add whose caller was SIGKILLed keeps checking out in its own session: claim refuses while that add is alive, however old its index.lock, and finishes the window once it is gone" {
+  # The lock's mtime is set when the checkout opens it and does not move until
+  # the index is written at the end (measured 2026-09-28, git 2.50.1), so a
+  # lock-age test called a checkout longer than 60 s dead under its writer.
+  slow_checkout
+  wt="$DAEDALUS_HOME/worktrees/01/thing"; gd="$DAEDALUS_HOME/target/thing/.git/worktrees/thing"
+  SLOW_SMUDGE=30 LEASE_WORKTREE_TIMEOUT=60 bash "$DAEDALUS_HOME/core/lease.sh" create </dev/null >/dev/null 2>&1 3>&- &
+  caller=$!
+  for _ in $(seq 50); do [ -e "$gd/index.lock" ] && break; sleep 0.1; done
+  [ -e "$gd/index.lock" ] || { kill -KILL "$caller"; echo "the checkout never started"; return 1; }
+  kill -KILL "$caller"; wait "$caller" 2>/dev/null || true
+  adder="$(pgrep -f "worktree add $wt " | head -1)"
+  [ -n "$adder" ] || { echo "the add died with its caller"; return 1; }
+  touch -t 200001010000 "$gd/index.lock"      # a lock-age test would call this writer long gone
+  CLAUDE_CODE_SESSION_ID=sC run LS claim 01
+  st=$status; out=$output
+  kill -KILL -- "-$adder" 2>/dev/null; for _ in $(seq 50); do kill -0 "$adder" 2>/dev/null || break; sleep 0.1; done
+  [ "$st" -ne 0 ] || { echo "claimed under a live add: $out"; return 1; }
+  case "$out" in *"window 01 is still being checked out"*) : ;; *) echo "$out"; return 1 ;; esac
+  [ -d "$wt" ]
+  CLAUDE_CODE_SESSION_ID=sC run LS claim 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$wt/slow.txt" ]; [ -f "$wt/sub/n.txt" ]; [ -z "$(git -C "$wt" status --porcelain)" ]
 }
 
 @test "when git deregisters a half-finished worktree but cannot delete its directory, claim deletes the leftover itself and re-adds" {

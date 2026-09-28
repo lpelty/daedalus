@@ -568,8 +568,8 @@ def _git(repo: Path, *args: str, timeout: int = 20) -> Tuple[int, str, str]:
     return v.run(["git", "-C", str(repo)] + list(args), timeout=timeout)
 
 
-# An interrupted add's checkout counts as possibly still writing while the
-# worktree's index.lock is younger than this.
+# Only when `ps` cannot answer: an interrupted add's checkout then counts as
+# possibly still writing while the worktree's index.lock is younger than this.
 CHECKOUT_FRESH_SECS = 60
 
 
@@ -660,12 +660,35 @@ def _interrupted_add(listed: str, dest: Path) -> bool:
     return False
 
 
+def _add_running(dest: Path) -> Optional[bool]:
+    """Whether a `git ... worktree add <dest> ...` process is alive — the
+    writer of an interrupted add, since `worktree add` waits for its checkout
+    child. Daedalus runs every add with `dest` as its own argument (and in its
+    own session, so the add outlives a SIGKILLed caller). None when `ps`
+    cannot answer."""
+    code, out, _ = v.run(["ps", "-A", "-ww", "-o", "command="], timeout=5)
+    if code != 0:
+        return None
+    wants = {" %s " % dest, " %s " % dest.resolve()}
+    return any(" worktree add " in c and any(w in c + " " for w in wants) for c in out.splitlines())
+
+
 def _checkout_live(dest: Path) -> bool:
     """True while an interrupted add's checkout may still be writing `dest`:
-    the worktree's index.lock exists and was touched within
-    CHECKOUT_FRESH_SECS. Removing a tree under a live writer failed with
-    'Directory not empty' after git had already deregistered it (review,
-    2026-09-27)."""
+    its `git worktree add` process is alive. Removing a tree under a live
+    writer failed with 'Directory not empty' after git had already
+    deregistered it (review, 2026-09-27).
+
+    Not the index.lock's age (the first draft): a checkout Daedalus cut off
+    itself is SIGKILLed with its group (_run_bounded) and leaves its lock
+    behind, which read as "still writing" for a minute although nothing was;
+    and the lock's mtime is set when the checkout opens it and does not move
+    until the index is written at the end (measured 2026-09-28, git 2.50.1),
+    so an orphaned add running past 60 s read as dead under its writer. The
+    lock age is only the fallback when `ps` cannot answer."""
+    running = _add_running(dest)
+    if running is not None:
+        return running
     try:
         line = (dest / ".git").read_text().strip()
     except OSError:
@@ -696,7 +719,7 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
     nested or not, pushes SessionStart past its 30 s, and no checkout keeps
     writing after it. A worktree list cut off is "out of time", never "not
     registered". A registered worktree still locked 'initializing' (an add
-    killed mid-checkout) is refused while its checkout may still be writing
+    killed mid-checkout) is refused while its `worktree add` is still alive
     (_checkout_live), else removed with `remove -f -f` — plain -f refuses a
     locked tree — and added again from its branch; when git deregisters it
     but cannot delete the directory, the leftover is deleted here. Caller
@@ -803,6 +826,11 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
             data["criteria"] = criteria
         if spawned:
             data["spawned"] = True
+        # Written unfinished and marked ready only once the add returns True:
+        # a caller SIGKILLed mid-add (its add lives on in its own session,
+        # _run_bounded) leaves a window that claim finishes, never one that
+        # reads ready over a half-written tree.
+        data["worktree_ready"] = False
         try:
             write_lease(root, nn, data, exclusive=True)
         except FileExistsError:
@@ -818,8 +846,8 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
         except OSError:
             pass
         raise
-    if not ready:
-        data["worktree_ready"] = False
+    if ready:
+        data.pop("worktree_ready", None)
         write_lease(root, nn, data)
     write_changed(root, nn, {})
     heartbeat(root, nn)
@@ -996,15 +1024,16 @@ def claim(root: Path, token: str, sid: str) -> str:
         subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
         data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
                 "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn,
-                "repos": list(trunks), "trunks": trunks, "created": now_stamp(), "bound_at": None, "promoted": []}
+                "repos": list(trunks), "trunks": trunks, "created": now_stamp(), "bound_at": None, "promoted": [],
+                "worktree_ready": False}   # as allocate_locked: ready only once the add returns True
         write_lease(root, nn, data, exclusive=True)
         try:
-            if not add_worktrees(root, nn, trunks):
-                # cut off (a git call timed out): written unfinished, so the
-                # bind just below — and any later claim — finishes it (§4.2).
-                # Plan 1 discarded this False and wrote the window ready.
-                data["worktree_ready"] = False
+            if add_worktrees(root, nn, trunks):
+                data.pop("worktree_ready", None)
                 write_lease(root, nn, data)
+            # else cut off (a git call timed out): left unfinished, so the bind
+            # just below — and any later claim — finishes it (§4.2). Plan 1
+            # discarded this False and wrote the window ready.
             write_changed(root, nn, {})
             lease = bind(root, nn, sid)
         except BaseException:
