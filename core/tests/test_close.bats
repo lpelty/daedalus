@@ -52,6 +52,7 @@ configure_capture() {
   export HINDSIGHT_API_URL="http://127.0.0.1:1"
   export HINDSIGHT_API_TENANT_API_KEY="not-a-real-key"
   seed_transcript
+  export CLAUDE_CODE_SESSION_ID="session-a"
 }
 
 @test "close.sh exists and is executable" {
@@ -256,4 +257,33 @@ EOF
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q '^POST /v1/default/banks/envbank/memories' "$BATS_TEST_TMPDIR/requests.log"
   run grep -q 'blockbank' "$BATS_TEST_TMPDIR/requests.log"; [ "$status" -ne 0 ]
+}
+
+@test "close --transcript names the session from an operator shell (no session id): it captures that file and exits 0" {
+  configure_capture; start_stub
+  unset CLAUDE_CODE_SESSION_ID
+  run bash "$CLOSE" --transcript "$BATS_TEST_TMPDIR/transcripts/session-a.jsonl"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'session session-a' "$BATS_TEST_TMPDIR/posts.jsonl"
+  case "$output" in *"close complete"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "close from an operator shell without --transcript refuses to guess, names close.sh --transcript, and never says close complete" {
+  configure_capture; start_stub
+  unset CLAUDE_CODE_SESSION_ID
+  run bash "$CLOSE"
+  [ "$status" -ne 0 ]
+  case "$output" in *"refusing to guess"*"core/close.sh --transcript"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close complete"*) echo "$output"; return 1 ;; *) : ;; esac
+  [ ! -s "$BATS_TEST_TMPDIR/posts.jsonl" ]
+}
+
+@test "close from a Bash-tool environment captures its own session's transcript, not the newest" {
+  configure_capture; start_stub
+  printf '{"type":"user","message":{"role":"user","content":"another window"}}\n' > "$BATS_TEST_TMPDIR/transcripts/session-z.jsonl"
+  touch -t 203001010000 "$BATS_TEST_TMPDIR/transcripts/session-z.jsonl"
+  CLAUDE_CODE_SESSION_ID=session-a run bash "$CLOSE"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'session session-a' "$BATS_TEST_TMPDIR/posts.jsonl"
+  run grep -q 'session-z' "$BATS_TEST_TMPDIR/posts.jsonl"; [ "$status" -ne 0 ]
 }

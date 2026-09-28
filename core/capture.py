@@ -17,8 +17,11 @@ Cursors persist at $TENANT_HOME/state/hindsight/offsets.json.
 
 Commands (run via `uv run --project <engine>/services/hindsight python capture.py ...`):
     capture             Ingest new transcript bytes -> retain (SessionEnd hook uses this)
-        [--hook-json F] read Claude Code hook payload from file F (else stdin,
-                        else newest transcript under TRANSCRIPT_DIR)
+        [--transcript P | --session-id S | --hook-json F]
+                        the transcript: P; else a hook payload (file F, else
+                        stdin); else session S / CLAUDE_CODE_SESSION_ID via its
+                        SessionStart marker or TRANSCRIPT_DIR/<S>.jsonl. Never
+                        "the newest transcript": with nothing named it refuses.
     recall "<query>"    Query memory; --types world,experience,observation
     retain "<text>"     Manually store a fact
     status              Server health + bank stats + token usage + offsets
@@ -29,7 +32,8 @@ from __future__ import annotations
 import sys
 import os
 import json
-import glob
+import re
+import select
 import time
 import urllib.request
 import urllib.error
@@ -258,11 +262,6 @@ def _transcript_to_convo(raw_lines: list[str], user_label: str = "User", assista
         who = user_label if t == "user" else assistant_label
         turns.append(f"{who}: {text}")
     return "\n\n".join(turns)
-
-
-def _newest_transcript(transcript_dir: Path) -> Path | None:
-    files = glob.glob(str(transcript_dir / "*.jsonl"))
-    return Path(max(files, key=os.path.getmtime)) if files else None
 
 
 def _split_convo(convo: str, max_chars: int = MAX_ITEM_CHARS) -> list[str]:
@@ -643,25 +642,93 @@ def _capture_path(transcript: str, cfg: dict):
     return True
 
 
-def cmd_capture(args: list[str], cfg: dict):
-    transcript = None
-    if "--hook-json" in args:
-        payload = json.loads(Path(args[args.index("--hook-json") + 1]).read_text())
-        transcript = payload.get("transcript_path")
+REFUSE_GUESS = ("capture: I cannot tell which transcript is this session's (no hook payload, "
+                "no --transcript, no CLAUDE_CODE_SESSION_ID); refusing to guess — from a shell, name it: "
+                "core/close.sh --transcript <path>, or capture.py capture --transcript <path>")
+
+
+def _flag(args: list[str], name: str) -> str | None:
+    """The value after `name`, or None when the flag is absent. A flag given
+    with no value is a usage error (exit 2), never silently ignored."""
+    if name not in args:
+        return None
+    i = args.index(name)
+    if i + 1 >= len(args):
+        print(f"capture: {name} needs a value", file=sys.stderr)
+        sys.exit(2)
+    return args[i + 1]
+
+
+def _safe_sid(sid: str) -> str:
+    """The marker file's spelling of a session id — verifylib._safe, copied
+    because this module imports nothing from core (recall-inject.py imports it)."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(sid or "")) or "none"
+
+
+def _resolve_transcript(args: list[str], cfg: dict) -> tuple[str | None, bool]:
+    """Which transcript is this session's (spec §4.7 'the transcript is named,
+    never guessed'). Returns (path, derived). Order: --transcript; the hook
+    payload's transcript_path (--hook-json F, else stdin); a session id — the
+    payload's, else --session-id, else CLAUDE_CODE_SESSION_ID — through the
+    SessionStart marker's transcript_path, else TRANSCRIPT_DIR/<sid>.jsonl
+    (derived=True). Nothing to go on -> (None, False) and the caller refuses.
+
+    There is no 'newest transcript' fallback any more: on a live machine it
+    named a session from days earlier, so close.sh could flush the wrong
+    session — and with several windows or a visitor there is no right answer
+    to 'newest'."""
+    given = _flag(args, "--transcript")
+    if given:
+        return given, False
+    payload: object = {}
+    hook_json = _flag(args, "--hook-json")
+    if hook_json:
+        payload = json.loads(Path(hook_json).read_text())
     elif not sys.stdin.isatty():
-        stdin = sys.stdin.read().strip()
-        if stdin:
+        # A hook writes its payload and closes stdin at once. A Bash tool can
+        # hand over a stdin that is an open socket and never closes (measured
+        # 2026-09-27 in a subagent's Bash tool: `capture` blocked in read()
+        # for minutes), so wait at most a second for it to become readable.
+        ready, _, _ = select.select([sys.stdin], [], [], 1.0)
+        raw = sys.stdin.read().strip() if ready else ""
+        if raw:
             try:
-                transcript = json.loads(stdin).get("transcript_path")
+                payload = json.loads(raw)
             except json.JSONDecodeError:
-                pass
+                payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if payload.get("transcript_path"):
+        return str(payload["transcript_path"]), False
+    sid = payload.get("session_id") or _flag(args, "--session-id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        return None, False
+    marker = cfg["tenant_home"] / "state" / f"session-{_safe_sid(sid)}.json"
+    try:
+        recorded = json.loads(marker.read_text()).get("transcript_path")
+    except (OSError, ValueError, AttributeError):
+        recorded = None
+    if recorded and Path(recorded).exists():
+        return str(recorded), False
+    return str(cfg["transcript_dir"] / f"{sid}.jsonl"), True
+
+
+def cmd_capture(args: list[str], cfg: dict):
+    transcript, derived = _resolve_transcript(args, cfg)
     if not transcript:
-        t = _newest_transcript(cfg["transcript_dir"])
-        transcript = str(t) if t else None
-    if not transcript or not Path(transcript).exists():
+        print(REFUSE_GUESS)
+        return False
+    if not Path(transcript).exists():
+        if derived:
+            # A derived path that is not there means the directory is wrong,
+            # not that the session said nothing: refuse rather than report a
+            # close that recorded nothing.
+            print(f"capture: this session's transcript is not at {transcript} (derived from the "
+                  f"session id and TRANSCRIPT_DIR); set memory.transcript_dir in config.yaml or "
+                  f"pass --transcript")
+            return False
         # Still settle the ledger. A pending span belongs to a PAST transcript,
-        # so its fate does not depend on there being a current one -- and this
-        # is otherwise the branch where a ledger could sit unresolved forever.
+        # so its fate does not depend on there being a current one.
         state = _load_state(cfg["tenant_home"])
         _reconcile_pending(cfg, state)
         _save_state(cfg["tenant_home"], state)

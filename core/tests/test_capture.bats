@@ -20,6 +20,10 @@ setup() {
   export TRANSCRIPT_DIR="$BATS_TEST_TMPDIR/transcripts"
   export HINDSIGHT_API_URL="http://127.0.0.1:1"   # nothing listens here
   export HINDSIGHT_API_TENANT_API_KEY="not-a-real-key"
+  # capture no longer guesses "the newest transcript" (spec §4.7); a Bash
+  # tool names its session with CLAUDE_CODE_SESSION_ID, and so does this
+  # fixture. Unset whatever the developer's own session exported.
+  export CLAUDE_CODE_SESSION_ID="session-a"
   # stdin from /dev/null: bats inherits the runner's stdin, and inside a
   # Claude Code Bash tool that can be a socket that never closes — capture
   # would wait on it (a second at most after Task 7; forever before it).
@@ -872,4 +876,76 @@ LIVE_FAILED_OP='{"id":"op-1","status":"failed","error_message":"chunk 0: JSONDec
   printf '%s' '{"status":"failed","error":"boom","retry_count":0}' > "$BATS_TEST_TMPDIR/op_body"
   CAPTURE_VERIFY_EXTRACTION=1 CAPTURE_VERIFY_TIMEOUT_SEC=5 run python3 "$CAPTURE" capture
   case "$output" in *"error='boom'"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- the transcript is named, never guessed (spec §4.7 (2)) -----------------
+@test "capture with CLAUDE_CODE_SESSION_ID and two transcripts present captures the named one only — never the newest" {
+  start_op_stub "running"
+  Z="$TRANSCRIPT_DIR/session-z.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"a different session entirely"}}\n' > "$Z"
+  touch -t 203001010000 "$Z"                       # newest by far
+  run python3 "$CAPTURE" capture                   # CLAUDE_CODE_SESSION_ID=session-a from setup
+  [ "$status" -eq 0 ]
+  grep -q 'session session-a' "$STUB_POSTS"
+  run grep -q 'session-z' "$STUB_POSTS"; [ "$status" -ne 0 ]
+}
+
+@test "no payload, no --transcript and no session id: capture refuses to guess, exits non-zero, and leaves offsets untouched" {
+  unset CLAUDE_CODE_SESSION_ID
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture </dev/null
+  [ "$status" -ne 0 ]
+  case "$output" in *"capture: I cannot tell which transcript is this session's (no hook payload, no --transcript, no CLAUDE_CODE_SESSION_ID); refusing to guess"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$OFFSETS" ]; [ "$(post_count)" -eq 0 ]
+}
+
+@test "--transcript names the file; --session-id goes through this session's SessionStart marker before the TRANSCRIPT_DIR derivation" {
+  unset CLAUDE_CODE_SESSION_ID
+  start_op_stub "running"
+  O="$BATS_TEST_TMPDIR/elsewhere/s-m.jsonl"; mkdir -p "$(dirname "$O")"; cp "$TRANSCRIPT" "$O"
+  mkdir -p "$TENANT_HOME/state"; printf '{"transcript_path":"%s"}' "$O" > "$TENANT_HOME/state/session-s-m.json"
+  run python3 "$CAPTURE" capture --session-id s-m; [ "$status" -eq 0 ]
+  run python3 "$CAPTURE" capture --transcript "$TRANSCRIPT"; [ "$status" -eq 0 ]
+  run python3 - "$OFFSETS" "$O" "$TRANSCRIPT" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1]))["offsets"]
+for t in sys.argv[2:]:
+    assert d.get(os.path.realpath(t)) == os.path.getsize(t), (t, d)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a hook payload on stdin names the transcript; a payload with only a session_id goes through the derivation, not the newest file" {
+  unset CLAUDE_CODE_SESSION_ID
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture <<< "{\"session_id\":\"x\",\"transcript_path\":\"$TRANSCRIPT\"}"
+  [ "$status" -eq 0 ]; [ "$(stored_offset)" -gt 0 ]
+  cp "$TRANSCRIPT" "$TRANSCRIPT_DIR/s-p.jsonl"
+  touch -t 200001010000 "$TRANSCRIPT_DIR/s-p.jsonl"               # the oldest file here
+  printf '{"type":"user","message":{"role":"user","content":"a decoy"}}\n' > "$TRANSCRIPT_DIR/session-z.jsonl"
+  touch -t 203001010000 "$TRANSCRIPT_DIR/session-z.jsonl"         # the newest by far
+  run python3 "$CAPTURE" capture <<< '{"session_id":"s-p"}'
+  [ "$status" -eq 0 ]; grep -q 'session s-p' "$STUB_POSTS"
+  run grep -q 'session-z' "$STUB_POSTS"; [ "$status" -ne 0 ]
+}
+
+@test "capture never waits on a stdin that stays open: a pipe with a writer that never writes is given one second, then the session id is used" {
+  start_op_stub "running"
+  mkfifo "$BATS_TEST_TMPDIR/held"
+  sleep 30 > "$BATS_TEST_TMPDIR/held" & holder=$!
+  t0="$(date +%s)"
+  run python3 "$CAPTURE" capture < "$BATS_TEST_TMPDIR/held"
+  t1="$(date +%s)"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ $((t1 - t0)) -lt 5 ] || { echo "capture waited $((t1 - t0)) s on stdin"; return 1; }
+  [ "$(post_count)" -eq 1 ]
+}
+
+@test "a session id whose derived transcript does not exist is refused, naming the path and memory.transcript_dir" {
+  start_op_stub "running"
+  CLAUDE_CODE_SESSION_ID=no-such-session run python3 "$CAPTURE" capture
+  [ "$status" -ne 0 ]
+  case "$output" in *"this session's transcript is not at $TRANSCRIPT_DIR/no-such-session.jsonl"*"memory.transcript_dir"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 0 ]
 }

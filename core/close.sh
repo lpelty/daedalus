@@ -20,12 +20,21 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 env_lines="$(memory_env)" || die "episodic capture is not configured — nothing was flushed"
 eval "$env_lines"
 
+# --transcript <path>: an operator shell names the session to flush (spec
+# §4.7 (2)); from a session capture.py finds it by CLAUDE_CODE_SESSION_ID.
 commit=0
-case "${1:-}" in
-  --commit) commit=1 ;;
-  "") : ;;
-  *) die "usage: core/close.sh [--commit]" ;;
-esac
+transcript=""
+usage="usage: core/close.sh [--transcript <path>] [--commit]"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --commit) commit=1 ;;
+    --transcript)
+      { [ $# -ge 2 ] && [ -n "$2" ]; } || die "$usage"
+      transcript="$2"; shift ;;
+    *) die "$usage" ;;
+  esac
+  shift
+done
 phases=1; [ "$commit" -eq 1 ] && phases=2
 
 log "phase 1/$phases: episodic capture"
@@ -34,8 +43,13 @@ log "phase 1/$phases: episodic capture"
 # the offset advanced past the lost span and this script still printed
 # "close complete". Waiting costs a few seconds and is the only thing that
 # makes the header comment above true rather than aspirational.
+# The transcript (spec §4.7 (2)): --transcript when given; else capture.py
+# resolves it from CLAUDE_CODE_SESSION_ID (the SessionStart marker, then the
+# derivation) and refuses when there is nothing to go on. </dev/null:
+# close.sh never carries a hook payload, and a Bash tool's stdin may be a
+# socket that never closes.
 CAPTURE_VERIFY_EXTRACTION=1 \
-python3 "$DAEDALUS_HOME/core/capture.py" capture \
+python3 "$DAEDALUS_HOME/core/capture.py" capture ${transcript:+--transcript "$transcript"} </dev/null \
   || die "capture failed — the session is unrecorded"
 # --commit: the prime's vault commit (spec §4.7) runs only after the capture
 # succeeded — a failed capture stops the close before anything is committed.
