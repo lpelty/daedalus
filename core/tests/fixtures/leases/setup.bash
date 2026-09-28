@@ -96,13 +96,20 @@ lease_json() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); prin
 # trunk_moves [file] [line] — someone else moves origin/main, from a separate clone
 # (the way trunk moves in real life), and target/thing fetches it. Never a push from
 # target/thing: once a window exists its pre-push hook refuses a trunk push that no
-# promotion confirmed (spec §7.3).
-trunk_moves() {
-  local o="$BATS_TEST_TMPDIR/elsewhere" f="${1:-b.txt}" msg="${2:-trunk moved}"
-  [ -d "$o/.git" ] || git clone -q "$BATS_TEST_TMPDIR/origin.git" "$o"
+# promotion confirmed (spec §7.3). TRUNK_MOVES_NO_FETCH=1 leaves target/thing's
+# origin/main where it was, so a test passes only if the command under test fetches.
+trunk_moves() { _origin_moves "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/elsewhere" \
+                  "$DAEDALUS_HOME/target/thing" "${1:-b.txt}" "${2:-trunk moved}"; }
+# sub_moves [file] [line] — the same for the nested repo's origin (sub-origin.git),
+# fetched (unless TRUNK_MOVES_NO_FETCH=1) into target/thing/sub.
+sub_moves() { _origin_moves "$BATS_TEST_TMPDIR/sub-origin.git" "$BATS_TEST_TMPDIR/elsewhere-sub" \
+                "$DAEDALUS_HOME/target/thing/sub" "${1:-m.txt}" "${2:-sub trunk moved}"; }
+_origin_moves() {
+  local origin="$1" o="$2" target="$3" f="$4" msg="$5"
+  [ -d "$o/.git" ] || git clone -q "$origin" "$o"
   git -C "$o" pull -q --ff-only origin main
   printf '%s\n' "$msg" >> "$o/$f"
   git -C "$o" add -A; git -C "$o" -c user.email=t@x -c user.name=t commit -q -m "$msg"
   git -C "$o" push -q origin HEAD:main
-  git -C "$DAEDALUS_HOME/target/thing" fetch -q origin
+  [ "${TRUNK_MOVES_NO_FETCH:-}" = 1 ] || git -C "$target" fetch -q origin
 }

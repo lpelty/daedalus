@@ -1194,9 +1194,15 @@ def _holder_or_shell(root: Path, nn: str, lease: dict, sid: Optional[str], cmd: 
         raise _held_by_live(nn, lease, "Say '%s %s' to that window; it runs it in its own worktree." % (cmd, nn))
 
 
-def _count(repo: Path, spec: str) -> int:
-    code, out, _ = _git(repo, "rev-list", "--count", spec)
-    return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
+def _count(root: Path, nn: str, repo: str, trunk: str, spec: str) -> int:
+    """Commits in `spec` in worktrees/<nn>/<repo>. A rev-list that fails is an
+    answer we do not have, never 0 — 0 would tell the window it is up to date."""
+    code, out, err = _git(root / "worktrees" / nn / repo, "rev-list", "--count", spec)
+    if code != 0 or not out.strip().isdigit():
+        last = err.strip().splitlines()[-1:] or ["no output"]
+        raise Refused("cannot tell whether worktrees/%s/%s is behind origin/%s (git rev-list: %s); window %s was not rebased"
+                      % (nn, repo, trunk, last[0], nn))
+    return int(out.strip())
 
 
 def rebase(root: Path, token: str, sid: Optional[str]) -> str:
@@ -1214,7 +1220,15 @@ def rebase(root: Path, token: str, sid: Optional[str]) -> str:
     if lease is None:
         raise Refused("There is no window %s." % nn)
     _holder_or_shell(root, nn, lease, sid, "rebase")
+    if lease.get("worktree_ready") is False:
+        raise Refused("window %s's worktree was not finished at start; run `core/lease.sh claim %s` to finish it" % (nn, nn))
     trunks = lease.get("trunks") or trunks_of(root, root / "target")
+    # A worktree that is not there cannot be counted or rebased, and
+    # dirty_files calls it clean: refuse it rather than report it up to date.
+    for repo in trunks:
+        if not (root / "worktrees" / nn / repo).is_dir():
+            raise Refused("worktrees/%s/%s is missing; run `core/lease.sh claim %s` to finish window %s's worktree, "
+                          "then rebase" % (nn, repo, nn, nn))
     for repo in trunks:
         files = dirty_files(root / "worktrees" / nn / repo)
         if files:
@@ -1225,10 +1239,14 @@ def rebase(root: Path, token: str, sid: Optional[str]) -> str:
         if code != 0:
             last = err.strip().splitlines()[-1:] or ["no output"]
             raise Refused("could not fetch origin in target/%s (%s); window %s was not rebased" % (repo, last[0], nn))
+    # Every repo is counted before any is rebased: a count that fails refuses
+    # while no worktree has moved, so "was not rebased" stays true.
+    counts = {repo: (_count(root, nn, repo, trunk, "origin/%s..HEAD" % trunk),
+                     _count(root, nn, repo, trunk, "HEAD..origin/%s" % trunk)) for repo, trunk in trunks.items()}
     report = []
     for repo, trunk in trunks.items():
         wt = root / "worktrees" / nn / repo
-        ahead, behind = _count(wt, "origin/%s..HEAD" % trunk), _count(wt, "HEAD..origin/%s" % trunk)
+        ahead, behind = counts[repo]
         if behind == 0:
             report.append("%s already up to date" % repo)
             continue

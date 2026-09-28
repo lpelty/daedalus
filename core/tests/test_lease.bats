@@ -1052,16 +1052,58 @@ two_windows_prime_01() {
 
 @test "rebase: a clean lease fast-forwards onto a moved trunk; a lease with commits has them replayed onto it, subjects kept" {
   LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
-  trunk_moves b.txt "trunk moved"
+  # The move is not fetched into target/thing: only rebase's own fetch (§7.1 step 4) brings it.
+  TRUNK_MOVES_NO_FETCH=1 trunk_moves b.txt "trunk moved"
   run LS rebase 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Window 01 is up to date with trunk (thing fast-forwarded to origin/main; thing/sub already up to date). Run core/gates.sh before asking for promote."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$W" rev-parse HEAD)" = "$(git -C "$T" rev-parse origin/main)" ]
   printf 'mine\n' > "$W/c.txt"; git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m "window work"
-  trunk_moves b.txt "trunk again"
+  TRUNK_MOVES_NO_FETCH=1 trunk_moves b.txt "trunk again"
   GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x run LS rebase 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"thing: 1 commit replayed onto origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$W" rev-parse HEAD^)" = "$(git -C "$T" rev-parse origin/main)" ]
   [ "$(git -C "$W" log -1 --format=%s)" = "window work" ]
+}
+
+@test "rebase: a nested repo whose trunk moved is fast-forwarded too; a conflict there names thing/sub and its path" {
+  LS create >/dev/null; S="$DAEDALUS_HOME/worktrees/01/thing/sub"
+  TRUNK_MOVES_NO_FETCH=1 sub_moves m.txt "sub trunk moved"
+  run LS rebase 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 is up to date with trunk (thing already up to date; thing/sub fast-forwarded to origin/main)."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$S" rev-parse HEAD)" = "$(git -C "$T/sub" rev-parse origin/main)" ]
+  [ -f "$S/m.txt" ]
+  printf 'window line\n' >> "$S/n.txt"; git -C "$S" -c user.email=t@x -c user.name=t commit -q -am "window edits n.txt"
+  TRUNK_MOVES_NO_FETCH=1 sub_moves n.txt "sub trunk edits n.txt"
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"Window 01's rebase stopped on a conflict in thing/sub: n.txt. Resolve it in worktrees/01/thing/sub,"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "rebase: an origin that cannot be fetched stops before any worktree moves, naming the repo, exit non-zero" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"; before="$(git -C "$W" rev-parse HEAD)"
+  git -C "$T" remote set-url origin "$BATS_TEST_TMPDIR/no-such-origin.git"
+  run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"could not fetch origin in target/thing ("*"); window 01 was not rebased"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" rev-parse HEAD)" = "$before" ]
+}
+
+@test "rebase never calls a window up to date when it cannot tell: a missing worktree, an unfinished one, and a trunk git cannot count against are refused" {
+  LS create >/dev/null
+  mv "$DAEDALUS_HOME/worktrees/01/thing/sub" "$BATS_TEST_TMPDIR/sub-away"
+  run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"worktrees/01/thing/sub is missing; run \`core/lease.sh claim 01\` to finish window 01's worktree, then rebase"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"up to date"*) echo "$output"; return 1 ;; esac
+  mv "$BATS_TEST_TMPDIR/sub-away" "$DAEDALUS_HOME/worktrees/01/thing/sub"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["worktree_ready"]=False; json.dump(d,open(p,"w"))' "$DAEDALUS_HOME/state/leases/01.json"
+  run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"window 01's worktree was not finished at start; run \`core/lease.sh claim 01\` to finish it"*) : ;; *) echo "$output"; return 1 ;; esac
+  # The nested repo's trunk is the unknown one while the outer's has moved:
+  # the refusal comes before the outer worktree is touched.
+  W="$DAEDALUS_HOME/worktrees/01/thing"; before="$(git -C "$W" rev-parse HEAD)"; trunk_moves b.txt "trunk moved"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("worktree_ready"); d["trunks"]={"thing":"main","thing/sub":"nosuch"}; json.dump(d,open(p,"w"))' "$DAEDALUS_HOME/state/leases/01.json"
+  run LS rebase 01; [ "$status" -ne 0 ]
+  case "$output" in *"cannot tell whether worktrees/01/thing/sub is behind origin/nosuch ("*"); window 01 was not rebased"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"up to date"*) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" rev-parse HEAD)" = "$before" ]
 }
 
 @test "rebase: a conflict stops with the path named and a non-zero exit, and the worktree is left mid-rebase for the window to resolve" {
