@@ -249,15 +249,15 @@ _run_scan_in_fixture() {
 }
 
 # Regression guard for the capture.py credential incident: a deployment ran
-# for hours on a 401 because the wrong bearer token was used and the
-# fallback .env path does not resolve in Daedalus's layout. Two distinct
-# assertions so a partial deletion (e.g. keeping the env var name but
-# dropping the explicit-setup sentence) still fails this test.
-@test "README documents the capture.py credential requirement" {
-  run grep -qF "HINDSIGHT_API_TENANT_API_KEY" "$DAEDALUS_HOME/README.md"
-  [ "$status" -eq 0 ]
-  run grep -q "Set .HINDSIGHT_API_TENANT_API_KEY. explicitly on the hook command" "$DAEDALUS_HOME/README.md"
-  [ "$status" -eq 0 ]
+# for hours on a 401 because the wrong bearer token was used. Since v0.7.0 the
+# key lives in a 0600 file named by memory.api_key_file (spec §4.7) — the old
+# advice, "Set HINDSIGHT_API_TENANT_API_KEY explicitly on the hook command",
+# put the key on a command line any process listing shows, and must not come back.
+@test "README documents the capture credential: the variable, the key file, that it is not the MCP token, and never the hook-command advice" {
+  run grep -qF "HINDSIGHT_API_TENANT_API_KEY" "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ]
+  run grep -qF "memory.api_key_file" "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ]
+  run grep -q "different credential" "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ]
+  run grep -q "explicitly on the hook command" "$DAEDALUS_HOME/README.md"; [ "$status" -ne 0 ]
 }
 
 @test "runtime-evaluated PEP 604 unions carry the future import (3.9 deployments)" {
@@ -303,4 +303,15 @@ _run_scan_in_fixture() {
   run grep -q 'prime' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
   run grep -q 'core/vault-commit.sh' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
   run grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -eq 0 ]
+}
+
+# Spec §4.7: the operator-facing summary of incremental capture (plan 2 of 5).
+@test "README, CLAUDE.md and CHANGELOG describe Stop-cadence capture, the memory: block and close.sh's in-flight wait" {
+  for s in 'memory:' 'core/capture-tick.sh' 'capture_interval' 'still in flight' '--transcript'; do
+    run grep -qF -- "$s" "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ] || { echo "README lacks $s"; return 1; }
+  done
+  run grep -qF 'core/close.sh' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -qF 'still in flight' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -qF 'Incremental capture' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -eq 0 ]
+  run grep -qF 'incremental capture (plan 2)' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -ne 0 ]
 }

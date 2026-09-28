@@ -74,57 +74,111 @@ Claude Code keeps under `~/.claude/sessions/` (liveness reads it).
 a Hindsight episodic-memory server. It is additive: `setup.sh` and the gates
 work fully with episodic capture unconfigured.
 
-Capture runs as a `SessionEnd` hook, wired in `.claude/settings.local.json`
-(gitignored, per-deployment — see `.gitignore`). That file, not a tracked
-settings file, is the right home for this hook: the command line carries a
-machine-specific transcript path and a secret, both of which belong to one
-deployment rather than the distribution.
+### One place for its configuration: the `memory:` block
 
-The script reads its configuration entirely from environment variables set
-on the hook command:
+Everything capture needs lives in a `memory:` block in `config.yaml`.
+`config.example.yaml` carries the block commented out; adding it turns capture
+on.
 
-- `TENANT_HOME`, `TENANT_BANK`, `TRANSCRIPT_DIR` — required.
-- `HINDSIGHT_API_URL` — optional, defaults to `http://127.0.0.1:8888`.
-- `TENANT_USER_LABEL`, `TENANT_ASSISTANT_LABEL` — optional, default `User` /
-  `Assistant`.
-- `HINDSIGHT_API_TENANT_API_KEY` — the bearer credential for the REST API
-  `capture.py` posts to. This is a **different credential** from the bearer
+```yaml
+memory:
+  bank: daedalus
+  api_url: http://127.0.0.1:8888
+  # A file under the Daedalus home holding the REST API key, mode 0600.
+  api_key_file: state/hindsight/api-key
+  capture_interval: 120
+  # Optional; see below.
+  # transcript_dir: /path/to/transcripts
+  # user_label: OPERATOR
+  # assistant_label: Daedalus
+```
+
+- `bank` — the Hindsight bank. Required once the block is there.
+- `api_url` — defaults to `http://127.0.0.1:8888`.
+- `api_key_file` — the bearer credential for the REST API `capture.py` posts
+  to, in a file under the Daedalus home. `chmod 600` it: capture refuses a key
+  file others can read. This is a **different credential** from the bearer
   token a Hindsight MCP client uses against `/mcp/BANK/` — using the MCP
   token here authenticates as the wrong principal and the server returns
-  `401 Invalid API key`.
+  `401 Invalid API key`. Keep the key in the file, never on a hook command
+  line, where any process listing shows it. In capture's environment the file
+  named by `memory.api_key_file` becomes `HINDSIGHT_API_TENANT_API_KEY`.
+- `capture_interval` — seconds between captures of one session at Stop;
+  default 120.
+- `transcript_dir` — where Claude Code writes this home's transcripts. The
+  default is `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR/projects/`) plus
+  this home's resolved path with every character other than a letter or
+  digit turned into `-` — Claude Code's own naming. Capture needs it only
+  when no hook has named the transcript; `core/doctor.sh` says when the
+  directory does not exist.
+- `user_label`, `assistant_label` — how turns are labelled in memory;
+  default `User` / `Assistant`.
 
-Set `HINDSIGHT_API_TENANT_API_KEY` explicitly on the hook command — this is
-the required setup step, not an optional one. The script falls back to a
-`.env` file at a path relative to its own location on disk, a path that
-resolves in the harness capture.py was vendored from. In Daedalus's directory
-layout, the explicit environment variable is the path that resolves.
+An environment variable of the same meaning overrides one field:
+`TENANT_BANK`, `HINDSIGHT_API_URL`, `HINDSIGHT_API_TENANT_API_KEY`,
+`TRANSCRIPT_DIR`, `CAPTURE_INTERVAL`, `TENANT_USER_LABEL`,
+`TENANT_ASSISTANT_LABEL`, `TENANT_HOME`. That is how a hook line written for
+an older release keeps working. `core/doctor.sh` reports the block, or says
+capture is off.
 
-Worked example, `.claude/settings.local.json`:
+### When capture runs
 
-```json
-{
-  "hooks": {
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "HINDSIGHT_API_TENANT_API_KEY=YOUR_KEY TENANT_HOME=/path/to/daedalus TENANT_BANK=daedalus TRANSCRIPT_DIR=/path/to/daedalus/transcripts python3 /path/to/daedalus/core/capture.py capture >> /path/to/daedalus/.capture.log 2>&1"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+- **At every Stop** — `core/capture-tick.sh`, wired in the tracked
+  `.claude/settings.json`. At most once per `capture_interval` for each
+  session. The capture runs in the background (its output goes to
+  `.capture.log`), so a turn never waits on memory, and what one window
+  learned reaches the bank within minutes.
+- **When the session ends** — the same script with `--final`: the last turns,
+  no interval, after any Stop capture still sending.
+- **`core/close.sh`** — the explicit flush at the end of a working session. It
+  waits until the server confirms every part of the session it holds —
+  including what the Stop captures sent earlier — and otherwise exits
+  non-zero, naming the parts not yet confirmed, so you close again. If
+  another capture of the session is still in flight it waits up to 90
+  seconds; past that it exits non-zero with "a capture is still in flight
+  after 90 s; wait and close again" rather than report a close that did not
+  happen.
+
+The transcript is named, never guessed: the hook payload's `transcript_path`;
+else the path this session's start recorded; else
+`<transcript_dir>/<CLAUDE_CODE_SESSION_ID>.jsonl`. From a shell with none of
+those, name it: `core/close.sh --transcript <path>`. With nothing to go on,
+capture refuses rather than flush another session.
+
+A transcript is read in whole lines, so a turn Claude Code is still writing
+waits for the next capture. If the transcript format changes under a newer
+Claude Code, `.capture.log` says once "transcript parse failure — …";
+entries capture cannot read are not stored, and a stretch with nothing
+readable is held for a build that can read it.
+
+One capture of a session runs at a time. A second one — a Stop capture while
+the end-of-session flush is sending, or two windows closing together — sees
+the first's in-flight mark in `state/hindsight/offsets.json` and skips (from
+`close.sh`, waits). A mark left by a process that died is recognised by its
+process id and start time and cleared.
+
+A session started by the direct-call launcher does not capture itself
+(`CAPTURE_DEFER_TO_CALLER=1` or `DIRECT_CALL_ID` in its environment); the
+caller records it.
+
+### Moving from the hook line in `.claude/settings.local.json`
+
+Releases before v0.7.0 wired capture as a `SessionEnd` command in
+`.claude/settings.local.json`, with its values as `VAR=value` prefixes on the
+command line. That line keeps working — its prefixes override the block — so
+nothing breaks while you move the values into `memory:` (the bank, the
+transcript directory, and the key into `state/hindsight/api-key`). Once they
+are there, the line can be removed; `core/doctor.sh` says so. The
+`UserPromptSubmit` line for `recall-inject.py` (below) keeps its prefixes in
+this release.
 
 ### What happens when extraction fails
 
 The server returns `202` when it *accepts* a batch; extraction runs afterwards
-and can fail on its own. The `SessionEnd` hook cannot wait for that verdict —
-Claude Code gives its hooks a shared budget of roughly a second and a half,
-while extraction takes tens of seconds — so the hook records each pushed span
-in a retry ledger inside `state/hindsight/offsets.json` and returns.
+and can fail on its own. The Stop capture and the end-of-session flush do not
+wait for that verdict — extraction takes tens of seconds — so each records the
+pushed span in a retry ledger inside `state/hindsight/offsets.json` and
+finishes.
 
 Every later run of `capture.py capture` (including `core/close.sh`) settles
 that ledger first: it asks the server how each pending operation ended, drops
@@ -150,7 +204,7 @@ so continuity survives a session boundary without anyone asking for it. It
 shares the credentials above, and it is optional — a deployment without it
 works, and the skill still does.
 
-Add alongside the `SessionEnd` block in `.claude/settings.local.json`:
+Add to `.claude/settings.local.json` (this line still carries its values as prefixes in this release):
 
 ```json
 {

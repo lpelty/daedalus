@@ -248,6 +248,18 @@ Sessions are captured into an episodic memory bank, so what earlier sessions
 established stays reachable: decisions and their reasoning, audit findings,
 and observations about how the target actually behaved.
 
+Capture is automatic when the deployment has a `memory:` block in
+`config.yaml`: a Stop hook records this session every couple of minutes, and
+once more when it ends, so what another window learned reaches the bank within
+minutes. At the end of a working session run `core/close.sh`: it waits until
+the server confirms the session was stored. It can take several minutes (up
+to 90 s waiting for a capture already in flight, then settling, pushing and
+verifying inside the run's 300 s in-flight ceiling), so run it with the Bash
+tool's timeout at its maximum, 600000 ms. If it says a capture is
+still in flight, wait and run it again — do not report the session as
+recorded until it exits 0. A session started by the direct-call launcher does
+not capture itself; its caller does.
+
 Reading it back works two ways. Relevant memories are surfaced automatically
 at the top of a prompt when a deployment wires the injection hook. The
 `recall` skill queries the bank directly, and it is the one to reach for when

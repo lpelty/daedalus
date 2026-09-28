@@ -4,7 +4,7 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
-## Unreleased — numbered windows, lease worktrees, the board, the pen (v0.7.0 plan 1 of 5)
+## Unreleased — numbered windows, lease worktrees, the board, the pen; incremental capture (v0.7.0 plans 1–2 of 5)
 
 - **Every interactive window numbers itself** at SessionStart and builds in
   its own git worktree of the target (`worktrees/<NN>/<repo>`, branch
@@ -31,9 +31,41 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
   `lease:`; per-session dedup files; the document index is prime-only.
 - Doctor reports the lease directories, stale/released/finished windows,
   swept numbers with waiting work, and the session registry.
-- Not yet in this release: incremental capture (plan 2), the caller and
-  refuter launcher (plan 3), `promote` and the pre-push hook (plan 4),
-  `lease.sh rebase/split/adopt` (plans 4 and 5), the self-upgrade and
+- **Incremental capture.** With a `memory:` block in `config.yaml` — now the
+  one place capture's configuration lives (`lib.sh memory_env`; an environment
+  variable still overrides a field; the API key comes from a 0600 file) —
+  `core/capture-tick.sh` captures each window's session at Stop, at most every
+  `capture_interval` seconds, and flushes it at SessionEnd. Both are wired in
+  the tracked `settings.json` and run capture in the background.
+- **The transcript is named, never guessed**: `capture.py capture
+  --transcript` / `--session-id`, the hook payload, this session's start
+  marker, then `<transcript_dir>/<session id>.jsonl`. The "newest transcript"
+  fallback is gone (it could flush another session); with nothing to go on,
+  capture refuses.
+- **One capture per session at a time**: `offsets.json` is read and written
+  under a lock that is never held across a network call; a run marks the
+  transcript in flight (process id, start time) and the retry-ledger entries it
+  is settling. A second run skips; `close.sh` waits up to 90 s and otherwise
+  exits non-zero; a run that outlived its mark never writes over the run that
+  replaced it.
+- **`close.sh` confirms the whole session** — the spans the Stop captures sent
+  earlier as well as its own — and takes `--transcript <path>` from a shell.
+- **Whole lines only**: a turn still being written waits for the next capture;
+  an unreadable transcript format is logged once and never skipped silently.
+- `CAPTURE_DEFER_TO_CALLER=1`, or `DIRECT_CALL_ID` (a direct-call visitor),
+  makes capture stand down (the direct-call launcher re-captures, plan 3).
+- PROP-006: a failed extraction reports the server's `error_message` instead
+  of `error=None`.
+- `core/lease.sh` refuses every command that changes a window from a
+  direct-call session; SessionStart's worktree adds share the hook's 30 s
+  budget (a slow nested repo leaves the window for `claim` to finish); an add
+  interrupted mid-checkout is removed and redone instead of adopted.
+- Doctor reports the `memory:` block (OK, absent, or unusable) and a leftover
+  capture line in `.claude/settings.local.json`.
+- Not yet in this release: the caller and refuter launcher (plan 3);
+  `promote`, the pre-push hook and `prime take`'s transcript check (plan 4);
+  `lease.sh rebase/split/adopt` (plans 4 and 5); the self-upgrade that moves an
+  old capture line into `memory:`, `recall-inject.py` on `memory_env`, and
   `VERSION` (plan 5).
 
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
