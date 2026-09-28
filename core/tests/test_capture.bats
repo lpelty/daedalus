@@ -825,17 +825,20 @@ ps_ms() { python3 -c 'import subprocess,sys,time
 out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
 print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
 
-# seed_in_flight <pid> <proc_started_ms> <started_epoch> [transcript] — write an
-# in-flight claim for a transcript into offsets.json, as a running capture would.
+# seed_in_flight <pid> <proc_started_ms> <started_epoch> [transcript] [ceiling]
+# — write an in-flight claim for a transcript into offsets.json, as a running
+# capture would; with a ceiling, the claim records it as its run's own.
 seed_in_flight() {
   mkdir -p "$(dirname "$OFFSETS")"
-  python3 - "$OFFSETS" "${4:-$TRANSCRIPT}" "$1" "$2" "$3" <<'PY'
+  python3 - "$OFFSETS" "${4:-$TRANSCRIPT}" "$1" "$2" "$3" "${5:-}" <<'PY'
 import json, os, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 d = json.loads(p.read_text()) if p.exists() else {}
 d.setdefault("offsets", {}); d.setdefault("pending", [])
-d.setdefault("transcripts", {})[os.path.realpath(sys.argv[2])] = {"in_flight": {
-    "offset": 0, "pid": int(sys.argv[3]), "proc_started": int(sys.argv[4]), "started": float(sys.argv[5])}}
+claim = {"offset": 0, "pid": int(sys.argv[3]), "proc_started": int(sys.argv[4]), "started": float(sys.argv[5])}
+if sys.argv[6]:
+    claim["ceiling"] = float(sys.argv[6])
+d.setdefault("transcripts", {})[os.path.realpath(sys.argv[2])] = {"in_flight": claim}
 p.write_text(json.dumps(d))
 PY
 }
@@ -1468,6 +1471,47 @@ await_log() {     # await_log <text> — up to 10 s
   [ "$(post_count)" -eq 1 ]
   run tick --final; [ "$status" -eq 0 ]
   await_posts 2
+}
+
+@test "the session-end flush waits out a Stop tick still in flight, then captures the turns appended after it" {
+  # A --final that skips a live claim (as a Stop tick does) loses the tail:
+  # nothing re-ticks an ended session's transcript.
+  tick_home; start_op_stub "running"; with_memory
+  printf '4' > "$BATS_TEST_TMPDIR/post_sleep"
+  run tick; await_posts 1
+  printf '{"type":"user","message":{"role":"user","content":"the last turn"}}\n' >> "$TRANSCRIPT"
+  run tick --final; [ "$status" -eq 0 ]
+  await_posts 2
+  await_log "capture: queued"
+  run grep -F "skipping" "$TH/.capture.log"; [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c 'the last turn' "$STUB_POSTS")" -eq 1 ]
+}
+
+@test "--wait-out-claim waits for the claim in flight to its own recorded ceiling, not a fixed limit, then clears it and captures" {
+  start_op_stub "running"
+  sleep 300 & sp=$!
+  # Live for 3 s more by its own ceiling (300 s), although its pid lives on.
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(( $(date +%s) - 297 ))" "" 300
+  run python3 "$CAPTURE" capture --wait-out-claim
+  kill "$sp"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"cleared a dead in-flight claim"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(post_count)" -eq 1 ]
+}
+
+@test "a session-end flush that must give up says so in a sentence fit for a hook: the last turns were not stored, and the close command that stores them" {
+  # A claim dated ahead of the clock (the wall clock stepped back) stays live
+  # past the flush's wait; the flush gives up rather than hanging.
+  tick_home; start_op_stub "running"; with_memory
+  OFFSETS="$TH/state/hindsight/offsets.json"
+  sleep 300 & sp=$!
+  seed_in_flight "$sp" "$(ps_ms "$sp")" "$(( $(date +%s) + 600 ))" "" 2
+  run tick --final; [ "$status" -eq 0 ]
+  await_log "the session-end flush gave up after" || { kill "$sp"; return 1; }
+  kill "$sp"
+  grep -qF "the last turns of this session were not stored — run core/close.sh --transcript $TRANSCRIPT" "$TH/.capture.log"
+  run grep -F "wait and close again" "$TH/.capture.log"; [ "$status" -ne 0 ]
+  [ "$(post_count)" -eq 0 ]
 }
 
 @test "the tick honours memory.capture_interval end to end: with 2 s a second tick at once is throttled (the log names 2 s, not the 120 s default), and a tick after 3 s captures" {

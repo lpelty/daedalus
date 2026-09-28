@@ -2,7 +2,10 @@
 # Episodic capture on a Stop cadence (spec §4.7 "Capture, incremental").
 # The tracked .claude/settings.json runs this on every Stop (throttled per
 # transcript to memory.capture_interval) and on SessionEnd with --final (the
-# tail flush: no throttle; waits out a Stop tick still in flight). Claude Code
+# tail flush: no throttle; waits out a Stop tick still in flight for as long as
+# that tick's claim can honestly last — its own recorded ceiling, not a fixed
+# 90 s, because nothing re-ticks an ended session and the flush is detached,
+# so the wait holds no one up). Claude Code
 # runs an event's hooks in parallel, so its place in the Stop list is cosmetic.
 #
 # Reads the hook payload on stdin. Exits 0 on every path, and silently when
@@ -51,7 +54,7 @@ else
   exit 0
 fi
 if [ "$final" -eq 1 ]; then
-  set -- "$@" --wait-in-flight 90
+  set -- "$@" --wait-out-claim
 else
   set -- "$@" --throttle "$CAPTURE_INTERVAL"
 fi

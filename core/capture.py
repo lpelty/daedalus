@@ -32,7 +32,12 @@ Commands (python3 core/capture.py ...):
                         skip a transcript captured less than SECS ago (Stop tick)
         [--wait-in-flight SECS]
                         wait up to SECS for a capture in flight, then capture;
-                        fail past that (close.sh, the session-end flush)
+                        fail past that (close.sh)
+        [--wait-out-claim]
+                        wait for a capture in flight until it clears or passes
+                        its own recorded ceiling, then capture (the session-end
+                        flush: nothing re-ticks an ended session, so it waits as
+                        long as a live claim can honestly last)
     recall "<query>"    Query memory; --types world,experience,observation
     retain "<text>"     Manually store a fact
     status              Server health + bank stats + token usage + offsets
@@ -1112,24 +1117,48 @@ def _unsettled_spans(cfg: dict, ctx: dict) -> tuple:
     return unconfirmed, settling
 
 
-def _capture_path(transcript: str, cfg: dict, throttle: int | None = None, wait: int = 0):
+def _claim_end(claim, cfg: dict, now: float) -> float:
+    """When `claim` stops counting as live by age: its start plus the ceiling
+    its own run recorded. A start dated ahead of the clock (the clock stepped
+    back) counts from now, so a wait on it stays bounded."""
+    started = claim.get("started") if isinstance(claim, dict) else None
+    if not isinstance(started, (int, float)) or isinstance(started, bool):
+        started = now
+    return min(started, now) + _claim_ceiling(claim, cfg)
+
+
+def _capture_path(transcript: str, cfg: dict, throttle: int | None = None, wait: int = 0,
+                  wait_out: bool = False):
     """One capture of one transcript in three sections (spec §4.7): claim it,
     settle and push with no lock, apply what this run still holds. `throttle`
     (the Stop tick) skips a transcript captured less than that many seconds
     ago. A run that finds a live in-flight claim skips -- or, with `wait`
-    (close.sh, the session-end flush), polls once a second until the claim
-    clears and then captures, failing after `wait` seconds so a close never
-    reports a session it did not flush. In verification mode (close.sh) the
-    run also waits out this transcript's earlier spans and succeeds only when
-    none is left in the ledger (Decision 15). A claim is always released, even
-    when the push raises."""
+    (close.sh), polls once a second until the claim clears and then captures,
+    failing after `wait` seconds so a close never reports a session it did not
+    flush. With `wait_out` (the session-end flush) the poll lasts until the
+    first claim it finds passes its own recorded ceiling (then it is dead and
+    cleared): a Stop tick may honestly hold its claim for its whole ceiling
+    (the ledger settling, then a slow POST), nothing re-ticks an ended
+    session's transcript, and the flush runs detached, so waiting costs no
+    one. In verification mode (close.sh) the run also waits out this
+    transcript's earlier spans and succeeds only when none is left in the
+    ledger (Decision 15). A claim is always released, even when the push
+    raises."""
     status, info = _claim_run(transcript, cfg, throttle)
-    until = time.time() + wait
+    t0 = time.time()
+    until = t0 + wait
+    if status == "busy" and wait_out:
+        until = max(until, _claim_end(info, cfg, t0) + 2)
     while status == "busy" and time.time() < until:
         time.sleep(1)
         status, info = _claim_run(transcript, cfg, None)
     if status == "busy":
         started = time.strftime("%H:%M", time.localtime(info.get("started") or 0))
+        if wait_out:
+            print(f"capture: the session-end flush gave up after {int(time.time() - t0)} s behind another "
+                  f"capture of this transcript (pid {info.get('pid')}, started {started}); the last turns "
+                  f"of this session were not stored — run core/close.sh --transcript {transcript}")
+            return False
         if wait:
             print(f"capture: a capture is still in flight after {wait} s; wait and close again "
                   f"(pid {info.get('pid')}, started {started})")
@@ -1295,6 +1324,7 @@ def cmd_capture(args: list[str], cfg: dict):
         return True
     throttle = _secs_flag(args, "--throttle")
     wait = _secs_flag(args, "--wait-in-flight") or 0
+    wait_out = "--wait-out-claim" in args
     transcript, source = _resolve_transcript(args, cfg)
     if not transcript:
         print(REFUSE_GUESS)
@@ -1321,7 +1351,7 @@ def cmd_capture(args: list[str], cfg: dict):
         _settle_ledger(cfg)
         print(f"capture: no transcript ({transcript})")
         return True
-    return _capture_path(transcript, cfg, throttle=throttle, wait=wait)
+    return _capture_path(transcript, cfg, throttle=throttle, wait=wait, wait_out=wait_out)
 
 
 def cmd_recall(args: list[str], cfg: dict):
