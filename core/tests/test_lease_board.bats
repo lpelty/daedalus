@@ -1,5 +1,9 @@
 #!/usr/bin/env bats
 # Pins core/lease-board.py: rendering, the heartbeat and the reader's changed set — never binding (spec §4.3, §4.2).
+# A wall-clock assertion lives in this file (the 40-lease render under 2 s): under the parallel
+# full-suite gate (`bats --jobs 12`) its tests run one at a time, while other files run beside it.
+# It missed the budget twice under parallel load in plan 2 (2.16 s, 2.72 s) and passed serially both times.
+BATS_NO_PARALLELIZE_WITHIN_FILE=true
 bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
 setup() { lease_fixture; LS() { bash "$DAEDALUS_HOME/core/lease.sh" "$@"; }; }
