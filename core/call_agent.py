@@ -954,14 +954,69 @@ def write_verdict(root: Path, call_dir: Path, rec: dict, answer: str) -> Optiona
 
 # --- capture (spec §8.5) ---------------------------------------------------------------
 
+def classify_capture(code: int, output: str) -> str:
+    """capture.py's verify-mode output -> the receipt word. pending and failed
+    mean NOT remembered — never report otherwise."""
+    if code == 97:
+        return "failed"
+    if "extraction confirmed" in output:
+        return "confirmed"
+    if "nothing new" in output or "no conversational text" in output:
+        return "nothing_new"
+    if code != 0 and "timed out" in output:
+        return "pending"
+    if code != 0:
+        return "failed"
+    return "pending"
+
+
+def memory_configured(root: Path) -> bool:
+    """A top-level memory: block in this deployment's config.yaml, or a
+    TENANT_BANK already in the caller's environment."""
+    if os.environ.get("TENANT_BANK"):
+        return True
+    cfg_file = config_file(root)
+    try:
+        return any(ln.startswith("memory:") for ln in cfg_file.read_text().splitlines())
+    except OSError:
+        return False
+
+
 def recapture(root: Path, call_dir: Path, stamp: str, rec: dict, launch: dict) -> dict:
-    """Task 6 replaces this body with the launcher's re-capture (spec §8.5).
-    A call through the callee's own launcher is captured there (Decision 9)."""
+    """The launcher's re-capture (spec §8.5): the callee's own SessionEnd capture
+    stands down (CAPTURE_DEFER_TO_CALLER in its environment), so the call is
+    remembered here, in the caller's environment without the direct-call
+    variables, with the caller and the callee as the two speakers. A call
+    through the callee's own launcher is captured there (Decision 9)."""
+    def skipped(why: str) -> dict:
+        return {"status": "skipped", "exit_code": None, "detail": why}
+    if rec["mode"] == "refuter":
+        return skipped("the refuter has no memory by design; its transcript is the verdict")
     if launch["output"] == "launcher":
         return {"status": "deferred", "exit_code": None,
                 "detail": "%s's own launcher captures this call (its receipt %s)"
                           % (rec["callee"], rec.get("callee_receipt") or "unknown")}
-    return {"status": "skipped", "exit_code": None, "detail": "re-capture is not wired in this build"}
+    s = launch["settings"]
+    if not s["capture"]:
+        return skipped("direct_call.capture is false")
+    if not memory_configured(root):
+        return skipped("no memory: block in config.yaml and no TENANT_BANK in the environment")
+    transcript = launch["transcript"]
+    if not transcript.is_file():
+        return skipped("no transcript at %s" % transcript)
+    hook = call_dir / ("%s-hook.json" % stamp)
+    hook.write_text(json.dumps({"transcript_path": str(transcript), "session_id": rec["session_id"]}))
+    env = {k: val for k, val in lib_env(root).items() if k not in CALL_VARS}
+    env.update(TENANT_USER_LABEL=rec["caller"], TENANT_ASSISTANT_LABEL=rec["callee"],
+               TRANSCRIPT_DIR=str(transcript.parent), CAPTURE_VERIFY_EXTRACTION="1",
+               CAPTURE_VERIFY_TIMEOUT_SEC=str(s["capture_wait"]))
+    try:
+        p = subprocess.run(["bash", "-c", CAPTURE_SNIPPET, "capture", str(hook)], capture_output=True,
+                           text=True, env=env, timeout=s["capture_wait"] + 120)
+    except subprocess.TimeoutExpired:
+        return {"status": "pending", "exit_code": None, "detail": "capture did not finish in time"}
+    out = (p.stdout + p.stderr).strip()
+    return {"status": classify_capture(p.returncode, out), "exit_code": p.returncode, "detail": out[-400:]}
 
 
 # --- new calls, resumes, the latest review ----------------------------------------------

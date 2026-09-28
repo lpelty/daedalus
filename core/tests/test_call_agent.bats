@@ -687,3 +687,56 @@ got = [a["advisory"] for a in r["attempts"]]
 assert got == [False, True], got
 PY
 }
+
+# --- capture belongs to the caller (Task 6, spec §8.5) ---------------------------------------
+
+@test "the launcher re-captures a call with the caller and the callee as labels, in the caller's environment without the direct-call variables" {
+  direct_call "callers: Peer"
+  export TENANT_BANK=bank-x CAPTURE_LOG="$BATS_TEST_TMPDIR/capture.json"
+  FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 0 ]
+  [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: confirmed; exit: 0" ]
+  python3 - "$CAPTURE_LOG" "$DAEDALUS_HOME" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); e = c["env"]
+assert c["argv"][0] == "capture" and c["argv"][1] == "--hook-json", c
+assert e["TENANT_USER_LABEL"] == "Peer" and e["TENANT_ASSISTANT_LABEL"] == "Daedalus", e
+assert e["TENANT_BANK"] == "bank-x" and e["CAPTURE_VERIFY_EXTRACTION"] == "1" and e["CAPTURE_VERIFY_TIMEOUT_SEC"] == "90", e
+assert "CAPTURE_DEFER_TO_CALLER" not in e and not any(k.startswith("DIRECT_CALL_") for k in e), e
+hook = json.load(open(c["argv"][2]))
+assert hook["transcript_path"].endswith(hook["session_id"] + ".jsonl"), hook
+PY
+  STUB_CAPTURE_OUT="capture: extraction FAILED — boom" STUB_CAPTURE_EXIT=1 FAKE_MARKER="Daedalus session orientation: visitor, x" \
+    run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: failed; exit: 0" ]
+}
+
+@test "capture is skipped with a reason when direct_call.capture is false or no memory is configured" {
+  direct_call "callers: Peer" "capture: false"
+  export TENANT_BANK=bank-x CAPTURE_LOG="$BATS_TEST_TMPDIR/capture.json"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
+  [ ! -f "$CAPTURE_LOG" ]
+  grep -q 'direct_call.capture is false' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  unset TENANT_BANK; sed -i.bak '/capture: false/d' "$DAEDALUS_HOME/config.yaml"
+  run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
+  [ ! -f "$CAPTURE_LOG" ]
+}
+
+@test "after plan 2 lands, capture.py itself stands down in the called session's environment (skipped until its stand-down exists)" {
+  real="$BATS_TEST_DIRNAME/../capture.py"
+  grep -q 'CAPTURE_DEFER_TO_CALLER' "$real" || skip "capture.py's stand-down arrives with plan 2 (capture, incremental)"
+  direct_call "callers: Peer"
+  run bash "$CALL" --callee self --caller Peer "hello"
+  mkdir -p "$BATS_TEST_TMPDIR/real"; cp "$real" "$BATS_TEST_TMPDIR/real/capture.py"
+  run python3 - "$FAKE_CLAUDE_DIR/1.env.json" "$BATS_TEST_TMPDIR/real/capture.py" <<'PY'
+import json, os, subprocess, sys
+e = dict(os.environ); e.update(json.load(open(sys.argv[1])))
+e.update(TENANT_HOME=os.environ["BATS_TEST_TMPDIR"], TENANT_BANK="b", TRANSCRIPT_DIR=os.environ["BATS_TEST_TMPDIR"])
+p = subprocess.run(["python3", sys.argv[2], "capture"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=e,
+                   timeout=30)   # a regression that reaches the network fails fast (HINDSIGHT_API_URL is port 1 here)
+print(p.returncode, p.stdout, p.stderr)
+PY
+  case "$output" in "0 "*"deferred to caller"*) : ;; *) echo "$output"; return 1 ;; esac
+}
