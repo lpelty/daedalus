@@ -1545,3 +1545,20 @@ end = [h for g in d["SessionEnd"] for h in g["hooks"] if "capture-tick.sh --fina
 assert len(end) == 1 and end[0]["timeout"] == 5, end
 PY
 }
+
+# Spec A12: the shape capture reads, pinned to a transcript of the live build.
+@test "the live-shape fixture transcript reads with no unknown entries: capture turns its operator and assistant text into turns" {
+  F="$BATS_TEST_DIRNAME/fixtures/transcripts/live.jsonl"
+  run python3 - "$ROOT/core" "$F" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import capture
+lines = open(sys.argv[2]).read().splitlines()
+convo, unknown, total = capture._scan_transcript(lines)
+assert total >= 6, total
+assert unknown == 0, "entries this build's parser cannot read: %d of %d" % (unknown, total)
+assert "User: placeholder text" in convo and "Assistant: placeholder text" in convo, convo[:200]
+print("ok")
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
