@@ -201,10 +201,16 @@ wiring. It documents the query command, which is `core/capture.py recall`.
 **Automatic injection** is a `UserPromptSubmit` hook. `core/recall-inject.py`
 queries the bank with the prompt and returns matches as `additionalContext`,
 so continuity survives a session boundary without anyone asking for it. It
-shares the credentials above, and it is optional — a deployment without it
-works, and the skill still does.
+uses the same bank and key as capture, and it is optional — a deployment
+without it works, and the skill still does.
 
-Add to `.claude/settings.local.json` (this line still carries its values as prefixes in this release):
+In this release the injector cannot read the `memory:` block yet (a later
+release moves it there), so its hook line still carries its own values as
+prefixes. That makes it the one hook line that names the key — so it reads
+the key from the same file at run time instead of having it typed in, and the
+key itself never appears in the command.
+
+Add to `.claude/settings.local.json`:
 
 ```json
 {
@@ -214,7 +220,7 @@ Add to `.claude/settings.local.json` (this line still carries its values as pref
         "hooks": [
           {
             "type": "command",
-            "command": "HINDSIGHT_API_TENANT_API_KEY=YOUR_KEY TENANT_HOME=/path/to/daedalus TENANT_BANK=daedalus TRANSCRIPT_DIR=/path/to/daedalus/transcripts python3 /path/to/daedalus/core/recall-inject.py"
+            "command": "HINDSIGHT_API_TENANT_API_KEY=\"$(cat /path/to/daedalus/state/hindsight/api-key)\" TENANT_HOME=/path/to/daedalus TENANT_BANK=daedalus TRANSCRIPT_DIR=/path/to/daedalus/transcripts python3 /path/to/daedalus/core/recall-inject.py"
           }
         ]
       }

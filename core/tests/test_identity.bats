@@ -260,6 +260,16 @@ _run_scan_in_fixture() {
   run grep -q "explicitly on the hook command" "$DAEDALUS_HOME/README.md"; [ "$status" -ne 0 ]
 }
 
+# The recall-inject example is the one hook line that still takes the key as a
+# prefix in this release. It must read the key from the file at run time, never
+# carry a literal key, and must not claim to share the memory: block it cannot read.
+@test "README never shows the key typed on a hook command line; recall-inject reads it from the key file" {
+  run grep -nE 'HINDSIGHT_API_TENANT_API_KEY=[^"$ \\]' "$DAEDALUS_HOME/README.md"
+  [ "$status" -ne 0 ] || { echo "key typed on a command line: $output"; return 1; }
+  run grep -qF 'HINDSIGHT_API_TENANT_API_KEY=\"$(cat /path/to/daedalus/' "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ]
+  run grep -q "shares the credentials above" "$DAEDALUS_HOME/README.md"; [ "$status" -ne 0 ]
+}
+
 @test "runtime-evaluated PEP 604 unions carry the future import (3.9 deployments)" {
   # `X | None` in a def signature COMPILES under 3.9 but raises TypeError at
   # import time unless the file has `from __future__ import annotations`.
