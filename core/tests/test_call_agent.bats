@@ -693,6 +693,11 @@ PY
 @test "the launcher re-captures a call with the caller and the callee as labels, in the caller's environment without the direct-call variables" {
   direct_call "callers: Peer"
   export TENANT_BANK=bank-x CAPTURE_LOG="$BATS_TEST_TMPDIR/capture.json"
+  # The caller is itself a called session: every direct-call variable is in its
+  # environment. Unless the re-capture drops them, capture.py (plan 2) stands
+  # down on CAPTURE_DEFER_TO_CALLER / DIRECT_CALL_ID and the call is never
+  # remembered — so they must be present here for the assertion below to bite.
+  export CAPTURE_DEFER_TO_CALLER=1 DIRECT_CALL_ID=outer DIRECT_CALL_RECEIPT_DIR=/x DIRECT_CALL_CALLER=Outer
   FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
   [ "$status" -eq 0 ]
   [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: confirmed; exit: 0" ]
@@ -722,6 +727,55 @@ PY
   run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
   [ "${stderr_lines[1]}" = "Daedalus orientation: no; capture: skipped; exit: 3" ]
   [ ! -f "$CAPTURE_LOG" ]
+}
+
+@test "a memory: block in config.yaml alone turns the re-capture on — the production path, where the caller's environment has no TENANT_BANK" {
+  direct_call "callers: Peer"
+  printf 'memory:\n  bank: bank-cfg\n' >> "$DAEDALUS_HOME/config.yaml"
+  export CAPTURE_LOG="$BATS_TEST_TMPDIR/capture.json"
+  FAKE_MARKER="Daedalus session orientation: visitor, x" run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "$status" -eq 0 ]
+  [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: confirmed; exit: 0" ]
+  python3 - "$CAPTURE_LOG" <<'PY'
+import json, sys
+e = json.load(open(sys.argv[1]))["env"]
+assert e["TENANT_USER_LABEL"] == "Peer" and e["TENANT_ASSISTANT_LABEL"] == "Daedalus", e
+# No memory_env in this build: the bank then comes from capture.py's own
+# reading; with memory_env (plan 2) it is the block's bank, never another.
+assert e.get("TENANT_BANK") in (None, "bank-cfg"), e
+PY
+}
+
+@test "a capture that is not confirmed is never reported as remembered: pending, failed and nothing new, each from capture.py's own words and exit" {
+  # The whole table, straight through the classifier.
+  run python3 - "$DAEDALUS_HOME/core" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1]); from call_agent import classify_capture as c
+table = [
+    (0, "capture: extraction confirmed (3 facts)", "confirmed"),
+    (0, "capture: retain accepted; extraction not verified", "pending"),
+    (0, "", "pending"),
+    (1, "capture: extraction FAILED — timed out after 90 s", "pending"),
+    (1, "capture: extraction FAILED — boom", "failed"),
+    (2, "", "failed"),
+    (97, "daedalus: episodic capture needs memory.bank in config.yaml", "failed"),
+    (97, "capture: extraction confirmed", "failed"),
+    (0, "capture: nothing new since the last capture", "nothing_new"),
+    (0, "capture: no conversational text in the transcript", "nothing_new"),
+]
+bad = [(code, out, want, c(code, out)) for code, out, want in table if c(code, out) != want]
+assert not bad, bad
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # And end to end: the receipt line carries the word, for the dangerous case
+  # (accepted but not verified) and for the memory_env failure's exit 97.
+  direct_call "callers: Peer"
+  export TENANT_BANK=bank-x
+  STUB_CAPTURE_OUT="capture: retain accepted; extraction not verified" FAKE_MARKER="Daedalus session orientation: visitor, x" \
+    run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: pending; exit: 0" ]
+  STUB_CAPTURE_OUT="daedalus: memory.capture_interval must be a whole number" STUB_CAPTURE_EXIT=97 FAKE_MARKER="Daedalus session orientation: visitor, x" \
+    run --separate-stderr bash "$CALL" --callee self --caller Peer "hello"
+  [ "${stderr_lines[1]}" = "Daedalus orientation: yes; capture: failed; exit: 0" ]
 }
 
 @test "after plan 2 lands, capture.py itself stands down in the called session's environment (skipped until its stand-down exists)" {
