@@ -1372,6 +1372,9 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
         raise Refusal("call %s is a --callee %s call, which this build cannot resume" % (call_id, mode))
     if mode == "agent":
         recheck_agent(conf, rec)
+    if mode == "refuter":
+        render_path, _ = render_charter(root)       # the charter's own refusals come first
+        os.unlink(render_path)
     dist = require_clean_distribution(root)
     request = read_request(args)
     with invocation_lock(call_dir, call_id):
@@ -1387,6 +1390,29 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
             launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
         return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell",
                        resumer_phrase(view), locked=True)
+
+
+def latest_review(root: Path, token: str, view: dict) -> str:
+    """--resume-review <NN>: the most recent refuter call for that window by
+    creation time, whichever review mode it ran in (spec §6.1). An alias is
+    refused with its number, as everywhere a window number is expected (§4.1)."""
+    if not re.fullmatch(r"[0-9]{2}", token or ""):
+        for nn, d in view.get("leases", {}).items():
+            if nn != "prime" and isinstance(d, dict) and d.get("alias") == token:
+                raise Refusal("%s is an alias; window %s carries it — say `--resume-review %s`" % (token, nn, nn))
+        raise Refusal("%s is not a window number (two digits, 01–99)" % token)
+    best: Optional[dict] = None
+    for rj in (root / "state" / "direct-calls").glob("*/launch.json"):
+        try:
+            rec = json.loads(rj.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("mode") == "refuter" and rec.get("window") == token:
+            if best is None or rec.get("created_ts", 0) > best.get("created_ts", 0):
+                best = rec
+    if best is None:
+        raise Refusal("no review has run for window %s yet" % token)
+    return str(best["call_id"])
 
 
 # --- doctor (spec §15) -------------------------------------------------------------------
@@ -1476,12 +1502,15 @@ def main(argv: List[str]) -> int:
     try:
         conf = read_config(root)
         view = lease_view(root)
+        if args.resume_review:
+            args.resume = latest_review(root, args.resume_review, view)
         if args.resume:
             return resume(root, conf, args, view)
         return new_call(root, conf, args, view)
     except Refusal as e:
         sys.stderr.write("daedalus: %s\n" % e)
         return EXIT_REFUSED
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

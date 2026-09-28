@@ -794,3 +794,59 @@ print(p.returncode, p.stdout, p.stderr)
 PY
   case "$output" in "0 "*"deferred to caller"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- interrogating the reviewer: refuter resume and --resume-review (Task 9, spec §6.1) ---
+
+@test "--resume-review <NN> resumes the latest review of that window with the full launch set re-passed; the answer is advisory and never a verdict" {
+  refuter_fixture
+  printf 'verify:\n  refute_model: sonnet\n' >> "$DAEDALUS_HOME/config.yaml"
+  printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  review r1; [ "$status" -eq 0 ]
+  mkdir -p "$DAEDALUS_HOME/state/evidence/r2"; printf '{"run_id":"r2","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r2/run.json"
+  review r2; [ "$status" -eq 0 ]
+  id2="$(sed -n 's/^call-id: //p' "$DAEDALUS_HOME/vault/evidence/r2-review.md")"
+  before="$(shasum "$DAEDALUS_HOME/vault/evidence/r2-review.md")"
+  FAKE_ANSWER="Line 12: the lock is released only on success." \
+    run --separate-stderr bash "$CALL" --resume-review 02 "Finding F2 says the lock leaks. Show me the line."
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "$output" = "Line 12: the lock is released only on success." ]
+  [ "${stderr_lines[0]}" = "Refuter call $id2 (branch review of run r2, window 02; resumed from an operator shell); receipt state/direct-calls/$id2" ]
+  python3 - "$FAKE_CLAUDE_DIR/3.argv" "$id2" "$T" <<'PY'
+import json, sys
+argv = open(sys.argv[1]).read().split("\n"); pairs = list(zip(argv, argv[1:]))
+assert ("--resume", sys.argv[2]) in pairs and "--session-id" not in argv, argv
+assert ("--agent", "refuter") in pairs and len([b for a, b in pairs if a == "--agents"]) == 1, argv
+s = json.loads([b for a, b in pairs if a == "--settings"][0])
+assert s["disableAllHooks"] is True and s["autoMemoryEnabled"] is False and s["claudeMdExcludes"], s
+assert "--strict-mcp-config" in argv and ("--tools", "Read,Grep,Glob") in pairs, argv
+assert ("--add-dir", sys.argv[3]) in pairs and ("--model", "sonnet") in pairs, argv
+PY
+  [ "$(head -1 "$FAKE_CLAUDE_DIR/3.stdin")" = "Finding F2 says the lock leaks. Show me the line." ]
+  cwd="$(cat "$FAKE_CLAUDE_DIR/3.cwd")"; [ ! -d "$cwd" ]; case "$cwd" in "$DAEDALUS_HOME"*) return 1 ;; esac
+  grep -q '"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"' "$FAKE_CLAUDE_DIR/3.env.json"
+  [ "$(shasum "$DAEDALUS_HOME/vault/evidence/r2-review.md")" = "$before" ]
+  python3 - "$DAEDALUS_HOME/state/direct-calls/$id2/launch.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["attempts"][1]["advisory"] is True and r["attempts"][1]["resumed_by"] == "operator-shell", r
+PY
+}
+
+@test "--resume-review names the resumer (the prime), refuses an alias with its number, and says when a window has no review" {
+  refuter_fixture
+  printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  review r1; [ "$status" -eq 0 ]
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  printf '{"lease":"02","session_id":"s2","alias":"electron"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  printf '{"lease":"prime","session_id":"sP"}' > "$DAEDALUS_HOME/state/leases/prime.json"
+  DAEDALUS_SESSION_ID=sP run --separate-stderr bash "$CALL" --resume-review 02 "why?"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  case "${stderr_lines[0]}" in *"; resumed by the prime session); receipt "*) : ;; *) echo "$stderr"; return 1 ;; esac
+  grep -q '"resumed_by": "sP"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  run bash "$CALL" --resume-review electron "why?"
+  [ "$status" -eq 2 ]; case "$output" in *"electron is an alias; window 02 carries it — say \`--resume-review 02\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --resume-review 05 "why?"
+  [ "$status" -eq 2 ]; case "$output" in *"no review has run for window 05 yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --resume-review 02 --verdict-file "$DAEDALUS_HOME/vault/evidence/r1-review.md" "why?"
+  [ "$status" -eq 2 ]; case "$output" in *"--verdict-file is refused on resume"*) : ;; *) echo "$output"; return 1 ;; esac
+}
