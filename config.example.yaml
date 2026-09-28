@@ -81,6 +81,48 @@ verify:
   # needs no timeout line. Anything else is refused before any gate runs.
   refute_timeout: 600
 
+# Direct calls (optional) — core/call-agent.sh. Uncomment to use.
+# The target's own agent — the one Daedalus may summon for context or a
+# review — is named HERE and nowhere else: core has no default and takes no
+# callee home on the command line, so the same core calls one agent on one
+# deployment and another agent on the next. --callee agent is refused while
+# callee_home and callee_name are unset. Comments on their own lines only:
+# cfg does not strip an inline comment.
+# direct_call:
+#   # The agent's Claude Code project root (absolute). The call runs there,
+#   # so its identity loads from its own CLAUDE.md and hooks.
+#   callee_home: /abs/path/to/agent-home
+#   # Its name in the frame prompt and the receipts.
+#   callee_name: AgentName
+#   # Who authorized the exchange ("<human> authorized this exchange").
+#   callee_human: OperatorName
+#   # Who may call THIS Daedalus (--callee self). Comma separated; absent or
+#   # empty means nobody. A name is a claim on one user account; the
+#   # receipt records the invoking process as evidence.
+#   callers: AgentName
+#   # A line the agent's SessionStart writes into its transcript; the
+#   # launcher looks for it to report "orientation: yes". Unset, a call to
+#   # the agent reports "unverified" (exit 3). --callee self knows
+#   # Daedalus's own line and ignores this key.
+#   orientation_marker: 'Session orientation'
+#   # Optional. The agent's own direct-call launcher (absolute path). When
+#   # set, --callee agent runs it instead of a bare claude -p, so the agent's
+#   # allowlist, receipt and capture apply. It is called as
+#   #   <launcher> --caller Daedalus --request-file <file> --artifact-dir <dir>
+#   #   <launcher> --caller Daedalus --resume <its call id> --request-file <file>
+#   # and must answer on stdout with "<Name> call <id>; receipt ..." and
+#   # "... orientation: yes|no ..." on stderr.
+#   callee_launcher: /abs/path/to/callee-launcher
+#   # Read-only tools, passed as --tools. Only Read, Grep and Glob are accepted.
+#   tools: Read,Grep,Glob
+#   max_turns: 40
+#   # Seconds before the call's whole process group is killed (exit 124).
+#   timeout: 600
+#   # Re-capture the call's transcript into this deployment's memory: block
+#   # afterwards, labelled with the caller and the callee.
+#   capture: true
+#   capture_wait: 90
+
 recall:
   # Optional retrieval layer (spec: document-recall-and-code-context design).
   # Deployment-owned engine commands, same trust model as gates:.
