@@ -6,6 +6,10 @@
 # uncleanly never fires it, and the conversation is gone from working memory
 # either way. close.sh removes the dependency on a hook firing.
 
+# Wall-clock assertions live in this file: under the parallel full-suite gate
+# (`bats --jobs 12`) its tests run one at a time, while other files run beside it.
+BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core"
@@ -24,6 +28,8 @@ gates:
 proposals:
   budget: 5
 EOF
+  exec </dev/null
+  unset CAPTURE_DEFER_TO_CALLER DIRECT_CALL_ID
 }
 
 teardown() {

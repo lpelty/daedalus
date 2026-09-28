@@ -320,8 +320,11 @@ def _await_extraction(op_id: str, bank: str, cfg: dict) -> tuple[bool, str]:
                 return False, f"status={status} but extraction_errors_count={errs}"
             return True, f"status={status}, operation {op_id}"
         if status in ("failed", "error", "cancelled", "canceled"):
+            # PROP-006: the live payload's field is error_message; "error" is
+            # the fallback for an older or differently versioned server.
+            reason = op.get("error_message") or op.get("error")
             return False, (f"status={status}, retry_count={op.get('retry_count')}, "
-                           f"error={op.get('error')!r}, operation {op_id}")
+                           f"error={reason!r}, operation {op_id}")
         last = f"status={status or 'unknown'}"
         time.sleep(VERIFY_POLL_SEC)
     return False, f"timed out after {cfg.get('verify_timeout', VERIFY_TIMEOUT_SEC)}s ({last})"
@@ -347,8 +350,10 @@ def _check_operation(op_id: str, bank: str, cfg: dict) -> tuple[str, str]:
             return "failed", f"status={status} but extraction_errors_count={errs}"
         return "ok", f"status={status}"
     if status in ("failed", "error", "cancelled", "canceled"):
+        # PROP-006: see _await_extraction.
+        reason = op.get("error_message") or op.get("error")
         return "failed", (f"status={status}, retry_count={op.get('retry_count')}, "
-                          f"error={op.get('error')!r}")
+                          f"error={reason!r}")
     return "unknown", f"status={status or 'unknown'}"
 
 

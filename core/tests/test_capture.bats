@@ -8,6 +8,10 @@
 # when the POST fails. These tests exist because nothing pinned it, so a
 # reordering would have shipped silently green.
 
+# Wall-clock assertions live in this file: under the parallel full-suite gate
+# (`bats --jobs 12`) its tests run one at a time, while other files run beside it.
+BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   CAPTURE="$ROOT/core/capture.py"
@@ -16,6 +20,14 @@ setup() {
   export TRANSCRIPT_DIR="$BATS_TEST_TMPDIR/transcripts"
   export HINDSIGHT_API_URL="http://127.0.0.1:1"   # nothing listens here
   export HINDSIGHT_API_TENANT_API_KEY="not-a-real-key"
+  # stdin from /dev/null: bats inherits the runner's stdin, and inside a
+  # Claude Code Bash tool that can be a socket that never closes — capture
+  # would wait on it (a second at most after Task 7; forever before it).
+  exec </dev/null
+  # Session variables this suite sets per test, never inherited from the
+  # developer's own session: a direct call's would make capture stand down
+  # (Task 8), an interval would change the in-flight ceiling (Task 9).
+  unset CAPTURE_DEFER_TO_CALLER DIRECT_CALL_ID CAPTURE_INTERVAL
   mkdir -p "$TENANT_HOME" "$TRANSCRIPT_DIR"
 
   TRANSCRIPT="$TRANSCRIPT_DIR/session-a.jsonl"
@@ -688,29 +700,38 @@ stop_stub() {
 
 # A stub that models the part of the backend the deferred-verification work
 # actually depends on: an async retain returns an operation id, and the
-# operation's verdict arrives LATER via GET /operations/<id>. The plain
-# start_stub above returns no operation id at all, so it cannot express the
-# difference between "accepted" and "stored" — which is the entire defect.
+# operation's verdict arrives LATER via GET /operations/<id>.
 #
 # $1: the status served for GET /operations/<id> ("completed", "failed", ...).
 # $2 (optional): extraction_errors_count to report alongside it.
 #
-# Every POST body is appended as one JSON line to $STUB_POSTS, so a test can
-# assert what was re-pushed — including the document_ids, which is the one
-# property GC-6 makes load-bearing.
+# Every POST body is appended as one JSON line to $STUB_POSTS, and every
+# request as "<METHOD> <path> <epoch>" to $BATS_TEST_TMPDIR/requests.log.
+# Per-request knobs, read from $BATS_TEST_TMPDIR when present:
+#   op_body     the verbatim JSON served for GET /operations/<id> — the live
+#               server's shape (PROP-006), overriding $1/$2
+#   get_sleep   seconds to stall every GET before answering
+#   post_sleep  seconds to stall every POST before answering (logged first)
+# Threaded: a stalled request must not hold up the others, or a test of "one
+# slow capture does not delay another" would measure the stub, not capture.
 start_op_stub() {
   STUB_POSTS="$BATS_TEST_TMPDIR/posts.jsonl"
   STUB_STATUS_FILE="$BATS_TEST_TMPDIR/op_status"
   : > "$STUB_POSTS"
+  : > "$BATS_TEST_TMPDIR/requests.log"
   printf '%s' "$1" > "$STUB_STATUS_FILE"
   STUB_PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
-  python3 - "$STUB_PORT" "$STUB_POSTS" "$STUB_STATUS_FILE" "${2:-0}" \
+  python3 - "$STUB_PORT" "$STUB_POSTS" "$STUB_STATUS_FILE" "${2:-0}" "$BATS_TEST_TMPDIR" \
       > "$BATS_TEST_TMPDIR/stub.log" 2>&1 <<'PY' &
-import sys, json, itertools
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import sys, json, itertools, os, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-posts_path, status_path, errs = sys.argv[2], sys.argv[3], int(sys.argv[4])
+posts_path, status_path, errs, tmp = sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
 counter = itertools.count(1)
+
+def knob(name):
+    p = os.path.join(tmp, name)
+    return open(p).read().strip() if os.path.exists(p) else None
 
 class H(BaseHTTPRequestHandler):
     def _send(self, obj, code=200):
@@ -721,18 +742,34 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _log(self):
+        with open(os.path.join(tmp, "requests.log"), "a") as f:
+            f.write("%s %s %.3f\n" % (self.command, self.path, time.time()))
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n).decode()
+        self._log()
         with open(posts_path, "a") as f:
             f.write(raw.replace("\n", " ") + "\n")
+        s = knob("post_sleep")
+        if s:
+            time.sleep(float(s))
         # Each accepted batch gets its own operation id, exactly as the real
         # async surface does — a retry must be pollable independently of the
         # push it replaces.
         self._send({"success": True, "operation_id": f"op-{next(counter)}"}, 202)
 
     def do_GET(self):
+        self._log()
+        s = knob("get_sleep")
+        if s:
+            time.sleep(float(s))
         if "/operations/" in self.path:
+            body = knob("op_body")
+            if body:
+                self._send(json.loads(body))
+                return
             # Read the verdict per request, so a test can flip it between
             # runs and model "failed once, then succeeded".
             with open(status_path) as f:
@@ -744,7 +781,7 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
   STUB_PID=$!
   i=0
@@ -755,6 +792,11 @@ PY
     i=$((i + 1))
   done
   export HINDSIGHT_API_URL="http://127.0.0.1:$STUB_PORT"
+}
+
+# POSTs the stub has received (0 when it never started or saw none).
+post_count() {
+  awk '/^POST /{n++} END{print n+0}' "$BATS_TEST_TMPDIR/requests.log" 2>/dev/null || echo 0
 }
 
 # Flip the verdict the running operation stub serves.
@@ -784,4 +826,50 @@ for line in open(sys.argv[1]):
     for item in json.loads(line).get("items", []):
         print(item.get("document_id"))
 PY
+}
+
+# --- PROP-006: the failure reason is the server's error_message --------------
+#
+# The live server (GET /v1/default/banks/<bank>/operations, 2026-09-21) returns
+# objects whose keys are created_at, document_id, error_message, filename, id,
+# items_count, next_retry_at, progress, retry_count, status, task_type,
+# updated_at — there is no "error" key. Both sites read op.get('error') and
+# printed error=None for every real failure.
+LIVE_FAILED_OP='{"id":"op-1","status":"failed","error_message":"chunk 0: JSONDecodeError: Expecting value: line 1 column 1 (char 0)","retry_count":0,"items_count":1,"document_id":"session-a-o0-p00","filename":null,"next_retry_at":null,"progress":null,"task_type":"retain","created_at":"2026-09-21T10:00:00Z","updated_at":"2026-09-21T10:00:05Z"}'
+
+@test "PROP-006: the verified path (_await_extraction) reports the server's error_message on the live payload shape, never error=None" {
+  start_op_stub "failed"
+  printf '%s' "$LIVE_FAILED_OP" > "$BATS_TEST_TMPDIR/op_body"
+  CAPTURE_VERIFY_EXTRACTION=1 CAPTURE_VERIFY_TIMEOUT_SEC=5 run python3 "$CAPTURE" capture
+  [ "$status" -ne 0 ]
+  case "$output" in *"extraction FAILED"*"JSONDecodeError"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"error=None"*) echo "the reason was dropped: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "PROP-006: reconciliation (_check_operation) reports the server's error_message for a failed pending span" {
+  start_op_stub "running"
+  run python3 "$CAPTURE" capture            # fast path: the span is pending under op-1
+  printf '%s' "$LIVE_FAILED_OP" > "$BATS_TEST_TMPDIR/op_body"
+  run python3 "$CAPTURE" capture            # nothing new; settles op-1 -> failed
+  case "$output" in *"pending span FAILED extraction"*"JSONDecodeError"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"error=None"*) echo "the reason was dropped: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "PROP-006: when a server sends both fields, error_message wins over error" {
+  # Discriminates the fix's precedence: before it, the reported reason is 'old'.
+  start_op_stub "failed"
+  printf '%s' '{"status":"failed","error_message":"real","error":"old","retry_count":0}' > "$BATS_TEST_TMPDIR/op_body"
+  CAPTURE_VERIFY_EXTRACTION=1 CAPTURE_VERIFY_TIMEOUT_SEC=5 run python3 "$CAPTURE" capture
+  case "$output" in *"error='real'"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "PROP-006 non-regression guard: a server that names the field only error still has its reason reported" {
+  # Passes before and after the fix, by design, and proves nothing about the
+  # fix itself: PROP-006's Test section calls this shape "a test that agreed
+  # with the bug". It guards the fallback half — against a later change that
+  # reads error_message ONLY and goes mute on an older server.
+  start_op_stub "failed"
+  printf '%s' '{"status":"failed","error":"boom","retry_count":0}' > "$BATS_TEST_TMPDIR/op_body"
+  CAPTURE_VERIFY_EXTRACTION=1 CAPTURE_VERIFY_TIMEOUT_SEC=5 run python3 "$CAPTURE" capture
+  case "$output" in *"error='boom'"*) : ;; *) echo "$output"; return 1 ;; esac
 }

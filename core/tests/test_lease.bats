@@ -1,5 +1,8 @@
 #!/usr/bin/env bats
 # Pins core/leaselib.py and core/lease.sh — the only writers of state/leases/.
+# Wall-clock assertions live in this file: under the parallel full-suite gate
+# (`bats --jobs 12`) its tests run one at a time, while other files run beside it.
+BATS_NO_PARALLELIZE_WITHIN_FILE=true
 bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
 setup() { lease_fixture; LL="$DAEDALUS_HOME/core/leaselib.py"; }
