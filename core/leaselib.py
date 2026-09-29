@@ -1438,6 +1438,160 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
                                       new_nn))
 
 
+LEASE_BRANCH = re.compile(r"lease/[0-9]{2}")
+ADOPT_DIRTY = ("target/%s has uncommitted changes — commit them on their branch inside that checkout, or stash them, "
+               "then run adopt again.")
+
+
+def repo_key(root: Path, repo: Optional[str]) -> str:
+    """'<name>' for the outer repo (repo None or the name itself); '<name>/<rel>' for a nested one, given as
+    '<rel>' or '<name>/<rel>'. Refused for anything that is not one of this target's repos."""
+    name = target_name(root)
+    if not repo or repo == name:
+        return name
+    key = repo if repo.startswith(name + "/") else "%s/%s" % (name, repo)
+    repos = repos_of(root)
+    if key not in repos:
+        raise Refused("%s is not one of this target's repos (%s)." % (repo, ", ".join(repos)))
+    return key
+
+
+def unpromoted_commits(src: Path, trunk: str, rev: str) -> list:
+    """Subjects, oldest first, of the commits on <rev> that origin/<trunk> has no equivalent of. `git cherry`
+    compares changes, not shas: a commit that reached trunk as part of a merge, or cherry-picked under another
+    sha, is on trunk (spec §14 step 6 adopts only work that is not; plan 5 Decision 4)."""
+    code, out, err = _git(src, "cherry", "origin/" + trunk, rev)
+    if code != 0:
+        last = err.strip().splitlines()[-1:] or ["no output"]
+        raise Refused("cannot compare %s with origin/%s in %s (%s)" % (rev, trunk, src.name, last[0]))
+    subjects = []
+    for ln in out.splitlines():
+        if ln.startswith("+ "):
+            _, s, _ = _git(src, "log", "-1", "--format=%s", ln[2:].strip())
+            subjects.append(s.strip())
+    return subjects
+
+
+def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[str] = None,
+          fetch: bool = True, deadline: Optional[float] = None) -> dict:
+    """`lease.sh adopt <branch> [--repo <nested>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
+    that carries work trunk does not have becomes a numbered window with no session bound — the same allocation
+    `create` and `split` use. target/<repo> goes back to its trunk at origin/<trunk>; the branch is renamed
+    lease/<NN> and checked out at worktrees/<NN>/<repo>; the other repos' worktrees are cut at their trunks.
+    `adopt <trunk>` moves a trunk that is ahead of origin: its commits go to daedalus/upgrade-<stamp>-<short sha>,
+    the trunk is reset, and that branch is adopted (adopted_from names it). Idempotent: a branch already adopted returns {"already": True}.
+    Refused: a dirty target/<repo> (tracked changes), a branch that does not exist or is a window's, nothing
+    past trunk. The fetch (a shell path, §4.2) runs before the lock; the upgrade passes fetch=False — it
+    fetched already — and its start deadline. Every git step after the rename is rolled back if the worktree
+    add fails, so a refusal leaves the branch where it was."""
+    key = repo_key(root, repo)
+    src = root / "target" / key
+    if fetch:
+        code, _, err = _git(src, "fetch", "--quiet", "origin", timeout=120)
+        if code != 0:
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("could not fetch origin in target/%s (%s); nothing was adopted" % (key, last[0]))
+    with lock(root, deadline=deadline, busy="the lease lock stayed busy; nothing was adopted"):
+        leases = read_all(root)
+        for nn, d in sorted(leases.items()):
+            if nn != "prime" and d.get("adopted_from") == branch and d.get("adopted_repo") == key:
+                return {"nn": nn, "repo": key, "branch": branch, "trunk": (d.get("trunks") or {}).get(key, ""),
+                        "subjects": [], "already": True, "notes": []}
+        if LEASE_BRANCH.fullmatch(branch):
+            raise Refused("%s is already a window's branch; nothing to adopt." % branch)
+        trunks = trunks_of(root, root / "target")
+        trunk = trunks[key]
+        code, _, _ = _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + branch)
+        if code != 0:
+            raise Refused("target/%s has no branch %s." % (key, branch))
+        code, dirt, _ = _git(src, "status", "--porcelain", "--untracked-files=no")
+        if code != 0 or dirt.strip():
+            raise Refused(ADOPT_DIRTY % key)
+        _, cur, _ = _git(src, "branch", "--show-current")
+        cur = cur.strip()
+        notes, original = [], branch
+        if branch == trunk:
+            code, out, _ = _git(src, "log", "--reverse", "--format=%s", "origin/%s..%s" % (trunk, trunk))
+            subjects = [s for s in out.splitlines() if s.strip()] if code == 0 else []
+            if not subjects:
+                raise Refused("target/%s's %s has no commits that are not already on origin/%s — nothing to adopt."
+                              % (key, trunk, trunk))
+            _, ttip, _ = _git(src, "rev-parse", "--short=7", trunk)
+            moved = "daedalus/upgrade-%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), ttip.strip())
+            steps = [("branch", moved, trunk),
+                     ("reset", "--hard", "--quiet", "origin/" + trunk) if cur == trunk
+                     else ("branch", "-f", trunk, "origin/" + trunk)]
+            for args in steps:
+                code, _, err = _git(src, *args)
+                if code != 0:
+                    last = err.strip().splitlines()[-1:] or ["no output"]
+                    raise Refused("could not move target/%s's %s commits aside (%s); nothing was adopted"
+                                  % (key, trunk, last[0]))
+            # the window holds the moved branch: adopted_from names it, never the trunk (plan 5 Decision 14) —
+            # so the "same-named branch on origin" note below cannot fire for a trunk, and a later trunk-ahead
+            # case is adopted again instead of matching this lease as "already"
+            branch = original = moved
+        else:
+            subjects = unpromoted_commits(src, trunk, branch)
+            if not subjects:
+                raise Refused("%s in target/%s has no commits that are not already on origin/%s — nothing to adopt."
+                              % (branch, key, trunk))
+            if cur != trunk:
+                code, _, err = _git(src, "checkout", "--quiet", trunk)
+                if code != 0:
+                    last = err.strip().splitlines()[-1:] or ["no output"]
+                    raise Refused("could not put target/%s back on %s (%s); nothing was adopted" % (key, trunk, last[0]))
+            code, _, err = _git(src, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+            if code != 0:
+                notes.append("target/%s's %s could not be fast-forwarded to origin/%s (%s)"
+                             % (key, trunk, trunk, (err.strip().splitlines()[-1:] or ["no output"])[0]))
+        _, tip, _ = _git(src, "rev-parse", branch)
+        nn = free_number(root, leases, root / "target", trunks)
+        code, _, err = _git(src, "branch", "-m", branch, "lease/" + nn)
+        if code != 0:
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("could not rename %s to lease/%s in target/%s (%s); nothing was adopted"
+                          % (branch, nn, key, last[0]))
+        code, _, _ = _git(src, "rev-parse", "--verify", "-q", "refs/remotes/origin/" + original)
+        if code == 0:
+            notes.append("a branch named %s on origin was left alone" % original)
+        data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
+                "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn, "repos": list(trunks), "trunks": trunks,
+                "created": now_stamp(), "bound_at": None, "promoted": [], "adopted_from": original,
+                "adopted_repo": key, "adopted_tip": tip.strip(), "worktree_ready": False}
+        if note:
+            data["note"] = note
+        try:
+            write_lease(root, nn, data, exclusive=True)
+            ready = add_worktrees(root, nn, trunks, deadline=deadline)
+        except BaseException:
+            try:
+                os.unlink(str(lease_path(root, nn)))
+            except OSError:
+                pass
+            _git(src, "branch", "-m", "lease/" + nn, branch)
+            raise
+        if ready:
+            data.pop("worktree_ready", None)
+            write_lease(root, nn, data)
+        write_changed(root, nn, {})
+        heartbeat(root, nn)
+    return {"nn": nn, "repo": key, "branch": original, "trunk": trunk, "subjects": subjects, "already": False,
+            "notes": notes}
+
+
+def adopt_sentence(r: dict) -> str:
+    if r["already"]:
+        return "%s in target/%s is already window %s; nothing to do." % (r["branch"], r["repo"], r["nn"])
+    n = len(r["subjects"])
+    s = ("Window %s now holds %s from target/%s (%d commit%s: %s) on branch lease/%s; target/%s is on %s at origin/%s."
+         % (r["nn"], r["branch"], r["repo"], n, "" if n == 1 else "s", _quoted(r["subjects"]), r["nn"], r["repo"],
+            r["trunk"], r["trunk"]))
+    if r["notes"]:
+        s += " Note: %s." % "; ".join(r["notes"])
+    return s
+
+
 def mark_done(root: Path, token: str, sid: str, summary: str) -> str:
     """A spawned clone reports completion: finished: <time> and summary: in
     the lease, holder only, under the lock. The board renders FINISHED from
@@ -1874,7 +2028,7 @@ VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take
 # `prime take` would move the pen to a read-only headless session that exits
 # in minutes. list/status stay allowed (they read).
 VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime",
-                   "rebase", "split")
+                   "rebase", "split", "adopt")
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
@@ -2002,6 +2156,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
             parts.append('last commit "%s"' % subj if subj else "no commits yet")
             if d.get("note"):
                 parts.append("note: %s" % d["note"])
+            if d.get("adopted_from"):
+                parts.append("adopted from %s" % d["adopted_from"])
             if nn == mine:
                 fetched = fetched_at(root, d)
                 parts.append("based on origin/%s %s" % (v.target_branch(root),
@@ -2326,6 +2482,23 @@ def main(argv: list) -> int:
         print(launch_line(root, nn))
         if data.get("worktree_ready") is False:
             print("Window %s's worktree was not finished inside the budget; run `core/lease.sh claim %s` to finish it." % (nn, nn))
+        return 0
+    if cmd == "adopt":
+        if not args or args[0].startswith("--"):
+            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested>] [--note "..."]\n')
+            return 2
+
+        def _opt(flag: str) -> Optional[str]:
+            return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+
+        try:
+            r = adopt(root, args[0], repo=_opt("--repo"), note=_opt("--note"))
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e)
+            return 1
+        print(adopt_sentence(r))
+        if not r["already"]:
+            print(launch_line(root, r["nn"]))
         return 0
     if cmd == "waiting-work":
         try:

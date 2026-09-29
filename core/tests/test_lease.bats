@@ -1244,3 +1244,118 @@ SH
   [ -s "$BATS_TEST_TMPDIR/probe" ]
   ! grep -q held "$BATS_TEST_TMPDIR/probe" || { cat "$BATS_TEST_TMPDIR/probe"; return 1; }
 }
+
+# --- adopt (spec §4.2, §14 step 6; plan 5 Task 2) -----------------------------
+
+cmt() { git -C "$1" -c user.email=t@x -c user.name=t commit -q "${@:2}"; }
+on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, checked out
+  git -C "$1" checkout -q -b "$2"
+  local i f; f="f-$(printf '%s' "$2" | tr / -).txt"     # a branch name may hold a slash; a file name may not
+  for i in $(seq 1 "$3"); do printf '%s %s\n' "$2" "$i" >> "$1/$f"; git -C "$1" add -A; cmt "$1" -m "$2 work $i"; done
+}
+
+@test "adopt: a branch checked out in target/thing with two commits past trunk becomes window 01 — target/thing back on main at origin/main, the branch renamed lease/01 and checked out at worktrees/01/thing, the nested repo at its trunk, the lease file carrying adopted_from, the board naming it" {
+  on_feat "$T" feat/x 2
+  tip="$(git -C "$T" rev-parse feat/x)"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x --note "the old branch"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 now holds feat/x from target/thing (2 commits: \"feat/x work 1\", \"feat/x work 2\") on branch lease/01; target/thing is on main at origin/main."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"DAEDALUS_LEASE=01"*) : ;; *) echo "no launch line: $output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  ! git -C "$T" rev-parse -q --verify refs/heads/feat/x >/dev/null
+  [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" branch --show-current)" = lease/01 ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing/sub" rev-parse HEAD)" = "$(git -C "$T/sub" rev-parse origin/main)" ]
+  [ "$(lease_json 01 adopted_from)" = feat/x ]
+  [ "$(lease_json 01 adopted_repo)" = thing ]
+  [ "$(lease_json 01 adopted_tip)" = "$tip" ]
+  [ "$(lease_json 01 session_id)" = None ]
+  [ "$(lease_json 01 note)" = "the old branch" ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["trunks"] == {"thing": "main", "thing/sub": "main"}, d' "$DAEDALUS_HOME/state/leases/01.json"
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  case "$output" in *"- 01 "*"adopted from feat/x"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "adopt run twice is a no-op the second time: no second lease, the sentence names the window it already is" {
+  on_feat "$T" feat/x 1
+  bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x >/dev/null
+  before="$(ls "$DAEDALUS_HOME/state/leases" | sort | tr '\n' ' ')"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"feat/x in target/thing is already window 01; nothing to do."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(ls "$DAEDALUS_HOME/state/leases" | sort | tr '\n' ' ')" = "$before" ]
+}
+
+@test "adopt refuses a dirty target/thing, and a branch with nothing past trunk (merged or cherry-picked counts as on trunk); nothing changes" {
+  on_feat "$T" feat/x 1
+  printf 'uncommitted\n' >> "$T/a.txt"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/thing has uncommitted changes — commit them on their branch inside that checkout, or stash them, then run adopt again."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = feat/x ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  git -C "$T" checkout -q -- a.txt
+  git -C "$T" checkout -q main
+  git -C "$T" branch feat/empty main
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/empty
+  [ "$status" -ne 0 ]
+  case "$output" in *"feat/empty in target/thing has no commits that are not already on origin/main — nothing to adopt."*) : ;; *) echo "$output"; return 1 ;; esac
+  # the same change landed on trunk under another sha: git cherry sees it as on trunk
+  git -C "$T" checkout -q -b feat/dup main
+  printf 'trunk moved\n' >> "$T/b.txt"; git -C "$T" add -A; cmt "$T" -m "the same change"
+  git -C "$T" checkout -q main
+  trunk_moves b.txt "trunk moved"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/dup
+  [ "$status" -ne 0 ]
+  case "$output" in *"nothing to adopt"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+}
+
+@test "adopt main when the trunk is ahead of origin: the commits move to a window, the trunk is reset to origin/main, no commit is lost" {
+  printf 'local\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk by hand"
+  tip="$(git -C "$T" rev-parse main)"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
+  case "$(lease_json 01 adopted_from)" in daedalus/upgrade-*) : ;; *) echo "adopted_from: $(lease_json 01 adopted_from)"; return 1 ;; esac
+  [ -z "$(git -C "$T" branch --list 'daedalus/upgrade-*')" ]
+  case "$output" in *"left alone"*) echo "a note about origin for a moved trunk: $output"; return 1 ;; esac
+  # and again: the trunk is now at origin/main, so there is nothing to adopt — never "already window 01"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -ne 0 ]
+  case "$output" in *"has no commits that are not already on origin/main — nothing to adopt."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "adopt of a branch that was pushed: the same-named branch on origin is left alone, and the sentence says so" {
+  on_feat "$T" feat/p 1
+  git -C "$T" push -q origin feat/p
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/p
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 now holds feat/p"*" Note: a branch named feat/p on origin was left alone."*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse -q --verify refs/heads/feat/p >/dev/null
+}
+
+@test "adopt --repo sub: a nested repo's branch becomes the window's branch in sub; the outer repo's worktree is cut at its trunk" {
+  on_feat "$T/sub" feat/n 1
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/n --repo sub
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"from target/thing/sub (1 commit:"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T/sub" branch --show-current)" = main ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing/sub" branch --show-current)" = lease/01 ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse HEAD)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(lease_json 01 adopted_repo)" = thing/sub ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/n --repo elsewhere
+  [ "$status" -ne 0 ]
+  case "$output" in *"elsewhere is not one of this target's repos (thing, thing/sub)."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "adopt is refused to a visitor, and a missing branch is named" {
+  run env DIRECT_CALL_ID=c1 bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -ne 0 ]
+  case "$output" in *"direct-call session"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/none
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/thing has no branch feat/none."*) : ;; *) echo "$output"; return 1 ;; esac
+}
