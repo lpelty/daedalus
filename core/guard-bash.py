@@ -37,7 +37,16 @@ program-made terminal (`script`, `expect`, `unbuffer`, a `pty`, the suite's
 tty helper) in front of `promote.sh` or `lease.sh`, `screen`/`tmux`/`login`
 anywhere, and the suite's tty seam variable; destructive git; and writes
 whose operand resolves to a protected path of this deployment. One message
-rule in every case: trunk is reached only through promote. The guard is a
+rule in every case: trunk is reached only through promote. The guard reads
+only literal words (plan 4 completeness critic, finding 1): a git command any of
+whose words the shell fills in or expands when it runs — a variable, `$( )`,
+backticks, `$'…'`, a glob or brace expansion — in its subcommand, options,
+refspecs or the words before it, a command name or a wrapper's word that could
+be git, a `bash -c`/`eval`/interpreter string that is not literal, `env -S`, and
+a git command after `cd` to a place the guard cannot know are denied ("I can't
+read this git command exactly …"); only a commit message and a pathspec after
+`--` of anything but a push may hold one. GIT_COMMON_DIR, which moves the hooks
+directory, is denied like the GIT_CONFIG_* variables. The guard is a
 speed bump and git's pre-push hook (core/prepush.py) a second one, which does
 not fail open when this does but runs only for `git push`; a push by a route
 this guard does not parse (a script file, an interpreter's own git library,
@@ -158,11 +167,24 @@ UPSTREAM_TRUNK = "`git branch %s` would make %s this branch's push destination. 
 CONFIG_PUSH_TRUNK = "This push would move %s (remote.%s.push sends it there). " + PROMOTE_RULE
 CANNOT_CHECK = ("The guard could not check this command (it failed on `%s`); nothing ran. Run its commands one at a "
                 "time, written out plainly.")
+# Plan 4 completeness critic, finding 1: a word the shell fills in when the command runs ($VAR, ${…}, $( ),
+# backticks, $'…') or a glob it expands (*, ?, […], {a,b}) is not a word the guard can read. Where it reaches git
+# — or could be git — the command is denied, never judged by its spelling.
+GIT_UNREADABLE = "I can't read this git command exactly, so I can't check it is not a push to trunk. Write it out literally."
+CMD_UNREADABLE = ("I can't read this command exactly (%s is filled in by the shell when it runs), so I can't check it "
+                  "is not a git push to trunk. Write it out literally.")
+ENV_SPLIT = ("`env -S` splits a string into a command the guard cannot read exactly, so I can't check it is not a git "
+             "push to trunk or a write to the session transcript. Write the command out literally.")
+HOOKDIR_ENV = ("%s is not set from here: it moves where git reads its hooks from, so the pre-push hook that guards "
+               "trunk would not run.")
 # the GIT_CONFIG_* variables that point git at other configuration; GIT_CONFIG_NOSYSTEM is not among them: it
 # can only remove configuration (the system file), never add a hooks path or a push destination.
 CONFIG_ENV = re.compile(r"^(GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|"
                         r"GIT_CONFIG_KEY_[0-9]+|GIT_CONFIG_VALUE_[0-9]+)=")
 TRUNK_REF = "`git %s` would move %s by hand. " + PROMOTE_RULE
+# git reads its hooks from the common git directory; GIT_COMMON_DIR moves it (measured: a push with it pointed at a
+# copy of the repository ran no pre-push hook) — critic finding 1.
+HOOKDIR_VAR = re.compile(r"^(GIT_COMMON_DIR)=")
 TTY_SEAM = "DAEDALUS_TEST_TTY_ANCESTRY is the test suite's switch; nothing outside the suite sets it."
 TTY_WRAP = ("A terminal made by a program is not the operator typing: the yes, and a reason to take the pen or skip "
             "the review, are typed by a person in their own shell.")
@@ -298,13 +320,111 @@ def is_redirect(t: str) -> bool:
     return ">" in t and all(c in "&>|" for c in t)
 
 
+# The shell's expansions, marked before tokenizing (critic finding 1): each character that starts one is replaced by
+# a private-use character of its own, one for one, so a token keeps the marks through shlex and every slice of it.
+DYN, BQ, STAR, QMARK, BRACKET, BRACE, TILDE = "\ue000", "\ue001", "\ue002", "\ue003", "\ue004", "\ue005", "\ue006"
+UNMARK = str.maketrans({DYN: "$", BQ: "`", STAR: "*", QMARK: "?", BRACKET: "[", BRACE: "{", TILDE: "~"})
+DYN_MARKS = DYN + BQ + TILDE
+GLOB_MARKS = STAR + QMARK + BRACKET + BRACE
+WORD_END = " \t\n;&|()<>"
+
+
+def _word_rest(cmd: str, i: int) -> str:
+    """The rest of the word that starts at i (approximate: up to unquoted-looking whitespace or an operator)."""
+    j = i
+    while j < len(cmd) and cmd[j] not in WORD_END:
+        j += 1
+    return cmd[i:j]
+
+
+def mark(cmd: str) -> str:
+    """cmd with each unquoted expansion's first character replaced by its mark: `$` that starts a parameter,
+    command or arithmetic expansion or a $'…' / $"…" string (outside single quotes), a backtick (outside single
+    quotes), and — unquoted — `*`, `?`, a `[` closed later in its word, a `{` that opens a brace expansion
+    ({a,b} or {1..3}), and a `~+` / `~-` word start. Backslash-escaped characters stay literal."""
+    out: List[str] = []
+    i, n, state = 0, len(cmd), "n"
+    while i < n:
+        c = cmd[i]
+        if state == "s":
+            out.append(c)
+            state = "n" if c == "'" else "s"
+            i += 1
+            continue
+        if c == "\\":
+            if state == "n" or (i + 1 < n and cmd[i + 1] in '$`"\\\n'):
+                out.append(cmd[i:i + 2])
+                i += 2
+                continue
+            out.append(c)
+            i += 1
+            continue
+        if state == "d" and c == '"':
+            state = "n"
+        elif state == "n" and c == "'":
+            state = "s"
+        elif state == "n" and c == '"':
+            state = "d"
+        elif c == "$" and i + 1 < n and (cmd[i + 1].isalnum() or cmd[i + 1] in "{(`@*#?!$_-" or
+                                          (state == "n" and cmd[i + 1] in "'\"")):
+            out.append(DYN)
+            i += 1
+            continue
+        elif c == "`":
+            out.append(BQ)
+            i += 1
+            continue
+        elif state == "n":
+            if c == "*":
+                c = STAR
+            elif c == "?":
+                c = QMARK
+            elif c == "[" and "]" in _word_rest(cmd, i + 1):
+                c = BRACKET
+            elif c == "{":
+                rest = _word_rest(cmd, i + 1)
+                body = rest.split("}", 1)[0] if "}" in rest else ""
+                if "," in body or ".." in body:
+                    c = BRACE
+            elif c == "~" and (i == 0 or cmd[i - 1] in WORD_END + "=:") and cmd[i + 1:i + 2] in ("+", "-"):
+                c = TILDE
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+class Word(str):
+    """A token as the guard reads it (its marks restored), with `raw` — the marked spelling — so the guard can
+    tell a literal word from one the shell fills in or expands."""
+    raw: str
+
+    def __new__(cls, raw: str) -> "Word":
+        w = str.__new__(cls, raw.translate(UNMARK))
+        w.raw = raw
+        return w
+
+
+def dynamic(t: str) -> bool:
+    """t holds a parameter, command or arithmetic expansion, a backtick, $'…' or ~+ / ~-."""
+    return any(ch in DYN_MARKS for ch in getattr(t, "raw", ""))
+
+
+def globbed(t: str) -> bool:
+    """t holds an unquoted glob or brace expansion."""
+    return any(ch in GLOB_MARKS for ch in getattr(t, "raw", ""))
+
+
+def unresolved(t: str) -> bool:
+    return dynamic(t) or globbed(t)
+
+
 def tokenize(cmd: str) -> List[str]:
     """shlex in punctuation mode over the command with its heredoc bodies removed: `;`, `&`,
     `|`, `>` and newlines come out as their own tokens (runs merged: `&&`, `||`, `>>`, `&>`),
     quotes and escapes as in posix mode, `#` never a comment. A run that mixes a separator
     and a redirect is split (split_punct_run). Raises ValueError only for a quote the shell
     itself leaves open."""
-    lex = shlex.shlex(strip_heredocs(cmd), posix=True, punctuation_chars=PUNCT + ">")
+    lex = shlex.shlex(mark(strip_heredocs(cmd)), posix=True, punctuation_chars=PUNCT + ">")
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
     lex.commenters = ""
@@ -313,7 +433,7 @@ def tokenize(cmd: str) -> List[str]:
         if ">" in t and t and all(c in PUNCT + ">" for c in t):
             out.extend(split_punct_run(t))
         else:
-            out.append(t)
+            out.append(Word(t))
     return out
 
 
@@ -1319,6 +1439,89 @@ def watch_inner(seg: List[str]) -> Optional[str]:
 
 
 RUN_HEADS = SHELLS | INTERPRETERS | {"git", "eval"}
+# Commands that run another command from their words (critic finding 1): a word the shell fills in there could be git.
+RUNNERS = {"sudo", "doas", "su", "runuser", "nice", "ionice", "renice", "timeout", "gtimeout", "xargs", "parallel", "watch",
+           "stdbuf", "flock", "caffeinate", "nohup", "setsid", "chronic", "taskset", "chrt", "unbuffer", "script", "time",
+           "command", "exec", "builtin", "env", "arch", "sandbox-exec", "strace", "ltrace", "dtruss", "valgrind", "entr",
+           "retry", "sem", "find"}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
+# A cwd the guard cannot know (`cd "$D"`): a git command run there cannot be placed in a repository.
+UNKNOWN_CWD = Path("/" + DYN + "unknown-cwd")
+# git subcommands whose -m / --message value is a message, never an option or a ref.
+MESSAGE_SUBS = {"commit", "tag", "notes", "stash", "merge"}
+MESSAGE_CLUSTER = re.compile(r"^-[A-Za-z]*m$")
+
+
+def env_splits(seg: List[str]) -> bool:
+    """`env -S …` / `env --split-string …` (or a flag run carrying S) anywhere in the segment's env words."""
+    for i, t in enumerate(seg):
+        if os.path.basename(t) != "env":
+            continue
+        j = i + 1
+        while j < len(seg) and (seg[j].startswith("-") or ASSIGN.match(seg[j])):
+            a = seg[j]
+            if a.startswith("--split-string") or (a.startswith("-") and not a.startswith("--") and "S" in a[1:]):
+                return True
+            j += 2 if a in ("-u", "--unset", "-C", "--chdir") else 1
+    return False
+
+
+def runner_unresolved(seg: List[str]) -> Optional[str]:
+    """A word the shell fills in, in a command that runs another from its words — it could be git."""
+    head = os.path.basename(seg[0])
+    if head not in RUNNERS:
+        return None
+    words = seg[1:]
+    if head == "find":
+        idx = next((i for i, t in enumerate(words) if t in FIND_EXEC), None)
+        words = words[idx + 1:] if idx is not None else []
+    return next((t for t in words if unresolved(t)), None)
+
+
+def git_unreadable(gseg: List[str], prefix: List[str], here: Path, penv: Dict[str, str]) -> Optional[str]:
+    """Critic finding 1: every word that reaches git must be literal — the words before it (VAR= prefixes, a
+    wrapper's), git's own options and their values, the subcommand, and each argument — or the command is denied.
+    Two places may hold a word the shell fills in, since neither can move a ref or change how git runs: a message
+    (-m / --message of commit, tag, notes, stash, merge) and a pathspec after `--` of anything but a push. A git
+    command run in a directory the guard cannot know (`cd "$D" && git …`) is denied too."""
+    if here == UNKNOWN_CWD or any(unresolved(t) for t in prefix):
+        return GIT_UNREADABLE
+    i = 1
+    while i < len(gseg):
+        a = gseg[i]
+        if unresolved(a):
+            return GIT_UNREADABLE
+        if not a.startswith("-"):
+            break
+        name, eq, _ = a.partition("=")
+        if name in GIT_VALUE_OPTS and not eq:
+            if i + 1 < len(gseg) and unresolved(gseg[i + 1]):
+                return GIT_UNREADABLE
+            i += 2
+        else:
+            i += 1
+    if i >= len(gseg):
+        return None
+    repo, args, cfg = git_parts(gseg, here, penv)
+    resolved, shell_alias = resolve_alias(repo, args, cfg)
+    sub = resolved[0] if resolved else ""
+    pushes = shell_alias is not None or sub == "push" or sub in PLUMBING_SUBS or sub.startswith("remote-")
+    rest = gseg[i + 1:]
+    j = 0
+    while j < len(rest):
+        a = rest[j]
+        if a == "--" and not pushes:
+            return None
+        if sub in MESSAGE_SUBS and (a == "--message" or MESSAGE_CLUSTER.match(a)):
+            j += 2
+            continue
+        if sub in MESSAGE_SUBS and (a.startswith("--message=") or (a.startswith("-m") and not a.startswith("--"))):
+            j += 1
+            continue
+        if unresolved(a):
+            return GIT_UNREADABLE
+        j += 1
+    return None
 
 
 def check_command(cmd: str, cwd: Path, g: G, depth: int = 0) -> Tuple[Optional[str], List[str]]:
@@ -1374,19 +1577,34 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
         m = CONFIG_ENV.match(t)
         if m:
             return GIT_CONFIG_ENV % m.group(1), [], here, branch_created
+        m = HOOKDIR_VAR.match(t)
+        if m:
+            return HOOKDIR_ENV % m.group(1), [], here, branch_created
     if strips_session_variable(raw):
         return STRIP_REASON, [], here, branch_created
+    if env_splits(raw):
+        return ENV_SPLIT, [], here, branch_created
     penv = prefix_env(raw)
     seg = unwrap(raw)
     if not seg:
         return None, [], here, branch_created
+    prefix = raw[:len(raw) - len(seg)]
+    if unresolved(seg[0]):
+        return CMD_UNREADABLE % seg[0], [], here, branch_created      # critic finding 1: it could be git
+    bad = runner_unresolved(seg)
+    if bad is not None:
+        return CMD_UNREADABLE % bad, [], here, branch_created
     names_entry = ENTRY.search(cmd) is not None
     head = os.path.basename(seg[0])
     if head in TTY_ALWAYS or (names_entry and (
             head in TTY_TOOLS or any("fixtures/tty/" in t for t in seg)
             or (head in INTERPRETERS and any(re.search(r"\bpty\b", t) for t in seg[1:])))):
         return TTY_WRAP, [], here, branch_created           # Decision 32: a program-made terminal
-    if seg[0] == "cd" and len(seg) >= 2:
+    if seg[0] in ("cd", "pushd"):
+        if len(seg) < 2:
+            return None, [], Path(os.path.expanduser("~")).resolve(), branch_created
+        if unresolved(seg[1]) or seg[1] == "-":
+            return None, [], UNKNOWN_CWD, branch_created                # critic finding 1: nowhere the guard knows
         return None, [], resolve(here, seg[1]), branch_created
     k = exec_index(seg, RUN_HEADS)
     run = seg[k:]
@@ -1397,6 +1615,8 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
     inner = None
     if rhead in SHELLS:
         inner = shell_inner(run)
+        if inner is not None and unresolved(inner):
+            return CMD_UNREADABLE % inner, [], here, branch_created
         if inner is None and shell_reads_stdin(run):
             fed = [" ".join(piped)] + herestrings(run)
             if any(t.startswith("<<") and not t.startswith("<<<") for t in run):
@@ -1404,6 +1624,9 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
             if any(PUSH_IN_STRING.search(x) for x in fed):
                 return PUSH_IN_SCRIPT, [], here, branch_created
     elif rhead == "eval" and len(run) > 1:
+        bad = next((t for t in run[1:] if unresolved(t)), None)
+        if bad is not None:
+            return CMD_UNREADABLE % bad, [], here, branch_created
         inner = " ".join(run[1:])
     elif head == "watch":
         inner = watch_inner(seg)
@@ -1412,11 +1635,18 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
         if reason:
             return reason, [], here, branch_created
         contexts += more
+    if rhead in INTERPRETERS:
+        code = next((run[i + 1] for i, t in enumerate(run[:-1]) if t in ("-c", "-e", "-E")), None)
+        if code is not None and dynamic(code):
+            return CMD_UNREADABLE % code, [], here, branch_created
     if rhead in INTERPRETERS and any(t in ("-c", "-e") for t in run) and any(PUSH_IN_STRING.search(t) for t in run[1:]):
         return PUSH_IN_SCRIPT, [], here, branch_created
     if is_git_word(rhead):
         gseg = git_argv(run)
         gseg = split_redirects(gseg)[1] or gseg    # `2>&1` is not a refspec or an argument
+        reason = git_unreadable(gseg, prefix + seg[:k], here, penv)
+        if reason:
+            return reason, [], here, branch_created
         repo_dir, args, _cfg = git_parts(gseg, here, penv)
         if head in STDIN_ARGS and args[:1] and args[0] in ("push", "send-pack", "config", "update-ref", "branch", "commit"):
             return FROM_STDIN % (head, args[0], args[0]), [], here, branch_created

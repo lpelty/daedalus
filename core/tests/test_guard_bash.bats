@@ -525,7 +525,9 @@ scratch_and_worktree() {
   for c in 'd=main; git push origin HEAD:$d' 'git push origin HEAD:`echo main`' 'git push origin HEAD:{main}'; do
     run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
   done
-  run guard_as sB 'git push origin HEAD:$d' "$W2"; case "$output" in *"name the branch literally"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a variable is a word the shell fills in: the git command cannot be read (critic finding 1); a literal brace can
+  run guard_as sB 'git push origin HEAD:$d' "$W2"; case "$output" in *"I can't read this git command exactly"*"Write it out literally."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB "git push origin 'HEAD:{main}'" "$W2"; case "$output" in *"name the branch literally"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sB 'git push --no-verify origin lease/02' "$W2"; denied
   run guard_as sB 'git commit --no-verify -m x' "$W2"; denied
   run guard_as sB 'git commit -n -m x' "$W2"; denied
@@ -732,5 +734,50 @@ gb.main()
   for c in 'git push' 'git push origin lease/02' 'git -c push.default=current push' 'git push origin HEAD:heads/fix/x' \
            'git config push.default current' 'git branch -u origin/fix/x'; do
     run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c"; return 1; }
+  done
+}
+
+# ---- Plan 4 completeness critic, finding 1: the guard fails CLOSED on a git command it cannot read ----
+
+@test "a git command the guard cannot resolve to literal words is denied: a subcommand, option or path from a variable, env -S, bash/zsh -c or eval of a variable, \$( ) or backticks in git's words, glob characters, a cd to a variable; GIT_COMMON_DIR is denied; literal feature pushes, reads, a message with a variable and pathspecs after -- are not (critic finding 1)" {
+  scratch_and_worktree
+  touch -- "$W2/--no-verify" "$W2/HEAD:main"      # what makes the glob spelling match (the critic's probe)
+  for c in 'F=send-pack; git $F origin lease/02:main' 'F=--no-verify; git push $F origin lease/02' \
+           "F='git push --no-verify origin HEAD:main'; bash -c \"\$F\"" "F='git push --no-verify origin HEAD:main'; eval \"\$F\"" \
+           "F='git push --no-verify origin HEAD:main'; zsh -c \"\$F\"" "bash -c \"git push origin HEAD:\$B\"" \
+           "env -S 'git push --no-verify origin HEAD:main'" "env --split-string='git push --no-verify origin HEAD:main'" \
+           "env -S 'git send-pack origin lease/02:main'" 'git push --no-verif? origin HEAD:ma?n' 'git push origin HEAD:ma*' \
+           'git push origin "$B"' 'git push origin HEAD:${B}' 'G=git; $G push origin HEAD:main' '"$G" push origin HEAD:main' \
+           'git -C $D push origin HEAD:main' 'cd $D && git push origin HEAD:main' 'cd "$D"; git status' \
+           'GIT_DIR=$D git push origin HEAD:main' 'sudo $G push origin HEAD:main' 'nice $G push origin HEAD:main' \
+           'git $(echo push) origin HEAD:main' 'git `echo push` origin HEAD:main' 'git -c alias.x=$A x origin HEAD:main' \
+           "git push \$'\\x2d\\x2dno-verify' origin lease/02" 'gi? push origin HEAD:main' 'git log $R' \
+           'GIT_COMMON_DIR=/tmp/x git push origin lease/02' 'export GIT_COMMON_DIR=/tmp/x' 'env GIT_COMMON_DIR=/tmp/x git status'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB 'F=--no-verify; git push $F origin lease/02' "$W2"
+  case "$output" in *"I can't read this git command exactly, so I can't check it is not a push to trunk. Write it out literally."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB "env -S 'git status'" "$W2"; denied
+  run guard_as sB 'GIT_COMMON_DIR=/tmp/x git push origin lease/02' "$W2"
+  case "$output" in *"GIT_COMMON_DIR"*"pre-push hook"*) : ;; *) echo "$output"; return 1 ;; esac
+  for c in 'git push origin lease/02' 'git status' 'git log --oneline -5' "git log --format='%H \$x' -1" \
+           'git commit -m "fix $thing"' 'git commit --message="note $x"' 'git add -- *.py' 'git diff HEAD~1 -- "$f"' \
+           "bash -c 'git status'" 'echo $HOME' 'for f in *.md; do wc -l "$f"; done' 'git push origin lease/02 2>&1 | tail -1' \
+           "git log -1 --format='\$(x)'" 'cd ../../01 && ls' '[ -f x ] && git status' 'git rev-parse HEAD@{1}'; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+  # why the guard must: git runs no pre-push hook under --no-verify, under -c core.hooksPath, or with its hooks
+  # directory moved by GIT_COMMON_DIR — measured on a plain repo whose hook refuses every push
+  P="$BATS_TEST_TMPDIR/plain"; B="$BATS_TEST_TMPDIR/plain.git"; git init -q --bare -b main "$B"; git clone -q "$B" "$P" 2>/dev/null
+  printf '#!/bin/sh\nexit 1\n' > "$P/.git/hooks/pre-push"; chmod +x "$P/.git/hooks/pre-push"; git clone -q --bare "$P" "$BATS_TEST_TMPDIR/x.git" 2>/dev/null
+  for how in '' '--no-verify' '-c core.hooksPath=/dev/null' 'GIT_COMMON_DIR'; do
+    git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m "m$how"
+    case "$how" in
+      '') run git -C "$P" push -q "$B" HEAD:main; [ "$status" -ne 0 ] ;;
+      --no-verify) run git -C "$P" push -q --no-verify "$B" HEAD:main; [ "$status" -eq 0 ] ;;
+      -c*) run git -C "$P" -c core.hooksPath=/dev/null push -q "$B" HEAD:main; [ "$status" -eq 0 ] ;;
+      GIT_COMMON_DIR) git -C "$BATS_TEST_TMPDIR/x.git" fetch -q "$P" HEAD:refs/heads/main 2>/dev/null || true
+                      run env GIT_COMMON_DIR="$BATS_TEST_TMPDIR/x.git" git -C "$P" push -q "$B" HEAD:main; [ "$status" -eq 0 ] ;;
+    esac
   done
 }
