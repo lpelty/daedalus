@@ -8,7 +8,7 @@ setup() {
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/state"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
   # the guard imports boundary-hook.py for the cross-lease helpers and leaselib for the leases (Task 11)
-  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$SRC/distcheck.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
@@ -109,7 +109,7 @@ EOF2
 
 @test "trunk from config: pushing mainline is denied in every refspec shape, and the message names mainline" {
   use_mainline
-  run guard 'git push origin mainline' "$T"; denied; case "$output" in *"not mainline"*) : ;; *) echo "message must name the configured trunk: $output"; return 1 ;; esac
+  run guard 'git push origin mainline' "$T"; denied; case "$output" in *"This push would move mainline. Trunk is reached only through promote."*) : ;; *) echo "message must name the configured trunk: $output"; return 1 ;; esac
   run guard 'git push origin HEAD:mainline' "$T"; denied
   run guard 'git push origin feature:mainline' "$T"; denied
   run guard 'git push -u origin mainline' "$T"; denied
@@ -222,7 +222,7 @@ EOF2
   printf 'x\n' > "$W/README.md"; git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m i
   git -C "$W" push -q "$O" mainline; git -C "$W" branch -q main; git -C "$W" push -q "$O" main
   git clone -q --branch main "$O" "$T"      # exactly as core/sync-target.sh clones
-  run guard 'git push origin HEAD:mainline' "$T"; denied; case "$output" in *"not mainline"*) : ;; *) echo "message must name mainline: $output"; return 1 ;; esac
+  run guard 'git push origin HEAD:mainline' "$T"; denied; case "$output" in *"This push would move mainline. Trunk is reached only through promote."*) : ;; *) echo "message must name mainline: $output"; return 1 ;; esac
   run guard 'git push origin mainline' "$T"; denied
   run guard 'git push origin fix/x:refs/heads/mainline' "$T"; denied
   run guard 'git push origin main' "$T"; denied
@@ -466,4 +466,133 @@ git push origin main"; denied
   for c in "echo x>core/lib.sh" "echo x 2>core/lib.sh" "cp /tmp/x core/lib.sh 2>/dev/null" "ln -f /tmp/x core/lib.sh"; do
     run guard "$c"; denied || { echo "not denied: $c"; return 1; }
   done
+}
+
+# --- Every trunk-reaching git shape (spec §7.3, §11.1; plan 4 Task 13, Decisions 13, 14, 32, 33, 38) ---
+# scratch_and_worktree — windows 01 (sA, prime) and 02 (sB) from guard_leases, plus a promote
+# scratch worktree of target/thing, detached at main.
+scratch_and_worktree() {
+  guard_leases
+  S="$DAEDALUS_HOME/state/promote/02-20260928-120000-abc/thing"
+  git -C "$T" worktree add -q --detach "$S" main
+  W1="$DAEDALUS_HOME/worktrees/01/thing"; W2="$DAEDALUS_HOME/worktrees/02/thing"
+}
+
+@test "the rewritten trunk messages: a trunk push, a forced push, an everything push, a commit on trunk in the prime's checkout and elsewhere — each says trunk is reached only through promote, never 'the operator merges'" {
+  scratch_and_worktree
+  run guard_as sB 'git push origin HEAD:main' "$W2"; denied
+  case "$output" in *"This push would move main. Trunk is reached only through promote. Commit on your window's branch (lease/02); when it is ready, ask the prime to run promote 02."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git push --force origin lease/02' "$W2"; denied
+  # the hook's JSON escapes the em dash (\u2014), so the sentence is matched on either side of it
+  case "$output" in *"Trunk is reached only through promote. Commit on your window's branch (lease/02); when it is ready, ask the prime to run promote 02 "*" and never with --force: a forced push rewrites history."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git push --all origin' "$W2"; denied
+  case "$output" in *"promote pushes one merge commit; nothing else pushes branches"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git commit -m x' "$T"; denied
+  case "$output" in *"You are on main in the prime's checkout. Build in your window's worktree (worktrees/02/thing), not here."*|*"This is the prime's checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git push origin HEAD:main' "$T"; denied
+  case "$output" in *"operator merges"*) echo "$output"; return 1 ;; esac
+}
+
+@test "every refspec shape from a window's worktree and from the promote scratch: trunk pushes denied from the worktree, every push denied from the scratch as promote's job; --prune, -d and --delete denied everywhere under the home" {
+  scratch_and_worktree
+  for c in 'git push origin HEAD:main' 'git push origin lease/02:main' 'git push origin +HEAD:refs/heads/main' 'git push origin HEAD:master' 'git push origin :'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied from the worktree: $c"; return 1; }
+  done
+  run guard_as sB 'git push origin lease/02' "$W2"; allowed
+  run guard_as sA 'git push origin HEAD:refs/heads/fix/x' "$S"; denied
+  case "$output" in *"Pushes from the promote scratch are promote's job; run \`core/promote.sh <NN> --confirm\`."*) : ;; *) echo "$output"; return 1 ;; esac
+  for c in 'git push --prune origin' 'git push -d origin fix/x' 'git push origin --delete fix/x' 'git push --mirror origin' 'git push --branches origin'; do
+    for d in "$T" "$W2"; do run guard_as sB "$c" "$d"; denied || { echo "not denied in $d: $c"; return 1; }; done
+  done
+}
+
+@test "a push reached any other way is the same push: bash -c, eval, \$( ), backticks, an env or VAR= prefix, a git alias from config, -c alias.X=push, a !-alias, and a push inside a python -c string" {
+  scratch_and_worktree
+  git -C "$W2" config alias.p push
+  for c in "bash -c 'git push origin HEAD:main'" "sh -c \"git push origin HEAD:main\"" "eval git push origin HEAD:main" \
+           'echo $(git push origin HEAD:main)' 'echo `git push origin HEAD:main`' 'env GIT_TRACE=1 git push origin HEAD:main' \
+           'FOO=1 git push origin HEAD:main' 'git p origin HEAD:main' 'git -c alias.q=push q origin HEAD:main' \
+           "git -c 'alias.r=!git push' r origin HEAD:main" "python3 -c \"import os; os.system('git push origin main')\""; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB "bash -c 'git push origin lease/02'" "$W2"; allowed
+  run guard_as sB 'git p origin lease/02' "$W2"; allowed
+  run guard_as sB 'echo $(git log -1)' "$W2"; allowed
+}
+
+@test "unparseable refspecs, --no-verify, core.hooksPath and writes under .git/hooks are denied" {
+  scratch_and_worktree
+  for c in 'd=main; git push origin HEAD:$d' 'git push origin HEAD:`echo main`' 'git push origin HEAD:{main}'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB 'git push origin HEAD:$d' "$W2"; case "$output" in *"name the branch literally"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'git push --no-verify origin lease/02' "$W2"; denied
+  run guard_as sB 'git commit --no-verify -m x' "$W2"; denied
+  run guard_as sB 'git commit -n -m x' "$W2"; denied
+  run guard_as sB 'git -c core.hooksPath=/dev/null push origin lease/02' "$W2"; denied
+  run guard_as sB 'git config core.hooksPath /tmp/h' "$W2"; denied
+  run guard_as sB "echo x > $T/.git/hooks/pre-push" "$W2"; denied
+  case "$output" in *".git/hooks"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB 'rm -f ../../../target/thing/.git/hooks/pre-push' "$W2"; denied
+}
+
+@test "distribution code by every git route: in Daedalus's own checkout apply, am, cherry-pick, merge, pull, rebase, stash pop and apply, checkout <rev>, switch <branch> and restore --source are denied; patch < file in core/ is denied; the same verbs in a window's worktree are allowed" {
+  scratch_and_worktree
+  for c in 'git apply /tmp/x.patch' 'git am /tmp/x.mbox' 'git cherry-pick abc123' 'git merge other' 'git pull' 'git rebase main' \
+           'git stash pop' 'git stash apply' 'git checkout abc123' 'git switch other' 'git restore --source=HEAD~1 core/lib.sh'; do
+    run guard_as sA "git -C $DAEDALUS_HOME ${c#git }"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"distribution code; write a proposal"*) : ;; *) echo "$c: $output"; return 1 ;; esac
+  done
+  run guard_as sA 'patch -p1 < /tmp/x.patch' "$DAEDALUS_HOME/core"; denied
+  run guard_as sA "git -C $DAEDALUS_HOME switch -c proposal-branch"; allowed
+  run guard_as sB 'git rebase origin/main' "$W2"; allowed
+  run guard_as sB 'git merge origin/main' "$W2"; allowed
+}
+
+@test "worktree removal and pruning under the promote scratch are the prime's: a non-prime window is denied, the prime is not" {
+  scratch_and_worktree
+  run guard_as sB "git -C $T worktree remove $S"; denied
+  run guard_as sB "git -C $T worktree prune"; denied
+  run guard_as sA "git -C $T worktree remove $S"; allowed
+  run guard_as sA "git -C $T worktree prune"; allowed
+}
+
+@test "abbreviated options are the options they abbreviate; update-ref and branch -f on a trunk; every other way to set the hooks path (Decision 33)" {
+  scratch_and_worktree
+  for c in 'git push --no-veri origin lease/02' 'git push --mirr origin' 'git push --prun origin' 'git push origin --delet fix/x' \
+           'git push --forc origin lease/02' 'git push --force-with origin lease/02' 'git push --al origin' 'git commit --no-ver -m x' \
+           'git update-ref refs/heads/main HEAD' 'git update-ref main HEAD' 'git update-ref --stdin' 'git branch -f main HEAD~1' \
+           'git branch -M other main' 'git --config-env=core.hooksPath=HP push origin lease/02' \
+           'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp git push origin lease/02'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB 'git push --follow-tags origin lease/02' "$W2"; allowed
+  run guard_as sB 'git branch -f fix/x HEAD' "$W2"; allowed
+  run guard_as sB 'git update-ref refs/heads/fix/x HEAD' "$W2"; allowed
+}
+
+@test "a push from outside the home to the target's origin is in scope: a clone elsewhere, GIT_DIR pointed at the target, the origin named by path; a push to an unrelated remote is not (Decision 38)" {
+  scratch_and_worktree
+  O="$BATS_TEST_TMPDIR/origin.git"; X="$BATS_TEST_TMPDIR/outside"; git clone -q "$O" "$X"
+  for c in 'git push origin HEAD:main' "git push $O HEAD:main" 'git push --mirr origin'; do
+    run guard_as sB "$c" "$X"; denied || { echo "not denied from outside the home: $c"; return 1; }
+  done
+  run guard_as sB "GIT_DIR=$T/.git git push origin HEAD:main" "$BATS_TEST_TMPDIR"; denied
+  run guard_as sB 'git push origin HEAD:refs/heads/fix/x' "$X"; allowed
+  U="$BATS_TEST_TMPDIR/unrelated.git"; git init -q --bare "$U"; git -C "$X" remote add other "$U"
+  run guard_as sB 'git push other HEAD:main' "$X"; allowed
+}
+
+@test "a program-made terminal cannot type the yes: script, expect, unbuffer, a python pty and the suite's tty helper in front of promote.sh or lease.sh are denied, as is the suite's seam variable anywhere (Decision 32)" {
+  scratch_and_worktree
+  for c in 'script -q /dev/null bash core/promote.sh 02 --confirm' 'expect -c "spawn core/promote.sh 02 --confirm"' \
+           'unbuffer core/lease.sh prime take' "python3 -c 'import pty; pty.spawn([\"core/promote.sh\", \"02\", \"--confirm\"])'" \
+           'python3 core/tests/fixtures/tty/type-into.py yes Type -- bash core/promote.sh 02 --confirm' \
+           'DAEDALUS_TEST_TTY_ANCESTRY=skip bash core/promote.sh 02 --confirm' 'export DAEDALUS_TEST_TTY_ANCESTRY=skip' \
+           'screen -dmS x bash core/promote.sh 02 --confirm' 'screen -S x -X stuff yes' 'tmux send-keys -t x yes Enter' \
+           'tmux new -d -s x' '/usr/bin/login -pf someone bash core/promote.sh 02 --confirm'; do
+    run guard_as sA "$c" "$DAEDALUS_HOME"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sA 'bash core/promote.sh 02' "$DAEDALUS_HOME"; allowed
+  run guard_as sA 'script -q /dev/null ls' "$DAEDALUS_HOME"; allowed
 }

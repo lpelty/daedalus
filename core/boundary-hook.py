@@ -132,6 +132,23 @@ def check_config(root: Path, marker: dict, reasons: List[str]) -> None:
         reasons.append("The deny rules or hooks in .claude/settings.local.json changed this session; restore them.%s" % RESTART)
 
 
+def check_distribution(root: Path, reasons: List[str]) -> None:
+    """§6.1, §7.3: at Stop a modified core/ blocks — whoever changed it and
+    whenever, since a modified reviewer cannot certify anything and the
+    launcher and promote refuse until it is clean. core/ only (the spec's
+    words); a home that is not a git checkout is silent here (plan 4
+    Decision 11 — the launcher, promote and doctor all say so)."""
+    sys.dont_write_bytecode = True   # a new core/__pycache__/distcheck.*.pyc would itself be protected dirt
+    try:
+        import distcheck as dc
+    except ImportError:
+        return
+    state, detail = dc.distribution_state(root, paths=("core",))
+    if state == "modified":
+        reasons.append("Distribution code is modified (%s); restore it — reviews and promotes refuse until it is "
+                       "clean." % detail)
+
+
 def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
     try:
         since = time.mktime(time.strptime(marker.get("started", "")[:19], "%Y-%m-%dT%H:%M:%S"))
@@ -573,6 +590,7 @@ def main() -> int:
         if event == "Stop":
             if not visitor:
                 check_backstop(root, sid, reasons, notes)
+            check_distribution(root, reasons)
             check_promotion(root, marker, reasons, notes)
     except Exception:
         return 0

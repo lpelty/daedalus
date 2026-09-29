@@ -10,7 +10,7 @@ setup() {
   DAEDALUS_HOME="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/dae"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault/evidence"
-  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$SRC/distcheck.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
@@ -536,4 +536,15 @@ PY
   printf 'c\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am unrecorded
   run hook Stop; [ "$status" -eq 2 ]
   case "$output" in *"main moved"*"trunk is reached only through promote"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a Stop with a modified core/ file is blocked with 'Distribution code is modified', whoever changed it — even when the change was already there at session start; a visitor's is a note; restored, the Stop passes" {
+  printf '# local\n' >> "$DAEDALUS_HOME/core/fingerprint.sh"
+  printf '{"hook_event_name":"SessionStart","session_id":"s9","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  run hook_as Stop s9; [ "$status" -eq 2 ]
+  case "$output" in *"Distribution code is modified (core/fingerprint.sh); restore it — reviews and promotes refuse until it is clean."*) : ;; *) echo "$output"; return 1 ;; esac
+  DIRECT_CALL_ID=x run hook_as Stop s9; [ "$status" -eq 0 ]
+  case "$output" in *"(visitor, not blocking) Distribution code is modified"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$DAEDALUS_HOME" checkout -q -- core/fingerprint.sh
+  run hook_as Stop s9; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
