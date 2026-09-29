@@ -321,6 +321,29 @@ EOF
   fi
 fi
 
+# Promote (spec §15): the confirm mode, each target repo's trunk, the pre-push hook
+# in each (git's own refusal of a trunk push no promotion confirmed), and a
+# promotion prepared but never confirmed. One reader, core/promote.py --doctor;
+# here-string loop so the MISSING count survives (see the leases block).
+# Skipped, visibly absent, when a fixture has no promote.py.
+if [ -f "$DAEDALUS_HOME/core/promote.py" ]; then
+  pr_out="$(python3 "$DAEDALUS_HOME/core/promote.py" --doctor 2>/dev/null)"
+  pr_rc=$?
+  if [ "$pr_rc" -ne 0 ]; then
+    note_problem "promote: check failed (core/promote.py --doctor exited $pr_rc)"
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        "") ;;
+        "MISSING  "*) note_problem "${line#MISSING  }" ;;
+        *) log "$line" ;;
+      esac
+    done <<EOF
+$pr_out
+EOF
+  fi
+fi
+
 # Arm-state visibility: claims() returns [] until vault/evidence/ has at
 # least one dated *.md file, which is also what forces the first gates run
 # to happen at all. That is a real gap, not a bug — but a silent one, since

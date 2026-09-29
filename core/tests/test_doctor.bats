@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+load fixtures/leases/setup.bash
+
 # The target checkout in these fixtures is a real (empty, origin-less) `git
 # init` repository, never a faked `mkdir target/thing/.git`: doctor asks git
 # whether the directory is a work tree's root (lib.sh is_work_tree_root, the
@@ -894,4 +896,54 @@ doctor_memory_fixture() {
   printf '  bank: b\n  api_key_file: state/hindsight/api-key\n' >> "$DAEDALUS_HOME/config.yaml"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
   case "$output" in *"MISSING  memory: memory.api_key_file state/hindsight/api-key is readable by others (mode 644); run chmod 600 state/hindsight/api-key"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- Promote (spec §15, plan-4 rows) -----------------------------------------
+# lease_fixture's target has a nested repo (sub) and bare origins for both; the
+# promote block runs only when core/promote.py is present, so every older test
+# above (which copies none) is unchanged.
+doctor_promote_fixture() {
+  lease_fixture
+  cp "$SRC/doctor.sh" "$SRC/promote.py" "$SRC/prepush.py" "$SRC/distcheck.py" "$SRC/transcriptlib.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
+  unset DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID CLAUDECODE
+  D() { bash "$DAEDALUS_HOME/core/doctor.sh"; }
+}
+
+@test "doctor: promote.confirm is OK when transcribed (the default) or tty, MISSING when anything else" {
+  doctor_promote_fixture
+  run D; case "$output" in *"OK       promote: the operator's yes is transcribed and checked against the session transcript"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run D; case "$output" in *"OK       promote: the operator types yes in a terminal (tty)"*) : ;; *) echo "$output"; return 1 ;; esac
+  sed -i '' 's/confirm: tty/confirm: maybe/' "$DAEDALUS_HOME/config.yaml"
+  run D; [ "$status" -ne 0 ]; case "$output" in *"MISSING  promote.confirm must be transcribed or tty (got: maybe)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: the pre-push hook is MISSING per repo until installed, OK naming both repos after, NOTE when it differs from this release's, MISSING when core.hooksPath is set" {
+  doctor_promote_fixture
+  run D; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  pre-push hook in target/thing — run core/setup.sh (the trunk is unguarded in git until it is installed)"*"MISSING  pre-push hook in target/thing/sub — run core/setup.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 "$DAEDALUS_HOME/core/prepush.py" install "$T" "$T/sub" >/dev/null
+  run D; case "$output" in *"OK       pre-push hook: target/thing, target/thing/sub"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '# edited\n' >> "$T/.git/hooks/pre-push"
+  run D; case "$output" in *"NOTE     pre-push hook in target/thing differs from this release's — run core/setup.sh to refresh it"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T/sub" config core.hooksPath /tmp/elsewhere
+  run D; case "$output" in *"MISSING  target/thing/sub sets core.hooksPath (/tmp/elsewhere), so its pre-push hook never runs"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: each repo's trunk is OK by name; a nested repo with no origin/HEAD is MISSING with the remedy" {
+  doctor_promote_fixture
+  run D; case "$output" in *"OK       trunk: thing=main, thing/sub=main"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T/sub" symbolic-ref --delete refs/remotes/origin/HEAD
+  run D; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  nested repo sub has no origin/HEAD — run git -C target/thing/sub remote set-head origin -a"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: a promotion prepared and never confirmed is a NOTE naming the window and the time; a confirmed one is not" {
+  doctor_promote_fixture
+  d="$DAEDALUS_HOME/state/promote/02-20260928-113100-abc"; mkdir -p "$d"
+  ts="$(python3 -c 'import time; print(time.mktime(time.strptime("2026-09-28 11:31", "%Y-%m-%d %H:%M")))')"
+  printf '{"lease":"02","prepared_ts":%s,"prepared_at":"x"}' "$ts" > "$d/prepared.json"
+  run D; case "$output" in *"NOTE     promote: window 02 prepared at 11:31, not confirmed — say yes to the prime or run promote again"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"lease":"02","prepared_ts":%s,"prepared_at":"x","confirmed_at":"y"}' "$ts" > "$d/prepared.json"; : > "$d/pushed"
+  run D; case "$output" in *"window 02 prepared at"*) echo "$output"; return 1 ;; esac
 }

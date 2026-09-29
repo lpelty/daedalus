@@ -6,6 +6,7 @@
                                              recorded (§7.1 step 8; in tty mode the reason is typed at the terminal)
     core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept)
     core/promote.sh <NN> --confirm [--operator-said "..."] [--id <promote-id>]   confirm and push (§7.2)
+    python3 core/promote.py --doctor         doctor's promote lines (§15), one per state
 
 core/promote.sh has already run the distribution-integrity check
 (core/distcheck.py) before this file was read. Run by the prime — the session
@@ -1249,12 +1250,79 @@ def confirm(root: Path, a: dict) -> int:
     print("\n".join(lines))
     return 0
 
+# --- doctor (§15) -----------------------------------------------------------------------------------
+
+def doctor(root: Path) -> int:
+    """The §15 lines for promote, one per state; doctor.sh counts the MISSING
+    ones. Never fails on its own: a line it cannot compute is not printed."""
+    try:
+        mode = tl.confirm_mode(root)
+        print("OK       promote: the operator's yes is transcribed and checked against the session transcript"
+              if mode == "transcribed" else "OK       promote: the operator types yes in a terminal (tty)")
+    except ValueError as e:
+        print("MISSING  %s" % e)
+    try:
+        name = ll.target_name(root)
+    except ll.Refused:
+        return 0
+    if (root / "target" / name).is_dir():
+        nested = v.nested_relpaths(root)
+        repos = [name] + ["%s/%s" % (name, n) for n in nested]
+        heads, missing_head = ["%s=%s" % (name, v.target_branch(root))], False
+        for n in nested:
+            code, head, _ = run(["git", "-C", str(root / "target" / name / n), "symbolic-ref", "--short",
+                                 "refs/remotes/origin/HEAD"])
+            if code == 0 and head.strip().startswith("origin/"):
+                heads.append("%s/%s=%s" % (name, n, head.strip()[len("origin/"):]))
+            else:
+                missing_head = True
+                print("MISSING  nested repo %s has no origin/HEAD — run git -C target/%s/%s remote set-head origin -a"
+                      % (n, name, n))
+        if not missing_head:
+            print("OK       trunk: %s" % ", ".join(heads))
+        import prepush
+        ok = []
+        for repo in repos:
+            s, where = prepush.state(root / "target" / repo)
+            if s == "installed":
+                ok.append("target/" + repo)
+            elif s == "differs":
+                print("NOTE     pre-push hook in target/%s differs from this release's — run core/setup.sh to refresh it"
+                      % repo)
+            elif s == "foreign":
+                print("MISSING  target/%s has a pre-push hook Daedalus did not install (%s) — the trunk is unguarded in "
+                      "git until Daedalus's hook runs there; merge the two by hand" % (repo, where))
+            elif s == "hookspath":
+                print("MISSING  target/%s sets core.hooksPath (%s), so its pre-push hook never runs — unset it (git -C "
+                      "target/%s config --unset core.hooksPath); the trunk is unguarded in git until then"
+                      % (repo, where, repo))
+            else:
+                print("MISSING  pre-push hook in target/%s — run core/setup.sh (the trunk is unguarded in git until it "
+                      "is installed)" % repo)
+        if ok:
+            print("OK       pre-push hook: %s" % ", ".join(ok))
+    latest: Dict[str, Tuple[float, Path, dict]] = {}
+    base = root / "state" / "promote"
+    for f in (base.glob("*/prepared.json") if base.is_dir() else []):
+        p = read_json(f)
+        if p and p.get("lease"):
+            ts = float(p.get("prepared_ts") or 0)
+            if ts >= latest.get(p["lease"], (-1.0, f, p))[0]:
+                latest[p["lease"]] = (ts, f.parent, p)
+    for nn, (ts, pdir, p) in sorted(latest.items()):
+        if not p.get("confirmed_at") and not (pdir / "pushed").exists() and not (pdir / "announced").exists():
+            print("NOTE     promote: window %s prepared at %s, not confirmed — say yes to the prime or run promote again"
+                  % (nn, time.strftime("%H:%M", time.localtime(ts))))
+    return 0
+
+
 # --- the command line -----------------------------------------------------------------------------
 
 USAGE = ("Usage: core/promote.sh <NN> [--skip-review [--reason \"...\"]] | <NN> --confirm [--operator-said \"...\"] "
          "[--id <promote-id>] | <NN> --clean")
 VALUE_FLAGS: Dict[str, str] = {"--operator-said": "said", "--id": "id", "--reason": "reason"}   # flags with a value
-SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm", "--skip-review": "skip"}   # flags without one
+SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm", "--skip-review": "skip",
+                            "--doctor": "doctor"}   # flags without one
 
 
 def parse(argv: List[str]) -> dict:
@@ -1281,6 +1349,8 @@ def parse(argv: List[str]) -> dict:
 
 
 def dispatch(root: Path, a: dict) -> int:
+    if a.get("doctor"):
+        return doctor(root)
     if not a["token"]:
         raise Stop(USAGE)
     if a.get("confirm"):
