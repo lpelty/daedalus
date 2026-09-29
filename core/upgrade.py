@@ -13,8 +13,10 @@ step is idempotent — the second run changes nothing — and says one line the 
      block, the key into state/hindsight/api-key (mode 600); the old line is left and still works
   6. in-flight work in target/ moved into numbered windows (leaselib.adopt) — the checked-out branch, then a
      trunk still ahead of origin — each checkout put back on its trunk at origin, after one bounded fetch of
-     all of them at once (plan 5 Decision 3). The one thing it will not do is move a checkout with uncommitted
-     changes: it stops there, and the board repeats the sentence until a later start finishes.
+     all of them at once (plan 5 Decision 3). It will not move a checkout with uncommitted changes, nor one
+     with an untracked file where the move back to the trunk would write: it stops there, saying what to do,
+     and the board repeats the sentence until a later start finishes. A window an earlier, cut-off run made
+     is found again, never made twice.
   7. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
     python3 core/upgrade.py              every step now, as a session start would
@@ -58,7 +60,13 @@ FETCH_SECS = 4          # one cap for every target repo's fetch together, never 
 NOTE_ADOPTED = "adopted at the upgrade to %s"
 DIRTY = ("upgrade to %s incomplete: target/%s has uncommitted changes — commit them on their branch inside that "
          "checkout, or stash them, then start a session again")
-STOPPED_WHILE = "upgrade to %s incomplete: stopped while %s — %s; it runs again at the next session start"
+UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s would overwrite (%s) — move them out "
+             "of that checkout, or commit them on its branch, then start a session again")
+# A stop the upgrade cannot say will clear by itself names what to do if it comes back (review finding 3); only
+# running out of time at a session start is sure to clear, so only it says "it runs again".
+STOPPED_WHILE = ("upgrade to %s incomplete: stopped while %s — %s; it tries again at the next session start — if it "
+                 "stops the same way again, ask this home's agent to look into the reason given")
+STOPPED_TIME = "upgrade to %s incomplete: stopped while %s — the session start ran out of time; it runs again at the next session start"
 
 
 class Stop(Exception):
@@ -90,7 +98,8 @@ def _git(repo: Path, *args: str) -> Tuple[int, str, str]:
 
 
 def _last(err: str) -> str:
-    return (err.strip().splitlines()[-1:] or ["no output"])[0]
+    import leaselib as ll
+    return ll.git_reason(err)
 
 
 def _write(path: Path, text: str, mode: Optional[int] = None) -> None:
@@ -370,6 +379,36 @@ def _into_window(root: Path, key: str, rel: str, ref: str, ver: str, deadline: O
         raise Stop("could not move target/%s's work into a window (%s)" % (key, e))
 
 
+def _carried_by(root: Path, p: Path, key: str, trunk: str) -> Optional[str]:
+    """The number of a window adopted from target/<key> whose lease/<NN> already holds the trunk's tip — made by
+    an earlier run cut off before the trunk was reset (review finding 1). None when no window does."""
+    import leaselib as ll
+    for nn, d in sorted(ll.read_all(root).items()):
+        if nn == "prime" or d.get("adopted_repo") != key:
+            continue
+        ref = "refs/heads/lease/" + nn
+        if (_git(p, "rev-parse", "--verify", "-q", ref)[0] == 0
+                and _git(p, "merge-base", "--is-ancestor", trunk, ref)[0] == 0):
+            return nn
+    return None
+
+
+def _in_the_way(p: Path, key: str, trunk: str, cur: str, ver: str) -> None:
+    """Stop, before anything in target/ moves, when an untracked file is where the move back to the trunk or the
+    trunk's reset would write (review finding 3): git refuses the checkout over it on every run, and a reset
+    deletes it silently. Checked after the fetch, against origin/<trunk> as the run will see it."""
+    import leaselib as ll
+    if cur != trunk:
+        refs, doing = [trunk, "origin/" + trunk], "putting it back on %s" % trunk
+    elif _ahead(p, trunk):
+        refs, doing = ["origin/" + trunk], "resetting %s to origin/%s" % (trunk, trunk)
+    else:
+        return
+    hit = ll.untracked_in_way(p, refs)
+    if hit:
+        raise Stop(UNTRACKED % (ver, key, doing, ll.name_paths(hit)))
+
+
 def _now_window(head: str, what: str, r: dict, key: str, trunk: str, stale: str) -> str:
     tail = " Note: %s." % "; ".join(r["notes"]) if r["notes"] else ""
     return ("%s: %s; that work is now window %s (branch lease/%s), and target/%s is back on %s. Promote it from the "
@@ -384,8 +423,10 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
     origin/<trunk> lacks is adopted as a numbered window, one whose work is already there goes back to the trunk
     and is left as it was (Decisions 4, 5) — and then the trunk itself: a trunk still ahead of origin is adopted
     as its own window, unless the window just adopted from this checkout already carries its commits, in which
-    case the trunk is only reset to origin/<trunk> (review of 2026-09-29, finding 1). Afterwards no
-    target/<repo> is off its trunk or ahead of origin — §14's predicate."""
+    case the trunk is only reset to origin/<trunk> (review of 2026-09-29, finding 1) — and so it is when a window
+    an earlier run made, cut off before the reset, carries them (Task 3 review, findings 1-2). An untracked file
+    where a checkout or reset would write stops the step, after the fetch and before anything moves (finding 3).
+    Afterwards no target/<repo> is off its trunk or ahead of origin — §14's predicate."""
     import leaselib as ll
     repos = target_repos(root)
     if not repos:
@@ -400,6 +441,9 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         if code != 0 or dirt.strip():
             raise Stop(DIRTY % (ver, key))
     fetched = set() if dry else _fetch_all(repos, deadline)
+    for key, p in repos:
+        _, cur, _ = _git(p, "branch", "--show-current")
+        _in_the_way(p, key, trunks[key], cur.strip(), ver)
     lines = []
     for key, p in repos:
         trunk = trunks[key]
@@ -476,14 +520,33 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
             lines.append("%s: target/%s's %s was also %s ahead of origin/%s; window %s carries those commits, so %s is "
                          "reset to origin/%s.%s" % (head, key, trunk, n, trunk, carrier_nn, trunk, trunk, stale))
             continue
+        prior = _carried_by(root, p, key, trunk)
+        if prior:
+            # an earlier run made that window and was cut off before the reset: finish it, never a second window
+            if dry:
+                lines.append("%s: would reset target/%s's %s (%s ahead of origin/%s) to origin/%s — window %s already "
+                             "carries those commits%s." % (head, key, trunk, n, trunk, trunk, prior, stale))
+                continue
+            code, _, err = _git(p, "reset", "--hard", "--quiet", "origin/" + trunk)
+            if code != 0:
+                raise Stop("could not reset target/%s's %s to origin/%s (%s); window %s holds its commits"
+                           % (key, trunk, trunk, _last(err), prior))
+            lines.append("%s: target/%s's %s was %s ahead of origin/%s; window %s already carries those commits, so %s "
+                         "is reset to origin/%s.%s" % (head, key, trunk, n, trunk, prior, trunk, trunk, stale))
+            continue
         if dry:
             lines.append("%s: would move target/%s's %s (%s ahead of origin/%s) into a numbered window and reset it "
                          "to origin/%s%s." % (head, key, trunk, n, trunk, trunk, stale))
             continue
         r = _into_window(root, key, rel, trunk, ver, deadline)
         if r["already"]:
-            raise Stop("target/%s's %s is still ahead of origin/%s, and adopting it named window %s, which was "
-                       "adopted before" % (key, trunk, trunk, r["nn"]))
+            # adopt finished a reset an earlier, cut-off run left (review finding 2): say so, and go on
+            if _ahead(p, trunk):
+                raise Stop("target/%s's %s is still ahead of origin/%s after adopting it named window %s, which was "
+                           "adopted before" % (key, trunk, trunk, r["nn"]))
+            lines.append("%s: target/%s's %s was %s ahead of origin/%s; window %s already carries those commits, and "
+                         "%s is now reset to origin/%s.%s" % (head, key, trunk, n, trunk, r["nn"], trunk, trunk, stale))
+            continue
         lines.append(_now_window(head, "target/%s's %s was %s ahead of origin/%s (%s)"
                                  % (key, trunk, n, trunk, _quoted(ahead)), r, key, trunk, stale))
     return lines
@@ -536,7 +599,7 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
             if n > upto:
                 break
             if not dry and deadline is not None and time.time() >= deadline:
-                return lines, _stopped(root, ver, n, STOPPED_WHILE % (ver, what, "the session start ran out of time"))
+                return lines, _stopped(root, ver, n, STOPPED_TIME % (ver, what))
             try:
                 lines += fn(root, head, dry, deadline)
             except Stop as e:

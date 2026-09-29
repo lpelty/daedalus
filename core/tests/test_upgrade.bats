@@ -225,3 +225,105 @@ lines, stop = u.run(pathlib.Path(sys.argv[2]), deadline=time.time()+5); print(li
   [ "$output" = "[] None" ] || { echo "$output"; return 1; }
   [ ! -d "$DAEDALUS_HOME/state/leases" ]; [ ! -d "$DAEDALUS_HOME/worktrees" ]
 }
+
+# killed_run <python patch> — one upgrade run with <patch> applied to the loaded modules first (u = upgrade,
+# ll = leaselib, os imported); the patch models a process killed part-way through (os._exit).
+killed_run() {
+  run python3 -c 'import os, sys; sys.path.insert(0, sys.argv[1]); import upgrade as u, leaselib as ll
+exec(sys.argv[2]); sys.exit(u.main(["upgrade.py"]))' "$DAEDALUS_HOME/core" "$1"
+}
+
+@test "a run killed after the checked-out branch became a window, before the trunk was reset: the next run finds the window carrying the trunk's commits — one window, main reset, the stamp" {
+  printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk"
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  killed_run 'o = u._into_window
+def k(*a, **kw):
+    o(*a, **kw); os._exit(9)
+u._into_window = k'
+  [ "$status" -eq 9 ]; [ -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  [ "$(git -C "$T" rev-list --count origin/main..main)" = 1 ]          # the cut: main still ahead
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's main was 1 commit ahead of origin/main; window 01 already carries those commits, so main is reset to origin/main."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 02"*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(git -C "$T" log --format=%s lease/01 | head -2 | tr '\n' '|')" = "in flight|committed on trunk|" ]
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
+
+@test "a run killed inside the trunk's adoption, after its window was made and before the reset: the next run finishes it and names the window — no stop, no second window" {
+  printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk"
+  tip="$(git -C "$T" rev-parse main)"
+  killed_run 'll._trunk_reset = lambda *a: os._exit(9)'
+  [ "$status" -eq 9 ]; [ -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(git -C "$T" rev-parse main)" = "$tip" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's main was 1 commit ahead of origin/main; window 01 already carries those commits, so main is reset to origin/main."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"still ahead"*|*"incomplete"*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]; [ ! -e "$DAEDALUS_HOME/state/upgrade-stopped.json" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  # the same cut, with the window lookup blind, goes through adopt's own finish ("already"): still no stop
+  rm -rf "$DAEDALUS_HOME/state/upgraded-to"
+  git -C "$T" reset -q --hard "$tip"
+  killed_run 'u._carried_by = lambda *a: None'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's main was 1 commit ahead of origin/main; window 01 already carries those commits, and main is now reset to origin/main."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+}
+
+@test "an untracked file the move back to the trunk would overwrite stops before anything moves, in a sentence that names it and says what to do — not 'it runs again'; moved aside, the next run finishes" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  git -C "$T" checkout -q main; printf 'gen\n' > "$T/gen.txt"; git -C "$T" add -A; cmt "$T" -m "generated file"
+  git -C "$T" push -q origin main; git -C "$T" checkout -q feat/x
+  printf 'mine\n' > "$T/gen.txt"
+  s="upgrade to 0.7.0 incomplete: target/thing has untracked files that putting it back on main would overwrite (gen.txt) — move them out of that checkout, or commit them on its branch, then start a session again"
+  for i in 1 2; do
+    run python3 "$UP"
+    [ "$status" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
+  done
+  case "$output" in *"runs again"*|*Aborting*) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = feat/x ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(cat "$T/gen.txt")" = mine ]
+  run python3 "$UP" --dry-run
+  case "$output" in *"would stop: $s"*) : ;; *) echo "$output"; return 1 ;; esac
+  mv "$T/gen.txt" "$BATS_TEST_TMPDIR/gen.txt"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"that work is now window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "an untracked file that resetting a trunk ahead of origin would overwrite stops before anything moves — the file is kept, nothing is adopted" {
+  printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk"
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  printf 'gen\n' > "$BATS_TEST_TMPDIR/hand/gen.txt"; git -C "$BATS_TEST_TMPDIR/hand" add -A; cmt "$BATS_TEST_TMPDIR/hand" -m "generated file"
+  git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
+  printf 'mine\n' > "$T/gen.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing has untracked files that resetting main to origin/main would overwrite (gen.txt) — move them out of that checkout, or commit them on its branch, then start a session again" ] || { echo "$output"; return 1; }
+  [ "$(cat "$T/gen.txt")" = mine ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(git -C "$T" rev-list --count origin/main..main)" = 1 ]
+}
+
+@test "a stop that does not clear by itself says what to do when it comes back, and gives git's reason rather than its last line" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  killed_run 'import leaselib
+def refuse(*a, **kw):
+    raise ll.Refused("could not add worktrees/01/thing (fatal: worktrees/01/thing already exists)")
+ll.adopt = refuse'
+  [ "$status" -eq 1 ]
+  case "$output" in *"could not move target/thing's work into a window (could not add worktrees/01/thing (fatal: worktrees/01/thing already exists)); it tries again at the next session start — if it stops the same way again, ask this home's agent to look into the reason given"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll
+print(ll.git_reason("error: The following untracked working tree files would be overwritten by checkout:\n\ta.txt\n\tb/c.txt\nPlease move or remove them before you switch branches.\nAborting\n"))
+print(ll.git_reason("fatal: not a git repository\n"))
+print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
+  [ "${lines[0]}" = "untracked files would be overwritten: a.txt, b/c.txt" ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "not a git repository" ]; [ "${lines[2]}" = "no output" ]
+}

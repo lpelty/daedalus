@@ -1491,6 +1491,64 @@ def _held_elsewhere(src: Path, sha: str) -> bool:
     return code == 0 and bool(out.strip())
 
 
+def git_reason(err: str) -> str:
+    """git's reason for a refusal, in one line: the files named after a "would be overwritten" line (untracked
+    files in the way, or local changes), else the first error:/fatal: line without its prefix, else the last line.
+    git ends such refusals with "Aborting", which says nothing (plan 5 Task 3 review, finding 3)."""
+    lines = err.strip().splitlines()
+    for i, ln in enumerate(lines):
+        if "would be overwritten" in ln:
+            files = []
+            for f in lines[i + 1:]:
+                if not f.startswith(("\t", " ")):
+                    break
+                files.append(f.strip())
+            kind = "untracked files" if "untracked" in ln else "local changes"
+            if files:
+                return "%s would be overwritten: %s" % (kind, ", ".join(files))
+    for ln in lines:
+        for pre in ("error: ", "fatal: "):
+            if ln.startswith(pre):
+                return ln[len(pre):].strip()
+    return (lines[-1:] or ["no output"])[0].strip() or "no output"
+
+
+def untracked_in_way(src: Path, refs: list) -> list:
+    """Untracked, not-ignored paths of <src>'s working tree that checking out, fast-forwarding or hard-resetting to
+    any of <refs> would overwrite: a file the ref tracks, a directory where it has a file, or a file where it has a
+    directory. A checkout or merge refuses over them; `reset --hard` deletes them without a word, so a trunk reset
+    asks first (plan 5 Task 3 review, finding 3). Sorted; [] when there are none or git cannot answer."""
+    code, out, _ = _git(src, "ls-files", "--others", "--exclude-standard", "-z")
+    untracked = [u.rstrip("/") for u in out.split("\0") if u] if code == 0 else []
+    if not untracked:
+        return []
+    files: set = set()
+    dirs: set = set()
+    for ref in refs:
+        code, out, _ = _git(src, "ls-tree", "-r", "--name-only", "-z", ref)
+        if code != 0:
+            continue
+        for t in out.split("\0"):
+            if t:
+                files.add(t)
+                parts = t.split("/")
+                dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    hit = []
+    for u in untracked:
+        parts = u.split("/")
+        if u in files or u in dirs or any("/".join(parts[:i]) in files for i in range(1, len(parts))):
+            hit.append(u)
+    return sorted(hit)
+
+
+def name_paths(paths: list, most: int = 5) -> str:
+    return ", ".join(paths[:most]) + (" and %d more" % (len(paths) - most) if len(paths) > most else "")
+
+
+ADOPT_UNTRACKED = ("target/%s has untracked files that resetting %s to origin/%s would overwrite (%s) — move them out "
+                   "of that checkout, or commit them, then run adopt again; nothing was adopted.")
+
+
 ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branch has; adopting %s would put the "
                   "checkout on %s and leave them behind — give them a branch inside that checkout "
                   "(git -C target/%s branch <name>), then run adopt again.")
@@ -1550,6 +1608,11 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         tip = tip.strip()
         notes = []
         is_trunk = branch == trunk
+        if is_trunk and cur == trunk:
+            # the trunk's reset is a `reset --hard`, which deletes an untracked file in its way without a word
+            in_way = untracked_in_way(src, ["origin/" + trunk])
+            if in_way:
+                raise Refused(ADOPT_UNTRACKED % (key, trunk, trunk, name_paths(in_way)))
         if is_trunk:
             code, out, _ = _git(src, "log", "--reverse", "--format=%s", "origin/%s..%s" % (trunk, trunk))
             subjects = [s for s in out.splitlines() if s.strip()] if code == 0 else []
@@ -1598,7 +1661,8 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                 # off the renamed branch (or wherever it was) before lease/<NN> is checked out in its worktree
                 code, _, err = _git(src, "checkout", "--quiet", trunk)
                 if code != 0:
-                    raise Refused("could not put target/%s back on %s (%s); nothing was adopted" % (key, trunk, _last(err)))
+                    raise Refused("could not put target/%s back on %s (%s); nothing was adopted"
+                                  % (key, trunk, git_reason(err)))
             ready = add_worktrees(root, nn, trunks, deadline=deadline)
         except BaseException:
             if wrote:

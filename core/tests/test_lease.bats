@@ -1417,6 +1417,20 @@ on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, c
   [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
 }
 
+@test "adopt main refuses while an untracked file sits where resetting main to origin/main would write — a reset deletes it silently — and changes nothing; the file is kept" {
+  printf 'local\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk by hand"
+  tip="$(git -C "$T" rev-parse main)"
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  printf 'gen\n' > "$BATS_TEST_TMPDIR/hand/gen.txt"; git -C "$BATS_TEST_TMPDIR/hand" add -A; cmt "$BATS_TEST_TMPDIR/hand" -m "generated file"
+  git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
+  printf 'mine\n' > "$T/gen.txt"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/thing has untracked files that resetting main to origin/main would overwrite (gen.txt) — move them out of that checkout, or commit them, then run adopt again; nothing was adopted."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/gen.txt")" = mine ]; [ "$(git -C "$T" rev-parse main)" = "$tip" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ -z "$(git -C "$T" branch --list 'lease/*')" ]
+}
+
 @test "adopt refuses while target/thing is on a detached HEAD whose commits no branch holds, and changes nothing; a detached HEAD on trunk is no obstacle" {
   on_feat "$T" feat/x 1
   git -C "$T" checkout -q --detach main
