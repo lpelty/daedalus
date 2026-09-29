@@ -1055,6 +1055,11 @@ def push(root: Path, p: dict, pdir: Path) -> None:
     seam = os.environ.get("PROMOTE_TEST_BEFORE_PUSH")
     if seam:                                   # test seam: move trunk in the race the next sentence names
         subprocess.run(["bash", "-c", seam], capture_output=True)
+    try:                                   # a deployment set up before the hook existed gets it now (§7.3)
+        import prepush
+        prepush.install(root / "target" / p["repo"])
+    except (ImportError, OSError, ValueError):
+        pass
     env = dict(os.environ, DAEDALUS_PROMOTE_ID=p["promote_id"])
     code, _, err = git(pdir / p["repo"], "push", "origin", "%s:refs/heads/%s" % (p["merge_sha"], p["trunk"]),
                        env=env, timeout=600, stop=False)

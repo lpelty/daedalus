@@ -117,4 +117,20 @@ if cfg target.nested >/dev/null 2>&1; then
   trap - EXIT
 fi
 
+# The pre-push hook (spec §7.3): installed idempotently in the target and every nested
+# repo, core.hooksPath untouched. setup.sh runs this script as its first phase, so a
+# fresh install and a re-run of setup both get it.
+if [ -f "$DAEDALUS_HOME/core/prepush.py" ]; then
+  hook_repos=("$dest")
+  if cfg target.nested >/dev/null 2>&1; then
+    while IFS="$(printf '\t')" read -r rel _url; do
+      [ -n "$rel" ] && hook_repos+=("$dest/$rel")
+    done <<EOF
+$(cfg_pairs target.nested)
+EOF
+  fi
+  python3 "$DAEDALUS_HOME/core/prepush.py" install "${hook_repos[@]}" \
+    || die "the pre-push hook could not be installed (see above) — the trunk is unguarded in git until it is"
+fi
+
 log "target ready: $dest"

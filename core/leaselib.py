@@ -796,6 +796,21 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
     for ln in v._lib(root, "cfg target.scaffold >/dev/null 2>&1 && cfg_pairs target.scaffold | cut -f1").splitlines():
         if ln.strip():
             (base / list(trunks)[0] / ln.strip()).mkdir(parents=True, exist_ok=True)
+    # The pre-push hook (spec §7.3), in each repo's COMMON git dir: one install
+    # covers target/<repo>, every lease worktree and every promote scratch.
+    # Idempotent; a hook Daedalus did not install is left alone (doctor names it).
+    try:
+        import prepush
+    except ImportError:
+        prepush = None
+    if prepush is not None:
+        for repo in trunks:
+            try:
+                s, msg = prepush.install(root / "target" / repo)
+            except (OSError, ValueError) as e:
+                s, msg = "failed", "the pre-push hook could not be installed in target/%s (%s)" % (repo, e)
+            if s not in ("installed", "unchanged"):
+                sys.stderr.write("daedalus: %s; run core/doctor.sh\n" % msg)
     return True
 
 

@@ -806,3 +806,14 @@ PY
   run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
+
+@test "the pre-push hook and promote: the prepared merge pushed by hand from the scratch is refused by git, with or without the unconfirmed promotion id; the confirm's own push passes it" {
+  work_on_02; run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]
+  m="$(pj merge_sha)"; S="$DAEDALUS_HOME/state/promote/$(pj promote_id)/thing"
+  run git -C "$S" push origin "$m:refs/heads/main"; [ "$status" -ne 0 ]
+  case "$output" in *"This push would move main."*) : ;; *) echo "$output"; return 1 ;; esac
+  run env DAEDALUS_PROMOTE_ID="$(pj promote_id)" git -C "$S" push origin "$m:refs/heads/main"; [ "$status" -ne 0 ]
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(origin_main)" = "$m" ]
+}
