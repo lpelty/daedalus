@@ -10,7 +10,7 @@ lease_fixture() {
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
   for f in lease.sh lease-board.py session-start.py boundary-hook.py guard-bash.py verify-hook.py \
            fingerprint.sh gates.sh manifest-append.py vault-commit.sh pitfall-inject.py code-context.py \
-           transcriptlib.py capture.py prepush.py distcheck.py; do
+           transcriptlib.py capture.py prepush.py distcheck.py upgrade.py capture-tick.sh; do
     [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DAEDALUS_HOME/core/"
   done
   printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
