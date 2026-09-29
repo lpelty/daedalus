@@ -157,6 +157,25 @@ leases:
   # --force. An integer with an m, h or d suffix; default 4h.
   stale_after: 4h
 
+promote:
+  # How the operator's yes reaches core/promote.sh. transcribed = the prime
+  # types the operator's words and promote checks them against the session's
+  # own transcript (the default); tty = the operator types yes in a terminal
+  # (the fallback when this build's transcript cannot be read).
+  confirm: transcribed
+  # Optional. On a deployment where a promote is a release (the next update
+  # step ships it to every user), the decision block and the pushed line say
+  # so. Default false.
+  # release_note: true
+  # Optional, with release_note: the words this deployment's users type to
+  # receive a release, for example its own command-line tool's update command.
+  # update_command: 'tool update'
+  # Optional, tty mode: the program the operator's terminal runs under when it
+  # is not login, sshd, tmux or screen (for example an editor's built-in
+  # terminal); several are separated by commas. The typed yes is refused from
+  # anything else (plan 4 Decision 32).
+  # tty_parents: 'Code Helper'
+
 # memory:
 #   # Optional — episodic capture into a Hindsight bank. THE source for
 #   # capture's configuration (core/close.sh, the Stop and SessionEnd hooks);

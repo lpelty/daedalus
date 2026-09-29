@@ -2,6 +2,7 @@
 """promote (spec §7): the one way a window's work reaches trunk.
 
     core/promote.sh <NN>                     prepare (§7.1)
+    core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept)
 
 core/promote.sh has already run the distribution-integrity check
 (core/distcheck.py) before this file was read. Run by the prime — the session
@@ -428,11 +429,26 @@ def reviewer_line(rv: Optional[dict], skipped: Optional[str]) -> str:
     return "Reviewer on the merged change: %s — %s." % (rv["verdict"], counted)
 
 
+def release_words(root: Path) -> Optional[str]:
+    """None unless config promote.release_note is true (a deployment where a
+    promote is a release, spec §7.1 step 10); then the deployment's own update
+    command in backticks (promote.update_command), or "" for the generic words.
+    Core never names a product (Decision 1; the §8.4 generalization rule)."""
+    if config(root, "promote.release_note") != "true":
+        return None
+    cmd = config(root, "promote.update_command")
+    return "`%s`" % cmd if cmd else ""
+
+
 def first_line(p: dict, ready: bool, root: Path) -> str:
     alias = " (%s)" % p["alias"] if p.get("alias") else ""
     if not ready:
         return "Window %s's work%s is not ready to promote onto %s." % (p["lease"], alias, p["trunk"])
-    return "Ready to promote window %s's work%s onto %s." % (p["lease"], alias, p["trunk"])
+    line = "Ready to promote window %s's work%s onto %s" % (p["lease"], alias, p["trunk"])
+    rel_ = release_words(root)
+    if rel_ is None:
+        return line + "."
+    return line + " — this is a release: the next %s ships it." % (rel_ or "update")
 
 
 def block_opening(p: dict) -> str:
@@ -615,11 +631,25 @@ def prepare(root: Path, a: dict) -> int:
     return 0
 
 
+def clean(root: Path, a: dict) -> int:
+    """`promote <NN> --clean` (§7.1 step 7): every scratch worktree of window NN's
+    promotions goes; prepared.json, context.json and the stamps stay (Decision 22).
+    The repos are the ones the window's lease file recorded (else the current
+    config's) — never a trunk check: removing scratch moves nothing."""
+    leases = read_leases(root)
+    who(root, leases)
+    nn, lease = window(leases, a["token"])
+    removed = clean_window(root, nn, lease.get("trunks") or current_trunks(root))
+    print("Removed the promote scratch of window %s (%s); the promotion records are kept." % (nn, ", ".join(removed))
+          if removed else "Window %s has no promote scratch to remove." % nn)
+    return 0
+
+
 # --- the command line -----------------------------------------------------------------------------
 
-USAGE = "Usage: core/promote.sh <NN>"
+USAGE = "Usage: core/promote.sh <NN> [--clean]"
 VALUE_FLAGS: Dict[str, str] = {}           # flag -> key, for flags that take a value (later tasks add theirs)
-SWITCHES: Dict[str, str] = {}              # flag -> key, for flags without one
+SWITCHES: Dict[str, str] = {"--clean": "clean"}   # flag -> key, for flags without one
 
 
 def parse(argv: List[str]) -> dict:
@@ -648,6 +678,8 @@ def parse(argv: List[str]) -> dict:
 def dispatch(root: Path, a: dict) -> int:
     if not a["token"]:
         raise Stop(USAGE)
+    if a.get("clean"):
+        return clean(root, a)
     return prepare(root, a)
 
 

@@ -216,3 +216,36 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   refused "promote did nothing — git could not take a lock in the target (error: cannot lock ref"
   case "$output" in *"another session is mid-operation, run promote again."*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "on a deployment where a promote is a release, the first line says so — naming the deployment's own update command when config gives one" {
+  work_on_02
+  printf 'promote:\n  release_note: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = "Ready to promote window 02's work onto main — this is a release: the next update ships it." ]
+  printf "  update_command: 'tool update'\n" >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = "Ready to promote window 02's work onto main — this is a release: the next \`tool update\` ships it." ]
+}
+
+@test "--clean removes window 02's promote scratch worktrees and keeps the records; a new prepare replaces the old scratch" {
+  work_on_02; sed -i '' 's/^  - true$/  - false/' "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  first="$(ls "$DAEDALUS_HOME/state/promote")"; [ -d "$DAEDALUS_HOME/state/promote/$first/thing" ]
+  sed -i '' 's/^  - false$/  - true/' "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -d "$DAEDALUS_HOME/state/promote/$first/thing" ]; [ -f "$DAEDALUS_HOME/state/promote/$first/context.json" ]
+  second="$(pj promote_id)"
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ]
+  [ "$output" = "Removed the promote scratch of window 02 ($second); the promotion records are kept." ]
+  [ ! -d "$DAEDALUS_HOME/state/promote/$second/thing" ]; [ -f "$DAEDALUS_HOME/state/promote/$second/prepared.json" ]
+  [ -z "$(git -C "$T" worktree list --porcelain | grep state/promote)" ]
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$output" = "Window 02 has no promote scratch to remove." ]
+}
+
+@test "config.example.yaml carries a promote: block — confirm transcribed by default, the release lines commented out" {
+  R="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  [ "$(DAEDALUS_CONFIG="$R/config.example.yaml" bash -c 'source "$1/core/lib.sh"; cfg promote.confirm' _ "$R")" = "transcribed" ]
+  grep -q '^  # release_note: true$' "$R/config.example.yaml"
+  grep -q "^  # update_command: " "$R/config.example.yaml"
+  grep -q "^  # tty_parents: " "$R/config.example.yaml"
+}
