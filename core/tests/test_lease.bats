@@ -1359,3 +1359,130 @@ on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, c
   [ "$status" -ne 0 ]
   case "$output" in *"target/thing has no branch feat/none."*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- adopt: refusals leave everything where it was (plan 5 Task 2 review, findings 1-3) ---
+
+@test "adopt of a branch refused by the worktree add leaves target/thing on the branch it was on and the branch under its own name — no lease/01, no lease file; adopt then works once the directory is moved aside" {
+  on_feat "$T" feat/x 1
+  tip="$(git -C "$T" rev-parse feat/x)"
+  mkdir -p "$DAEDALUS_HOME/worktrees/01/thing"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -ne 0 ]
+  case "$output" in *"worktrees/01/thing exists but is not a worktree of target/thing; move it aside."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = feat/x ]
+  [ "$(git -C "$T" rev-parse feat/x)" = "$tip" ]
+  git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null && { echo "refs/heads/lease/01 is left"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  # a branch that is not the checked-out one: the checkout stays where it was, too
+  git -C "$T" checkout -q -b feat/other main
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -ne 0 ]
+  [ "$(git -C "$T" branch --show-current)" = feat/other ]
+  [ "$(git -C "$T" rev-parse feat/x)" = "$tip" ]
+  mv "$DAEDALUS_HOME/worktrees/01/thing" "$BATS_TEST_TMPDIR/aside"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
+}
+
+@test "adopt main refused by the worktree add leaves the trunk at its own tip and no daedalus/upgrade-* or lease/01 branch; adopt main then works once the directory is moved aside" {
+  printf 'local\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk by hand"
+  tip="$(git -C "$T" rev-parse main)"
+  mkdir -p "$DAEDALUS_HOME/worktrees/01/thing"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -ne 0 ]
+  case "$output" in *"move it aside."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse main)" = "$tip" ]
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  [ -z "$(git -C "$T" branch --list 'daedalus/upgrade-*')" ]
+  git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null && { echo "refs/heads/lease/01 is left"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  mv "$DAEDALUS_HOME/worktrees/01/thing" "$BATS_TEST_TMPDIR/aside"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+}
+
+@test "adopt main finishes a run cut off after the window was made but before the trunk was reset: the trunk is reset, no second window is made" {
+  printf 'local\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "committed on trunk by hand"
+  tip="$(git -C "$T" rev-parse main)"
+  bash "$DAEDALUS_HOME/core/lease.sh" adopt main >/dev/null
+  git -C "$T" reset -q --hard "$tip"     # the state a kill between the window and the reset leaves
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"is already window 01"*"reset to origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]
+  [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
+}
+
+@test "adopt refuses while target/thing is on a detached HEAD whose commits no branch holds, and changes nothing; a detached HEAD on trunk is no obstacle" {
+  on_feat "$T" feat/x 1
+  git -C "$T" checkout -q --detach main
+  printf 'detached\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "detached work"
+  head="$(git -C "$T" rev-parse HEAD)"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/thing is on a detached HEAD ("*") holding commits no branch has"*"then run adopt again."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse HEAD)" = "$head" ]
+  [ -z "$(git -C "$T" branch --show-current)" ]
+  git -C "$T" rev-parse -q --verify refs/heads/feat/x >/dev/null
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  git -C "$T" checkout -q --detach main
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" branch --show-current)" = main ]
+}
+
+@test "adopt fast-forwards a trunk that is behind origin: target/thing ends at origin/main" {
+  on_feat "$T" feat/x 1
+  git -C "$T" checkout -q main
+  trunk_moves b.txt "trunk moved"
+  [ "$(git -C "$T" rev-parse main)" != "$(git -C "$T" rev-parse origin/main)" ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+}
+
+@test "adopt lease/01 is refused (it is already a window's branch) and changes nothing; an untracked file in target/thing does not block adopt" {
+  on_feat "$T" feat/x 1
+  printf 'scratch\n' > "$T/untracked-note.txt"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  before="$(ls "$DAEDALUS_HOME/state/leases" | sort | tr '\n' ' ')"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt lease/01
+  [ "$status" -ne 0 ]
+  case "$output" in *"lease/01 is already a window's branch; nothing to adopt."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(ls "$DAEDALUS_HOME/state/leases" | sort | tr '\n' ' ')" = "$before" ]
+}
+
+@test "adopt takes the next number when a swept window's merged lease/01 branch is still there, instead of failing on the rename" {
+  git -C "$T" branch lease/01 origin/main
+  on_feat "$T" feat/x 1
+  tip="$(git -C "$T" rev-parse feat/x)"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 02 now holds feat/x"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse lease/02)" = "$tip" ]
+  [ "$(git -C "$T" rev-parse lease/01)" = "$(git -C "$T" rev-parse origin/main)" ]
+}
+
+@test "adopt --repo sub refused by its own worktree add, after the outer repo's worktree was made: both are undone — no lease/01 in either repo, no worktree left, sub's branch under its own name and checked out" {
+  on_feat "$T/sub" feat/n 1
+  tip="$(git -C "$T/sub" rev-parse feat/n)"
+  # git refuses the nested repo's worktree add only; the outer one goes through first
+  fake_git 'case "$*" in *"/target/thing/sub worktree add"*) echo "fatal: simulated failure" >&2; exit 128 ;; esac'
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/n --repo sub
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"git worktree add for window 01 (thing/sub) failed: fatal: simulated failure"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T/sub" branch --show-current)" = feat/n ]
+  [ "$(git -C "$T/sub" rev-parse feat/n)" = "$tip" ]
+  git -C "$T/sub" rev-parse -q --verify refs/heads/lease/01 >/dev/null && { echo "refs/heads/lease/01 is left"; return 1; }
+  git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null && { echo "refs/heads/lease/01 is left"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  git -C "$T" worktree list --porcelain | grep -q "worktrees/01/thing\$" && { echo "worktree left"; return 1; }
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/n --repo sub
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T/sub" rev-parse lease/01)" = "$tip" ]
+}
