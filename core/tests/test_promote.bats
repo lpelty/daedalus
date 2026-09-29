@@ -242,6 +242,21 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   run as_prime bash "$PROMOTE" 02 --clean; [ "$output" = "Window 02 has no promote scratch to remove." ]
 }
 
+@test "--clean uses the trunks window 02's lease recorded: a trunk moved since the window was cut does not stop the scratch going; a clone session is refused --clean" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  pid="$(pj promote_id)"; [ -d "$DAEDALUS_HOME/state/promote/$pid/thing" ]
+  git -C "$BATS_TEST_TMPDIR/origin.git" branch dev main
+  sed -i '' 's/^  branch: main$/  branch: dev/' "$DAEDALUS_HOME/config.yaml"
+  run env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sC bash "$PROMOTE" 02 --clean
+  refused "Only the prime window runs promote."
+  [ -d "$DAEDALUS_HOME/state/promote/$pid/thing" ]
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Removed the promote scratch of window 02 ($pid); the promotion records are kept." ]
+  [ ! -d "$DAEDALUS_HOME/state/promote/$pid/thing" ]; [ -f "$DAEDALUS_HOME/state/promote/$pid/prepared.json" ]
+  [ -z "$(git -C "$T" worktree list --porcelain | grep state/promote)" ]
+}
+
 @test "config.example.yaml carries a promote: block — confirm transcribed by default, the release lines commented out" {
   R="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   [ "$(DAEDALUS_CONFIG="$R/config.example.yaml" bash -c 'source "$1/core/lib.sh"; cfg promote.confirm' _ "$R")" = "transcribed" ]
