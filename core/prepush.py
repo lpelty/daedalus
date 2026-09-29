@@ -4,7 +4,7 @@
 
     python3 core/prepush.py hook <remote> <url>     run by git; the ref updates on stdin
     python3 core/prepush.py install <repo>...       idempotent; one line per repo; exit 1 if one could not be
-    python3 core/prepush.py status <repo>...        for doctor: installed | missing | differs | foreign | hookspath
+    python3 core/prepush.py status <repo>...        for doctor: installed | missing | noexec | differs | foreign | hookspath
 
 The installed file is a shim — fixed lines that exec this file's `hook` — in
 the repo's COMMON git dir: linked worktrees run hooks from there, so one install
@@ -82,7 +82,9 @@ def state(repo: Path) -> Tuple[str, str]:
     text = p.read_text(errors="replace")
     if MARK not in text:
         return "foreign", str(p)
-    if text != shim(HOME) or not os.access(str(p), os.X_OK):
+    if not os.access(str(p), os.X_OK):
+        return "noexec", str(p)   # git skips a hook it cannot execute: the trunk is unguarded, not drifted
+    if text != shim(HOME):
         return "differs", str(p)
     return "installed", str(p)
 

@@ -1286,6 +1286,9 @@ def doctor(root: Path) -> int:
             s, where = prepush.state(root / "target" / repo)
             if s == "installed":
                 ok.append("target/" + repo)
+            elif s == "noexec":
+                print("MISSING  pre-push hook in target/%s is not executable, so git never runs it — run core/setup.sh "
+                      "(the trunk is unguarded in git until it is)" % repo)
             elif s == "differs":
                 print("NOTE     pre-push hook in target/%s differs from this release's — run core/setup.sh to refresh it"
                       % repo)
@@ -1301,18 +1304,28 @@ def doctor(root: Path) -> int:
                       "is installed)" % repo)
         if ok:
             print("OK       pre-push hook: %s" % ", ".join(ok))
-    latest: Dict[str, Tuple[float, Path, dict]] = {}
-    base = root / "state" / "promote"
-    for f in (base.glob("*/prepared.json") if base.is_dir() else []):
-        p = read_json(f)
-        if p and p.get("lease"):
-            ts = float(p.get("prepared_ts") or 0)
-            if ts >= latest.get(p["lease"], (-1.0, f, p))[0]:
-                latest[p["lease"]] = (ts, f.parent, p)
-    for nn, (ts, pdir, p) in sorted(latest.items()):
-        if not p.get("confirmed_at") and not (pdir / "pushed").exists() and not (pdir / "announced").exists():
+    # Only the live windows' current occupants (Decision 51's occupant_prepares):
+    # a released window, or an earlier occupant of a reused number, has nothing
+    # left for the operator to confirm; its records are kept, not reported.
+    try:
+        leases = read_leases(root)
+    except (ll.Refused, OSError):
+        leases = {}   # an unreadable lease file is the leases block's line, not this one's
+    for nn, lease in sorted(leases.items()):
+        if nn == "prime":
+            continue
+        pending = [p for p in occupant_prepares(root, nn, lease) if not p.get("confirmed_at")]
+        if not pending:
+            continue
+        p = pending[-1]
+        at = time.strftime("%H:%M", time.localtime(float(p.get("prepared_ts") or 0)))
+        if (p.get("review") or {}).get("verdict") == "REFUTED":
+            print("NOTE     promote: window %s's last prepare (%s) was refuted by the review, so it cannot be confirmed "
+                  "— fix the work and run promote %s again, or promote it without the review with a written reason "
+                  "(promote %s --skip-review --reason \"...\")" % (nn, at, nn, nn))
+        else:
             print("NOTE     promote: window %s prepared at %s, not confirmed — say yes to the prime or run promote again"
-                  % (nn, time.strftime("%H:%M", time.localtime(ts))))
+                  % (nn, at))
     return 0
 
 

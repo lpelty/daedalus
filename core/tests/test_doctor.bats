@@ -909,41 +909,96 @@ doctor_promote_fixture() {
   D() { bash "$DAEDALUS_HOME/core/doctor.sh"; }
 }
 
-@test "doctor: promote.confirm is OK when transcribed (the default) or tty, MISSING when anything else" {
-  doctor_promote_fixture
-  run D; case "$output" in *"OK       promote: the operator's yes is transcribed and checked against the session transcript"*) : ;; *) echo "$output"; return 1 ;; esac
-  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
-  run D; case "$output" in *"OK       promote: the operator types yes in a terminal (tty)"*) : ;; *) echo "$output"; return 1 ;; esac
-  sed -i '' 's/confirm: tty/confirm: maybe/' "$DAEDALUS_HOME/config.yaml"
-  run D; [ "$status" -ne 0 ]; case "$output" in *"MISSING  promote.confirm must be transcribed or tty (got: maybe)"*) : ;; *) echo "$output"; return 1 ;; esac
+# The doctor's problem count after `run D` — lease_fixture already carries
+# MISSING lines of its own (vault.repo, the lease directories, …), so a bare
+# non-zero status proves nothing about promote's lines: each test takes the
+# count in a good state and asserts exactly one more in each bad one.
+problems() {
+  local n
+  n="$(printf '%s\n' "$output" | sed -n 's/.* \([0-9][0-9]*\) problem(s) found.*/\1/p' | tail -1)"
+  printf '%s\n' "${n:-0}"
 }
 
-@test "doctor: the pre-push hook is MISSING per repo until installed, OK naming both repos after, NOTE when it differs from this release's, MISSING when core.hooksPath is set" {
+@test "doctor: promote.confirm is OK when transcribed (the default) or tty, MISSING — and counted — when anything else" {
+  doctor_promote_fixture
+  run D; case "$output" in *"OK       promote: the operator's yes is transcribed and checked against the session transcript"*) : ;; *) echo "$output"; return 1 ;; esac
+  base="$(problems)"
+  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run D; case "$output" in *"OK       promote: the operator types yes in a terminal (tty)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq "$base" ] || { echo "tty changed the count: $output"; return 1; }
+  sed -i '' 's/confirm: tty/confirm: maybe/' "$DAEDALUS_HOME/config.yaml"
+  run D; [ "$status" -ne 0 ]; case "$output" in *"MISSING  promote.confirm must be transcribed or tty (got: maybe)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq $((base + 1)) ] || { echo "expected $((base + 1)) problems: $output"; return 1; }
+}
+
+@test "doctor: the pre-push hook is MISSING (counted) per repo until installed, OK naming both repos after, NOTE (not counted) when its content differs, MISSING when it is not executable or core.hooksPath is set" {
   doctor_promote_fixture
   run D; [ "$status" -ne 0 ]
   case "$output" in *"MISSING  pre-push hook in target/thing — run core/setup.sh (the trunk is unguarded in git until it is installed)"*"MISSING  pre-push hook in target/thing/sub — run core/setup.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  before="$(problems)"
   python3 "$DAEDALUS_HOME/core/prepush.py" install "$T" "$T/sub" >/dev/null
   run D; case "$output" in *"OK       pre-push hook: target/thing, target/thing/sub"*) : ;; *) echo "$output"; return 1 ;; esac
+  base="$(problems)"
+  [ "$before" -eq $((base + 2)) ] || { echo "two missing hooks should count two: $before vs $base"; return 1; }
+  cp "$T/.git/hooks/pre-push" "$BATS_TEST_TMPDIR/hook.good"
   printf '# edited\n' >> "$T/.git/hooks/pre-push"
   run D; case "$output" in *"NOTE     pre-push hook in target/thing differs from this release's — run core/setup.sh to refresh it"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq "$base" ] || { echo "a content drift is a NOTE, not a problem: $output"; return 1; }
+  cp "$BATS_TEST_TMPDIR/hook.good" "$T/.git/hooks/pre-push"; chmod -x "$T/.git/hooks/pre-push"
+  run D; case "$output" in *"MISSING  pre-push hook in target/thing is not executable, so git never runs it — run core/setup.sh (the trunk is unguarded in git until it is)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing differs"*) echo "a hook git skips is not a drift: $output"; return 1 ;; esac
+  [ "$(problems)" -eq $((base + 1)) ] || { echo "expected $((base + 1)) problems: $output"; return 1; }
+  python3 "$DAEDALUS_HOME/core/prepush.py" install "$T" >/dev/null; [ -x "$T/.git/hooks/pre-push" ]
   git -C "$T/sub" config core.hooksPath /tmp/elsewhere
   run D; case "$output" in *"MISSING  target/thing/sub sets core.hooksPath (/tmp/elsewhere), so its pre-push hook never runs"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq $((base + 1)) ] || { echo "expected $((base + 1)) problems: $output"; return 1; }
 }
 
-@test "doctor: each repo's trunk is OK by name; a nested repo with no origin/HEAD is MISSING with the remedy" {
+@test "doctor: each repo's trunk is OK by name; a nested repo with no origin/HEAD is MISSING with the remedy, and counted" {
   doctor_promote_fixture
   run D; case "$output" in *"OK       trunk: thing=main, thing/sub=main"*) : ;; *) echo "$output"; return 1 ;; esac
+  base="$(problems)"
   git -C "$T/sub" symbolic-ref --delete refs/remotes/origin/HEAD
   run D; [ "$status" -ne 0 ]
   case "$output" in *"MISSING  nested repo sub has no origin/HEAD — run git -C target/thing/sub remote set-head origin -a"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq $((base + 1)) ] || { echo "expected $((base + 1)) problems: $output"; return 1; }
 }
 
-@test "doctor: a promotion prepared and never confirmed is a NOTE naming the window and the time; a confirmed one is not" {
+# promote_prepared <dir-suffix> <json> — a prepared.json under state/promote/.
+promote_prepared() {
+  mkdir -p "$DAEDALUS_HOME/state/promote/$1"; printf '%s' "$2" > "$DAEDALUS_HOME/state/promote/$1/prepared.json"
+}
+
+@test "doctor: a promotion the window's current occupant prepared and never confirmed is a NOTE (not counted) naming the window and the time; a confirmed one is not" {
   doctor_promote_fixture
-  d="$DAEDALUS_HOME/state/promote/02-20260928-113100-abc"; mkdir -p "$d"
+  mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{"created":"c1"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  run D; base="$(problems)"
   ts="$(python3 -c 'import time; print(time.mktime(time.strptime("2026-09-28 11:31", "%Y-%m-%d %H:%M")))')"
-  printf '{"lease":"02","prepared_ts":%s,"prepared_at":"x"}' "$ts" > "$d/prepared.json"
+  promote_prepared 02-20260928-113100-abc "{\"lease\":\"02\",\"lease_created\":\"c1\",\"prepared_ts\":$ts,\"prepared_at\":\"x\"}"
   run D; case "$output" in *"NOTE     promote: window 02 prepared at 11:31, not confirmed — say yes to the prime or run promote again"*) : ;; *) echo "$output"; return 1 ;; esac
-  printf '{"lease":"02","prepared_ts":%s,"prepared_at":"x","confirmed_at":"y"}' "$ts" > "$d/prepared.json"; : > "$d/pushed"
+  [ "$(problems)" -eq "$base" ] || { echo "a prepared promotion is a NOTE, not a problem: $output"; return 1; }
+  promote_prepared 02-20260928-113100-abc "{\"lease\":\"02\",\"lease_created\":\"c1\",\"prepared_ts\":$ts,\"prepared_at\":\"x\",\"confirmed_at\":\"y\"}"
+  : > "$DAEDALUS_HOME/state/promote/02-20260928-113100-abc/pushed"
   run D; case "$output" in *"window 02 prepared at"*) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: a prepare the review refuted is not offered for a yes — the NOTE says confirm will refuse it and names the two ways on" {
+  doctor_promote_fixture
+  mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{"created":"c1"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  ts="$(python3 -c 'import time; print(time.mktime(time.strptime("2026-09-28 11:31", "%Y-%m-%d %H:%M")))')"
+  promote_prepared 02-20260928-113100-abc "{\"lease\":\"02\",\"lease_created\":\"c1\",\"prepared_ts\":$ts,\"prepared_at\":\"x\",\"review\":{\"verdict\":\"REFUTED\"}}"
+  run D
+  case "$output" in *"say yes to the prime"*) echo "offered a yes confirm refuses: $output"; return 1 ;; esac
+  case "$output" in *"NOTE     promote: window 02's last prepare (11:31) was refuted by the review, so it cannot be confirmed — fix the work and run promote 02 again, or promote it without the review with a written reason (promote 02 --skip-review --reason \"...\")"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: prepares from an earlier occupant of the window, or of a window no longer live, are not reported" {
+  doctor_promote_fixture
+  ts="$(python3 -c 'import time; print(time.time())')"
+  promote_prepared 02-20260928-113100-abc "{\"lease\":\"02\",\"lease_created\":\"old\",\"prepared_ts\":$ts,\"prepared_at\":\"x\"}"
+  run D; case "$output" in *"promote: window 02"*) echo "a released window's prepare was reported: $output"; return 1 ;; esac
+  mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{"created":"new"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  run D; case "$output" in *"promote: window 02"*) echo "an earlier occupant's prepare was reported: $output"; return 1 ;; esac
+  promote_prepared 02-20260928-120000-def "{\"lease\":\"02\",\"lease_created\":\"new\",\"prepared_ts\":$ts,\"prepared_at\":\"x\"}"
+  run D; case "$output" in *"NOTE     promote: window 02 prepared at"*", not confirmed"*) : ;; *) echo "the current occupant's prepare was not reported: $output"; return 1 ;; esac
 }
