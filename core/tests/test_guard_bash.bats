@@ -781,3 +781,29 @@ gb.main()
     esac
   done
 }
+
+@test "a pattern refspec whose destination can land on a trunk is denied — refs/heads/x/*:refs/heads/*, refs/heads/*:refs/heads/*, refs/*:refs/*, a bare refs/heads/*, the + forms, and remote.<name>.push set to one; a glob-spelled refspec is denied (finding 1's rule); a pattern that cannot reach a trunk is not (critic finding 3)" {
+  scratch_and_worktree
+  touch -- "$W2/HEAD:main"
+  for c in "git push origin 'refs/heads/x/*:refs/heads/*'" "git push origin 'refs/heads/*:refs/heads/*'" \
+           "git push origin '+refs/heads/*:refs/heads/*'" "git push origin 'refs/*:refs/*'" "git push origin 'refs/heads/*'" \
+           "git push origin 'refs/heads/lease/*:refs/heads/ma*'" "git push origin '*:*'" 'git push origin HEAD:ma?n' \
+           "git -c 'remote.origin.push=refs/heads/*:refs/heads/*' push origin" "git config remote.origin.push 'refs/heads/*:refs/heads/*'"; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB "git push origin 'refs/heads/x/*:refs/heads/*'" "$W2"
+  case "$output" in *"refs/heads/x/*:refs/heads/*"*"main"*"Trunk is reached only through promote."*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W2" config remote.origin.push 'refs/heads/*:refs/heads/*'
+  run guard_as sB 'git push origin' "$W2"; denied
+  git -C "$W2" config --unset remote.origin.push
+  for c in "git push origin 'refs/heads/lease/02/*:refs/heads/lease/02/*'" "git push origin 'refs/heads/fix/*:refs/heads/fix/*'" \
+           "git push origin 'refs/tags/*:refs/tags/*'"; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+  # why: with no hook, the pattern moved the trunk (the critic's measurement, reproduced)
+  P="$BATS_TEST_TMPDIR/plain"; B="$BATS_TEST_TMPDIR/plain.git"; git init -q --bare -b main "$B"; git clone -q "$B" "$P" 2>/dev/null
+  git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m a; git -C "$P" push -q origin HEAD:main
+  git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m b; git -C "$P" branch x/main HEAD
+  run git -C "$P" push -q origin 'refs/heads/x/*:refs/heads/*'; [ "$status" -eq 0 ]
+  [ "$(git -C "$B" rev-parse main)" = "$(git -C "$P" rev-parse HEAD)" ]
+}

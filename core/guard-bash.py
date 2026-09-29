@@ -28,7 +28,9 @@ toward the target's origin from anywhere — git runs the pre-push hook for
 measured); a push whose destination comes from configuration
 (remote.<name>.push, remote.<name>.mirror, push.default over the branch's
 upstream — read as the command runs, its `-c` pairs included), git's `heads/<x>`
-name matching, `git config` and `branch -u` aiming at a trunk; a trunk moved by
+name matching, a pattern refspec (`refs/heads/x/*:refs/heads/*`, `refs/*:refs/*`) whose
+destination can land on a trunk, on the command line or in remote.<name>.push (critic finding 3),
+`git config` and `branch -u` aiming at a trunk; a trunk moved by
 `update-ref` or `branch -f`; a push to the target's origin from any directory,
 judged by repository — a local path as the git directory it opens, a network
 URL as host and path in any spelling, after insteadOf — with
@@ -165,6 +167,7 @@ PUSH_REWRITE = "%s is not set from here: it rewrites where a push goes, and coul
 CONFIG_TRUNK = "`git config %s %s` would send pushes to %s. " + PROMOTE_RULE
 UPSTREAM_TRUNK = "`git branch %s` would make %s this branch's push destination. " + PROMOTE_RULE
 CONFIG_PUSH_TRUNK = "This push would move %s (remote.%s.push sends it there). " + PROMOTE_RULE
+PATTERN_TRUNK = "The refspec %s is a pattern that can push onto %s without naming it. " + PROMOTE_RULE
 CANNOT_CHECK = ("The guard could not check this command (it failed on `%s`); nothing ran. Run its commands one at a "
                 "time, written out plainly.")
 # Plan 4 completeness critic, finding 1: a word the shell fills in when the command runs ($VAR, ${…}, $( ),
@@ -879,6 +882,10 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
             return UNPARSEABLE % bad, None
         cur = branch_of(repo)
         names = trunk_names(trunk, repo)
+        for spec in push_positionals(rest)[1:]:
+            hit = pattern_hits_trunk(spec, names)
+            if hit:
+                return PATTERN_TRUNK % (spec, hit, mine, mine), None
         # Task 13 review: the destination can come from configuration — remote.<name>.push (which
         # also maps a refspec written without a destination), remote.<name>.mirror, and for a push
         # with no refspec push.default over the branch's upstream (a window's branch is cut from
@@ -1021,16 +1028,33 @@ def config_list(repo: Path, cfg: "Cfg") -> Dict[str, List[str]]:
     return conf
 
 
+def pattern_hits_trunk(spec: str, names: set) -> Optional[str]:
+    """Critic finding 3: the trunk a pattern refspec (one holding `*`) can write, or None. git maps each ref the
+    source pattern matches onto the destination pattern, `*` matching any run of characters, `/` included; the
+    destination can land on a trunk when the pattern matches it in any spelling git accepts (`main`,
+    `heads/main`, `refs/heads/main`) — `refs/heads/x/*:refs/heads/*` (from x/main), `refs/heads/*`, `refs/*:refs/*`."""
+    spec = spec.strip().lstrip("+")
+    if "*" not in spec:
+        return None
+    src, colon, dst = spec.partition(":")
+    dst = dst if colon and dst else src
+    rx = re.compile("^" + ".*".join(re.escape(part) for part in dst.split("*")) + "$")
+    for n in sorted(names):
+        if any(rx.match(c) for c in (n, "heads/" + n, "refs/heads/" + n)):
+            return n
+    return None
+
+
 def spec_hits_trunk(spec: str, names: set, cur: str, trunk: str) -> Optional[str]:
     """The trunk a configured push refspec can write, or None: `:` (matching) and `HEAD` on a
-    trunk, a destination naming one, or a wildcard that maps a name onto another."""
+    trunk, a destination naming one, or a pattern whose destination can land on one (finding 3)."""
     spec = spec.strip().lstrip("+")
     if spec == ":":
         return trunk
     src, colon, dst = spec.partition(":")
     dst = dst if colon and dst else src
     if "*" in dst:
-        return None if dest_name(src) == dest_name(dst) else dst
+        return pattern_hits_trunk(spec, names)
     d = dest_name(dst)
     d = cur if d in ("HEAD", "@") else d
     return d if d in names else None
