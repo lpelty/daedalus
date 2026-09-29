@@ -124,6 +124,7 @@ EOF
 import json, sys
 m = json.load(open(sys.argv[1]))
 assert m["target_branch"] == "main", m
+import time; assert abs(float(m["started_epoch"]) - time.time()) < 120, m   # the absolute instant beside the local stamp
 assert m["target_base"] == "", m
 assert "main" in m["target_base_error"], m
 PY

@@ -730,6 +730,73 @@ PY
   [ "$(pj overrode_review)" = "None" ]; [ "$(calls)" -eq 0 ]
 }
 
+@test "a second --skip-review after trunk moved still sets aside the REFUTED review: a reason typed after only the skip question is refused; typed after the verdict is shown again, the block and the confirm's ledger line name it; and a promotion settles it" {
+  work_on_02
+  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  refuted="$(pj review.call_id)"; rrun="$(pj run_id)"
+  RL="Reviewer on the merged change: REFUTED — one high finding."
+  shown_then_said "promote it anyway, F1 is about a test file" "$RL"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "promote it anyway, F1 is about a test file"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  trunk_moves b.txt "elsewhere"
+  P="$(pj prepared_ts)"; why="same reason as before, really"
+  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" operator "$why" "$(plus "$P" 2)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"
+  refused "The review was not shown to the operator before those words"
+  tx "$TXP" assistant "$RL" "$(plus "$P" 4)" >/dev/null; tx "$TXP" operator "$why" "$(plus "$P" 5)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"review skipped by the operator (it sets aside review $refuted of run $rrun);"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(pj overrode_review.call_id)" = "$refuted" ]; [ "$(pj overrode_review.run_id)" = "$rrun" ]
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  L="$DAEDALUS_HOME/vault/evidence/promotions.log"
+  [ "$(tail -1 "$L" | grep -cF "overrode: $refuted")" = 1 ] || { cat "$L"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+  # promoted: the REFUTED review is settled; the next skip on this window sets nothing aside
+  printf 'w3\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "docs: note"
+  P="$(pj prepared_ts)"
+  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" operator "a docs-only note, skip it" "$(plus "$P" 2)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "a docs-only note, skip it"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(pj overrode_review)" = "None" ]
+}
+
+@test "a REFUTED review from an earlier window under the same number is not set aside by the new window's skip" {
+  work_on_02
+  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  # the window is re-created under the same number (its lease file is a new one)
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["created"]="2099-01-01T00:00:00"; json.dump(d, open(sys.argv[1],"w"))' \
+    "$DAEDALUS_HOME/state/leases/02.json"
+  P="$(pj prepared_ts)"
+  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" operator "a docs-only change, skip it" "$(plus "$P" 2)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "a docs-only change, skip it"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(pj overrode_review)" = "None" ]
+}
+
+@test "--skip-review with no earlier prepare: words typed before this session's marker started do not count, under any TZ, a marker from an older build counts from its file's time, and no readable marker is refused" {
+  work_on_02; M="$DAEDALUS_HOME/state/session-sP.json"
+  S="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["started_epoch"])' "$M")"
+  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$S" -20)" >/dev/null
+  tx "$TXP" operator "skip the review, it is a docs change" "$(plus "$S" -10)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
+  refused "I could not find those words as something the operator typed after the review was shown."
+  TZ=Etc/GMT-14 run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
+  refused "I could not find those words as something the operator typed after the review was shown."
+  # an older build's marker (no started_epoch) counts from the file's modification time
+  python3 - "$M" "$S" <<'PY'
+import json, os, sys
+m = json.load(open(sys.argv[1])); m.pop("started_epoch"); json.dump(m, open(sys.argv[1], "w")); os.utime(sys.argv[1], (float(sys.argv[2]),) * 2)
+PY
+  TZ=Etc/GMT-14 run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
+  refused "I could not find those words as something the operator typed after the review was shown."
+  rm "$M"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
+  refused "This session has no start record"
+  [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
+}
+
 @test "--skip-review in tty mode: --reason is refused; the reason typed at a terminal is recorded as typed, and a tty confirm pushes it" {
   work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "x"; refused "the reason for skipping the review is typed in a terminal"

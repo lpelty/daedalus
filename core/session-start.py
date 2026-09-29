@@ -218,6 +218,9 @@ def main() -> int:
                                  "fixed and the session restarted." % (branch, base_err))
             marker = {
                 "session_id": str(sid), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                # the absolute instant beside the local stamp: a transcript cut-off is never a
+                # local stamp parsed under the reader's TZ (plan 4 Decisions 45, 51)
+                "started_epoch": time.time(),
                 "vault_head": v.vault_head(root),
                 "config_sha": v.sha256_file(root / "config.yaml"),
                 "local_settings_sha": v.local_settings_sha(root),

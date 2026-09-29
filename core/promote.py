@@ -560,13 +560,20 @@ def earlier_refuted(root: Path, nn: str, pid: str, fp: str, tip: str, trunk_sha:
     return out
 
 
-def earlier_prepared(root: Path, nn: str) -> Optional[dict]:
-    """The newest prepared.json for window NN, or None."""
+def occupant_prepares(root: Path, nn: str, lease: dict) -> List[dict]:
+    """Decision 51: the prepared.json files of window NN's current occupant, oldest
+    first — those carrying the lease file's own `created` stamp (compared as a
+    string, never parsed), after the newest one a confirm pushed (its `pushed` or
+    `announced` stamp): a promotion settles every review before it."""
     base = root / "state" / "promote"
-    found = [(float(p.get("prepared_ts") or 0), p) for p in
-             (read_json(f) for f in (base.glob("%s-*/prepared.json" % nn) if base.is_dir() else []))
-             if p and p.get("lease") == nn]
-    return max(found, key=lambda x: x[0])[1] if found else None
+    found = []
+    for f in (base.glob("%s-*/prepared.json" % nn) if base.is_dir() else []):
+        p = read_json(f)
+        if p and p.get("lease") == nn and p.get("lease_created") == lease.get("created"):
+            found.append((float(p.get("prepared_ts") or 0), f.parent, p))
+    found.sort(key=lambda x: x[0])
+    done = [i for i, (_, d, _) in enumerate(found) if (d / "pushed").exists() or (d / "announced").exists()]
+    return [p for _, _, p in found[(done[-1] + 1 if done else 0):]]
 
 
 SKIP_QUESTION = "Promote window %s's work without the review?"
@@ -574,24 +581,38 @@ TOO_SHORT = ("--skip-review needs the operator's reason in their own words — a
              "price of skipping the review.")
 
 
-def marker_started(root: Path, sid: Optional[str]) -> float:
-    """The session's SessionStart marker `started` (local time) as epoch seconds; 0.0 without one."""
+def marker_started(root: Path, sid: Optional[str], nn: str) -> float:
+    """When this session started, as an absolute instant (Decisions 45, 51): the
+    SessionStart marker's `started_epoch`; for a marker from an older build
+    without it, the marker file's modification time (the marker is written once
+    per session, so a later write only moves the cut-off later). No readable
+    marker is a refusal, never a cut-off of 0 — the prime always has one."""
     m = v.read_marker(root, sid) if sid else None
-    try:
-        return time.mktime(time.strptime(str((m or {}).get("started"))[:19], "%Y-%m-%dT%H:%M:%S"))
-    except ValueError:
-        return 0.0
+    if m is not None:
+        try:
+            return float(m["started_epoch"])
+        except (KeyError, TypeError, ValueError):
+            try:
+                return v.marker_path(root, sid).stat().st_mtime
+            except OSError:
+                pass
+    raise Stop("This session has no start record (state/session-%s.json), so I cannot tell which of the operator's "
+               "words came after it started. Restart the prime window, or set `promote.confirm: tty` and run "
+               "`core/promote.sh %s --skip-review` in your own shell." % (sid, nn))
 
 
-def skip_reason(root: Path, me: dict, nn: str, reason: Optional[str], mode: str) -> dict:
+def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str], mode: str) -> dict:
     """§7.1 step 8, before any git work: the operator's written reason for
     skipping the review — in transcribed mode the operator's WHOLE turn, at least
     three words, typed after an assistant turn that showed the REFUTED verdict
     (or asked SKIP_QUESTION when no REFUTED prepare exists), recorded as the
     operator typed it; in tty mode typed at a terminal — and the REFUTED review it
-    sets aside (Decision 31)."""
-    earlier = earlier_prepared(root, nn)
-    refuted = earlier if earlier and (earlier.get("review") or {}).get("verdict") == "REFUTED" else None
+    sets aside (Decision 31): the latest REFUTED review of this window's current
+    occupant that no promotion has settled, however many prepares came after it
+    (Decision 51)."""
+    mine = occupant_prepares(root, nn, lease)
+    earlier = mine[-1] if mine else None
+    refuted = next((q for q in reversed(mine) if (q.get("review") or {}).get("verdict") == "REFUTED"), None)
     overrode = {"call_id": refuted["review"]["call_id"], "run_id": refuted["run_id"]} if refuted else None
     paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --skip-review`" % (root, nn)
     if mode == "tty":
@@ -620,7 +641,7 @@ def skip_reason(root: Path, me: dict, nn: str, reason: Optional[str], mode: str)
         after = max(float(earlier.get("prepared_ts") or 0),
                     tl.parse_ts((er.get("promotion") or {}).get("prepared_at")) or 0.0)
     else:
-        after = marker_started(root, me.get("session_id"))
+        after = marker_started(root, me.get("session_id"), nn)
     shown = "Reviewer on the merged change: REFUTED" if refuted else SKIP_QUESTION % nn
     yes = transcribed_yes(root, me, str(reason), after, "the review", shown_text=shown)
     return {"reason": yes["text"].strip(), "transcript_ref": yes["transcript_ref"], "session_id": me["session_id"],
@@ -633,7 +654,7 @@ def prepare(root: Path, a: dict) -> int:
     nn, lease = window(leases, a["token"])
     if a.get("reason") is not None and not a.get("skip"):
         raise Stop("--reason goes with --skip-review.")
-    skip = skip_reason(root, me, nn, a.get("reason"), confirm_mode(root)) if a.get("skip") else None
+    skip = skip_reason(root, me, nn, lease, a.get("reason"), confirm_mode(root)) if a.get("skip") else None
     tr = trunks(root, nn, lease)
     dirty(root, nn, tr)
     shas = fetch_trunks(root, tr)
@@ -687,7 +708,8 @@ def prepare(root: Path, a: dict) -> int:
     at, ts = tl.iso_utc(time.time()), time.time()
     dist = dc.committed_dist(root)
     secs = sum(int(g.get("duration_s") or 0) for g in run_rec.get("gates") or [])
-    p = {"promote_id": pid, "lease": nn, "alias": lease.get("alias"), "repo": repo, "trunk": trunk,
+    p = {"promote_id": pid, "lease": nn, "lease_created": lease.get("created"), "alias": lease.get("alias"),
+         "repo": repo, "trunk": trunk,
          "merge_sha": merge, "trunk_sha_at_prepare": trunk_sha, "lease_tip": tip, "fp_merged": fp, "run_id": run_id,
          "review": ({k: rv[k] for k in ("call_id", "verdict", "file", "fingerprint", "request_sha", "findings")}
                     if rv else None),

@@ -39,6 +39,7 @@ VERDICT: STANDS"
   python3 - "$DAEDALUS_HOME/state/session-sP.json" "$TXP" "$(git -C "$T" rev-parse origin/main)" <<'PY'
 import json, sys, time
 json.dump({"session_id": "sP", "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600)),
+           "started_epoch": time.time() - 3600,
            "target_branch": "main", "target_base": sys.argv[3], "target_base_error": "", "transcript_path": sys.argv[2],
            "lease": "01"}, open(sys.argv[1], "w"), indent=2)
 PY
