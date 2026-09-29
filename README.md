@@ -134,7 +134,13 @@ The transcript format is internal to Claude Code and changes between
 releases. `core/tests/fixtures/transcripts/live.jsonl` is a redacted copy of a
 real transcript (see its `PROVENANCE.md`); after a Claude Code upgrade, run
 `bats core/tests/test_transcript.bats core/tests/test_capture.bats` — they
-fail first if the shape moved.
+fail first if the fixture's shape moved. Those tests read only the fixture, so
+`core/doctor.sh` also reads the newest transcript of this deployment's own
+sessions (read-only) and says MISSING — "this Claude Code build's transcript
+shape is not the one Daedalus was tested against; promote confirm will refuse
+until the fixture is refreshed" — when the installed build writes a shape the
+parser does not know; confirm refuses with the same sentence. Refresh the
+fixture as `PROVENANCE.md` says, and use `promote.confirm: tty` meanwhile.
 
 ## Episodic memory capture (optional)
 

@@ -315,6 +315,20 @@ PY
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
 
+@test "confirm fails closed with the drift sentence when this build's typed turns carry no origin field — the yes typed, the block shown, the shape not the tested one — and nothing is pushed (critic finding 4, A12)" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"; P="$(pj prepared_ts)"
+  tx "$TXP" no-origin "promote window 2" "$(plus "$P" -60)" >/dev/null
+  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" 2)" >/dev/null
+  tx "$TXP" no-origin "yes, push it" "$(plus "$P" 3)" >/dev/null; tx "$TXP" tool-use "" "$(plus "$P" 4)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"
+  refused "This Claude Code build's transcript shape is not the one Daedalus was tested against ("
+  case "$output" in *"promote confirm will refuse until the fixture is refreshed — see core/tests/fixtures/transcripts/PROVENANCE.md. Until then, set \`promote.confirm: tty\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, go on"
+  refused "This Claude Code build's transcript shape is not the one Daedalus was tested against ("
+  [ "$(origin_main)" = "$before" ]
+}
+
 @test "confirm leaves a target checkout that is not on trunk alone: the trunk ref moves, the branch does not" {
   work_on_02; git -C "$T" switch -q -c other
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]
@@ -345,7 +359,8 @@ PY
   : > "$TXP"; tx "$TXP" assistant "Shall I go ahead?" "$(plus "$P" 1)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 2)" >/dev/null
   c "yes ship it"; refused "The promote block was not shown to the operator before that yes"
   tx "$TXP" assistant "$B" "$(plus "$P" 3)" >/dev/null; tx "$TXP" malformed "x" "$(plus "$P" 4)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 5)" >/dev/null
-  c "yes ship it"; refused "I cannot read this build's transcript format ("
+  c "yes ship it"; refused "This Claude Code build's transcript shape is not the one Daedalus was tested against ("
+  case "$output" in *"promote confirm will refuse until the fixture is refreshed — see core/tests/fixtures/transcripts/PROVENANCE.md."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"set \`promote.confirm: tty\` and paste the confirm line in your own shell. Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
   rm -f "$TXP"
   c "yes ship it"; refused "I cannot find this session's transcript ("

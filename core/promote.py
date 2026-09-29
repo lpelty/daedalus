@@ -816,8 +816,11 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
                    "elsewhere, set memory.transcript_dir in config.yaml; or set `promote.confirm: tty` and paste the "
                    "confirm line in your own shell." % e)
     except tl.Unreadable as e:
-        raise Stop("I cannot read this build's transcript format (%s), so the operator's yes cannot be checked. Until "
-                   "the parser is updated, set `promote.confirm: tty` and paste the confirm line in your own shell." % e)
+        # critic finding 4 (A12): the doctor's sentence, so the refusal and the doctor line read alike
+        d = tl.DRIFT[:1].upper() + tl.DRIFT[1:]
+        cut = d.index(";")
+        raise Stop("%s (%s)%s. Until then, set `promote.confirm: tty` and paste the confirm line in your own shell."
+                   % (d[:cut], e, d[cut:]))
     except tl.NotShown:
         raise Stop("%s was not shown to the operator before %s (prepare and confirm ran in one turn, no reply "
                    "since the prepare repeated the block, or the operator's reply to it came before %s). Show the "
@@ -1263,6 +1266,20 @@ def doctor(root: Path) -> int:
         mode = tl.confirm_mode(root)
         print("OK       promote: the operator's yes is transcribed and checked against the session transcript"
               if mode == "transcribed" else "OK       promote: the operator types yes in a terminal (tty)")
+        if mode == "transcribed":
+            # critic finding 4 (A12): the installed build's shape, read from its newest interactive transcript
+            try:
+                state, detail = tl.shape_report(root)
+            except Exception:           # a line doctor cannot compute is not printed
+                state, detail = "", ""
+            if state == "ok":
+                print("OK       promote: this Claude Code build's transcript shape (%s) reads as the one Daedalus was "
+                      "tested against" % detail)
+            elif state == "drift":
+                print("MISSING  promote: %s (%s)" % (tl.DRIFT, detail))
+            elif state == "none":
+                print("NOTE     promote: no interactive session transcript of this deployment yet, so this Claude Code "
+                      "build's transcript shape is not measured")
     except ValueError as e:
         print("MISSING  %s" % e)
     try:

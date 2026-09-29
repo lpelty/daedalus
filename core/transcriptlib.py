@@ -278,6 +278,80 @@ def harness_wrote(seen: dict, e: dict) -> bool:
     return False
 
 
+# Critic finding 4 (A12): the sentence doctor and confirm say when this build's transcript shape is not the one
+# Daedalus was tested against.
+DRIFT = ("this Claude Code build's transcript shape is not the one Daedalus was tested against; promote confirm "
+         "will refuse until the fixture is refreshed — see core/tests/fixtures/transcripts/PROVENANCE.md")
+
+
+def typed_turns(entries: list) -> list:
+    """The user text entries a person could have typed in an interactive session: not a sidechain, a tool
+    result, an isMeta record or a compaction summary, and not a headless (sdk) prompt — those carry no origin by
+    design."""
+    out = []
+    for e in entries:
+        d = e["data"] if isinstance(e["data"], dict) else {}
+        if e["type"] != "user" or not e["readable"] or not e["text"] or d.get("isSidechain") or d.get("isMeta"):
+            continue
+        if e["tool_result"] or "toolUseResult" in d or "sourceToolUseID" in d or d.get("isCompactSummary"):
+            continue
+        if str(d.get("entrypoint") or "").startswith("sdk") or d.get("promptSource") == "sdk":
+            continue
+        out.append(e)
+    return out
+
+
+def shape_problem(entries: list, strict: bool) -> Optional[str]:
+    """Why this build's transcript does not read as the tested shape (critic finding 4, A12), or None.
+    Always: typed turns exist, none carries origin.kind human and some carry no origin at all (the 2.1.283
+    measurement: 0 of its user entries with an origin). strict (doctor, the newest interactive transcript whole):
+    any entry this build does not read, entries that do not link the way the harness writes them, or any typed
+    turn with no origin field."""
+    turns = typed_turns(entries)
+    kinds = [classify(e) for e in turns]
+    unknown = kinds.count("unknown_provenance")
+    typed = kinds.count("operator") + kinds.count("queued")
+    if strict:
+        bad = sum(1 for e in entries if not e["readable"])
+        if bad:
+            return "%d of its %d entries have a shape this build does not read" % (bad, len(entries))
+        try:
+            _chain(entries)
+        except Unreadable as e:
+            return str(e)
+    if unknown and (strict or not typed):
+        return ("%d of its %d typed turns carry no origin field, so who typed them cannot be told"
+                % (unknown, len(turns)))
+    return None
+
+
+def shape_report(root: Path) -> Tuple[str, str]:
+    """For doctor (critic finding 4, read-only): ("ok", build version), ("drift", why — naming the file) or
+    ("none", "") for the newest transcript of this deployment's sessions that has turns a person typed."""
+    files: List[Path] = []
+    for d in transcript_dirs(root):
+        try:
+            files += [f for f in d.glob("*.jsonl") if f.is_file()]
+        except OSError:
+            continue
+    for f in sorted(set(files), key=lambda x: x.stat().st_mtime, reverse=True)[:20]:
+        try:
+            entries = _entries(f)
+        except (Missing, Unreadable):
+            continue
+        turns = typed_turns(entries)
+        if not turns:
+            continue
+        why = shape_problem(entries, strict=True)
+        if why:
+            return "drift", "%s, in %s" % (why, f.name)
+        if not any(classify(e) in ("operator", "queued") for e in turns):
+            continue      # nothing a person typed is marked either way here: not a measure
+        versions = [str((e["data"] or {}).get("version") or "") for e in turns]
+        return "ok", max(set(versions), key=versions.count) or "unknown build"
+    return "none", ""
+
+
 def _ref(e: dict) -> dict:
     return {"uuid": e["data"].get("uuid"), "timestamp": e["data"].get("timestamp")}
 
@@ -329,6 +403,9 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     if not want:
         raise NotFound("nothing to look for")
     seen = _chain(entries)
+    drift = shape_problem(entries, strict=False)
+    if drift:
+        raise Unreadable(drift)     # critic finding 4: this build's typed turns are not the tested shape
     not_written = False
     mark = normalize(shown_text) if shown_text else None
     shown: Optional[dict] = None

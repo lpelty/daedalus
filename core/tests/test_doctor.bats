@@ -1002,3 +1002,38 @@ promote_prepared() {
   promote_prepared 02-20260928-120000-def "{\"lease\":\"02\",\"lease_created\":\"new\",\"prepared_ts\":$ts,\"prepared_at\":\"x\"}"
   run D; case "$output" in *"NOTE     promote: window 02 prepared at"*", not confirmed"*) : ;; *) echo "the current occupant's prepare was not reported: $output"; return 1 ;; esac
 }
+
+# ---- Plan 4 completeness critic, finding 4 (A12): transcript-shape drift is seen before a promotion ----
+
+@test "doctor: this Claude Code build's transcript shape — NOTE (not counted) with no interactive transcript yet; OK naming the build when the newest interactive transcript of this deployment reads as the tested one; MISSING (counted), with the sentence, when its typed turns carry no origin or its entries do not link; a headless (sdk) transcript is not the measure; no line in tty mode (critic finding 4)" {
+  doctor_promote_fixture
+  B="$BATS_TEST_DIRNAME/fixtures/transcripts/build.py"
+  X="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$(cd "$DAEDALUS_HOME" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$X"
+  run D; case "$output" in *"NOTE     promote: no interactive session transcript of this deployment yet, so this Claude Code build's transcript shape is not measured"*) : ;; *) echo "$output"; return 1 ;; esac
+  base="$(problems)"
+  python3 "$B" "$X/s1.jsonl" operator "hello" >/dev/null; python3 "$B" "$X/s1.jsonl" assistant "hi" >/dev/null
+  run D; case "$output" in *"OK       promote: this Claude Code build's transcript shape (2.1.282) reads as the one Daedalus was tested against"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq "$base" ] || { echo "OK changed the count: $output"; return 1; }
+  # a newer headless transcript (an sdk call: no origin by design) is not the measure
+  python3 - "$B" "$X/s0.jsonl" <<'PY'
+import json, subprocess, sys
+subprocess.run(["python3", sys.argv[1], sys.argv[2], "no-origin", "Reply with OK"], check=True, capture_output=True)
+rows = [json.loads(l) for l in open(sys.argv[2])]
+rows[0].update(entrypoint="sdk-cli", promptSource="sdk")
+open(sys.argv[2], "w").write("".join(json.dumps(r) + "\n" for r in rows))
+PY
+  touch -t 203001010000 "$X/s0.jsonl"
+  run D; case "$output" in *"OK       promote: this Claude Code build's transcript shape"*) : ;; *) echo "sdk: $output"; return 1 ;; esac
+  # the drift the critic measured on 2.1.283: typed turns with no origin field
+  python3 "$B" "$X/s2.jsonl" no-origin "hello again" >/dev/null; python3 "$B" "$X/s2.jsonl" assistant "hi" >/dev/null
+  touch -t 203101010000 "$X/s2.jsonl"
+  run D; case "$output" in *"MISSING  promote: this Claude Code build's transcript shape is not the one Daedalus was tested against; promote confirm will refuse until the fixture is refreshed — see core/tests/fixtures/transcripts/PROVENANCE.md ("*"no origin field"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq $((base + 1)) ] || { echo "expected $((base + 1)) problems: $output"; return 1; }
+  # entries that do not link the way Claude Code writes them
+  rm -f "$X/s2.jsonl"; python3 "$B" "$X/s3.jsonl" operator "x" >/dev/null
+  python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; r[1]["parentUuid"]="nowhere"; open(sys.argv[1],"w").write("".join(json.dumps(x)+"\n" for x in r))' "$X/s3.jsonl"
+  touch -t 203201010000 "$X/s3.jsonl"
+  run D; case "$output" in *"MISSING  promote: this Claude Code build's transcript shape is not the one Daedalus was tested against"*"do not link"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run D; case "$output" in *"transcript shape"*) echo "tty mode reads no transcript: $output"; return 1 ;; esac
+}
