@@ -24,6 +24,13 @@ working — before the block was on screen). A user text entry with no origin
 that starts with a harness tag is a harness record; one with no origin and no
 tag is of unknown provenance, and words found only there fail closed.
 
+An operator-typed entry counts only when Claude Code wrote it into the
+conversation it went on with (plan 4 completeness critic, finding 2): the
+file's uuids are unique and each parentUuid names an entry written before it
+(else Unreadable), and the entry lies on the chain from the file's last entry
+back through parentUuid with an assistant entry — the harness's reply — after
+it there (else NotWritten). A line appended by another writer fails that.
+
 Also: where a session's transcript is (transcript_for — only inside a
 directory nothing may write, Decision 36), the directories the guard and the
 boundary check deny as write targets (transcript_dirs), promote.confirm
@@ -75,6 +82,11 @@ class Unprotected(Exception):
 
 class NotFound(Exception):
     """The words are no operator-typed entry after the cut-off."""
+
+
+class NotWritten(NotFound):
+    """The words are in an entry Claude Code did not write there: nothing it wrote afterwards follows from it
+    (plan 4 completeness critic, finding 2 — a line appended to the file by another writer)."""
 
 
 class NotShown(Exception):
@@ -220,6 +232,52 @@ def classify(e: dict) -> str:
     return "unknown_provenance" if e["text"] else "other"
 
 
+def _chain(entries: list) -> dict:
+    """uuid -> entry for every entry that carries a uuid (a shape this build cannot read included: it still
+    links), checking the two invariants Claude Code keeps
+    (measured on 400 transcripts of 2.1.251-2.1.283, and on the live-shape fixture: no exception): no uuid is
+    written twice, and an entry's parentUuid, when set, names an entry written before it in the file. Raises
+    Unreadable when either fails — a file that does not link the way the harness writes it is not read as
+    evidence (critic finding 2). Timestamps are no invariant: parallel tool results are written out of order."""
+    seen: dict = {}
+    for e in entries:
+        d = e["data"]
+        if not isinstance(d, dict) or not isinstance(d.get("uuid"), str):
+            continue
+        u, parent = d["uuid"], d.get("parentUuid")
+        if u in seen or (parent is not None and parent not in seen):
+            raise Unreadable("the transcript's entries do not link the way Claude Code writes them (%s)"
+                             % ("the uuid %s is written twice" % u if u in seen else
+                                "the entry %s names a parent written nowhere before it" % u))
+        seen[u] = e
+    return seen
+
+
+def harness_wrote(seen: dict, e: dict) -> bool:
+    """Whether Claude Code wrote entry e into the conversation it went on with (critic finding 2): e lies on
+    the chain from the file's last entry back through each parentUuid (logicalParentUuid across a compaction),
+    and an assistant entry — the harness's reply — lies on that chain after it. A line appended to the file by
+    another writer fails one or the other: appended last, nothing the harness wrote follows it; passed by the
+    harness, the harness's later entries descend from its own last entry, not from the appended line. Measured:
+    every operator-typed turn in 400 transcripts lay on its file's final chain, and all but the last turn of a
+    session had an assistant entry after it there. It raises the bar from one appended line to a forged,
+    internally consistent chain written in the very command that runs confirm; it is not proof of who wrote the
+    file — the guard's refusal to write the transcript is the defense, this is a second, independent one."""
+    if not seen:
+        return False
+    cur: Optional[dict] = list(seen.values())[-1]
+    replied = False
+    for _ in range(len(seen) + 1):
+        if cur is None:
+            return False
+        if cur is e:
+            return replied
+        replied = replied or cur["type"] == "assistant"
+        d = cur["data"]
+        cur = seen.get(d.get("parentUuid") or d.get("logicalParentUuid") or "")
+    return False
+
+
 def _ref(e: dict) -> dict:
     return {"uuid": e["data"].get("uuid"), "timestamp": e["data"].get("timestamp")}
 
@@ -238,7 +296,8 @@ def _entries(path: Path) -> list:
 def find_operator_words(path: Path, quote: str, after: float, require_shown: bool,
                         shown_text: Optional[str] = None) -> dict:
     """{"transcript_ref": {uuid, timestamp}, "shown_ref": {uuid, timestamp} | None,
-    "text": the entry's own text} for the first operator-typed entry after `after`
+    "text": the entry's own text} for the first operator-typed entry after `after` that Claude Code wrote
+    into the conversation it went on with (harness_wrote — critic finding 2),
     (epoch seconds) whose WHOLE normalized text equals the normalized quote
     (Decision 30: a fragment of a longer turn is not what the operator said) —
     with require_shown, one that is the operator's FIRST turn after an assistant
@@ -247,8 +306,9 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     that entry is shown_ref. The yes answers the block itself: any user turn
     between the block and the words (operator-typed, queued, or of unknown
     provenance) was the reply to it, and words after it answer something else
-    unless the block is shown again. Raises Missing, Unreadable (A12, fail closed),
-    NotShown or NotFound."""
+    unless the block is shown again. Raises Missing, Unreadable (A12, fail closed; also a
+    file whose entries do not link the way the harness writes them), NotWritten (the words
+    only in entries the harness did not write), NotShown or NotFound."""
     entries = _entries(path)
     # The tail starts after the last user/assistant entry PROVABLY before the cut-off,
     # so an entry whose timestamp this build writes in a form parse_ts does not read
@@ -268,6 +328,8 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     want = normalize(quote)
     if not want:
         raise NotFound("nothing to look for")
+    seen = _chain(entries)
+    not_written = False
     mark = normalize(shown_text) if shown_text else None
     shown: Optional[dict] = None
     not_shown = unknown_hit = False
@@ -286,12 +348,18 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
             if require_shown and answers is None:
                 not_shown = True
                 continue
+            if not harness_wrote(seen, e):
+                not_written = True      # critic finding 2: appended to the file, not written by Claude Code
+                continue
             return {"transcript_ref": _ref(e), "shown_ref": _ref(answers) if answers else None, "text": e["text"]}
         if kind == "unknown_provenance":
             unknown_hit = True
     if unknown_hit:
         raise Unreadable("the words are only in a user entry that carries no origin field, so who typed it "
                          "cannot be told")
+    if not_written:
+        raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
+                         "chain, so it was added to the file afterwards")
     if not_shown:
         raise NotShown("the words are not the operator's first reply to an assistant turn showing the block "
                        "after the cut-off")
@@ -301,9 +369,11 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
 def operator_entry(path: Path, uuid: str) -> Optional[str]:
     """The text of the entry `uuid` when the operator typed it, else None
     (confirm's re-check of a skip reason, Decision 31). Missing / Unreadable propagate."""
-    for e in _entries(path):
+    entries = _entries(path)
+    seen = _chain(entries)
+    for e in entries:
         if e["readable"] and (e["data"] or {}).get("uuid") == uuid:
-            return e["text"] if classify(e) == "operator" else None
+            return e["text"] if classify(e) == "operator" and harness_wrote(seen, e) else None
     return None
 
 

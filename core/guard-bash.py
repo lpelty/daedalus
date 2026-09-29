@@ -48,7 +48,18 @@ be git, a `bash -c`/`eval`/interpreter string that is not literal, `env -S`, and
 a git command after `cd` to a place the guard cannot know are denied ("I can't
 read this git command exactly …"); only a commit message and a pathspec after
 `--` of anything but a push may hold one. GIT_COMMON_DIR, which moves the hooks
-directory, is denied like the GIT_CONFIG_* variables. The guard is a
+directory, is denied like the GIT_CONFIG_* variables. A write is read the same
+way (finding 2): a write target holding a variable other than $HOME /
+$CLAUDE_CONFIG_DIR, a `$( )`, backticks, `$'…'` or a brace expansion, or a
+relative one after `cd` to a place the guard cannot know, is denied outright; a
+glob is denied when the directory before its first wildcard could hold the
+transcript or Daedalus's own files, and otherwise each path it matches now is
+checked; the writers beyond redirects — curl -o/-O, wget, tar -x -C and -c -f,
+unzip -d, cpio -i, ditto, install, ln (its source too), cp/mv -t, patch -o,
+sqlite3 (its database and .output/.once/.save/ATTACH), sort -o, uniq, git
+--output, awk print redirects, and inline Python (parsed: open() in a write
+mode, pathlib, shutil, os) — are writes; inline perl, ruby or node code that
+writes files is denied, its targets unread. The guard is a
 speed bump and git's pre-push hook (core/prepush.py) a second one, which does
 not fail open when this does but runs only for `git push`; a push by a route
 this guard does not parse (a script file, an interpreter's own git library,
@@ -105,7 +116,9 @@ files exist fails CLOSED under target/, worktrees/ and hot.md (§4.4).
 """
 from __future__ import annotations
 
+import ast
 import functools
+import glob as globmod
 import importlib
 import json
 import os
@@ -178,6 +191,12 @@ CMD_UNREADABLE = ("I can't read this command exactly (%s is filled in by the she
                   "is not a git push to trunk. Write it out literally.")
 ENV_SPLIT = ("`env -S` splits a string into a command the guard cannot read exactly, so I can't check it is not a git "
              "push to trunk or a write to the session transcript. Write the command out literally.")
+WRITE_UNREADABLE = ("I can't tell exactly where this write lands (%s is filled in or expanded by the shell when it runs), "
+                    "so I can't check it stays out of the session transcript and Daedalus's own files. Write the path "
+                    "out literally.")
+CODE_WRITE = ("I can't tell exactly where this %s code writes, so I can't check it stays out of the session transcript "
+              "and Daedalus's own files. Write the file with a redirect to a literal path, or with Python's open() of "
+              "a literal path.")
 HOOKDIR_ENV = ("%s is not set from here: it moves where git reads its hooks from, so the pre-push hook that guards "
                "trunk would not run.")
 # the GIT_CONFIG_* variables that point git at other configuration; GIT_CONFIG_NOSYSTEM is not among them: it
@@ -405,6 +424,11 @@ class Word(str):
         w = str.__new__(cls, raw.translate(UNMARK))
         w.raw = raw
         return w
+
+
+def wslice(t: str, start: int) -> str:
+    """t[start:], keeping a Word's marks (each mark stands for one character, so the offsets agree)."""
+    return Word(t.raw[start:]) if isinstance(t, Word) else t[start:]
 
 
 def dynamic(t: str) -> bool:
@@ -1219,7 +1243,13 @@ def write_operands(seg: List[str]) -> List[str]:
     if head in ("rm", "unlink", "truncate"):
         ops.extend(pos)
     if head == "dd":
-        ops.extend(t[3:] for t in seg[1:] if t.startswith("of=") and len(t) > 3)
+        ops.extend(wslice(t, 3) for t in seg[1:] if t.startswith("of=") and len(t) > 3)
+    if head in ("cp", "mv", "install", "ln"):
+        ops.extend(option_values(seg[1:], {"-t", "--target-directory"}, set()))
+    if head == "ln":
+        # a link made toward the transcript (or distribution code) lets a later plain write reach it (critic finding 2)
+        ops.extend(pos)
+    ops.extend(extra_writer_operands(head, seg))
     if head in ("perl", "ruby") and any(PERL_INPLACE.match(t) for t in seg[1:]):
         # in-place edit: every file operand; the program after -e is not one
         ops.extend(t for i, t in enumerate(seg[1:], 1) if not t.startswith("-") and seg[i - 1] not in ("-e", "-E"))
@@ -1236,6 +1266,214 @@ def write_operands(seg: List[str]) -> List[str]:
             if len(t) > 8 and WRITE_IN_STRING.search(t):
                 ops.extend(m.group(0) for m in PATHISH.finditer(t) if "/" in m.group(0) or m.group(0).endswith((".sh", ".py", ".md", ".json", ".yaml")))
     return ops
+
+
+def option_values(args: List[str], spaced: set, glued_short: set) -> List[str]:
+    """The values of options: `-o X` / `--output X` (spaced), `--output=X`, and `-oX` or a flag run ending in o
+    (`-sSo X`) for the one-letter options in glued_short."""
+    out: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        name, eq, _ = a.partition("=")
+        if a in spaced and i + 1 < len(args):
+            out.append(args[i + 1])
+            i += 2
+            continue
+        if eq and name in spaced and name.startswith("--"):
+            out.append(wslice(a, len(name) + 1))
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            letters = a[1:]
+            for k, ch in enumerate(letters):
+                if ch in glued_short:
+                    if k + 1 < len(letters):
+                        out.append(wslice(a, k + 2))
+                    elif i + 1 < len(args):
+                        out.append(args[i + 1])
+                        i += 1
+                    break
+        i += 1
+    return out
+
+
+def url_basename(u: str) -> str:
+    return u.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "index.html"
+
+
+SQLITE_WRITE = re.compile(r"(?:^|\s|;)\.(?:output|once|save|backup(?:\s+\S+)?|excel)\s+['\"]?([^\s'\";]+)|"
+                          r"\b(?:ATTACH(?:\s+DATABASE)?|VACUUM\s+INTO)\s+['\"]([^'\"]+)['\"]", re.I)
+AWK_WRITE = re.compile(r"\bprint[f]?\b[^;}]*?(>>?|\|)\s*(\"[^\"]*\"|[^\s;}]+)")
+
+
+def extra_writer_operands(head: str, seg: List[str]) -> List[str]:
+    """Critic finding 2: the writers beyond redirect/sed/tee/cp/mv/rm/dd/perl -i — each file they write."""
+    args = seg[1:]
+    pos = positionals(args)
+    ops: List[str] = []
+    if head == "curl":
+        ops += option_values(args, {"-o", "--output", "-D", "--dump-header", "-c", "--cookie-jar", "--trace",
+                                    "--trace-ascii", "--stderr", "--libcurl", "--etag-save"}, {"o", "D", "c"})
+        if any(a in ("-O", "--remote-name", "--remote-name-all") or (a.startswith("-") and not a.startswith("--")
+                                                                    and "O" in a[1:]) for a in args):
+            dirs = option_values(args, {"--output-dir"}, set()) or ["."]
+            urls = [a for a in pos if "://" in a]
+            ops += ["%s/%s" % (dirs[-1], url_basename(u)) for u in urls]
+    elif head == "wget":
+        ops += option_values(args, {"-O", "--output-document", "-o", "--output-file", "-a", "--append-output"},
+                             {"O", "o", "a"})
+        if not any(a in ("-O", "--output-document") or a.startswith(("--output-document=", "-O")) for a in args):
+            dirs = option_values(args, {"-P", "--directory-prefix"}, {"P"}) or ["."]
+            ops += ["%s/%s" % (dirs[-1], url_basename(u)) for u in pos if "://" in u]
+    elif head in ("sort", "shuf"):
+        ops += option_values(args, {"-o", "--output"}, {"o"})
+    elif head == "uniq" and len(pos) >= 2:
+        ops.append(pos[1])
+    elif head == "sqlite3":
+        dbs = [a for a in pos]
+        if dbs:
+            ops.append(dbs[0])
+        for a in args:
+            for m in SQLITE_WRITE.finditer(a):
+                ops.append(m.group(1) or m.group(2))
+    elif head == "patch":
+        ops += option_values(args, {"-o", "--output", "-r", "--reject-file"}, {"o", "r"})
+    elif head == "ditto" and len(pos) >= 2:
+        ops.append(pos[-1])
+    elif head == "git":
+        ops += option_values(args, {"--output"}, set())
+        if "format-patch" in args:
+            ops += option_values(args, {"-o", "--output-directory"}, {"o"})
+    elif head in ("awk", "gawk", "mawk", "nawk"):
+        prog = next((a for a in args if not a.startswith("-") and "=" not in a.split(" ", 1)[0]), None)
+        for m in AWK_WRITE.finditer(prog or ""):
+            if m.group(1) == "|":
+                continue
+            t = m.group(2)
+            ops.append(t[1:-1] if t.startswith('"') and t.endswith('"') else Word(DYN + t))
+    return ops
+
+
+def fill_dirs(seg: List[str], here: Path) -> List[str]:
+    """Critic finding 2: the directories an extraction fills with files the archive names — tar -x (its -C or the
+    cwd), unzip (-d or the cwd), ditto's destination, cpio -i (the cwd) — and, for tar -c/-r/-u, the archive."""
+    _, words, _ = split_redirects(seg)
+    if not words:
+        return []
+    head, args = os.path.basename(words[0]), words[1:]
+    if head in ("tar", "gtar", "bsdtar"):
+        letters = ""
+        for i, a in enumerate(args):
+            if a.startswith("--"):
+                continue
+            if a.startswith("-") or (i == 0 and a.isalpha()):
+                letters += a.lstrip("-")
+        longs = {a.split("=", 1)[0] for a in args if a.startswith("--")}
+        extract = "x" in letters or longs & {"--extract", "--get"}
+        create = any(ch in letters for ch in "cru") or longs & {"--create", "--append", "--update"}
+        out: List[str] = []
+        if extract:
+            out += option_values(args, {"-C", "--directory", "--cd"}, {"C"}) or ["."]
+        if create:
+            files = option_values(args, {"-f", "--file"}, {"f"})
+            first = args[0] if args and not args[0].startswith("-") and args[0].isalpha() else ""
+            if "f" in first and len(args) > 1:
+                files.append(args[1])
+            out += files
+        return out
+    if head == "unzip" and not any(a in ("-l", "-p", "-t", "-v", "-Z", "-z") for a in args):
+        return option_values(args, {"-d"}, set()) or ["."]
+    if head == "cpio" and any(a.startswith("-") and not a.startswith("--") and "i" in a[1:] for a in args):
+        return ["."]
+    return []
+
+
+def code_write(head: str, code: str) -> Tuple[List[str], Optional[str]]:
+    """(the literal paths inline code writes, why its targets cannot be read — or None). Python is parsed:
+    open()/io.open() in a write mode, pathlib's write_text/write_bytes/open/touch/unlink/rename/replace/symlink_to/
+    hardlink_to on Path('<literal>'), shutil copy/move, os rename/replace/link/symlink/remove/unlink/truncate/open.
+    A target that is not a string literal cannot be read. perl, ruby and node are not parsed: code there that
+    opens a file for writing, renames, links or removes one cannot be read (critic finding 2)."""
+    if head in ("python", "python3"):
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return [], ("Python" if WRITE_IN_STRING.search(code) else None)
+        lits: List[str] = []
+        unread = False
+
+        def target(node: Optional[ast.AST]) -> None:
+            nonlocal unread
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                lits.append(node.value)
+            else:
+                unread = True
+
+        def name(f: ast.AST) -> str:
+            if isinstance(f, ast.Name):
+                return f.id
+            if isinstance(f, ast.Attribute):
+                return name(f.value) + "." + f.attr
+            if isinstance(f, ast.Call):
+                return name(f.func) + "()"
+            return "?"
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = name(node.func)
+            args = list(node.args)
+            kw = {k.arg: k.value for k in node.keywords}
+            last = fn.rsplit(".", 1)[-1]
+            if fn in ("open", "io.open", "codecs.open") or (last == "open" and fn.endswith("Path().open")):
+                mode = args[1] if len(args) > 1 and fn in ("open", "io.open", "codecs.open") else (
+                    args[0] if args and fn.endswith("Path().open") else kw.get("mode"))
+                writes = not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
+                              and not any(ch in mode.value for ch in "wax+")) and mode is not None
+                if writes:
+                    if fn.endswith("Path().open"):
+                        inner = node.func.value if isinstance(node.func, ast.Attribute) else None
+                        target(inner.args[0] if isinstance(inner, ast.Call) and inner.args else None)
+                    else:
+                        target(args[0] if args else kw.get("file"))
+            elif fn.endswith("Path()." + last) and last in ("write_text", "write_bytes", "touch", "unlink", "rename",
+                                                              "replace", "symlink_to", "hardlink_to", "mkdir", "chmod",
+                                                              "rmdir"):
+                inner = node.func.value if isinstance(node.func, ast.Attribute) else None
+                target(inner.args[0] if isinstance(inner, ast.Call) and inner.args else None)
+                if last in ("rename", "replace"):
+                    target(args[0] if args else None)
+            elif last in ("write_text", "write_bytes") :
+                unread = True           # a Path the code built: its value is not a literal
+            elif fn in ("shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.copytree", "shutil.move",
+                        "os.rename", "os.replace", "os.link", "os.symlink"):
+                target(args[1] if len(args) > 1 else kw.get("dst"))
+                if fn in ("shutil.move", "os.rename", "os.replace"):
+                    target(args[0] if args else kw.get("src"))
+                if fn == "os.symlink":
+                    target(args[0] if args else kw.get("src"))
+            elif fn in ("os.remove", "os.unlink", "os.truncate", "os.rmdir", "os.removedirs", "shutil.rmtree",
+                        "os.chmod", "os.chown", "os.utime", "os.open", "os.mkfifo"):
+                target(args[0] if args else kw.get("path"))
+        return lits, ("Python" if unread else None)
+    shapes = {"perl": r"\bopen\s*\(?[^;]*?['\"]\s*\+?[>|]|\bsysopen\b|\b(?:rename|unlink|link|symlink|truncate)\b|"
+                      r"\b(?:copy|move)\s*\(",
+              "ruby": r"\b(?:File|IO)\.(?:write|open|rename|symlink|link|delete|unlink|truncate|binwrite)\b|FileUtils\.",
+              "node": r"\bfs(?:\.promises)?\.\w*(?:[Ww]rite|[Aa]ppend|[Cc]opy|[Rr]ename|[Ss]ymlink|[Ll]ink|[Uu]nlink|"
+                      r"[Tt]runcate|[Rr]m|[Oo]pen|createWriteStream)"}
+    rx = shapes.get(head)
+    if rx and re.search(rx, code):
+        return [], head
+    return [], None
+
+
+def interpreter_code(seg: List[str]) -> Optional[str]:
+    """The inline program of `python3 -c …`, `perl -e …` (and -E, -ne, -pe …), `ruby -e …`, `node -e …`."""
+    for i, t in enumerate(seg[1:-1], 1):
+        if t in ("-c", "-e", "-E") or (t.startswith("-") and not t.startswith("--") and t[-1] in "eE"
+                                        and os.path.basename(seg[0]) in ("perl", "ruby")):
+            return seg[i + 1]
+    return None
 
 
 def strips_session_variable(seg: List[str]) -> bool:
@@ -1348,6 +1586,10 @@ def unparseable(cmd: str, cwd: Path, g: "G") -> Optional[str]:
     open): the redirect and -i operands the regex finds get the FULL write check, not
     is_protected alone — the lease-era denials have no Stop backstop for hot.md or the
     prime's checkout."""
+    for m in re.finditer(r">>?\|?\s*([^\s;&|<>]+)", cmd):
+        t = m.group(1).strip("'\"")
+        if re.search(r"[$`*?\[{]", t) and not re.fullmatch(r"(?:\$\{?(?:HOME|CLAUDE_CONFIG_DIR)\}?)?[A-Za-z0-9_./~-]*", t):
+            return WRITE_UNREADABLE % t      # critic finding 2: a target the shell fills in or expands
     for m in re.finditer(r"(?:>>?|\s-i(?:\s+\S+)?\s)\s*([A-Za-z0-9_./~-]+)", cmd):
         p = resolve(cwd, m.group(1))
         reason, _ = bh.write_check(g.root, g.ctx, p, g.sid, g.refused)
@@ -1433,7 +1675,8 @@ def git_argv(run: List[str]) -> List[str]:
 
 # what write_operands knows how to read, found behind a wrapper (`sudo chmod -x …`)
 WRITE_HEADS = {"sed", "tee", "cp", "install", "ln", "rsync", "mv", "rm", "unlink", "truncate", "dd", "perl", "ruby",
-               "patch", "chmod", "chown", "chgrp", "chflags", "touch"}
+               "patch", "chmod", "chown", "chgrp", "chflags", "touch", "curl", "wget", "sort", "shuf", "uniq", "sqlite3",
+               "ditto", "awk", "gawk", "mawk", "nawk", "tar", "gtar", "bsdtar", "unzip", "cpio"}
 
 
 def exec_index(seg: List[str], heads: set) -> int:
@@ -1546,6 +1789,92 @@ def git_unreadable(gseg: List[str], prefix: List[str], here: Path, penv: Dict[st
             return GIT_UNREADABLE
         j += 1
     return None
+
+
+# $HOME / $CLAUDE_CONFIG_DIR, marked: resolve() expands them from the hook's environment — unless the command
+# itself assigns one, when the shell's value is not the hook's.
+MARKED_PATH_VARS = re.compile(DYN + r"(?:\{(?:HOME|CLAUDE_CONFIG_DIR)\}|(?:HOME|CLAUDE_CONFIG_DIR)\b)")
+ASSIGNS_PATH_VAR = re.compile(r"(?:^|[\s;&|(])(?:export\s+|declare\s+-x\s+|typeset\s+-x\s+)?(?:HOME|CLAUDE_CONFIG_DIR)=")
+
+
+def could_land(d: Path, g: G) -> Optional[str]:
+    """Critic finding 2: the sentence a write somewhere under directory d could earn, or None — d is, holds or
+    lies in a transcript directory (outside <dir>/memory/); d is the home or above it; or d, under the home, is
+    protected, holds a protected path, or is a tree the lease rules deny (no warning state is recorded: this is
+    a probe of a directory, not the write itself)."""
+    import transcriptlib as tl
+    rr = g.root.resolve()
+    for t in tl.transcript_dirs(g.root):
+        if under(t, d) or (under(d, t) and not under(d, t / "memory")):
+            return bh.TRANSCRIPT_DENY
+    protected = "%s can hold Daedalus's own files (distribution code or evidence); write a proposal instead." % d
+    if under(rr, d):
+        return protected
+    if not under(d, rr):
+        return bh.git_gate_deny(d)
+    if v.is_protected(g.root, d) or hooks_path(d):
+        return protected
+    for pg in v.protected_globs(g.root):
+        base = rr / (pg[:-3] if pg.endswith("/**") else pg)
+        if under(base, d):
+            return protected
+    if g.refused and (under(d, rr / "target") or under(d, rr / "worktrees")):
+        return g.refused
+    if g.ctx["leases"]:
+        return bh.tree_deny(g.root, g.ctx, d)
+    return None
+
+
+def expanded(op: str, cmd: str) -> str:
+    """op with $HOME / $CLAUDE_CONFIG_DIR and a leading ~ expanded, as resolve() does."""
+    t = op if ASSIGNS_PATH_VAR.search(cmd) else PATH_VARS.sub(
+        lambda m: os.environ.get(m.group(1) or m.group(2)) or m.group(0), op)
+    return os.path.expanduser(t)
+
+
+def unreadable_target(op: str, here: Path, g: G, cmd: str) -> Optional[str]:
+    """Critic finding 2: a write operand the guard cannot resolve to one literal path — a variable other than
+    $HOME / $CLAUDE_CONFIG_DIR (those two only when the command does not assign them), $( ), backticks, $'…', a
+    brace expansion, a relative path after `cd` to a place the guard cannot know — is denied; a glob is denied when
+    the directory before its first wildcard could hold the transcript or Daedalus's own files, and otherwise each
+    path it matches now gets the full check (see glob_matches)."""
+    raw = getattr(op, "raw", None)
+    if raw is None:
+        return None
+    r = raw if ASSIGNS_PATH_VAR.search(cmd) else MARKED_PATH_VARS.sub("", raw)
+    if any(ch in DYN_MARKS for ch in r) or BRACE in r:
+        return WRITE_UNREADABLE % op
+    if here == UNKNOWN_CWD and not os.path.isabs(expanded(op, cmd)):
+        return WRITE_UNREADABLE % op
+    if globbed(op):
+        i = next(k for k, ch in enumerate(raw) if ch in GLOB_MARKS)
+        head = expanded(str(op)[:i], cmd)
+        d = head.rsplit("/", 1)[0] if "/" in head else ""
+        base = resolve(here, d) if d else (Path("/") if head.startswith("/") else here.resolve())
+        if could_land(base, g):
+            return WRITE_UNREADABLE % op
+    return None
+
+
+def glob_matches(op: str, here: Path, cmd: str) -> List[Path]:
+    """What a glob write operand matches now, as the shell would expand it from `here` (hidden files only when
+    the pattern names them)."""
+    pat = expanded(str(op), cmd)
+    pat = pat if os.path.isabs(pat) else str(here / pat)
+    return [Path(m) for m in globmod.glob(pat, recursive=True)]
+
+
+def literal_write(p: Path, op: str, g: G) -> Tuple[Optional[str], Optional[str]]:
+    """(deny reason, context) for one resolved write path: git's hooks, the lease-era write_check (the transcript,
+    git's configuration, the trees, the cross-lease warning), distribution code."""
+    if hooks_path(p):
+        return HOOKS_WRITE % op, None
+    reason, context = bh.write_check(g.root, g.ctx, p, g.sid, g.refused)
+    if reason:
+        return reason, None
+    if v.is_protected(g.root, p):
+        return "%s is distribution code (or evidence); write a proposal instead of editing it." % p, None
+    return None, context
 
 
 def check_command(cmd: str, cwd: Path, g: G, depth: int = 0) -> Tuple[Optional[str], List[str]]:
@@ -1700,23 +2029,38 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
         reason = transcript_ancestor(g.root, resolve(here, op), op in filled and op not in removed)
         if reason:
             return reason, [], here, branch_created
-    ops = write_operands(seg)
     w = exec_index(seg, WRITE_HEADS)
+    # critic finding 2: an extraction fills a directory (tar -x, unzip, cpio -i), its -C / -d or the cwd
+    for op in fill_dirs(seg, here) + (fill_dirs(seg[w:], here) if w else []):
+        reason = unreadable_target(op, here, g, cmd)
+        if reason:
+            return reason, [], here, branch_created
+        reason = transcript_ancestor(g.root, resolve(here, op), True) or could_land(resolve(here, op), g)
+        if reason:
+            return reason, [], here, branch_created
+    ops = write_operands(seg)
     if w:
         ops += write_operands(seg[w:])        # behind a wrapper: `sudo chmod -x …`
     if seg[0] == "patch" and any(t.startswith("<") for t in seg[1:]):
         ops.append(".")        # patch < file writes its cwd (§7.3)
+    if rhead in INTERPRETERS:
+        code = interpreter_code(run)
+        if code is not None:
+            lits, why = code_write(rhead, code)
+            if why:
+                return CODE_WRITE % why, [], here, branch_created
+            ops += lits
     for op in ops:
-        p = resolve(here, op)
-        if hooks_path(p):
-            return HOOKS_WRITE % op, [], here, branch_created
-        reason, context = bh.write_check(g.root, g.ctx, p, g.sid, g.refused)
+        reason = unreadable_target(op, here, g, cmd)
         if reason:
             return reason, [], here, branch_created
-        if context:
-            contexts.append(context)
-        if v.is_protected(g.root, p):
-            return "%s is distribution code (or evidence); write a proposal instead of editing it." % p, [], here, branch_created
+        paths = glob_matches(op, here, cmd) if globbed(op) else [resolve(here, op)]
+        for p in paths:
+            reason, context = literal_write(p, op, g)
+            if reason:
+                return reason, [], here, branch_created
+            if context:
+                contexts.append(context)
     return None, contexts, here, branch_created
 
 

@@ -824,6 +824,10 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
                    "block, then ask."
                    % (what[:1].upper() + what[1:], "that yes" if must_be_yes else "those words",
                       "that yes" if must_be_yes else "those words"))
+    except tl.NotWritten:
+        raise Stop("Those words are in this session's transcript, but not as a turn Claude Code wrote there: nothing "
+                   "in the conversation follows from them, so they were added to the file afterwards. Nothing was "
+                   "recorded; show %s to the operator and ask again." % what)
     except tl.NotFound:
         raise Stop("I could not find those words as something the operator typed after %s was shown." % what)
     return {"transcript_session_id": me["session_id"], "transcript_ref": found["transcript_ref"],

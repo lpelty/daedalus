@@ -11,7 +11,9 @@ busy), assistant (assistant text), tool-use, tool-result, meta (isMeta), peer
 (a message from another session), task-notification, command (a slash-command
 record: no origin, <command-name> text), no-origin (a user text entry with no
 origin and no tag: unknown provenance), malformed (a user entry whose content
-is neither text nor a list). epoch defaults to now + 1 s."""
+is neither text nor a list). epoch defaults to now + 1 s. Each entry's parentUuid is
+the file's last uuid, and an operator entry is followed by the harness's reply (an
+assistant tool_use entry chained to it) — the shape transcriptlib.harness_wrote reads."""
 import copy
 import json
 import sys
@@ -45,6 +47,19 @@ def blocks(r, kind):
 
 def iso(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch)) + ".%03dZ" % int((epoch % 1) * 1000)
+
+
+def last_uuid(out):
+    last = None
+    if out.exists():
+        for ln in out.read_text().splitlines():
+            try:
+                d = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and isinstance(d.get("uuid"), str):
+                last = d["uuid"]
+    return last
 
 
 def main(argv):
@@ -85,9 +100,19 @@ def main(argv):
         sys.exit("unknown kind %s" % kind)
     e["uuid"] = str(uuid.uuid4())
     e["timestamp"] = iso(at)
+    # linked as Claude Code links them (transcriptlib._chain, harness_wrote): each entry's parent is the last one
+    e["parentUuid"] = last_uuid(out)
+    rows = [e]
+    if kind == "operator":
+        # the harness's reply to a typed turn — before any tool can run, the assistant entry that answers it is
+        # written, chained to it (critic finding 2: a turn nothing follows was appended, not typed)
+        r = first(lambda x: x.get("type") == "assistant" and blocks(x, "tool_use"), "assistant tool_use")
+        r.update(uuid=str(uuid.uuid4()), parentUuid=e["uuid"], timestamp=iso(at + 0.001))
+        rows.append(r)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a") as fh:
-        fh.write(json.dumps(e) + "\n")
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
     print(e["uuid"])
 
 

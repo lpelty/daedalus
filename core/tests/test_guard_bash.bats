@@ -807,3 +807,41 @@ gb.main()
   run git -C "$P" push -q origin 'refs/heads/x/*:refs/heads/*'; [ "$status" -eq 0 ]
   [ "$(git -C "$B" rev-parse main)" = "$(git -C "$P" rev-parse HEAD)" ]
 }
+
+# ---- Plan 4 completeness critic, finding 2: a write whose target the guard cannot resolve ----
+
+@test "a write whose target cannot be resolved to a literal path is denied when it could land under the transcript directory or Daedalus's own files — a glob, a variable, \$( ), a brace expansion, a relative path after cd to a variable, env -S; curl, wget, tar, unzip, ditto, install, patch, sqlite3, sort -o, git --output, awk, python -c, perl -e and ln toward the transcript are writes; ordinary writes elsewhere are not (critic finding 2)" {
+  P="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$(cd "$DAEDALUS_HOME" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$P/memory"
+  S="${P##*/}"; G="$CLAUDE_CONFIG_DIR/proj?cts/$S"
+  : > "$P/s1.jsonl"; printf 'x\n' > "$BATS_TEST_TMPDIR/p.patch"
+  for c in "echo x >> $G/s1.jsonl" "echo x >> $P/s?.jsonl" "echo x >> $P/*.jsonl" "tee -a $G/s1.jsonl" "cp /tmp/x $G/s1.jsonl" \
+           "echo x >> \"\$Q/s1.jsonl\"" 'echo x >> $(cat /tmp/where)' "tee $P/s{1,2}.jsonl" "cd \$Q && echo x >> s1.jsonl" \
+           "dd if=/tmp/f of=\$Q" "mv /tmp/x \"\$Q\"" "env -S 'cp /tmp/x $P/s1.jsonl'" \
+           "curl -o $P/s1.jsonl https://example.com/x" "curl --output $P/s1.jsonl https://example.com/x" \
+           "curl -sSo $P/s1.jsonl https://example.com/x" "wget -O $P/s1.jsonl https://example.com/x" \
+           "wget --output-document=$P/s1.jsonl https://example.com/x" "tar -xf /tmp/a.tar -C $P" "tar xf /tmp/a.tar -C $CLAUDE_CONFIG_DIR/projects" \
+           "tar -cf $P/s1.jsonl /tmp/x" "unzip -o /tmp/a.zip -d $P" "ditto /tmp/x $P/s1.jsonl" "install -m 644 /dev/stdin $P/s1.jsonl" \
+           "patch $P/s1.jsonl < $BATS_TEST_TMPDIR/p.patch" "sqlite3 /tmp/x.db '.output $P/s1.jsonl' 'select 1'" "sqlite3 $P/s1.jsonl 'select 1'" \
+           "sort -o $P/s1.jsonl /tmp/x" "git -C /tmp log --output=$P/s1.jsonl -1" "awk '{print > \"$P/s1.jsonl\"}' /tmp/x" \
+           "awk '{print >> f}' f=$P/s1.jsonl /tmp/x" "python3 -c \"import glob; open(glob.glob('$G/s1.jsonl')[0], 'a').write('x')\"" \
+           "python3 -c \"from pathlib import Path; Path('$P/s1.jsonl').write_text('x')\"" "python3 -c \"import sys; open(sys.argv[1], 'a').write('x')\" $P/s1.jsonl" \
+           "python3 -c \"import shutil; shutil.copy('/tmp/x', '$P/s1.jsonl')\"" "perl -e 'open(my \$f, \">>\", \$ARGV[0])' $P/s1.jsonl" \
+           "ln -s $P $BATS_TEST_TMPDIR/link" "cp -t $P /tmp/x" "rm -f $CLAUDE_CONFIG_DIR/proj?cts/$S/*.jsonl"; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard "echo x >> $G/s1.jsonl"
+  case "$output" in *"I can't tell exactly where this write lands"*"Write the path out literally."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard "curl -o $P/s1.jsonl https://example.com/x"
+  case "$output" in *"the session transcript is the record of the operator's yes; nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  # writes Daedalus's own files cannot be spelled around either
+  for c in 'echo x > core/li?.sh' 'echo x > "$D/core/lib.sh"' 'tee core/*.sh' 'rm -f *' "curl -o core/lib.sh https://example.com/x"; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+  done
+  # ordinary writes elsewhere stay allowed
+  mkdir -p "$BATS_TEST_TMPDIR/w/build"
+  for c in "echo x > /tmp/out.txt" "ls 2>/dev/null" "rm -f build/*.o" "curl -o /tmp/x https://example.com/x" "tar -xf /tmp/a.tar -C /tmp/y" \
+           "tar -tf /tmp/a.tar" "tar -cf /tmp/a.tar build" "python3 -c \"open('/tmp/x', 'w').write('y')\"" "python3 -c \"import json; print(json.load(open('a.json')))\"" \
+           "sort -o /tmp/s /tmp/x" "awk '\$1 > 5' /tmp/x" "echo x >> $P/memory/MEMORY.md" "cat $P/s1.jsonl" "cp a.txt build/" "git log --oneline -1"; do
+    run guard "$c" "$BATS_TEST_TMPDIR/w"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+}
