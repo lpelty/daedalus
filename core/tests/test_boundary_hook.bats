@@ -515,3 +515,25 @@ PY
   case "$output" in *'"deny"'*"nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
   chmod 600 "$DAEDALUS_HOME/state/leases/.lock"
 }
+
+@test "vault/evidence/promotions.log, promote's ledger, is excused like the manifest: appended this session it does not block a Stop; a stray file beside it still does" {
+  printf 'x\twindow 02\n' >> "$DAEDALUS_HOME/vault/evidence/promotions.log"
+  run hook Stop; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'stray\n' > "$DAEDALUS_HOME/vault/evidence/stray.md"
+  run hook Stop; [ "$status" -eq 2 ]; case "$output" in *"stray.md"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a Stop after a promotion recorded in the marker is not blocked; a trunk move the marker does not record still is, and says trunk is reached only through promote" {
+  printf 'b\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am promoted
+  run hook Stop; [ "$status" -eq 2 ]
+  python3 - "$DAEDALUS_HOME/state/session-s1.json" "$(git -C "$T" rev-parse HEAD)" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1])); m["target_base"] = sys.argv[2]
+m["promotions"] = [{"id": "02-20260928-120000-abc", "sha": sys.argv[2], "at": "2026-09-28T12:00:00.000Z"}]
+json.dump(m, open(sys.argv[1], "w"))
+PY
+  run hook Stop; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'c\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am unrecorded
+  run hook Stop; [ "$status" -eq 2 ]
+  case "$output" in *"main moved"*"trunk is reached only through promote"*) : ;; *) echo "$output"; return 1 ;; esac
+}

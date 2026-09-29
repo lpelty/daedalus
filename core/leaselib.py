@@ -1447,6 +1447,16 @@ def mark_done(root: Path, token: str, sid: str, summary: str) -> str:
             % (what, summary, prime_peer))
 
 
+def record_promotion(root: Path, nn: str, promote_id: str) -> None:
+    """§7.2 step 7: the lease file's `promoted` list gains the promote id, under
+    the leases lock, by whichever process ran the confirm."""
+    with lock(root):
+        lease = read_lease(root, nn)
+        if lease is None:
+            return
+        lease["promoted"] = (lease.get("promoted") or []) + [promote_id]
+        write_lease(root, nn, lease)
+
 def sweep(root: Path, force_nn: Optional[str] = None) -> list:
     """Remove stale and released lease files. A quiet one only as --force <NN>
     (the operator's word); a finished one waits for promote or release (or

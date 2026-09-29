@@ -68,3 +68,16 @@ refused() {
   esac
 }
 origin_main() { git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse main; }
+
+# shown_then_said <words> [shown text] — the exchange a real confirm follows, after the newest
+# prepare: prepare's tool result, the assistant turn that showed the block (by default its first
+# line; a skip over a REFUTED review shows the reviewer line), then the operator's words.
+# Sets SHOWN and SAID to the two entries' uuids (call it directly, never in "$( )": a
+# subshell would lose them).
+shown_then_said() {
+  local P B="Ready to promote window 02's work onto main."; P="$(pj prepared_ts)"
+  # (the default lives in B: an apostrophe inside "${2:-…}" opens a quote bash never closes)
+  tx "$TXP" tool-result "prepared" "$(plus "$P" 1)" >/dev/null
+  SHOWN="$(tx "$TXP" assistant "${2:-$B}" "$(plus "$P" 2)")"
+  SAID="$(tx "$TXP" operator "$1" "$(plus "$P" 3)")"
+}

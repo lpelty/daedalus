@@ -59,7 +59,7 @@ RESTART = (" If the operator made this change, restart the session — a FRESH "
            "deletes state/session-<id>.json from outside the session first.")
 
 
-MANIFEST_FILES = (".manifest", ".manifest.lock")   # gates.sh's ledger and the lock its appends take
+MANIFEST_FILES = (".manifest", ".manifest.lock", "promotions.log")   # gates.sh's ledger, the lock its appends take, promote's ledger (spec §7.2 step 4)
 
 
 def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
@@ -233,8 +233,10 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
                        % (base[:12], branch, (gerr or "").strip().splitlines()[-1:] or ["no output"], RESTART))
         return
     if out.strip() not in ("", "0"):
-        reasons.append("Target %s moved this session (%s commit(s) past origin/%s at session start) — the operator "
-                       "merges; work on a branch.%s" % (branch, out.strip(), branch, RESTART))
+        # confirm rewrites the marker's target_base after a push (§7.2 step 6), so a promoted merge is
+        # not a trunk move here and an unrecorded one still is.
+        reasons.append("Target %s moved this session (%s commit(s) past origin/%s at session start) — trunk is "
+                       "reached only through promote; work on a window's branch.%s" % (branch, out.strip(), branch, RESTART))
 
 
 NEVER_FIRED = ("you changed %s, which window %s%s had already changed, and the warning never fired "

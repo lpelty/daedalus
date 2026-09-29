@@ -3,6 +3,7 @@
 
     core/promote.sh <NN>                     prepare (§7.1)
     core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept)
+    core/promote.sh <NN> --confirm [--operator-said "..."] [--id <promote-id>]   confirm and push (§7.2)
 
 core/promote.sh has already run the distribution-integrity check
 (core/distcheck.py) before this file was read. Run by the prime — the session
@@ -14,6 +15,8 @@ under state/promote/<promote-id>/, fingerprints the merged tree, runs the gates
 checks that nothing moved while they ran, writes prepared.json and prints the
 decision block: two paragraphs, the decision in plain words and the record.
 Prepare pushes nothing.
+Confirm re-derives everything from the primary artifacts, records the
+operator's yes, and pushes the merge commit the evidence names — nothing else.
 
 Exit: 0 ready (or done); 1 the work is not ready (gates FAIL or INVALID,
 REFUTED, the review could not be completed); 2 refused. Every refusal ends
@@ -645,11 +648,367 @@ def clean(root: Path, a: dict) -> int:
     return 0
 
 
+# --- confirm (§7.2) ---------------------------------------------------------------------------------
+
+def latest_prepared(root: Path, nn: str, pid: Optional[str] = None) -> Tuple[Path, dict]:
+    base = root / "state" / "promote"
+    if pid:
+        p = read_json(base / pid / "prepared.json") if re.fullmatch(r"[0-9A-Za-z-]+", pid) else None
+        if p is None:
+            raise Stop("No prepared promotion %s; run `promote %s` first." % (pid, nn))
+        if p.get("lease") != nn:
+            raise Stop("Promotion %s was prepared for window %s, not window %s." % (pid, p.get("lease"), nn))
+        return base / pid, p
+    found = []
+    for f in (base.glob("%s-*/prepared.json" % nn) if base.is_dir() else []):
+        p = read_json(f)
+        if p and p.get("lease") == nn:
+            found.append((float(p.get("prepared_ts") or 0), f.parent, p))
+    if not found:
+        raise Stop("No prepared promotion for window %s; run `promote %s` first." % (nn, nn))
+    _, pdir, p = max(found, key=lambda x: x[0])
+    return pdir, p
+
+
+def confirm_mode(root: Path) -> str:
+    try:
+        return tl.confirm_mode(root)
+    except ValueError as e:
+        raise Stop(str(e) + ".")
+
+
+def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, shown_text: Optional[str] = None,
+                    must_be_yes: bool = False) -> dict:
+    """The operator's words, found in the confirming session's own transcript
+    (§7.2 step 2): the operator's WHOLE turn (Decision 30), typed after `after`,
+    after an assistant turn that showed `what` — carrying `shown_text` when it is
+    given. With must_be_yes the words must begin with yes. Every failure is a
+    refusal; an unreadable transcript, or one outside the denied directories
+    (Decision 36), is never a pass (A12)."""
+    if me["kind"] != "prime-session":
+        raise Stop("In transcribed mode the prime window records the operator's yes; from a shell, set "
+                   "`promote.confirm: tty` and run the confirm there.")
+    if not (said or "").strip():
+        raise Stop("Record what the operator said. The yes is evidence; an empty one is not a yes.")
+    if must_be_yes and not tl.is_yes(said):
+        raise Stop("The operator's words do not begin with yes (got: \"%s\"). Record the operator's whole reply; a "
+                   "yes begins with yes." % said.strip())
+    try:
+        path = tl.transcript_for(root, me["session_id"])
+        found = tl.find_operator_words(path, said, after, require_shown=True, shown_text=shown_text)
+    except tl.Unprotected as e:
+        raise Stop("This session's transcript (%s) is outside every directory nothing may write, so it is not evidence "
+                   "of the operator's words. Set memory.transcript_dir in config.yaml, or set `promote.confirm: tty` "
+                   "and paste the confirm line in your own shell." % e)
+    except tl.Missing as e:
+        raise Stop("I cannot find this session's transcript (%s), so the operator's yes cannot be checked. If it lives "
+                   "elsewhere, set memory.transcript_dir in config.yaml; or set `promote.confirm: tty` and paste the "
+                   "confirm line in your own shell." % e)
+    except tl.Unreadable as e:
+        raise Stop("I cannot read this build's transcript format (%s), so the operator's yes cannot be checked. Until "
+                   "the parser is updated, set `promote.confirm: tty` and paste the confirm line in your own shell." % e)
+    except tl.NotShown:
+        raise Stop("%s was not shown to the operator before %s (prepare and confirm ran in one turn, no reply "
+                   "since the prepare repeated the block, or the operator's reply to it came before %s). Show the "
+                   "block, then ask."
+                   % (what[:1].upper() + what[1:], "that yes" if must_be_yes else "those words",
+                      "that yes" if must_be_yes else "those words"))
+    except tl.NotFound:
+        raise Stop("I could not find those words as something the operator typed after %s was shown." % what)
+    return {"transcript_session_id": me["session_id"], "transcript_ref": found["transcript_ref"],
+            "shown_ref": found["shown_ref"], "text": found["text"]}
+
+
+def cutoff(root: Path, p: dict, pdir: Path) -> float:
+    """Decision 35: the transcript cut-off is the latest of the promotion's
+    primaries — prepared_ts, run.json's promotion.prepared_at, the merge commit's
+    committer time, the end of the review's first attempt — never prepared.json's
+    word alone; a prepared_ts earlier than the merge commit is a disagreement."""
+    ts = float(p.get("prepared_ts") or 0)
+    run_rec = read_json(root / "state" / "evidence" / str(p["run_id"]) / "run.json") or {}
+    times = [ts, tl.parse_ts((run_rec.get("promotion") or {}).get("prepared_at")) or 0.0]
+    code, ct, _ = git(pdir / p["repo"], "show", "-s", "--format=%ct", p["merge_sha"])
+    if code == 0 and ct.strip().isdigit():
+        if ts + 1 < float(ct.strip()):
+            raise Stop("Evidence disagrees with the prepared promotion (the prepared time is earlier than the merge "
+                       "commit).")
+        times.append(float(ct.strip()))
+    rv = p.get("review") or {}
+    if rv.get("call_id"):
+        launch = read_json(root / "state" / "direct-calls" / str(rv["call_id"]) / "launch.json") or {}
+        first = (launch.get("attempts") or [{}])[0]
+        try:
+            started = calendar.timegm(time.strptime(str(first.get("started"))[:15], "%Y%m%dT%H%M%S"))
+            times.append(started + float(first.get("duration_ms") or 0) / 1000.0)
+        except ValueError:
+            pass
+    return max(times)
+
+
+def tty_yes(root: Path, p: dict) -> dict:
+    """§7.2 step 2, tty: the decision paragraph again, then one line read from
+    /dev/tty that must begin with yes (§7.4) — from a process that descends from
+    a terminal login and from no agent (Decision 32)."""
+    decision, _ = decision_block(root, p)
+    paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --confirm`" % (root, p["lease"])
+    try:
+        text, name = tl.tty_answer("%s\n\nType yes to push window %s's work to %s: " % (decision, p["lease"], p["trunk"]),
+                                   root)
+    except tl.NotAPerson as e:
+        raise Stop("The confirm must be typed by a person in their own terminal: %s. %s" % (e, paste))
+    except tl.NoTerminal:
+        raise Stop("The confirm must be typed by a person in a terminal. This session has none. " + paste)
+    if not tl.is_yes(text):
+        raise Stop("The operator did not say yes (typed: \"%s\")." % text.strip())
+    return {"typed": {"text": text.strip(), "tty": name, "pid": os.getpid()}}
+
+
+def pair_of(run_rec: dict, p: dict) -> Tuple[str, str]:
+    """(trunk_sha_at_prepare, merge_sha) that run.json records for the pushed repo."""
+    if "/" not in p["repo"]:
+        return str(run_rec.get("trunk_sha_at_prepare") or ""), str(run_rec.get("merge_sha") or "")
+    n = (run_rec.get("nested") or {}).get(p["repo"].split("/", 1)[1]) or {}
+    return str(n.get("trunk_sha_at_prepare") or ""), str(n.get("merge_sha") or "")
+
+
+def sha256_bytes(b: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(b).hexdigest()
+
+
+def check_review(root: Path, p: dict, run_rec: dict, tree: Path) -> None:
+    """§7.2 step 3: the review, the receipt and the re-rendered prompt, each
+    against the others; nothing taken from prepared.json that a primary can
+    contradict."""
+    vf = root / "vault" / "evidence" / ("%s-review.md" % p["run_id"])
+    _, verdict, _ = run(["bash", str(root / "core" / "refute.sh"), "--verdict-of", str(vf)])
+    if verdict.strip() != "STANDS" or (p.get("review") or {}).get("verdict") != "STANDS":
+        raise Stop("Evidence disagrees with the prepared promotion (review verdict).")
+    text = vf.read_text()
+    fm = v.parse_frontmatter(text)
+    if fm.get("fingerprint") != run_rec.get("fingerprint"):
+        raise Stop("Evidence disagrees with the prepared promotion (the review's fingerprint and the gate run's).")
+    env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
+    r = subprocess.run(["bash", str(root / "core" / "refute.sh"), p["run_id"], "--mode", "promote", "--render-only"],
+                       env=env, capture_output=True, timeout=600)
+    launch = read_json(root / "state" / "direct-calls" / str(fm.get("call-id")) / "launch.json") or {}
+    rendered = sha256_bytes(r.stdout) if r.returncode == 0 else None
+    if not (rendered and fm.get("request-sha") == launch.get("request_sha256") == rendered):
+        raise Stop("The review did not see the change that will be pushed.")
+    head = dc.committed_dist(root)
+    if fm.get("core-tree") != head.get("core_tree") or fm.get("charter-sha") != head.get("charter_sha"):
+        raise Stop("Distribution code changed since the review.")
+    first = (launch.get("attempts") or [{}])[0]
+    body = text.split("---\n", 2)[2] if text.startswith("---\n") and text.count("---\n") >= 2 else ""
+    try:
+        answer = Path(first.get("answer") or "").read_bytes()
+    except OSError:
+        answer = b""
+    if (first.get("exit_code") != 0 or first.get("advisory") or launch.get("core_tree") != fm.get("core-tree")
+            or sha256_bytes(answer) != sha256_bytes(body.encode())):
+        raise Stop("Evidence disagrees with the prepared promotion (the review's receipt and the review).")
+
+
+def check_skip(root: Path, p: dict, promo: dict) -> None:
+    """Decision 31: a skipped review's reason, re-read from its primary — the
+    terminal record in tty mode, else the transcript entry by uuid, which must be
+    operator-typed with the recorded text — never trusted from a ref's presence."""
+    reason = promo.get("review_skipped_reason")
+    if not reason or reason != p.get("review_skipped_reason"):
+        raise Stop("Evidence disagrees with the prepared promotion (the reason for skipping the review).")
+    typed, ref, sid = promo.get("skip_typed"), promo.get("skip_transcript_ref") or {}, promo.get("skip_transcript_session_id")
+    if typed and typed.get("text") == reason:
+        return
+    text = None
+    if ref.get("uuid") and sid:
+        try:
+            text = tl.operator_entry(tl.transcript_for(root, sid), ref["uuid"])
+        except (tl.Missing, tl.Unreadable, tl.Unprotected):
+            text = None
+    if text is None or tl.normalize(text) != tl.normalize(reason):
+        raise Stop("Evidence disagrees with the prepared promotion (the reason for skipping the review).")
+
+
+def rederive(root: Path, p: dict, pdir: Path, tr: Dict[str, str]) -> None:
+    """§7.2 step 3, in order."""
+    run_rec = read_json(root / "state" / "evidence" / str(p["run_id"]) / "run.json") or {}
+    base, merge = pair_of(run_rec, p)
+    if (run_rec.get("result") != "PASS" or run_rec.get("promote_id") != p["promote_id"] or merge != p["merge_sha"]
+            or base != p["trunk_sha_at_prepare"] or run_rec.get("refuter") != "deferred-to-promote"
+            or run_rec.get("fingerprint") in (None, "", "null")):
+        raise Stop("Evidence disagrees with the prepared promotion (the gate run's record).")
+    tree = pdir / outer_of(tr)
+    if p.get("review") is None:
+        check_skip(root, p, run_rec.get("promotion") or {})
+    else:
+        check_review(root, p, run_rec, tree)
+    state, detail = dc.distribution_state(root)
+    if state != "clean":
+        raise Stop(dc.refusal(state, detail, PUSHED))
+    repo, trunk, nn = p["repo"], p["trunk"], p["lease"]
+    src = root / "target" / repo
+    code, _, err = git(src, "fetch", "--quiet", "origin")
+    now_sha = rev(src, "origin/" + trunk) if code == 0 else ""
+    if now_sha != p["trunk_sha_at_prepare"]:
+        raise Stop("Trunk moved since the trial merge (was %s, now %s). The tested merge is stale. Run `promote %s` "
+                   "again." % (p["trunk_sha_at_prepare"][:7], now_sha[:7] or last_line(err), nn))
+    tip = rev(src, "lease/%s" % nn)
+    if tip != p["lease_tip"]:
+        _, log, _ = git(src, "log", "--reverse", "--format=%s", "%s..lease/%s" % (p["lease_tip"], nn))
+        new = [s for s in log.splitlines() if s.strip()]
+        raise Stop("Window %s's branch changed after the trial merge — %s: %s. Run `promote %s` again."
+                   % (nn, "1 new commit" if len(new) == 1 else "%d new commits" % len(new),
+                      ", ".join('"%s"' % s for s in new) or "its tip moved", nn))
+    wt = pdir / repo
+    if rev(wt, p["merge_sha"] + "^2") != p["lease_tip"] or rev(wt, p["merge_sha"] + "^1") != p["trunk_sha_at_prepare"]:
+        raise Stop("Evidence disagrees with the prepared promotion (the merge commit's parents).")
+    ctx = read_json(pdir / "context.json") or {}
+    outer = outer_of(tr)
+    heads = {outer: ctx.get("merge_sha")}
+    heads.update({"%s/%s" % (outer, rel): (n or {}).get("merge_sha") for rel, n in (ctx.get("nested") or {}).items()})
+    if heads.get(repo) != p["merge_sha"] or not scratch_is(pdir, heads):
+        raise Stop("Evidence disagrees with the prepared promotion (the scratch is not the merge commit).")
+    fp, _ = fingerprint(root, tree)
+    if not (fp == p["fp_merged"] == run_rec.get("fingerprint")
+            and (p.get("review") is None or p["review"].get("fingerprint") == fp)):
+        raise Stop("Evidence disagrees with the prepared promotion (the fingerprint of the scratch).")
+
+
+def record_yes(root: Path, p: dict, pdir: Path, me: dict, mode: str, yes: dict, said: Optional[str]) -> None:
+    """§7.2 step 4, before the push."""
+    at = tl.iso_utc(time.time())
+    words = said if mode == "transcribed" else yes["typed"]["text"]
+    extra = {"confirmed_at": at, "confirm_mode": mode,
+             "confirmed_by": {"session_id": me["session_id"], "lease": me["lease"], "pid": me["pid"], "user": me["user"]},
+             "transcript_session_id": yes.get("transcript_session_id"), "transcript_ref": yes.get("transcript_ref"),
+             "shown_ref": yes.get("shown_ref")}
+    if mode == "transcribed":
+        extra["operator_said"] = said
+    else:
+        extra["typed"] = yes["typed"]
+    update_run(root, p["run_id"], lambda rec: rec.setdefault("promotion", {}).update(extra))
+    ev = root / "vault" / "evidence"
+    with open(str(ev / ("%s.md" % p["run_id"])), "a") as fh:
+        fh.write('\nPromoted to %s at %s after the operator said: "%s"\n' % (p["trunk"], time.strftime("%H:%M"), words))
+    o = p.get("overrode_review")
+    fields = [at, "window %s" % p["lease"], "merge %s" % p["merge_sha"], "run %s" % p["run_id"],
+              ("STANDS (review %s)" % p["review"]["call_id"]) if p.get("review") else
+              "skipped: %s" % p.get("review_skipped_reason"),
+              'operator: "%s"' % words, "confirm: %s" % mode] + (["overrode: %s" % o["call_id"]] if o else []) + \
+             (["earlier refuted: %s" % ",".join(str(e.get("call_id")) for e in p["earlier_refuted"])]
+              if p.get("earlier_refuted") else [])
+    log = ev / "promotions.log"
+    new = not log.exists()
+    with open(str(log), "a") as fh:
+        fh.write("\t".join(fields) + "\n")
+    if new:
+        run(["python3", str(root / "core" / "manifest-append.py"), str(log)])
+    p["confirmed_at"] = at
+    write_json(pdir / "prepared.json", p)
+
+
+def push(root: Path, p: dict, pdir: Path) -> None:
+    """§7.2 step 5: the merge commit the evidence names, from the scratch, to
+    <repo>'s origin — nothing else. DAEDALUS_PROMOTE_ID is what the pre-push
+    hook checks against prepared.json's confirmed_at and merge_sha (§7.3)."""
+    seam = os.environ.get("PROMOTE_TEST_BEFORE_PUSH")
+    if seam:                                   # test seam: move trunk in the race the next sentence names
+        subprocess.run(["bash", "-c", seam], capture_output=True)
+    env = dict(os.environ, DAEDALUS_PROMOTE_ID=p["promote_id"])
+    code, _, err = git(pdir / p["repo"], "push", "origin", "%s:refs/heads/%s" % (p["merge_sha"], p["trunk"]),
+                       env=env, timeout=600)
+    if code != 0:
+        # Decision 34: a promotion whose push failed is never pushable again — the hook refuses it.
+        p["push_failed_at"] = tl.iso_utc(time.time())
+        write_json(pdir / "prepared.json", p)
+        # With the hook installed (Task 12) a push onto a trunk that moved is refused by the hook
+        # (the remote is no longer at the tested base) before git reports "[rejected]" — measured
+        # by the review — so the race is judged from origin itself, not from git's wording.
+        git(pdir / p["repo"], "fetch", "--quiet", "origin")
+        moved = rev(pdir / p["repo"], "origin/" + p["trunk"]) != p["trunk_sha_at_prepare"]
+        if moved or re.search(r"non-fast-forward|fetch first|\[rejected\]", err or ""):
+            raise Stop("Push rejected: trunk moved during confirm. Run promote again.", suffix=ON_ORIGIN)
+        raise Stop("The push to origin failed (%s). Run promote again." % last_line(err), suffix=ON_ORIGIN)
+
+
+def bring_forward(root: Path, p: dict, tr: Dict[str, str]) -> List[str]:
+    """§7.2 step 6, by whichever process ran the confirm: the prime's checkout
+    fast-forwarded only when it is on trunk and clean; the prime session's
+    marker told (target_base, promotions)."""
+    notes = []
+    repo, trunk = p["repo"], p["trunk"]
+    src = root / "target" / repo
+    git(src, "fetch", "--quiet", "origin", trunk)
+    code, head, _ = run(["git", "-C", str(src), "symbolic-ref", "--short", "-q", "HEAD"])
+    branch = head.strip() if code == 0 and head.strip() else "a detached HEAD"
+    try:
+        clean_tree = not ll.dirty_files(src)
+    except ll.Refused:
+        clean_tree = False
+    if branch == trunk and clean_tree:
+        c, _, err = git(src, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+        if c != 0:
+            notes.append("target/%s could not be fast-forwarded (%s); the trunk ref is updated, the checkout is "
+                         "untouched." % (repo, last_line(err)))
+    else:
+        notes.append("target/%s is on %s; the trunk ref is updated, the checkout is untouched." % (repo, branch))
+    sid = (p.get("prepared_by") or {}).get("session_id") or (read_leases(root).get("prime") or {}).get("session_id")
+    if sid:
+        mp = v.marker_path(root, sid)
+        m = read_json(mp)
+        if m is not None:
+            if repo == outer_of(tr):
+                m["target_base"] = p["merge_sha"]
+            m["promotions"] = (m.get("promotions") or []) + [{"id": p["promote_id"], "sha": p["merge_sha"],
+                                                              "at": tl.iso_utc(time.time()), "repo": repo}]
+            write_json(mp, m)
+    return notes
+
+
+def confirm(root: Path, a: dict) -> int:
+    leases = read_leases(root)
+    me = who(root, leases)
+    nn, lease = window(leases, a["token"])
+    mode = confirm_mode(root)
+    pdir, p = latest_prepared(root, nn, a.get("id"))
+    if (pdir / "pushed").exists() or (pdir / "announced").exists():
+        raise Stop("Promotion %s of window %s was already pushed. Run `promote %s` for anything newer."
+                   % (p["promote_id"], nn, nn))
+    tr = trunks(root, nn, lease)
+    if p.get("push_failed_at"):
+        raise Stop("Promotion %s of window %s already failed to push (%s). Run `promote %s` again."
+                   % (p["promote_id"], nn, p["push_failed_at"], nn))
+    if mode == "transcribed":
+        yes = transcribed_yes(root, me, a.get("said") or "", cutoff(root, p, pdir), "the promote block",
+                              shown_text=block_opening(p), must_be_yes=True)
+    else:
+        if a.get("said") is not None:
+            raise Stop("In tty mode the operator types the yes in a terminal; --operator-said is not accepted. Paste "
+                       "this line in your own shell: `cd %s && core/promote.sh %s --confirm`" % (root, nn))
+        yes = tty_yes(root, p)
+    rederive(root, p, pdir, tr)
+    record_yes(root, p, pdir, me, mode, yes, a.get("said"))
+    push(root, p, pdir)
+    notes = bring_forward(root, p, tr)
+    ll.record_promotion(root, nn, p["promote_id"])
+    write_json(pdir / "pushed", {"at": tl.iso_utc(time.time()), "hhmm": time.strftime("%H:%M"), "lease": nn,
+                                 "merge_sha": p["merge_sha"], "confirm_mode": mode,
+                                 "tty": (yes.get("typed") or {}).get("tty")})
+    alias = " (%s)" % p["alias"] if p.get("alias") else ""
+    lines = notes + ["Promoted window %s's work%s to %s (merge commit %s; evidence %s). The window's worktree is still "
+                     "there; say \"release window %d\" when you are done with it, or keep working — the next promote "
+                     "takes only what is new." % (nn, alias, p["trunk"], p["merge_sha"][:7], p["run_id"], int(nn))]
+    rel_ = release_words(root)
+    if rel_ is not None:
+        lines.append("This is a release: run %s to receive it." % (rel_ or "the update"))
+    print("\n".join(lines))
+    return 0
+
 # --- the command line -----------------------------------------------------------------------------
 
-USAGE = "Usage: core/promote.sh <NN> [--clean]"
-VALUE_FLAGS: Dict[str, str] = {}           # flag -> key, for flags that take a value (later tasks add theirs)
-SWITCHES: Dict[str, str] = {"--clean": "clean"}   # flag -> key, for flags without one
+USAGE = "Usage: core/promote.sh <NN> [--confirm [--operator-said \"...\"] [--id <promote-id>]] [--clean]"
+VALUE_FLAGS: Dict[str, str] = {"--operator-said": "said", "--id": "id"}   # flag -> key, for flags that take a value
+SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm"}   # flag -> key, for flags without one
 
 
 def parse(argv: List[str]) -> dict:
@@ -678,6 +1037,8 @@ def parse(argv: List[str]) -> dict:
 def dispatch(root: Path, a: dict) -> int:
     if not a["token"]:
         raise Stop(USAGE)
+    if a.get("confirm"):
+        return confirm(root, a)
     if a.get("clean"):
         return clean(root, a)
     return prepare(root, a)

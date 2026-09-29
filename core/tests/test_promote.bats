@@ -264,3 +264,164 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   grep -q "^  # update_command: " "$R/config.example.yaml"
   grep -q "^  # tty_parents: " "$R/config.example.yaml"
 }
+
+@test "confirm (transcribed): the operator's words, typed after the block was shown, are recorded; exactly the tested merge is pushed; the target is brought forward; the marker, the lease, the evidence and the ledger say so" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(pj merge_sha)"; rid="$(pj run_id)"; pid="$(pj promote_id)"
+  shown_then_said "Yes, push it."; said="$SAID"
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"Promoted window 02's work to main (merge commit ${m:0:7}; evidence $rid). The window's worktree is still there; say \"release window 2\" when you are done with it, or keep working — the next promote takes only what is new."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]
+  [ "$(git -C "$T" rev-parse HEAD)" = "$m" ]
+  python3 - "$DAEDALUS_HOME" "$pid" "$rid" "$m" "$said" "$SHOWN" <<'PY'
+import json, sys
+home, pid, rid, m, said, shown = sys.argv[1:7]
+r = json.load(open("%s/state/evidence/%s/run.json" % (home, rid)))["promotion"]
+assert r["confirm_mode"] == "transcribed" and r["operator_said"] == "yes, push it" and r["confirmed_at"], r
+assert r["confirmed_by"]["session_id"] == "sP" and r["transcript_session_id"] == "sP", r
+assert r["transcript_ref"]["uuid"] == said and r["shown_ref"]["uuid"] == shown, r
+p = json.load(open("%s/state/promote/%s/prepared.json" % (home, pid)))
+assert p["confirmed_at"] == r["confirmed_at"], p
+s = json.load(open("%s/state/promote/%s/pushed" % (home, pid)))
+assert s["merge_sha"] == m and s["confirm_mode"] == "transcribed" and s["tty"] is None, s
+mk = json.load(open("%s/state/session-sP.json" % home))
+assert mk["target_base"] == m and mk["promotions"][-1]["id"] == pid and mk["promotions"][-1]["sha"] == m, mk
+assert pid in json.load(open("%s/state/leases/02.json" % home))["promoted"]
+PY
+  grep -qE "^Promoted to main at [0-9][0-9]:[0-9][0-9] after the operator said: \"yes, push it\"$" "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  L="$DAEDALUS_HOME/vault/evidence/promotions.log"; [ "$(wc -l < "$L" | tr -d ' ')" = 1 ]
+  for f in "window 02" "merge $m" "run $rid" "STANDS (review " 'operator: "yes, push it"' "confirm: transcribed"; do grep -qF -- "$f" "$L" || { echo "ledger lacks $f: $(cat "$L")"; return 1; }; done
+  grep -qxF "$L" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"; refused "was already pushed"
+}
+
+@test "confirm leaves a target checkout that is not on trunk alone: the trunk ref moves, the branch does not" {
+  work_on_02; git -C "$T" switch -q -c other
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]
+  m="$(pj merge_sha)"; shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing is on other; the trunk ref is updated, the checkout is untouched."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse origin/main)" = "$m" ]; [ "$(git -C "$T" rev-parse HEAD)" != "$m" ]
+}
+
+@test "the transcribed yes, refused: empty; not a yes; not in the transcript; a fragment of a longer turn; only in a tool result; only before the block; with no assistant turn between, or only one that is not the block; an unreadable transcript (naming tty); no transcript at all; from an operator shell — and nothing is pushed" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"; P="$(pj prepared_ts)"
+  B="Ready to promote window 02's work onto main."
+  c() { run as_prime bash "$PROMOTE" 02 --confirm --operator-said "$1"; }
+  c ""; refused "Record what the operator said. The yes is evidence; an empty one is not a yes."
+  tx "$TXP" assistant "$B" "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" operator "No, wait — what did the reviewer say about F2?" "$(plus "$P" 2)" >/dev/null
+  c "No, wait"; refused "The operator's words do not begin with yes (got: \"No, wait\")."
+  c "yes ship it"; refused "I could not find those words as something the operator typed after the promote block was shown."
+  tx "$TXP" operator "yes, but first tell me about F2" "$(plus "$P" 3)" >/dev/null
+  c "yes"; refused "I could not find those words as something the operator typed after the promote block was shown."
+  : > "$TXP"; tx "$TXP" tool-result "yes ship it" "$(plus "$P" 1)" >/dev/null; tx "$TXP" assistant "$B" "$(plus "$P" 2)" >/dev/null
+  c "yes ship it"; refused "I could not find those words as something the operator typed after the promote block was shown."
+  : > "$TXP"; tx "$TXP" operator "yes ship it" "$(plus "$P" -30)" >/dev/null; tx "$TXP" assistant "$B" "$(plus "$P" 2)" >/dev/null
+  c "yes ship it"; refused "I could not find those words as something the operator typed after the promote block was shown."
+  : > "$TXP"; tx "$TXP" tool-result "prepared" "$(plus "$P" 1)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 2)" >/dev/null
+  c "yes ship it"; refused "The promote block was not shown to the operator before that yes (prepare and confirm ran in one turn, no reply since the prepare repeated the block, or the operator's reply to it came before that yes). Show the block, then ask."
+  : > "$TXP"; tx "$TXP" assistant "Shall I go ahead?" "$(plus "$P" 1)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 2)" >/dev/null
+  c "yes ship it"; refused "The promote block was not shown to the operator before that yes"
+  tx "$TXP" assistant "$B" "$(plus "$P" 3)" >/dev/null; tx "$TXP" malformed "x" "$(plus "$P" 4)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 5)" >/dev/null
+  c "yes ship it"; refused "I cannot read this build's transcript format ("
+  case "$output" in *"set \`promote.confirm: tty\` and paste the confirm line in your own shell. Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$TXP"
+  c "yes ship it"; refused "I cannot find this session's transcript ("
+  run bash "$PROMOTE" 02 --confirm --operator-said "yes ship it"
+  refused "In transcribed mode the prime window records the operator's yes; from a shell, set \`promote.confirm: tty\` and run the confirm there."
+  [ "$(origin_main)" = "$before" ]; [ ! -f "$(dirname "$(prepared)")/pushed" ]
+}
+
+@test "which promotion: none prepared; an --id prepared for another window" {
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "No prepared promotion for window 02; run \`promote 02\` first."
+  work_on_02; run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]
+  run as_prime bash "$PROMOTE" 01 --confirm --operator-said "yes" --id "$(pj promote_id)"; refused "was prepared for window 02, not window 01."
+}
+
+@test "evidence, re-derived: a REFUTED prepare is refused even with prepared.json edited to STANDS; a review whose request-sha is not the re-render's; a review of other distribution code; modified distribution code" {
+  work_on_02
+  FAKE_ANSWER="### F1 — c.txt:1 — HIGH
+What is wrong: a.
+How to confirm: b.
+VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (review verdict)."
+  python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["review"]["verdict"]="STANDS"; json.dump(p, open(sys.argv[1],"w"))' "$(prepared)"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (review verdict)."
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; rid="$(pj run_id)"; shown_then_said "yes"
+  sed -i '' 's/^request-sha: .*/request-sha: 0000000000000000000000000000000000000000000000000000000000000000/' "$DAEDALUS_HOME/vault/evidence/$rid-review.md"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "The review did not see the change that will be pushed."
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; shown_then_said "yes"
+  printf '# a later commit\n' >> "$DAEDALUS_HOME/core/refute-pitfalls.py"; git -C "$DAEDALUS_HOME" commit -qam "later"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Distribution code changed since the review."
+  printf '# dirty\n' >> "$DAEDALUS_HOME/core/lib.sh"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Distribution code is modified (core/lib.sh)"
+}
+
+@test "evidence, re-derived: trunk moved since the trial merge; the window's branch gained a commit after it (named by subject)" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; t="$(pj trunk_sha_at_prepare)"; shown_then_said "yes"
+  trunk_moves b.txt "elsewhere"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Trunk moved since the trial merge (was ${t:0:7}, now "
+  case "$output" in *"The tested merge is stale. Run \`promote 02\` again. Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; shown_then_said "yes"
+  printf 't\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "fix typo"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "branch changed after the trial merge — 1 new commit: \"fix typo\"."
+}
+
+@test "a push rejected because trunk moved during confirm changes nothing on origin, and marks the promotion so the hook refuses it from then on" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; shown_then_said "yes"
+  O="$BATS_TEST_TMPDIR/origin.git"; R="$BATS_TEST_TMPDIR/racer"
+  export PROMOTE_TEST_BEFORE_PUSH="git clone -q '$O' '$R' && cd '$R' && echo r >> b.txt && git add -A && git -c user.email=t@x -c user.name=t commit -qm race && git push -q origin HEAD:main"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Push rejected: trunk moved during confirm. Run promote again."
+  case "$output" in *"Nothing changed on origin."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$O" log -1 --format=%s main)" = "race" ]; [ "$(origin_main)" != "$m" ]
+  [ -n "$(pj push_failed_at)" ]
+}
+
+@test "the cut-off is the latest of the primaries: prepared.json's time lowered below an earlier yes does not let that yes count (Decision 35)" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; P="$(pj prepared_ts)"; m="$(pj merge_sha)"
+  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" -120)" >/dev/null
+  tx "$TXP" operator "yes" "$(plus "$P" -110)" >/dev/null
+  setp() { python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["prepared_ts"]=float(sys.argv[2]); json.dump(p, open(sys.argv[1],"w"))' "$(prepared)" "$1"; }
+  setp "$(plus "$P" -200)"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "Evidence disagrees with the prepared promotion (the prepared time is earlier than the merge commit)."
+  setp "$(git -C "$T" show -s --format=%ct "$m")"   # the scratch is a worktree of target/thing: one object store
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "I could not find those words as something the operator typed after the promote block was shown."
+}
+
+@test "the scratch must still be the merge commit at confirm: a commit made in it, which leaves the fingerprint unchanged, is refused (Decision 37)" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; shown_then_said "yes"
+  S="$DAEDALUS_HOME/state/promote/$(pj promote_id)/thing"
+  git -C "$S" -c user.email=t@x -c user.name=t commit -q --allow-empty -m "same tree"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "Evidence disagrees with the prepared promotion (the scratch is not the merge commit)."
+}
+
+@test "the nested case, confirmed: the push goes to the nested repo's origin; the outer origin is untouched; the marker's trunk base is the outer repo's and stays" {
+  printf 'n\n' >> "$W2/sub/n.txt"; git -C "$W2/sub" commit -q -am "nested work"
+  outer_before="$(origin_main)"; base_before="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["target_base"])' "$DAEDALUS_HOME/state/session-sP.json")"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$BATS_TEST_TMPDIR/sub-origin.git" rev-parse main)" = "$m" ]; [ "$(origin_main)" = "$outer_before" ]
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"]==sys.argv[2] and m["promotions"][-1]["sha"]==sys.argv[3], m' \
+    "$DAEDALUS_HOME/state/session-sP.json" "$base_before" "$m"
+}
+
+@test "tty mode from a session with no terminal: --operator-said is refused; the confirm hands over the paste line and pushes nothing" {
+  work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "In tty mode the operator types the yes in a terminal; --operator-said is not accepted."
+  run no_tty env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sP bash "$PROMOTE" 02 --confirm
+  refused "The confirm must be typed by a person in a terminal. This session has none. Paste this line in your own shell: \`cd $DAEDALUS_HOME && core/promote.sh 02 --confirm\`"
+  [ "$(origin_main)" = "$before" ]
+}
