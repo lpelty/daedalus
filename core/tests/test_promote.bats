@@ -279,7 +279,9 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
 import json, sys
 home, pid, rid, m, said, shown = sys.argv[1:7]
 r = json.load(open("%s/state/evidence/%s/run.json" % (home, rid)))["promotion"]
-assert r["confirm_mode"] == "transcribed" and r["operator_said"] == "yes, push it" and r["confirmed_at"], r
+# The quote is the operator's own turn from the transcript; the agent's transcription is kept beside it.
+assert r["confirm_mode"] == "transcribed" and r["operator_said"] == "Yes, push it." and r["confirmed_at"], r
+assert r["operator_said_as_transcribed"] == "yes, push it", r
 assert r["confirmed_by"]["session_id"] == "sP" and r["transcript_session_id"] == "sP", r
 assert r["transcript_ref"]["uuid"] == said and r["shown_ref"]["uuid"] == shown, r
 p = json.load(open("%s/state/promote/%s/prepared.json" % (home, pid)))
@@ -290,9 +292,9 @@ mk = json.load(open("%s/state/session-sP.json" % home))
 assert mk["target_base"] == m and mk["promotions"][-1]["id"] == pid and mk["promotions"][-1]["sha"] == m, mk
 assert pid in json.load(open("%s/state/leases/02.json" % home))["promoted"]
 PY
-  grep -qE "^Promoted to main at [0-9][0-9]:[0-9][0-9] after the operator said: \"yes, push it\"$" "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  grep -qE "^Promoted to main at [0-9][0-9]:[0-9][0-9] after the operator said: \"Yes, push it.\"$" "$DAEDALUS_HOME/vault/evidence/$rid.md"
   L="$DAEDALUS_HOME/vault/evidence/promotions.log"; [ "$(wc -l < "$L" | tr -d ' ')" = 1 ]
-  for f in "window 02" "merge $m" "run $rid" "STANDS (review " 'operator: "yes, push it"' "confirm: transcribed"; do grep -qF -- "$f" "$L" || { echo "ledger lacks $f: $(cat "$L")"; return 1; }; done
+  for f in "window 02" "merge $m" "run $rid" "STANDS (review " 'operator: "Yes, push it."' "confirm: transcribed"; do grep -qF -- "$f" "$L" || { echo "ledger lacks $f: $(cat "$L")"; return 1; }; done
   grep -qxF "$L" "$DAEDALUS_HOME/vault/evidence/.manifest"
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"; refused "was already pushed"
 }
@@ -382,6 +384,9 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   case "$output" in *"Nothing changed on origin."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$O" log -1 --format=%s main)" = "race" ]; [ "$(origin_main)" != "$m" ]
   [ -n "$(pj push_failed_at)" ]
+  unset PROMOTE_TEST_BEFORE_PUSH
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "already failed to push"
+  [ "$(git -C "$O" log -1 --format=%s main)" = "race" ]
 }
 
 @test "the cut-off is the latest of the primaries: prepared.json's time lowered below an earlier yes does not let that yes count (Decision 35)" {
@@ -424,4 +429,162 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   run no_tty env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sP bash "$PROMOTE" 02 --confirm
   refused "The confirm must be typed by a person in a terminal. This session has none. Paste this line in your own shell: \`cd $DAEDALUS_HOME && core/promote.sh 02 --confirm\`"
   [ "$(origin_main)" = "$before" ]
+}
+
+# jedit <json file> <python statement on d> — edit one field of a record in place.
+jedit() { python3 -c 'import json,sys
+d = json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(d, open(sys.argv[1], "w"))' "$1" "$2"; }
+# ledger_lines — how many lines promotions.log holds (one per promotion, §7.2 step 4).
+ledger_lines() { wc -l < "$DAEDALUS_HOME/vault/evidence/promotions.log" | tr -d ' '; }
+
+@test "a failure after the push is a note, never 'Nothing was pushed.': a stale index.lock in target/thing leaves its checkout behind; the stamp, the lease and the marker are still written; a second confirm says already pushed" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; pid="$(pj promote_id)"; shown_then_said "yes"
+  export PROMOTE_TEST_BEFORE_PUSH="touch '$T/.git/index.lock'"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Nothing was pushed."*|*"Nothing changed on origin."*) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing could not be fast-forwarded ("*"the trunk ref is updated, the checkout is untouched."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Promoted window 02's work to main (merge commit ${m:0:7}; evidence "*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]; [ "$(git -C "$T" rev-parse HEAD)" != "$m" ]
+  python3 - "$DAEDALUS_HOME" "$pid" "$m" <<'PY'
+import json, sys
+home, pid, m = sys.argv[1:4]
+assert json.load(open("%s/state/promote/%s/pushed" % (home, pid)))["merge_sha"] == m
+assert json.load(open("%s/state/leases/02.json" % home))["promoted"] == [pid]
+mk = json.load(open("%s/state/session-sP.json" % home))
+assert mk["target_base"] == m and [x["id"] for x in mk["promotions"]] == [pid], mk
+PY
+  rm -f "$T/.git/index.lock"; unset PROMOTE_TEST_BEFORE_PUSH
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "was already pushed"
+  [ "$(ledger_lines)" = 1 ]
+}
+
+@test "two confirms of one promotion at once: the second is refused while the first holds it; one ledger line, one promoted entry, one marker entry" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; pid="$(pj promote_id)"; shown_then_said "yes"
+  F="$BATS_TEST_TMPDIR/in-push"
+  PROMOTE_TEST_BEFORE_PUSH="touch '$F'; sleep 3" as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes" \
+    > "$BATS_TEST_TMPDIR/first.out" 2>&1 3>&- &
+  first=$!
+  for _ in $(seq 150); do [ -f "$F" ] && break; sleep 0.1; done; [ -f "$F" ]
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "Promotion $pid of window 02 is being confirmed by another process."
+  wait "$first" || { cat "$BATS_TEST_TMPDIR/first.out"; return 1; }
+  grep -q "Promoted window 02's work to main (merge commit ${m:0:7}" "$BATS_TEST_TMPDIR/first.out"
+  [ "$(origin_main)" = "$m" ]; [ "$(ledger_lines)" = 1 ]
+  python3 - "$DAEDALUS_HOME" "$pid" <<'PY'
+import json, sys
+home, pid = sys.argv[1:3]
+assert json.load(open("%s/state/leases/02.json" % home))["promoted"] == [pid]
+assert [x["id"] for x in json.load(open("%s/state/session-sP.json" % home))["promotions"]] == [pid]
+PY
+}
+
+@test "confirm takes the trunk, the repo, the review's call id, the override and the earlier refutations from their primaries, not from prepared.json" {
+  work_on_02
+  git -C "$BATS_TEST_TMPDIR/origin.git" branch release main
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; P="$(prepared)"; cp "$P" "$P.orig"
+  shown_then_said "yes" "Ready to promote window 02's work onto release."
+  jedit "$P" 'd["trunk"] = "release"'
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the repo or the trunk)."
+  [ "$(git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse release)" != "$m" ]
+  cp "$P.orig" "$P"; C="$(dirname "$P")/context.json"; cp "$C" "$C.orig"
+  jedit "$C" 'd["repo"] = "thing/sub"'
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the repo or the trunk)."
+  cp "$C.orig" "$C"
+  jedit "$P" 'd["review"]["call_id"] = "FORGED"'
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the review's call id)."
+  cp "$P.orig" "$P"; jedit "$P" 'd["overrode_review"] = {"call_id": "FORGED"}'
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the review it sets aside)."
+  cp "$P.orig" "$P"
+  [ "$(origin_main)" != "$m" ]
+}
+
+@test "the ledger names an earlier REFUTED review of the same change even when prepared.json's list was emptied, and the review's call id from its own frontmatter" {
+  work_on_02
+  FAKE_ANSWER="### F1 — c.txt:1 — HIGH
+What is wrong: a.
+How to confirm: b.
+VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]; refuted_call="$(pj review.call_id)"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; rid="$(pj run_id)"; call="$(pj review.call_id)"
+  jedit "$(prepared)" 'd["earlier_refuted"] = []'
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  L="$DAEDALUS_HOME/vault/evidence/promotions.log"
+  grep -qF "STANDS (review $call)" "$L"; grep -qF "earlier refuted: $refuted_call" "$L" || { cat "$L"; return 1; }
+}
+
+@test "evidence, re-derived: the gate run's record — result, refuter, fingerprint — each checked" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; rid="$(pj run_id)"; shown_then_said "yes"
+  R="$DAEDALUS_HOME/state/evidence/$rid/run.json"; cp "$R" "$R.orig"
+  for e in 'd["result"] = "FAIL"' 'd["refuter"] = "STANDS"' 'd["fingerprint"] = None' 'd["promote_id"] = "02-x"'; do
+    cp "$R.orig" "$R"; jedit "$R" "$e"
+    run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the gate run's record)." || { echo "edit: $e"; return 1; }
+  done
+  [ "$(origin_main)" != "$m" ]
+}
+
+@test "evidence, re-derived: the review's receipt — the first attempt's exit code, the advisory flag, the answer file, the receipt's core tree — and the charter the review names" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; rid="$(pj run_id)"; call="$(pj review.call_id)"; shown_then_said "yes"
+  J="$DAEDALUS_HOME/state/direct-calls/$call/launch.json"; cp "$J" "$J.orig"
+  A="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["attempts"][0]["answer"])' "$J")"; cp "$A" "$A.orig"
+  for e in 'd["attempts"][0]["exit_code"] = 1' 'd["attempts"][0]["advisory"] = True' 'd["core_tree"] = "0" * 40'; do
+    cp "$J.orig" "$J"; jedit "$J" "$e"
+    run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the review's receipt and the review)." || { echo "edit: $e"; return 1; }
+  done
+  cp "$J.orig" "$J"; printf 'and one more line\n' >> "$A"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the review's receipt and the review)."
+  cp "$A.orig" "$A"
+  # The charter is under core/, so a committed change to it moves the core tree too; the review's own
+  # record of the charter is what this checks.
+  V="$DAEDALUS_HOME/vault/evidence/$rid-review.md"
+  sed -i '' 's/^charter-sha: .*/charter-sha: 0000000000000000000000000000000000000000/' "$V"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Distribution code changed since the review."
+  [ "$(origin_main)" != "$m" ]
+}
+
+@test "evidence, re-derived: prepared.json's fingerprint is the scratch's; a merge commit with the same tree whose parents are not trunk then the window's tip is refused" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; t="$(pj trunk_sha_at_prepare)"; tip="$(pj lease_tip)"
+  rid="$(pj run_id)"; call="$(pj review.call_id)"; P="$(prepared)"; cp "$P" "$P.orig"; shown_then_said "yes"
+  jedit "$P" 'd["fp_merged"] = "0" * 64'
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the fingerprint of the scratch)."
+  cp "$P.orig" "$P"
+  # The same tree, the parents swapped; every record re-pointed at it, the review's render re-signed.
+  S="$DAEDALUS_HOME/state/promote/$(pj promote_id)/thing"; when="$(git -C "$S" show -s --format=%cI "$m")"
+  m2="$(GIT_COMMITTER_DATE="$when" GIT_AUTHOR_DATE="$when" git -C "$S" commit-tree "$m^{tree}" -p "$tip" -p "$t" -m swapped)"
+  R="$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  for f in "$P" "$R" "$(dirname "$P")/context.json"; do jedit "$f" "d['merge_sha'] = '$m2'"; done
+  sha="$(as_prime env DAEDALUS_TARGET_OVERRIDE="$S" bash "$DAEDALUS_HOME/core/refute.sh" "$rid" --mode promote --render-only | shasum -a 256 | cut -d' ' -f1)"
+  sed -i '' "s/^request-sha: .*/request-sha: $sha/" "$DAEDALUS_HOME/vault/evidence/$rid-review.md"
+  jedit "$DAEDALUS_HOME/state/direct-calls/$call/launch.json" "d['request_sha256'] = '$sha'"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion (the merge commit's parents)."
+  [ "$(origin_main)" = "$t" ]
+}
+
+@test "confirm fast-forwards the target only when it is clean: target/thing on main with an uncommitted change keeps its checkout" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; shown_then_said "yes"
+  printf 'local\n' >> "$T/a.txt"; before="$(git -C "$T" rev-parse HEAD)"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing has uncommitted changes; the trunk ref is updated, the checkout is untouched."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse HEAD)" = "$before" ]; [ "$(git -C "$T" rev-parse origin/main)" = "$m" ]
+}
+
+@test "the recorded quote is the operator's own turn, and one line: an agent's reshaped --operator-said with a newline and a tab neither replaces it nor splits the ledger or the summary" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; rid="$(pj run_id)"
+  shown_then_said $'Yes,\npush\tit.'
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said $'YES,\npush\tit'; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(ledger_lines)" = 1 ]
+  L="$DAEDALUS_HOME/vault/evidence/promotions.log"
+  grep -qF 'operator: "Yes, push it."' "$L" || { cat "$L"; return 1; }
+  [ "$(awk -F'\t' '{print NF}' "$L")" = 7 ]
+  grep -qE "^Promoted to main at [0-9][0-9]:[0-9][0-9] after the operator said: \"Yes, push it.\"$" "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["promotion"]; assert r["operator_said"]=="Yes,\npush\tit." and r["operator_said_as_transcribed"]=="YES,\npush\tit", r' \
+    "$DAEDALUS_HOME/state/evidence/$rid/run.json"
 }

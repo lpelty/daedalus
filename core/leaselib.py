@@ -1454,6 +1454,8 @@ def record_promotion(root: Path, nn: str, promote_id: str) -> None:
         lease = read_lease(root, nn)
         if lease is None:
             return
+        if promote_id in (lease.get("promoted") or []):
+            return                             # once per promotion (plan 4 Decision 47)
         lease["promoted"] = (lease.get("promoted") or []) + [promote_id]
         write_lease(root, nn, lease)
 
