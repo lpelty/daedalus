@@ -300,10 +300,58 @@ least the gates' time plus `verify.refute_timeout` (600 s default), or in the
 background — a timeout kills the run mid-review and it must be re-done. The review
 is a receipted call: to ask the reviewer about a finding, run
 `core/call-agent.sh --resume-review <NN> "<the operator's question>"` and repeat
-its answer — advice, never a new verdict. Promotion is: gates green, commit on
-your own branch, push, and the operator merges; the boundary hook enforces
-the branch, which is `target.branch` in `config.yaml`, never assumed to be
-`main`.
+its answer — advice, never a new verdict.
+
+Trunk is reached only through promote (below): commit on your window's
+branch, and never push to trunk or commit on it yourself — the guard and
+git's own pre-push hook both refuse it. The trunk is `target.branch` in
+`config.yaml`, never assumed to be `main`.
+
+## Promote
+
+Trunk is reached only through `core/promote.sh`, run by the window that holds
+the pen. When the operator says a window's work is ready ("ship window 2"):
+
+1. Run `core/promote.sh 02` (a window number, never an alias). It merges
+   window 02's branch onto current trunk in a scratch copy, runs the gates
+   and a fresh reviewer on exactly that merge, and prints two paragraphs.
+   Repeat both to the operator exactly as printed — the first is the decision
+   in plain words, the second is the record — and ask. Nothing has been
+   pushed.
+2. End your turn. When the operator answers, run, in a later turn,
+   `core/promote.sh 02 --confirm --operator-said "<their whole reply>"`. The
+   confirm looks for that reply in this session's own transcript: the whole
+   message the operator typed, beginning with yes, after a reply of yours that
+   repeated the block. A part of a longer message is not their answer, and a
+   prepare and a confirm in one turn is refused. If they said anything but a
+   yes, ask again — never write a yes the operator did not give.
+3. Repeat the "Promoted …" line it prints.
+
+When the deployment sets `promote.confirm: tty`, give the operator the one
+line the confirm prints and let them type yes in their own shell; that shell
+does the push, and your next prompt tells you it happened. Never run the
+confirm through a program that makes a terminal: the guard refuses it.
+
+If the reviewer refutes the merge, say so plainly, repeating the block. To
+ask it about a finding, run `core/call-agent.sh --resume-review 02 "<their
+question>"` and repeat the answer. To promote without the review the operator
+must give a written reason of at least three words:
+`core/promote.sh 02 --skip-review --reason "<their whole reply>"` — checked
+the same way (their whole message, after the refuted block), and recorded in
+their words beside the verdict it sets aside. When no review has refuted the
+change, first ask "Promote window 02's work without the review? Tell me why
+in your own words." and pass their answer. The gates always run.
+
+If the merge conflicts, tell window 02 to bring its work up to date: it runs
+`core/lease.sh rebase 02`, resolves any conflict in its own worktree, re-runs
+the gates and reports. If window 02 has commits in two repos, it runs
+`core/lease.sh split 02 --repo <nested>`, and the two windows are promoted
+one at a time. Every refusal ends "Nothing was pushed." — repeat it to the
+operator; never work around it.
+
+A merge that promote pushes after the operator's recorded yes counts as the
+operator's own write for any file a single-writer or human-only rule covers;
+nothing more is needed for it.
 
 ## Direct calls
 

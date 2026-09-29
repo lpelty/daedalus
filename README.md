@@ -68,6 +68,74 @@ are named by window number and date (`vault/sessions/YYYY/MM/YYYY-MM-DD-02.md`).
 windows, swept numbers with work still waiting, and the session registry
 Claude Code keeps under `~/.claude/sessions/` (liveness reads it).
 
+## Promote (`core/promote.sh`)
+
+Trunk moves only through promote. The window holding the pen runs
+`core/promote.sh 02` for window 02: it fetches trunk, merges `lease/02` onto
+it in a scratch worktree under `state/promote/<id>/`, fingerprints the merged
+tree, runs the gates (`core/gates.sh --no-refute --promote <id>`) and the
+fresh-context reviewer (`core/refute.sh --mode promote`) on exactly that
+merge, and prints two paragraphs: the decision, in plain words, and the
+record (merge commit, trunk, evidence run, review, fingerprint, promotion
+id). Nothing is pushed. `core/promote.sh 02 --confirm` then re-derives every
+piece of evidence from its own file, records the operator's yes, and pushes
+exactly the merge commit the evidence names; the prime's checkout is
+fast-forwarded when it is on trunk and clean, and the window's worktree stays
+until it is released.
+
+**The operator's yes** (`promote:` in `config.yaml`):
+
+- `confirm: transcribed` (the default) — the prime types the operator's reply
+  with `--operator-said "…"`, and promote requires it in the prime's own
+  session transcript as a whole message the operator typed, which begins with
+  yes, after a reply of the prime's that repeated the block, in a later turn.
+  A transcript this Claude Code build writes in a shape the parser cannot read
+  is refused, never passed — switch to `promote.confirm: tty` until the parser
+  is updated. The transcript directory is closed to writes by both the Bash
+  guard and the Edit check.
+- `confirm: tty` — the operator pastes one line into their own shell and
+  types `yes` at the terminal; that shell pushes and finishes the rest, and
+  the prime's next prompt says it happened. The confirm refuses a process
+  started by a Claude Code session or by no terminal login, and the guard
+  refuses programs that make terminals — a stronger check than the
+  transcript, but not a proof that a person typed it: on one user account a
+  determined agent can still build a terminal. `promote.tty_parents` names a
+  terminal program other than login, sshd, tmux or screen.
+- `release_note: true` (and optionally `update_command: '…'`) — for a
+  deployment where a promote is a release; the decision block and the pushed
+  line say so.
+
+**When it refuses.** Every refusal ends "Nothing was pushed." (or "Nothing
+changed on origin." after a rejected push). A merge conflict: the window runs
+`core/lease.sh rebase 02` and resolves it in its own worktree. Commits in two
+repos: `core/lease.sh split 02 --repo <nested>` moves the nested repo's
+commits to a new window, promoted separately. A refuted review: ask it about
+a finding with `core/call-agent.sh --resume-review 02 "…"`, or promote with
+the operator's written reason, `--skip-review --reason "…"`, which is checked
+like a yes and recorded beside the verdict it sets aside
+(`vault/evidence/promotions.log` names the overridden review). Gates are
+never skipped. `core/promote.sh 02 --clean` removes a window's scratch trees.
+
+**The pre-push hook.** `core/prepush.py` installs a pre-push hook in each
+target repo's shared `.git/hooks/` (lease allocation, `core/sync-target.sh`
+and so `core/setup.sh`, and promote itself; `core.hooksPath` is never
+touched, and a hook Daedalus did not install is never overwritten). It
+refuses a push to the trunk, `main` or `master` unless the push is the
+merge of a confirmed promotion, fast-forwarding the trunk it was tested on,
+pushed once. It is a second check beside the Bash guard, not a signature:
+the record of what was pushed is the confirm's re-derivation. Both checks
+live on this machine, so a push by a route the guard does not parse, from a
+clone outside the home (which has no hook), is caught only by server-side
+branch protection on the remote — set it where you can. `core/doctor.sh`
+reports each repo's hook and trunk, the confirm mode, and any promotion
+prepared but never confirmed.
+
+The transcript format is internal to Claude Code and changes between
+releases. `core/tests/fixtures/transcripts/live.jsonl` is a redacted copy of a
+real transcript (see its `PROVENANCE.md`); after a Claude Code upgrade, run
+`bats core/tests/test_transcript.bats core/tests/test_capture.bats` — they
+fail first if the shape moved.
+
 ## Episodic memory capture (optional)
 
 `core/capture.py` reads Claude Code session transcripts and posts new turns to

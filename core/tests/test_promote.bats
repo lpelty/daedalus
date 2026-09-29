@@ -836,3 +836,18 @@ PY
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(origin_main)" = "$m" ]; [ -x "$f" ]
 }
+
+@test "README, CLAUDE.md and CHANGELOG describe promote, the recorded yes, the pre-push hook, rebase and split — in plain language — and nothing says the operator merges" {
+  R="$BATS_TEST_DIRNAME/../.."
+  # both files wrap their lines: read each with its line breaks folded to spaces
+  flat() { tr '\n' ' ' < "$1" | tr -s ' '; }
+  RM="$(flat "$R/README.md")"; CM="$(flat "$R/CLAUDE.md")"
+  for s in 'core/promote.sh 02' '--operator-said' 'promote.confirm: tty' 'pre-push hook' 'core/lease.sh rebase 02' 'core/lease.sh split 02 --repo' '--skip-review --reason' 'Nothing was pushed.' 'begins with yes' 'not a proof' 'server-side branch protection'; do
+    case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
+  done
+  for s in '## Promote' 'core/promote.sh 02 --confirm --operator-said' 'in a later turn' 'their whole reply' 'Promote window 02'"'"'s work without the review?' 'core/lease.sh rebase 02' "the operator's own write"; do
+    case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
+  done
+  grep -qF 'v0.7.0 plans 1–4 of 5' "$R/CHANGELOG.md"; grep -qF 'core/promote.sh' "$R/CHANGELOG.md"
+  ! grep -qi 'the operator merges' "$R/CLAUDE.md" "$R/README.md"
+}
