@@ -27,7 +27,7 @@ stamp() { python3 -c 'import os,sys; print(" ".join("%d:%d" % (os.stat(p).st_ino
   [ -z "$(git -C "$T" config --get core.hooksPath)" ]; [ -z "$(git -C "$T/sub" config --get core.hooksPath)" ]
 }
 
-@test "the hook refuses a trunk push with no promotion id, with an id whose prepared.json has no confirmed_at, with a sha that is not the prepared merge, onto a remote trunk that is not the tested base, after a failed push, and once pushed; accepts the confirmed one; never refuses a branch push; a path in the id is refused" {
+@test "the hook refuses a trunk push with no promotion id, with an id whose prepared.json has no confirmed_at, with a sha that is not the prepared merge, onto a remote trunk that is not the tested base, after a failed push, once pushed, and once a tty push was announced; accepts the confirmed one; never refuses a branch push; a path in the id is refused" {
   LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
   printf 'x\n' > "$W/x.txt"; git -C "$W" add -A; git -C "$W" commit -q -m x; sha="$(git -C "$W" rev-parse HEAD)"
   base="$(git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse main)"
@@ -42,7 +42,8 @@ stamp() { python3 -c 'import os,sys; print(" ".join("%d:%d" % (os.stat(p).st_ino
   pjw "$sha" 0000000000000000000000000000000000000002 "$C";     push_id; [ "$status" -ne 0 ]; moves   # Decision 34
   pjw "$sha" "$base" "$C,\"push_failed_at\":\"2026-09-28T12:01:00.000Z\""; push_id; [ "$status" -ne 0 ]; moves
   pjw "$sha" "$base" "$C"; : > "$d/pushed";                     push_id; [ "$status" -ne 0 ]; moves
-  rm -f "$d/pushed"
+  rm -f "$d/pushed"; : > "$d/announced";                        push_id; [ "$status" -ne 0 ]; moves   # a tty push, announced
+  rm -f "$d/announced"
   push_id; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse main)" = "$sha" ]
   run git -C "$W" push origin HEAD:refs/heads/fix/x; [ "$status" -eq 0 ]
@@ -50,7 +51,12 @@ stamp() { python3 -c 'import os,sys; print(" ".join("%d:%d" % (os.stat(p).st_ino
   # a new commit, so the push below carries a trunk update for the hook to judge (an
   # up-to-date push never runs the hook — measured by the review)
   printf 'y\n' > "$W/y.txt"; git -C "$W" add -A; git -C "$W" commit -q -m y
+  # a path in the id: a prepared.json forged where it points (outside state/promote/, where the agent
+  # can write), otherwise valid for this very push, is never read — only the id's format stops it
+  f="$DAEDALUS_HOME/x/prepared.json"; mkdir -p "${f%/*}"
+  printf '{"merge_sha":"%s","trunk_sha_at_prepare":"%s"%s}' "$(git -C "$W" rev-parse HEAD)" "$(git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse main)" "$C" > "$f"
   run env DAEDALUS_PROMOTE_ID=../../x git -C "$W" push origin HEAD:main; [ "$status" -ne 0 ]; moves
+  [ "$(git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse main)" = "$sha" ]
 }
 
 @test "sync-target.sh — setup's first phase — installs the hook on an existing checkout, outer and nested; a pre-push hook Daedalus did not install is left alone and named; status reports core.hooksPath" {

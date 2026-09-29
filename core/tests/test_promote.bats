@@ -817,3 +817,22 @@ PY
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(origin_main)" = "$m" ]
 }
+
+@test "confirm refuses while git's gate is gone from the window's repo — core.hooksPath set (as husky sets it) or a pre-push hook Daedalus did not install — before the yes is recorded: origin unmoved, no confirmed_at, the foreign hook left alone; with the gate back the same promotion pushes" {
+  work_on_02; run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; m="$(pj merge_sha)"; base="$(origin_main)"
+  shown_then_said "yes"
+  unconfirmed() { python3 -c 'import json,sys; assert "confirmed_at" not in json.load(open(sys.argv[1]))' "$(prepared)"; }
+  git -C "$T" config core.hooksPath .husky/_
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "The trunk is unguarded in git"
+  case "$output" in *"sets core.hooksPath (.husky/_)"*"core/setup.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$base" ]; unconfirmed
+  git -C "$T" config --unset core.hooksPath
+  f="$(cd "$T" && cd "$(git rev-parse --git-common-dir)" && pwd -P)/hooks/pre-push"
+  printf '#!/bin/sh\nexit 0\n' > "$f"; chmod +x "$f"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "The trunk is unguarded in git"
+  case "$output" in *"already has a pre-push hook that Daedalus did not install"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$base" ]; unconfirmed; [ "$(cat "$f")" = "$(printf '#!/bin/sh\nexit 0')" ]
+  rm -f "$f"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(origin_main)" = "$m" ]; [ -x "$f" ]
+}

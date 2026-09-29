@@ -1055,11 +1055,6 @@ def push(root: Path, p: dict, pdir: Path) -> None:
     seam = os.environ.get("PROMOTE_TEST_BEFORE_PUSH")
     if seam:                                   # test seam: move trunk in the race the next sentence names
         subprocess.run(["bash", "-c", seam], capture_output=True)
-    try:                                   # a deployment set up before the hook existed gets it now (§7.3)
-        import prepush
-        prepush.install(root / "target" / p["repo"])
-    except (ImportError, OSError, ValueError):
-        pass
     env = dict(os.environ, DAEDALUS_PROMOTE_ID=p["promote_id"])
     code, _, err = git(pdir / p["repo"], "push", "origin", "%s:refs/heads/%s" % (p["merge_sha"], p["trunk"]),
                        env=env, timeout=600, stop=False)
@@ -1076,6 +1071,20 @@ def push(root: Path, p: dict, pdir: Path) -> None:
         if moved or re.search(r"non-fast-forward|fetch first|\[rejected\]", err or ""):
             raise Stop("Push rejected: trunk moved during confirm. Run promote again.", suffix=ON_ORIGIN)
         raise Stop("The push to origin failed (%s). Run promote again." % last_line(err), suffix=ON_ORIGIN)
+
+
+def guarded(root: Path, repo: str) -> None:
+    """§14: promote refuses while git's own gate is gone from the window's repo. A deployment set up
+    before the hook existed gets it now (§7.3); a foreign pre-push hook or a core.hooksPath (husky sets
+    one when a target's gates run npm install) is named, never overwritten, and nothing is recorded."""
+    try:
+        import prepush
+        s, sentence = prepush.install(root / "target" / repo)
+    except (ImportError, OSError, ValueError) as e:
+        s, sentence = "failed", "the pre-push hook could not be installed in target/%s (%s); run core/setup.sh" % (repo, e)
+    if s not in ("installed", "unchanged"):
+        raise Stop("The trunk is unguarded in git: %s. The yes was not recorded; run promote --confirm again "
+                   "once the hook is in place." % sentence.rstrip("."))
 
 
 def origin_trunk(repo: Path, trunk: str) -> str:
@@ -1213,6 +1222,8 @@ def confirm(root: Path, a: dict) -> int:
             raise Stop("Promotion %s of window %s was already confirmed (%s) by a confirm that did not finish. Run "
                        "`promote %s` again." % (pdir.name, nn, p["confirmed_at"], nn))
         tr = trunks(root, nn, lease)
+        if p.get("repo") in tr:                # before the yes: no confirmed_at for a push that will not happen
+            guarded(root, p["repo"])           # (a repo the window does not have is refused by rederive)
         if mode == "transcribed":
             yes = transcribed_yes(root, me, a.get("said") or "", cutoff(root, p, pdir), "the promote block",
                                   shown_text=block_opening(p), must_be_yes=True)
