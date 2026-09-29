@@ -513,3 +513,88 @@ EOF
   run start sP startup; [ "$status" -eq 0 ]
   case "$output" in *"memory: block absent"*) echo "said for a permission rule: $output"; return 1 ;; *) : ;; esac
 }
+
+# --- the upgrade at step 0 (spec §14; plan 5 Task 4) -------------------------------
+
+@test "step 0: a home that pulled 0.7.0 with an in-flight branch upgrades at the first interactive start — adopted as window 01, this window numbers 02 and takes the pen, the marker records the trunk base; the context says each step once" {
+  cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
+  git -C "$T" -c user.email=t@x -c user.name=t commit -q -m "in flight"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1 startup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
+  case "$c" in *"Upgrade to 0.7.0: target/thing was on feat/x (1 commit not on origin/main: \"in flight\"); that work is now window 01"*"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  [ "$(lease_json 01 adopted_from)" = feat/x ]
+  [ "$(lease_json 02 session_id)" = s1 ]
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"] and not m["target_base_error"], m' "$DAEDALUS_HOME/state/session-s1.json"
+  P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
+  run start s2 startup
+  case "$output" in *"Upgrade to"*) echo "a second start said an upgrade line: $output"; return 1 ;; esac
+}
+
+@test "step 0: a home whose stamp equals VERSION never loads the upgrade (a stub that records its import stays silent); a home with no VERSION neither" {
+  printf 'import pathlib\npathlib.Path(%s).write_text("imported")\ndef run(*a, **k): return [], None\n' \
+    "'$BATS_TEST_TMPDIR/imported'" > "$DAEDALUS_HOME/core/upgrade.py"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; mkdir -p "$DAEDALUS_HOME/state"; printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1 startup
+  [ "$status" -eq 0 ]; [ ! -e "$BATS_TEST_TMPDIR/imported" ]
+  rm "$DAEDALUS_HOME/VERSION" "$DAEDALUS_HOME/state/upgraded-to"
+  P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
+  run start s2 startup
+  [ "$status" -eq 0 ]; [ ! -e "$BATS_TEST_TMPDIR/imported" ]
+}
+
+@test "step 0: a visitor never runs the upgrade — no stamp, no window directories, no lease — and a stop is said at an interactive start and not stamped" {
+  cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  run env DIRECT_CALL_ID=c1 bash -c "$(declare -f start); start v1 startup"
+  [ "$status" -eq 0 ]; [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  [ ! -d "$DAEDALUS_HOME/worktrees" ]; [ ! -d "$DAEDALUS_HOME/state/promote" ]
+  [ ! -d "$DAEDALUS_HOME/state/leases" ]      # a reader's shared lock no longer makes the directory (Decision 13)
+  printf 'dirt\n' >> "$T/a.txt"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1 startup
+  case "$output" in *"upgrade to 0.7.0 incomplete: target/thing has uncommitted changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+}
+
+@test "step 0: while another start's upgrade holds the lock past this start's share, this window does not number itself — no state/leases/, no lease — and says the upgrade has not run; the start stays inside its budget" {
+  cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; mkdir -p "$DAEDALUS_HOME/state"
+  python3 -c 'import fcntl,os,sys,time
+fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(12)' "$DAEDALUS_HOME/state/.upgrade.lock" 3>&- &
+  holder=$!; sleep 0.3
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  t0=$(date +%s)
+  run env LEASE_TEST_HOOK_BUDGET=15 bash -c "$(declare -f start); start s1 startup"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(( $(date +%s) - t0 ))" -le 8 ]
+  case "$output" in *"upgrade to 0.7.0 has not run yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"You are window"*) echo "numbered before the upgrade: $output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/leases" ]
+}
+
+@test "step 0: a fetch that hangs costs the upgrade its judgement, never this window its worktree — the upgrade keeps to its share and the bind keeps the rest" {
+  cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
+  git -C "$T" -c user.email=t@x -c user.name=t commit -q -m "in flight"
+  real="$(command -v git)"; mkdir -p "$BATS_TEST_TMPDIR/slowgit"
+  printf '#!/bin/bash\ncase " $* " in *" fetch "*) sleep 60 ;; esac\nexec "%s" "$@"\n' "$real" > "$BATS_TEST_TMPDIR/slowgit/git"
+  chmod +x "$BATS_TEST_TMPDIR/slowgit/git"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  t0=$(date +%s)
+  run env LEASE_TEST_HOOK_BUDGET=20 PATH="$BATS_TEST_TMPDIR/slowgit:$PATH" bash -c "$(declare -f start); start s1 startup"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(( $(date +%s) - t0 ))" -le 12 ]
+  case "$output" in *"the fetch did not finish"*"You are window 02 and you hold the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 01 adopted_from)" = feat/x ]
+  [ "$(lease_json 02 session_id)" = s1 ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("worktree_ready", True) is not False, d' "$DAEDALUS_HOME/state/leases/02.json"
+  [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]
+}

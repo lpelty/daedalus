@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -43,6 +44,10 @@ HOOK_BUDGET_SECS = min(30, int(os.environ.get("LEASE_TEST_HOOK_BUDGET") or 30))
 MARKER_TAIL_SECS = 5
 MIN_RESOLVE_SECS = 5
 ADD_BUDGET_SECS = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - MIN_RESOLVE_SECS
+# The upgrade (spec §14 step 0) gets its own share of the worktree budget — 12 s of 20 at the default — so a
+# slow fetch or another start's upgrade can never leave this window's own bind without time (plan 5
+# Decisions 3, 10). It shrinks with LEASE_TEST_HOOK_BUDGET like everything above.
+UPGRADE_BUDGET_SECS = max(1, ADD_BUDGET_SECS * 3 // 5)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -68,6 +73,26 @@ def unverified(root: Path, marker: dict) -> list:
 def resolve_budget(started_at: float) -> int:
     left = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - (time.time() - started_at)
     return max(MIN_RESOLVE_SECS, int(left))
+
+
+_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def upgrade_pending(root: Path) -> bool:
+    """§14 step 0's test, by reading two files — the upgrade module is loaded only when it has work, so a home
+    already at its VERSION pays nothing, and a home with no VERSION (or one that is not X.Y.Z) is not upgraded
+    at all (plan 5 Decision 1; the same rule as upgrade.version and lib.sh daedalus_version)."""
+    try:
+        ver = (root / "VERSION").read_text().split("\n", 1)[0].strip()
+    except OSError:
+        return False
+    if not _VERSION_RE.fullmatch(ver):
+        return False
+    try:
+        done = (root / "state" / "upgraded-to").read_text().strip()
+    except OSError:
+        done = ""
+    return ver != done
 
 
 MEMORY_ABSENT = ("memory: block absent from config.yaml — Stop-cadence capture is off; "
@@ -128,12 +153,39 @@ def main() -> int:
     sid = v.export_session(payload)
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     bind_notes = []
+    # Step 0 (spec §14): a pulled release upgrades this home before anything binds — every step idempotent,
+    # each said once when it acts. Never in a visitor, which writes nothing (plan 5 Decision 2). A failure
+    # of the upgrade module is a line, never a broken start. The upgrade has its own deadline, so the bind
+    # below keeps the rest of the worktree budget.
+    skip_bind = False
+    if not visitor and upgrade_pending(root):
+        try:
+            import upgrade as up
+            up_lines, up_stop = up.run(root, deadline=started_at + UPGRADE_BUDGET_SECS)
+            bind_notes.extend(up_lines)
+            if up_stop:
+                bind_notes.append(up_stop)
+        except Exception as e:
+            bind_notes.append("The upgrade could not run at this start (%s: %s); core/doctor.sh says what is left."
+                              % (type(e).__name__, e))
+        # §14: no auto-numbering while state/leases/ does not exist — the upgrade did not get to its first step
+        # (another start held its lock past this start's share, or it failed). The next start, or `claim`,
+        # numbers this window; the pending line says why (plan 5 Decision 13).
+        if upgrade_pending(root) and not (root / "state" / "leases").is_dir():
+            skip_bind = True
+            try:
+                import upgrade as up
+                pend = up.pending_line(root)
+            except Exception:
+                pend = None
+            if pend and pend not in bind_notes:
+                bind_notes.append(pend)
     lease_nn = None
     try:
         import leaselib as ll
     except Exception:  # pragma: no cover
         ll = None
-    if ll is not None and not visitor and sid:
+    if ll is not None and not visitor and sid and not skip_bind:
         try:
             b = ll.session_start_bind(root, sid, deadline=started_at + ADD_BUDGET_SECS)
             lease_nn = b["lease"]

@@ -72,6 +72,12 @@ def lock(root: Path, shared: bool = False, deadline: Optional[float] = None,
     Refused(busy) with nothing done under the lock. A lock that is free is
     taken even past the deadline."""
     d = leases_dir(root)
+    if shared and not d.is_dir():
+        # A reader has nothing to read (read_all returns {} for a missing directory) and never makes the
+        # directory: its absence means the upgrade's first step has not run (plan 5 Decision 13). Every write
+        # under state/leases/ takes the exclusive lock, which does make it.
+        yield
+        return
     d.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(d / ".lock"), os.O_RDWR | os.O_CREAT, 0o644)
     mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX

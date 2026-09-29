@@ -1500,3 +1500,14 @@ on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, c
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(git -C "$T/sub" rev-parse lease/01)" = "$tip" ]
 }
+
+@test "lease.sh refuses in plain words while the upgrade has not made state/leases/ (a home with VERSION and no stamp); a home with no VERSION is untouched by the rule" {
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  [ "$status" -ne 0 ]
+  case "$output" in *"the upgrade has not run; start a session in this home"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/leases" ]
+  rm "$DAEDALUS_HOME/VERSION"
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}

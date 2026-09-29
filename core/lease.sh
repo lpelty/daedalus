@@ -18,4 +18,10 @@ case "$cmd" in
   create|claim|alias|note|update|spawn|list|status|release|done|sweep|prime|rebase|split|adopt) ;;
   *) die "unknown command: $cmd" ;;
 esac
+# Spec §14: a home that pulled a release and has not started a session since has no state/leases/ yet; the
+# upgrade makes it at the next session start. Only when VERSION says a release is waiting (plan 5 Decision 13).
+if [ ! -d "$DAEDALUS_HOME/state/leases" ] && ver="$(daedalus_version)" \
+   && [ "$(cat "$DAEDALUS_HOME/state/upgraded-to" 2>/dev/null)" != "$ver" ]; then
+  die "the upgrade has not run; start a session in this home"
+fi
 exec python3 "$DAEDALUS_HOME/core/leaselib.py" "$cmd" "$@"
