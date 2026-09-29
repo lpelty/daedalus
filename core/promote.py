@@ -2,6 +2,8 @@
 """promote (spec §7): the one way a window's work reaches trunk.
 
     core/promote.sh <NN>                     prepare (§7.1)
+    core/promote.sh <NN> --skip-review --reason "..."   prepare without the review, the operator's written reason
+                                             recorded (§7.1 step 8; in tty mode the reason is typed at the terminal)
     core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept)
     core/promote.sh <NN> --confirm [--operator-said "..."] [--id <promote-id>]   confirm and push (§7.2)
 
@@ -558,10 +560,80 @@ def earlier_refuted(root: Path, nn: str, pid: str, fp: str, tip: str, trunk_sha:
     return out
 
 
+def earlier_prepared(root: Path, nn: str) -> Optional[dict]:
+    """The newest prepared.json for window NN, or None."""
+    base = root / "state" / "promote"
+    found = [(float(p.get("prepared_ts") or 0), p) for p in
+             (read_json(f) for f in (base.glob("%s-*/prepared.json" % nn) if base.is_dir() else []))
+             if p and p.get("lease") == nn]
+    return max(found, key=lambda x: x[0])[1] if found else None
+
+
+SKIP_QUESTION = "Promote window %s's work without the review?"
+TOO_SHORT = ("--skip-review needs the operator's reason in their own words — at least three words; a reason is the "
+             "price of skipping the review.")
+
+
+def marker_started(root: Path, sid: Optional[str]) -> float:
+    """The session's SessionStart marker `started` (local time) as epoch seconds; 0.0 without one."""
+    m = v.read_marker(root, sid) if sid else None
+    try:
+        return time.mktime(time.strptime(str((m or {}).get("started"))[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return 0.0
+
+
+def skip_reason(root: Path, me: dict, nn: str, reason: Optional[str], mode: str) -> dict:
+    """§7.1 step 8, before any git work: the operator's written reason for
+    skipping the review — in transcribed mode the operator's WHOLE turn, at least
+    three words, typed after an assistant turn that showed the REFUTED verdict
+    (or asked SKIP_QUESTION when no REFUTED prepare exists), recorded as the
+    operator typed it; in tty mode typed at a terminal — and the REFUTED review it
+    sets aside (Decision 31)."""
+    earlier = earlier_prepared(root, nn)
+    refuted = earlier if earlier and (earlier.get("review") or {}).get("verdict") == "REFUTED" else None
+    overrode = {"call_id": refuted["review"]["call_id"], "run_id": refuted["run_id"]} if refuted else None
+    paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --skip-review`" % (root, nn)
+    if mode == "tty":
+        if reason is not None:
+            raise Stop("In tty mode the reason for skipping the review is typed in a terminal, not passed as --reason. "
+                       + paste)
+        try:
+            text, name = tl.tty_answer("Why promote window %s's work without the review? (the operator's words): " % nn,
+                                       root)
+        except tl.NotAPerson as e:
+            raise Stop("The reason to skip the review must be typed by a person in their own terminal: %s. %s"
+                       % (e, paste))
+        except tl.NoTerminal:
+            raise Stop("The reason to skip the review must be typed by a person in a terminal. This session has none. "
+                       + paste)
+        if len(tl.normalize(text).split()) < 3:
+            raise Stop(TOO_SHORT)
+        return {"reason": text.strip(), "transcript_ref": None, "session_id": None,
+                "typed": {"text": text.strip(), "tty": name, "pid": os.getpid()}, "overrode": overrode}
+    if not (reason or "").strip():
+        raise Stop("--skip-review needs --reason with the operator's words; a reason is the price of skipping the review.")
+    if len(tl.normalize(reason).split()) < 3:
+        raise Stop(TOO_SHORT)
+    if earlier:
+        er = read_json(root / "state" / "evidence" / str(earlier.get("run_id")) / "run.json") or {}
+        after = max(float(earlier.get("prepared_ts") or 0),
+                    tl.parse_ts((er.get("promotion") or {}).get("prepared_at")) or 0.0)
+    else:
+        after = marker_started(root, me.get("session_id"))
+    shown = "Reviewer on the merged change: REFUTED" if refuted else SKIP_QUESTION % nn
+    yes = transcribed_yes(root, me, str(reason), after, "the review", shown_text=shown)
+    return {"reason": yes["text"].strip(), "transcript_ref": yes["transcript_ref"], "session_id": me["session_id"],
+            "typed": None, "overrode": overrode}
+
+
 def prepare(root: Path, a: dict) -> int:
     leases = read_leases(root)
     me = who(root, leases)
     nn, lease = window(leases, a["token"])
+    if a.get("reason") is not None and not a.get("skip"):
+        raise Stop("--reason goes with --skip-review.")
+    skip = skip_reason(root, me, nn, a.get("reason"), confirm_mode(root)) if a.get("skip") else None
     tr = trunks(root, nn, lease)
     dirty(root, nn, tr)
     shas = fetch_trunks(root, tr)
@@ -606,7 +678,7 @@ def prepare(root: Path, a: dict) -> int:
         "merge_sha": merge if repo == outer else shas[outer]})
     run_rec = run_gates(root, pid, tree, trunk)
     run_id = run_rec["run_id"]
-    rv = review(root, run_id, tree) if not a.get("skip") else None
+    rv = review(root, run_id, tree) if skip is None else None
     fp_after, _ = fingerprint(root, tree)
     seen = [fp, fp_after, run_rec.get("fingerprint")] + ([rv["fingerprint"]] if rv else [])
     if len(set(seen)) != 1:
@@ -619,8 +691,11 @@ def prepare(root: Path, a: dict) -> int:
          "merge_sha": merge, "trunk_sha_at_prepare": trunk_sha, "lease_tip": tip, "fp_merged": fp, "run_id": run_id,
          "review": ({k: rv[k] for k in ("call_id", "verdict", "file", "fingerprint", "request_sha", "findings")}
                     if rv else None),
-         "review_skipped_reason": None, "skip_transcript_ref": None, "skip_transcript_session_id": None,
-         "overrode_review": None, "earlier_refuted": er,
+         "review_skipped_reason": skip["reason"] if skip else None,
+         "skip_transcript_ref": skip["transcript_ref"] if skip else None,
+         "skip_transcript_session_id": skip["session_id"] if skip else None,
+         "skip_typed": skip["typed"] if skip else None,
+         "overrode_review": skip["overrode"] if skip else None, "earlier_refuted": er,
          "core_tree": dist.get("core_tree"), "charter_sha": dist.get("charter_sha"), "commits": commits,
          "gates": {"count": len(run_rec.get("gates") or []), "seconds": secs}, "fetched_at": fetched_at,
          "prepared_at": at, "prepared_ts": ts,
@@ -629,9 +704,16 @@ def prepare(root: Path, a: dict) -> int:
 
     def record(rec: dict) -> None:
         rec["invoked_by"] = {"kind": me["kind"], "session_id": me["session_id"], "pid": me["pid"], "lease": me["lease"]}
-        rec["promotion"] = {"promote_id": pid, "prepared_at": at, "review_skipped_reason": None,
-                            "skip_transcript_ref": None, "skip_transcript_session_id": None, "overrode_review": None}
+        rec["promotion"] = {"promote_id": pid, "prepared_at": at, "review_skipped_reason": p["review_skipped_reason"],
+                            "skip_transcript_ref": p["skip_transcript_ref"],
+                            "skip_transcript_session_id": p["skip_transcript_session_id"],
+                            "overrode_review": p["overrode_review"]}
+        if p["skip_typed"]:
+            rec["promotion"]["skip_typed"] = p["skip_typed"]
     update_run(root, run_id, record)
+    if skip:
+        with open(str(root / "vault" / "evidence" / ("%s.md" % run_id)), "a") as fh:
+            fh.write("\nReview skipped by the operator because: %s\n" % one_line(skip["reason"]))
     decision, rec_text = decision_block(root, p)
     print(decision + "\n\n" + rec_text)
     sys.stdout.flush()
@@ -1131,9 +1213,10 @@ def confirm(root: Path, a: dict) -> int:
 
 # --- the command line -----------------------------------------------------------------------------
 
-USAGE = "Usage: core/promote.sh <NN> [--confirm [--operator-said \"...\"] [--id <promote-id>]] [--clean]"
-VALUE_FLAGS: Dict[str, str] = {"--operator-said": "said", "--id": "id"}   # flag -> key, for flags that take a value
-SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm"}   # flag -> key, for flags without one
+USAGE = ("Usage: core/promote.sh <NN> [--skip-review [--reason \"...\"]] | <NN> --confirm [--operator-said \"...\"] "
+         "[--id <promote-id>] | <NN> --clean")
+VALUE_FLAGS: Dict[str, str] = {"--operator-said": "said", "--id": "id", "--reason": "reason"}   # flags with a value
+SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm", "--skip-review": "skip"}   # flags without one
 
 
 def parse(argv: List[str]) -> dict:

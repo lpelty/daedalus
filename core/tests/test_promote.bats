@@ -649,3 +649,93 @@ PY
   case "$out" in *"pushed from your shell"*) echo "$out"; return 1 ;; esac
   [ -f "$(dirname "$(prepared)")/pushed" ]
 }
+
+REFUTE_ONE="### F1 — c.txt:1 — HIGH
+What is wrong: a.
+How to confirm: b.
+VERDICT: REFUTED"
+
+@test "--skip-review needs --reason with the operator's words, refused before any git work" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02 --skip-review; refused "--skip-review needs --reason with the operator's words; a reason is the price of skipping the review."
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "  "; refused "--skip-review needs --reason"
+  [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
+}
+
+@test "--skip-review over a REFUTED review: the reason typed only before that review was shown, not at all, as a fragment, in too few words, or after a reply that did not show the verdict is refused; typed after it, the operator's own words are recorded beside the verdict they set aside, no reviewer runs, gates still run, and the confirm's ledger line names the overridden call" {
+  work_on_02
+  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  refuted="$(pj review.call_id)"; rrun="$(pj run_id)"; P="$(pj prepared_ts)"; n0="$(calls)"
+  why="promote it anyway, F1 is about a test file"; typed="Promote it anyway, F1 is about a test file."
+  RL="Reviewer on the merged change: REFUTED — one high finding."
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"
+  refused "I could not find those words as something the operator typed after the review was shown."
+  tx "$TXP" operator "$why" "$(plus "$P" -30)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"
+  refused "I could not find those words as something the operator typed after the review was shown."
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "the"
+  refused "at least three words"
+  tx "$TXP" assistant "Shall I promote it?" "$(plus "$P" 1)" >/dev/null; tx "$TXP" operator "$typed" "$(plus "$P" 2)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"
+  refused "The review was not shown to the operator before those words"
+  tx "$TXP" operator "$typed and more" "$(plus "$P" 3)" >/dev/null
+  shown_then_said "$typed" "$RL"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "F1 is about a test file"
+  refused "I could not find those words as something the operator typed after the review was shown."
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[3]}" = "Reviewer: skipped by the operator because: $typed" ]
+  case "$output" in *"review skipped by the operator (it sets aside review $refuted of run $rrun);"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" = "$n0" ]
+  python3 - "$(prepared)" "$DAEDALUS_HOME/state/evidence/$(pj run_id)/run.json" "$SAID" "$refuted" "$rrun" "$typed" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1])); r = json.load(open(sys.argv[2]))
+said, refuted, rrun, typed = sys.argv[3:7]
+assert p["review"] is None and p["review_skipped_reason"] == typed, p     # the operator's words, not the flag's
+assert p["skip_transcript_ref"]["uuid"] == said and p["overrode_review"] == {"call_id": refuted, "run_id": rrun}, p
+assert p["skip_transcript_session_id"] == "sP", p
+pr = r["promotion"]
+assert pr["review_skipped_reason"] == typed and pr["skip_transcript_ref"] == p["skip_transcript_ref"] and pr["overrode_review"] == p["overrode_review"], pr
+assert pr["skip_transcript_session_id"] == "sP", pr
+assert r["refuter"] == "deferred-to-promote" and r["result"] == "PASS" and not [k for k in r if k.endswith("reason")], r
+PY
+  grep -qxF "Review skipped by the operator because: $typed" "$DAEDALUS_HOME/vault/evidence/$(pj run_id).md"
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  L="$DAEDALUS_HOME/vault/evidence/promotions.log"
+  grep -qF "skipped: $typed" "$L"; grep -qF "overrode: $refuted" "$L"
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+}
+
+@test "confirm re-reads a skip reason from the transcript: a reason edited in run.json, or a ref to an entry the operator did not type, is refused (Decision 31)" {
+  work_on_02; now_="$(now)"
+  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$now_" -20)" >/dev/null
+  tx "$TXP" operator "skip the review, it is a docs change" "$(plus "$now_" -10)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  shown_then_said "yes"
+  R="$DAEDALUS_HOME/state/evidence/$(pj run_id)/run.json"
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); r["promotion"]["review_skipped_reason"]="something the operator never said"; json.dump(r, open(sys.argv[1],"w"))' "$R"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "Evidence disagrees with the prepared promotion (the reason for skipping the review)."
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); r["promotion"]["review_skipped_reason"]=sys.argv[3]; r["promotion"]["skip_transcript_ref"]["uuid"]=sys.argv[2]; json.dump(r, open(sys.argv[1],"w"))' "$R" "$SHOWN" "$(pj review_skipped_reason)"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "Evidence disagrees with the prepared promotion (the reason for skipping the review)."
+}
+
+@test "--skip-review with no earlier REFUTED review is allowed with a reason typed since the session started after the prime asked the skip question, and overrides nothing" {
+  work_on_02; now_="$(now)"
+  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$now_" -20)" >/dev/null
+  tx "$TXP" operator "skip the review, it is a docs change" "$(plus "$now_" -10)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(pj overrode_review)" = "None" ]; [ "$(calls)" -eq 0 ]
+}
+
+@test "--skip-review in tty mode: --reason is refused; the reason typed at a terminal is recorded as typed, and a tty confirm pushes it" {
+  work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "x"; refused "the reason for skipping the review is typed in a terminal"
+  run type_into "a docs-only change" "without the review?" bash "$PROMOTE" 02 --skip-review
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(pj review_skipped_reason)" = "a docs-only change" ]; [ "$(pj skip_typed.text)" = "a docs-only change" ]
+  run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+}
