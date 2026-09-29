@@ -14,6 +14,7 @@ setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   cp "$SRC/lib.sh" "$SRC/doctor.sh" "$SRC/verifylib.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
   export DAEDALUS_HOME
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
 }
 
 @test "doctor fails when config is missing" {
@@ -1036,4 +1037,37 @@ PY
   run D; case "$output" in *"MISSING  promote: this Claude Code build's transcript shape is not the one Daedalus was tested against"*"do not link"*) : ;; *) echo "$output"; return 1 ;; esac
   printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
   run D; case "$output" in *"transcript shape"*) echo "tty mode reads no transcript: $output"; return 1 ;; esac
+}
+
+@test "doctor: VERSION is an OK line naming the release; absent, empty or not a version it is MISSING and counted (spec §14, §15)" {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  git init -q "$DAEDALUS_HOME/target/thing"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       version: 0.7.0"*) : ;; *) echo "$output"; return 1 ;; esac
+  for bad in absent empty v0.7 seven; do
+    case "$bad" in
+      absent) rm -f "$DAEDALUS_HOME/VERSION" ;;
+      empty) : > "$DAEDALUS_HOME/VERSION" ;;
+      *) printf '%s\n' "$bad" > "$DAEDALUS_HOME/VERSION" ;;
+    esac
+    run bash "$DAEDALUS_HOME/core/doctor.sh"
+    [ "$status" -ne 0 ] || { echo "$bad: doctor stayed green: $output"; return 1; }
+    case "$output" in
+      *"MISSING  VERSION — this checkout predates v0.7.0 (pull the release) or is corrupt"*"1 problem(s) found"*) : ;;
+      *) echo "$bad: $output"; return 1 ;;
+    esac
+  done
 }

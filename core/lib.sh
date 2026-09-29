@@ -16,6 +16,23 @@ log() {
   printf 'daedalus: %s\n' "$*"
 }
 
+# daedalus_version — the release this checkout is (spec §14): VERSION's first
+# line, trimmed, when it reads X.Y.Z. Returns 1, printing nothing, when the file
+# is absent, empty or anything else — a checkout from before v0.7.0 has none.
+daedalus_version() {
+  local ver
+  [ -f "$DAEDALUS_HOME/VERSION" ] || return 1
+  ver="$(head -n 1 "$DAEDALUS_HOME/VERSION" | tr -d '[:space:]')"
+  case "$ver" in
+    ''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+  esac
+  case "$ver" in
+    *.*.*.*) return 1 ;;
+    *.*.*) printf '%s\n' "$ver" ;;
+    *) return 1 ;;
+  esac
+}
+
 # cfg <top.key> | <key> — print a scalar value from the config.
 # A key that is present but has no value (e.g. "repo:" with nothing after
 # the colon) is treated as missing — returns 1, prints nothing — because

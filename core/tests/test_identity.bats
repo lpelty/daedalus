@@ -60,6 +60,8 @@ setup() {
 #   README.md             operator documentation
 #   config.example.yaml   the shipped config template
 #   .claude/              settings.json and the shipped skills
+#   VERSION               the release number (spec §14)
+#   docs/                 documents the distribution ships for a deployment to read
 #
 # .claude/ IS scanned, and that inclusion is load-bearing: its tracked
 # contents — the settings file and the skills under .claude/skills/ — are
@@ -116,7 +118,7 @@ setup() {
       offenders="$offenders $f(agent name)"
     fi
   done <<EOF
-$(git ls-files -- core .claude CLAUDE.md SOUL.md README.md CHANGELOG.md config.example.yaml)
+$(git ls-files -- core .claude CLAUDE.md SOUL.md README.md CHANGELOG.md config.example.yaml VERSION docs)
 EOF
 
   [ -z "$offenders" ] || { echo "personal-identity leak in:$offenders"; return 1; }
@@ -343,4 +345,20 @@ _run_scan_in_fixture() {
   run grep -qF 'still in flight' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
   run grep -qF 'Incremental capture' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -eq 0 ]
   run grep -qF 'incremental capture (plan 2)' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -ne 0 ]
+}
+
+@test "VERSION is one line, 0.7.0; the wide scan reads VERSION and docs/, which publish (spec §14)" {
+  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.0" ]
+  [ "$(wc -l < "$DAEDALUS_HOME/VERSION" | tr -d ' ')" = 1 ]
+  _make_fixture_repo
+  mkdir -p "$fixture/docs"
+  printf 'A note about running the fleet on this host.\n' > "$fixture/docs/handoff.md"
+  git -C "$fixture" add -A
+  run _run_scan_in_fixture
+  [ "$status" -ne 0 ] || { echo "a leak in docs/ passed the scan"; return 1; }
+  _make_fixture_repo
+  printf 'atlas\n' > "$fixture/VERSION"
+  git -C "$fixture" add -A
+  run _run_scan_in_fixture
+  [ "$status" -ne 0 ] || { echo "a leak in VERSION passed the scan"; return 1; }
 }

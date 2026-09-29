@@ -9,6 +9,8 @@
       "Edit(./config.example.yaml)",
       "Edit(./README.md)",
       "Edit(./CHANGELOG.md)",
+      "Edit(./VERSION)",
+      "Edit(./docs/**)",
       "Edit(./config.yaml)",
       "Edit(./state/**)",
       "Edit(./vault/evidence/**)"

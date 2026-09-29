@@ -18,6 +18,14 @@ note_problem() { log "MISSING  $*"; problems=$((problems + 1)); }
 
 [ -f "$DAEDALUS_CONFIG" ] || { log "MISSING  config.yaml (copy config.example.yaml)"; exit 1; }
 
+# The release (spec §14, §15): VERSION's one line. A checkout without it
+# predates v0.7.0 — the upgrade has nothing to upgrade to — or is damaged.
+if ver="$(daedalus_version)"; then
+  log "OK       version: $ver"
+else
+  note_problem "VERSION — this checkout predates v0.7.0 (pull the release) or is corrupt"
+fi
+
 target_repo_ok=0
 for key in target.repo target.branch vault.repo proposals.budget; do
   if cfg "$key" >/dev/null 2>&1; then

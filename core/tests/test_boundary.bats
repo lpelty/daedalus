@@ -45,6 +45,8 @@ _protected_paths() {
 ./config.example.yaml
 ./README.md
 ./CHANGELOG.md
+./VERSION
+./docs/handoff-reverse-caller.md
 ./core/agents/refuter.md
 ./config.yaml
 ./state/evidence/keep
@@ -127,6 +129,12 @@ PY
     # exempt from existence but not from the Edit-rule check.
     case "$p" in
       ./.claude/settings.local.json|./config.yaml|./state/evidence/keep|./vault/evidence/keep) continue ;;
+    esac
+    # docs/ is new in this release and its first document lands after the deny
+    # rule that covers it. Until docs/ exists its representative path is held to
+    # the Edit-rule check only; once docs/ exists, the file must too.
+    case "$p" in
+      ./docs/*) [ -d ./docs ] || continue ;;
     esac
     [ -e "$p" ] || missing="$missing $p"
   done <<EOF

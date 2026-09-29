@@ -6,6 +6,7 @@ setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   cp "$SRC/lib.sh" "$DAEDALUS_HOME/core/"
   export DAEDALUS_HOME
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
 
   # A repo whose SHAPE we want and whose CONTENTS we do not.
   SHAPEREPO="$BATS_TEST_TMPDIR/upstream-vault"
