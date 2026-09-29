@@ -21,7 +21,10 @@ current sha (a fast-forward from the tested base), with no push_failed_at and
 no pushed/announced stamp (plan 4 Decision 34). On one POSIX user it is a claim
 check, a second speed bump beside the guard: the record of what was pushed is
 confirm's re-derivation, never this hook; a clone outside the home has no hook
-at all (Decision 38). Python 3.9, standard library.
+at all (Decision 38). git runs a pre-push hook for `git push` only — never for
+`git send-pack`, `http-push` or a remote helper driven by hand (measured: a
+refusing hook blocked `git push` and not `git send-pack`), so those are the
+guard's to deny (Task 13 review). Python 3.9, standard library.
 """
 from __future__ import annotations
 

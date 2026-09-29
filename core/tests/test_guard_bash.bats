@@ -596,3 +596,141 @@ scratch_and_worktree() {
   run guard_as sA 'bash core/promote.sh 02' "$DAEDALUS_HOME"; allowed
   run guard_as sA 'script -q /dev/null ls' "$DAEDALUS_HOME"; allowed
 }
+
+# ---- Task 13 review: the shapes that got past the guard, each reproduced first ----
+
+@test "git send-pack and other push plumbing are denied in every repo under the home and toward the target's origin from anywhere — git runs no pre-push hook for them; an unrelated send-pack outside the home is not (Task 13 review)" {
+  scratch_and_worktree
+  O="$BATS_TEST_TMPDIR/origin.git"; X="$BATS_TEST_TMPDIR/outside"; git clone -q "$O" "$X"
+  for c in 'git send-pack ../../../../origin.git lease/02:refs/heads/main' "git send-pack $O lease/02:refs/heads/fix/x" \
+           'git http-push https://example.com/thing.git main' "git-send-pack $O HEAD:refs/heads/main" \
+           "/usr/libexec/git-core/git-send-pack $O HEAD:refs/heads/main" 'git remote-ext "git-receive-pack origin.git" x'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied in the home: $c"; return 1; }
+  done
+  case "$output" in *"pre-push hook"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sB "git send-pack $O HEAD:refs/heads/main" "$X"; denied
+  U="$BATS_TEST_TMPDIR/unrelated.git"; git init -q --bare "$U"
+  run guard_as sB "git send-pack $U HEAD:refs/heads/main" "$X"; allowed
+  # why the guard must: git runs a refusing pre-push hook for `git push`, never for `git send-pack`
+  P="$BATS_TEST_TMPDIR/plain"; B="$BATS_TEST_TMPDIR/plain.git"; git init -q --bare -b main "$B"; git clone -q "$B" "$P" 2>/dev/null
+  git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m a
+  printf '#!/bin/sh\nexit 1\n' > "$P/.git/hooks/pre-push"; chmod +x "$P/.git/hooks/pre-push"
+  run git -C "$P" push -q origin HEAD:main; [ "$status" -ne 0 ]
+  run git -C "$P" send-pack "$B" HEAD:refs/heads/main; [ "$status" -eq 0 ]
+  [ "$(git -C "$B" rev-parse main)" = "$(git -C "$P" rev-parse HEAD)" ]
+}
+
+@test "the trunk-push rule holds through ordinary shell shapes: a path to git, ( ), { }, if/then, !, prefix commands (sudo, nice, timeout, watch, xargs, find -exec), shell options before -c, a shell reading its script from a pipe or here-string, a function body, and --git-dir/--work-tree/--namespace in their space forms (Task 13 review)" {
+  scratch_and_worktree
+  for c in '/usr/bin/git push origin HEAD:main' '(git push origin HEAD:main)' '{ git push origin HEAD:main; }' \
+           'if true; then git push origin HEAD:main; fi' '! git push origin HEAD:main' 'sudo git push origin HEAD:main' \
+           'nice git push origin HEAD:main' 'nice -n 5 git push origin HEAD:main' 'timeout 5 git push origin HEAD:main' \
+           'watch git push origin HEAD:main' "watch -n 1 'git push origin HEAD:main'" 'xargs git push origin <<< HEAD:main' \
+           'echo HEAD:main | xargs git push origin' 'find . -maxdepth 0 -exec git push origin HEAD:main \;' \
+           'bash -o errexit -c "git push origin HEAD:main"' 'sudo bash -c "git push origin HEAD:main"' \
+           "echo 'git push origin HEAD:main' | bash" "bash <<< 'git push origin HEAD:main'" \
+           'f() { git push origin HEAD:main; }; f' 'while true; do git push origin HEAD:main; done' \
+           'git --git-dir ../../../target/thing/.git push origin HEAD:main' \
+           'git --git-dir ../../../target/thing/.git --work-tree ../../../target/thing commit -m x' \
+           'git --namespace x push origin HEAD:main' 'sudo env GIT_DIR=../../../target/thing/.git git commit -m x'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  for c in 'nice git push origin lease/02' 'sudo git status' 'echo git push origin HEAD:main' '(git status)' \
+           'if true; then git log -1; fi' 'find . -name x -exec grep y {} \;' 'timeout 5 git fetch origin' \
+           'bash -o errexit -c "git push origin lease/02"' 'git --git-dir .git status'; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c"; return 1; }
+  done
+}
+
+@test "chmod, chown and touch are writes: switching off or re-owning the pre-push hook or the hooks directory is denied; chmod elsewhere is not (Task 13 review)" {
+  scratch_and_worktree
+  [ -x "$T/.git/hooks/pre-push" ]
+  for c in "chmod -x $T/.git/hooks/pre-push" 'chmod 000 ../../../target/thing/.git/hooks' 'chmod -R a-x ../../../target/thing/.git/hooks' \
+           'chown nobody ../../../target/thing/.git/hooks/pre-push' 'touch ../../../target/thing/.git/hooks/post-checkout'; do
+    run guard_as sA "$c" "$W1"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *".git/hooks"*) : ;; *) echo "$c: $output"; return 1 ;; esac
+  done
+  run guard_as sA 'chmod +x build.sh' "$W1"; allowed
+  run guard_as sA 'chmod 755 build.sh' "$W1"; allowed
+}
+
+@test "a push to the target's origin from outside the home is judged by repository, not spelling: the path without .git, file://, a trailing slash, an insteadOf rewrite; ssh and https spellings of one network origin are one origin (Task 13 review)" {
+  scratch_and_worktree
+  O="$BATS_TEST_TMPDIR/origin.git"; X="$BATS_TEST_TMPDIR/outside"; git clone -q "$O" "$X"
+  for c in "git push ${O%.git} HEAD:main" "git push file://$O HEAD:main" "git push $O/ HEAD:main" \
+           "git -c url.$O.insteadOf=zz: push zz: HEAD:main" "git -c remote.other.url=$O push other HEAD:main"; do
+    run guard_as sB "$c" "$X"; denied || { echo "not denied: $c"; return 1; }
+  done
+  git -C "$T" remote set-url --push origin git@github.com:acme/thing.git
+  for u in https://github.com/acme/thing ssh://git@github.com/acme/thing.git git@github.com:acme/thing \
+           https://user@GitHub.com/acme/thing.git/ ssh://git@github.com:22/acme/thing; do
+    run guard_as sB "git push $u HEAD:main" "$X"; denied || { echo "not denied: $u"; return 1; }
+  done
+  run guard_as sB 'git push https://github.com/acme/other HEAD:main' "$X"; allowed
+}
+
+@test "a command that makes the guard fail is denied whole, never waved through: an empty alias before a trunk push (Task 13 review)" {
+  scratch_and_worktree
+  run guard_as sB "git -c 'alias.x= ' x; git push origin HEAD:main" "$W2"; denied
+  run guard_as sB "git -c 'alias.x= ' x; git status" "$W2"; allowed
+  # any error inside a segment, and any error the whole check raises, is a denial naming what could not be checked
+  run python3 -c '
+import importlib.util, io, json, sys
+from pathlib import Path
+home, cwd = sys.argv[1], sys.argv[2]
+sys.path.insert(0, home + "/core")
+spec = importlib.util.spec_from_file_location("gb", home + "/core/guard-bash.py")
+gb = importlib.util.module_from_spec(spec); spec.loader.exec_module(gb)
+def boom(*a, **k): raise IndexError("forced")
+real = gb.check_git
+gb.check_git = boom
+g = gb.G(Path(home), gb.v._empty_lease_context(), Path(home) / "target" / "thing", "", "sB")
+print("segment:", gb.check_command("git status", Path(cwd), g)[0])
+gb.check_git, gb.check_command = real, boom
+sys.stdin = io.StringIO(json.dumps({"session_id": "sB", "cwd": cwd, "tool_input": {"command": "git status"}}))
+gb.main()
+' "$DAEDALUS_HOME" "$W2"
+  case "$output" in *"segment: The guard could not check this command (it failed on \`git status\`)"*'"permissionDecision": "deny"'*"could not check this command"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the hooks path by the global and include routes: GIT_CONFIG_GLOBAL/SYSTEM and the other GIT_CONFIG_* variables, -c include.path and includeIf, git config include*, and writes to ~/.gitconfig, ~/.config/git/config and a repo's .git/config — by Bash and by Edit|Write; GIT_CONFIG_NOSYSTEM, which can only remove configuration, is not (Task 13 review)" {
+  scratch_and_worktree
+  for c in "echo '[core] hooksPath=/tmp' >> ~/.gitconfig" 'GIT_CONFIG_GLOBAL=/tmp/g git push origin lease/02' \
+           'GIT_CONFIG_SYSTEM=/tmp/g git status' 'export GIT_CONFIG_GLOBAL=/tmp/g' 'GIT_CONFIG_PARAMETERS="x" git status' \
+           'git -c include.path=/tmp/inc push origin lease/02' 'git -c includeIf.gitdir:/.path=/tmp/inc push origin lease/02' \
+           'git config --global include.path /tmp/inc' 'git config --global includeIf.onbranch:x.path /tmp/inc' \
+           'echo x >> ../../../vault/.git/config' "sed -i '' s/a/b/ ~/.config/git/config" 'cp /tmp/c ../../../target/thing/.git/config'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  for p in "$HOME/.gitconfig" "$HOME/.config/git/config" "$DAEDALUS_HOME/vault/.git/config" "$DAEDALUS_HOME/vault/.git/hooks/pre-push"; do
+    run write_as sA "$p"; denied || { echo "Edit|Write not denied: $p"; return 1; }
+  done
+  run guard_as sB 'GIT_CONFIG_NOSYSTEM=1 git status' "$W2"; allowed
+  run guard_as sB 'git config user.name x' "$W2"; allowed
+}
+
+@test "a trunk push whose destination comes from config or git's name matching is the same push: remote.<name>.push by -c or already set, remote.<name>.mirror, push.default upstream or matching over the window's tracking, heads/<trunk>; git config and branch -u aiming at a trunk are denied (Task 13 review)" {
+  scratch_and_worktree
+  [ "$(git -C "$W2" config branch.lease/02.merge)" = refs/heads/main ]    # lease worktrees track the trunk
+  for c in 'git -c remote.origin.push=HEAD:refs/heads/main push origin' 'git -c remote.origin.push=HEAD:refs/heads/main push origin lease/02' \
+           'git -c remote.origin.push=HEAD:refs/heads/main push' 'git config remote.origin.push HEAD:refs/heads/main' \
+           'git config --add remote.origin.push +refs/heads/lease/02:refs/heads/main' 'git config branch.lease/02.merge refs/heads/main' \
+           'git -c push.default=upstream push' 'git -c push.default=tracking push origin' 'git -c push.default=matching push' \
+           'git -c remote.origin.mirror=true push origin' 'git branch -u origin/main' 'git branch --set-upstream-to=origin/main' \
+           'git branch --set-upstream-to origin/master lease/02' 'git push origin HEAD:heads/main' 'git push origin lease/02:heads/main' \
+           "git --config-env=remote.origin.push=PUSHSPEC push origin" 'git -c url.x.pushInsteadOf=y push y HEAD:fix'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  git -C "$W2" config remote.origin.push HEAD:refs/heads/main
+  for c in 'git push' 'git push origin' 'git push origin lease/02'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied with remote.origin.push set: $c"; return 1; }
+  done
+  git -C "$W2" config --unset remote.origin.push
+  git -C "$W2" config push.default upstream
+  run guard_as sB 'git push' "$W2"; denied
+  git -C "$W2" config --unset push.default
+  for c in 'git push' 'git push origin lease/02' 'git -c push.default=current push' 'git push origin HEAD:heads/fix/x' \
+           'git config push.default current' 'git branch -u origin/fix/x'; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c"; return 1; }
+  done
+}

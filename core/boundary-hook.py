@@ -477,6 +477,32 @@ def tree_deny(root: Path, ctx: dict, p: Path) -> Optional[str]:
     return None
 
 
+HOOKS_DENY = ("%s is under .git/hooks/; those hooks guard trunk, and only Daedalus's installer (core/prepush.py) "
+              "writes them.")
+GITCONFIG_DENY = ("%s is git's configuration; it is changed with `git config`, never written directly — a written "
+                  "file can switch off the pre-push hook that guards trunk.")
+
+
+def git_gate_deny(p: Path) -> Optional[str]:
+    """Plan 4 Task 13 review: git's own gate, for both legs — a file under any `.git/hooks/`, a
+    repo's `.git/config` (or `config.worktree`), and the global and system git configuration
+    (~/.gitconfig, $XDG_CONFIG_HOME/git/config or ~/.config/git/config, /etc/gitconfig), each
+    of which can set core.hooksPath or include a file that does."""
+    rp = p.resolve()
+    parts = rp.parts
+    for i in range(len(parts) - 1):
+        if parts[i] == ".git" and parts[i + 1] == "hooks":
+            return HOOKS_DENY % rp
+        if parts[i] == ".git" and parts[-1] in ("config", "config.worktree") and (
+                i + 2 == len(parts) or (parts[i + 1] == "worktrees" and i + 4 == len(parts))):
+            return GITCONFIG_DENY % rp
+    home = Path(os.path.expanduser("~")).resolve()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config")).expanduser().resolve()
+    if rp in (home / ".gitconfig", xdg / "git" / "config", home / ".config" / "git" / "config", Path("/etc/gitconfig")):
+        return GITCONFIG_DENY % rp
+    return None
+
+
 def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """The lease-era checks for one resolved write path — the Edit/Write leg and every Bash
     write operand run this same function. In order: the session transcript (§7.4, any
@@ -487,7 +513,7 @@ def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[s
     non-prime (§4.7); the trees (tree_deny); the stop-once cross-lease warning (§4.6).
     Returns (deny reason, context): a deny; or context alone for a cross-lease path already
     warned this session; or (None, None)."""
-    reason = transcript_deny(root, p)
+    reason = transcript_deny(root, p) or git_gate_deny(p)
     if reason:
         return reason, None
     rroot = root.resolve()
