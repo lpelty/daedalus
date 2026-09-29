@@ -2034,13 +2034,42 @@ def waiting_numbers(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
     return out
 
 
+def announce_pushed(root: Path, sid: Optional[str]) -> list:
+    """§4.3 'announce': a promotion confirmed in tty mode — from the operator's
+    own shell (§7.4) — for which THIS session prepared is reported once, and its
+    stamp renamed `announced`. The confirming process already did the work
+    (push, target, marker, lease); this only tells the prime. A transcribed
+    confirm ran in the prime itself and is never announced (plan 4 Decision 20)."""
+    out = []
+    base = root / "state" / "promote"
+    if not sid or not base.is_dir():
+        return out
+    for stamp in sorted(base.glob("*/pushed")):
+        try:
+            s = json.loads(stamp.read_text())
+            p = json.loads((stamp.parent / "prepared.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if s.get("confirm_mode") != "tty" or (p.get("prepared_by") or {}).get("session_id") != sid:
+            continue
+        try:
+            os.rename(str(stamp), str(stamp.with_name("announced")))
+        except OSError:
+            continue          # another prompt of this session announced it first
+        out.append("Promotion of window %s's work was confirmed and pushed from your shell at %s (merge %s); your "
+                   "checkout and marker are already brought forward." % (p.get("lease"), s.get("hhmm") or "?",
+                                                                        str(s.get("merge_sha") or "")[:7]))
+    return out
+
+
 def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False,
               deadline: Optional[float] = None) -> str:
-    """The four duties of §4.3 in one call: recompute the reader's changed set
+    """The duties of §4.3 in one call: recompute the reader's changed set
     (every lease's for `list`/`status` — a shell has no budget), touch the
     reader's heartbeat, refresh stored pid/proc_started/peer_name from the
     registry for every lease whose session it shows live (so the file and the
-    board agree, §4.1), then render. Never binds, numbers or takes the pen
+    board agree, §4.1), render, and announce a tty-mode promotion confirmed
+    from the operator's shell (announce_pushed). Never binds, numbers or takes the pen
     (§4.2). '' when no numbered lease exists. Never called while the lock is
     held (it takes the lock itself, twice); the git and ps work runs outside it.
     `deadline` bounds both lock acquires (SessionStart only, §4.2): still busy
@@ -2071,7 +2100,10 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
                 self_rebind(root, str(d["session_id"]), leases=leases, live=live_map.get(str(d["session_id"]), []))
         leases = read_all(root)
         changed = {nn: read_changed(root, nn) for nn in leases if nn != "prime"}
-    return render_board(root, sid, leases, changed, waiting_numbers(root, leases), states, now, visitor=visitor, live_map=live_map)
+    text = render_board(root, sid, leases, changed, waiting_numbers(root, leases), states, now, visitor=visitor,
+                        live_map=live_map)
+    announced = announce_pushed(root, sid) if not visitor else []
+    return "\n".join(announced + [text]) if announced else text
 
 
 def _since(ts: Optional[float], now: float) -> str:

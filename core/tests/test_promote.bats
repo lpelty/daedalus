@@ -588,3 +588,44 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]; refuted_
   python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["promotion"]; assert r["operator_said"]=="Yes,\npush\tit." and r["operator_said_as_transcribed"]=="YES,\npush\tit", r' \
     "$DAEDALUS_HOME/state/evidence/$rid/run.json"
 }
+
+@test "tty mode, end to end: typed yes at a terminal in an operator shell with windows open pushes; the pushed stamp names the terminal; marker, lease and ledger are done before any hook runs; the prime's next prompt announces it once" {
+  work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(pj merge_sha)"; pid="$(pj promote_id)"
+  run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Ready to promote window 02's work onto main."*"Type yes to push window 02's work to main: "*"Promoted window 02's work to main (merge commit ${m:0:7};"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]
+  python3 - "$DAEDALUS_HOME" "$pid" "$m" "$(pj run_id)" <<'PY'
+import json, sys
+home, pid, m, rid = sys.argv[1:5]
+s = json.load(open("%s/state/promote/%s/pushed" % (home, pid)))
+assert s["confirm_mode"] == "tty" and s["tty"].startswith("/dev/") and s["merge_sha"] == m, s
+assert json.load(open("%s/state/session-sP.json" % home))["target_base"] == m
+assert pid in json.load(open("%s/state/leases/02.json" % home))["promoted"]
+r = json.load(open("%s/state/evidence/%s/run.json" % (home, rid)))["promotion"]
+assert r["confirm_mode"] == "tty" and r["typed"]["text"] == "yes" and r["confirmed_by"]["session_id"] is None, r
+PY
+  grep -qF "confirm: tty" "$DAEDALUS_HOME/vault/evidence/promotions.log"
+  board() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s"}' "$1" | python3 "$DAEDALUS_HOME/core/lease-board.py"; }
+  out="$(board sC)"; case "$out" in *"was confirmed and pushed from your shell"*) echo "announced to the wrong window: $out"; return 1 ;; esac
+  out="$(board sP)"
+  case "$out" in *"Promotion of window 02's work was confirmed and pushed from your shell at "[0-9][0-9]:[0-9][0-9]" (merge ${m:0:7}); your checkout and marker are already brought forward"*) : ;; *) echo "$out"; return 1 ;; esac
+  [ -f "$DAEDALUS_HOME/state/promote/$pid/announced" ]; [ ! -f "$DAEDALUS_HOME/state/promote/$pid/pushed" ]
+  out="$(board sP)"; case "$out" in *"pushed from your shell"*) echo "announced twice: $out"; return 1 ;; esac
+}
+
+@test "tty mode: anything but yes at the terminal pushes nothing; a transcribed confirm's stamp is never announced as pushed from a shell" {
+  work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"
+  run type_into "not yet" "Type yes to push" bash "$PROMOTE" 02 --confirm
+  [ "$status" -eq 2 ]; case "$output" in *"The operator did not say yes (typed: \"not yet\"). Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$before" ]
+  sed -i '' 's/^  confirm: tty$/  confirm: transcribed/' "$DAEDALUS_HOME/config.yaml"
+  shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  out="$(printf '{"hook_event_name":"UserPromptSubmit","session_id":"sP"}' | python3 "$DAEDALUS_HOME/core/lease-board.py")"
+  case "$out" in *"pushed from your shell"*) echo "$out"; return 1 ;; esac
+  [ -f "$(dirname "$(prepared)")/pushed" ]
+}
