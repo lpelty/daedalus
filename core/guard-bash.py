@@ -34,7 +34,14 @@ destination can land on a trunk, on the command line or in remote.<name>.push (c
 `update-ref` or `branch -f`; a push to the target's origin from any directory,
 judged by repository — a local path as the git directory it opens, a network
 URL as host and path in any spelling, after insteadOf — with
-`GIT_DIR`/`GIT_WORK_TREE`/`--git-dir`/`--work-tree` honoured; a
+`GIT_DIR`/`GIT_WORK_TREE`/`--git-dir`/`--work-tree` honoured; HOME or
+XDG_CONFIG_HOME set in a command that runs git (another global configuration
+can hold core.hooksPath and remote.<name>.push), a push whose configuration —
+read with the command's own HOME, XDG_CONFIG_HOME and GIT_CONFIG_* — sets
+core.hooksPath, `cd`/`pushd` options read as the shell reads them (-L, -P, -e,
+-@, --; any other option, popd and `builtin cd` placed too) and `git push
+--repo=<remote>` as the remote of a push with no repository argument
+(critic-fix review, findings 1, 2 and 4); a
 program-made terminal (`script`, `expect`, `unbuffer`, a `pty`, the suite's
 tty helper) in front of `promote.sh` or `lease.sh`, `screen`/`tmux`/`login`
 anywhere, and the suite's tty seam variable; destructive git; and writes
@@ -59,7 +66,15 @@ unzip -d, cpio -i, ditto, install, ln (its source too), cp/mv -t, patch -o,
 sqlite3 (its database and .output/.once/.save/ATTACH), sort -o, uniq, git
 --output, awk print redirects, and inline Python (parsed: open() in a write
 mode, pathlib, shutil, os) — are writes; inline perl, ruby or node code that
-writes files is denied, its targets unread. The guard is a
+writes files is denied, its targets unread. So are (critic-fix review,
+finding 3) a writer named by its path (`/bin/cp`), sed's w/W commands and
+s///w (its e command and s///e denied), base64 -o, openssl -out, xxd's output
+file, split/csplit prefixes, plutil -o (or in place), scp to a local path,
+say -o, gawk -i inplace, a scripted vim's files and the files its commands
+write (commands other than substitute, delete, global, sort, write, quit and
+their kin denied, as are -S/-s scripts), and the shell commands awk
+(system(), pipes, getline) and osascript (do shell script) run — checked
+like any command, denied when not a literal string. The guard is a
 speed bump and git's pre-push hook (core/prepush.py) a second one, which does
 not fail open when this does but runs only for `git push`; a push by a route
 this guard does not parse (a script file, an interpreter's own git library,
@@ -124,6 +139,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -207,6 +223,18 @@ TRUNK_REF = "`git %s` would move %s by hand. " + PROMOTE_RULE
 # git reads its hooks from the common git directory; GIT_COMMON_DIR moves it (measured: a push with it pointed at a
 # copy of the repository ran no pre-push hook) — critic finding 1.
 HOOKDIR_VAR = re.compile(r"^(GIT_COMMON_DIR)=")
+# git reads its global configuration from $HOME/.gitconfig and $XDG_CONFIG_HOME/git/config: either one, set in a
+# command that runs git, points git at another global configuration — whose core.hooksPath skips the pre-push hook
+# and whose remote.<name>.push aims the push at trunk (critic-fix review, finding 1: measured, `HOME=<dir> git push
+# origin` moved a bare origin's main past a refusing hook). Set as a prefix, through env, exported or assigned.
+GLOBAL_CONFIG_VAR = re.compile(r"^(HOME|XDG_CONFIG_HOME)=")
+GIT_WORD = re.compile(r"(?:^|[^A-Za-z0-9_.])git(?:$|[^A-Za-z0-9_.])")
+GLOBAL_CONFIG_ENV = ("%s is not set in front of a git command: git reads its global configuration from there, and "
+                     "another configuration can switch off the pre-push hook that guards trunk or send a push to "
+                     "trunk. Run git with the environment it has.")
+HOOKSPATH_SET = ("core.hooksPath is set (%s) in the configuration this push runs with, so git would not run the "
+                 "pre-push hook that guards trunk. Unset it (git config --unset core.hooksPath, or in your global "
+                 "git configuration) and run core/setup.sh.")
 TTY_SEAM = "DAEDALUS_TEST_TTY_ANCESTRY is the test suite's switch; nothing outside the suite sets it."
 TTY_WRAP = ("A terminal made by a program is not the operator typing: the yes, and a reason to take the pen or skip "
             "the review, are typed by a person in their own shell.")
@@ -559,6 +587,22 @@ def target_origins(root_s: str) -> frozenset:
     return frozenset(out)
 
 
+# the environment variables that change which configuration git reads (critic-fix review, finding 1)
+CONFIG_ENV_KEYS = re.compile(r"^(HOME|XDG_CONFIG_HOME|GIT_CONFIG[A-Z0-9_]*)$")
+
+
+def run_git(cmd: List[str], penv: Optional[Dict[str, str]] = None) -> Tuple[int, str, str]:
+    """v.run, with the command's own HOME / XDG_CONFIG_HOME / GIT_CONFIG_* over the hook's environment, so a
+    query reads the configuration the command would run with (critic-fix review, finding 1)."""
+    env = dict(os.environ)
+    env.update({k: val for k, val in (penv or {}).items() if CONFIG_ENV_KEYS.match(k)})
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=env)
+        return r.returncode, r.stdout, r.stderr
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, "", str(e)
+
+
 def with_cfg(repo: Path, cfg: "Cfg") -> List[str]:
     """`git -C <repo>` with the command's own -c pairs, so a query sees the configuration the command runs with."""
     cmd = ["git", "-C", str(repo)]
@@ -567,37 +611,62 @@ def with_cfg(repo: Path, cfg: "Cfg") -> List[str]:
     return cmd
 
 
-def destination_urls(repo: Path, word: str, cfg: "Cfg") -> List[str]:
+def destination_urls(repo: Path, word: str, cfg: "Cfg", penv: Optional[Dict[str, str]] = None) -> List[str]:
     """The URLs a push to <word> goes to: a configured remote's push URLs, else <word> as a URL
     after git's url.<base>.insteadOf rewriting (`ls-remote --get-url`), else <word> itself."""
     if "/" not in word and ":" not in word:
-        code, u, _ = v.run(with_cfg(repo, cfg) + ["remote", "get-url", "--push", "--all", word])
+        code, u, _ = run_git(with_cfg(repo, cfg) + ["remote", "get-url", "--push", "--all", word], penv)
         if code == 0 and u.strip():
             return [x for x in u.splitlines() if x.strip()]
-    code, u, _ = v.run(with_cfg(repo, cfg) + ["ls-remote", "--get-url", word])
+    code, u, _ = run_git(with_cfg(repo, cfg) + ["ls-remote", "--get-url", word], penv)
     return [u.strip()] if code == 0 and u.strip() else [word]
 
 
-def names_target(repo: Path, word: str, cfg: "Cfg", root: Path) -> bool:
+def names_target(repo: Path, word: str, cfg: "Cfg", root: Path, penv: Optional[Dict[str, str]] = None) -> bool:
     origins = target_origins(str(root.resolve()))
-    return any(norm_url(u, repo) in origins for u in destination_urls(repo, word, cfg))
+    return any(norm_url(u, repo) in origins for u in destination_urls(repo, word, cfg, penv))
+
+
+def push_repo_option(rest: List[str]) -> Optional[str]:
+    """The value of `--repo=<r>` / `--repo <r>` (or an abbreviation git accepts, `--rep`): the remote a push with
+    no repository argument goes to (critic-fix review, finding 4). The last one wins, as in git."""
+    val = None
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--":
+            break
+        full = push_value_option(a)
+        if full is not None:
+            name, eq, _ = a.partition("=")
+            got = wslice(a, len(name) + 1) if eq else (rest[i + 1] if i + 1 < len(rest) else None)
+            if full == "--repo" and got is not None:
+                val = got
+            i += 1 if eq else 2
+            continue
+        i += 1
+    return val
 
 
 def push_remote(repo: Path, rest: List[str], conf: Dict[str, List[str]], cur: str) -> str:
     pos = push_positionals(rest)
     if pos:
         return pos[0]
+    opt = push_repo_option(rest)
+    if opt:
+        return opt
     for k in ("branch.%s.pushremote" % cur, "remote.pushdefault", "branch.%s.remote" % cur):
         if conf.get(k):
             return conf[k][-1]
     return "origin"
 
 
-def pushes_to_target(repo: Path, rest: List[str], root: Path, cfg: Optional["Cfg"] = None) -> bool:
+def pushes_to_target(repo: Path, rest: List[str], root: Path, cfg: Optional["Cfg"] = None,
+                     penv: Optional[Dict[str, str]] = None) -> bool:
     """Decision 38: a push, from any directory, whose destination is the target's origin (by remote or literal URL)."""
     cfg = cfg if cfg is not None else Cfg()
     pos = push_positionals(rest)
-    return names_target(repo, pos[0] if pos else "origin", cfg, root)
+    return names_target(repo, pos[0] if pos else (push_repo_option(rest) or "origin"), cfg, root, penv)
 
 
 def unwrap(seg: List[str]) -> List[str]:
@@ -767,6 +836,22 @@ def dist_verb(sub: str, rest: List[str]) -> Optional[str]:
     return None
 
 
+# git push's long options that take a value, each with the shortest abbreviation git accepts for it (parse-options
+# takes any unique prefix: `--rep` is --repo; `--re` is ambiguous with --receive-pack and --recurse-submodules).
+PUSH_VALUE_LONG = {"--repo": "--rep", "--receive-pack": "--rece", "--exec": "--e", "--push-option": "--pu"}
+
+
+def push_value_option(a: str) -> Optional[str]:
+    """The value-taking push option a word spells (`-o`, or a long option or an abbreviation of one), or None."""
+    if a == "-o":
+        return "-o"
+    name = a.split("=", 1)[0]
+    if not name.startswith("--"):
+        return None
+    return next((full for full, least in PUSH_VALUE_LONG.items()
+                 if full.startswith(name) and len(name) >= len(least)), None)
+
+
 def push_positionals(rest: List[str]) -> List[str]:
     positionals: List[str] = []
     i = 0
@@ -776,7 +861,7 @@ def push_positionals(rest: List[str]) -> List[str]:
             positionals.extend(rest[i + 1:])
             break
         if a.startswith("-"):
-            i += 2 if (a in PUSH_VALUE_OPTS and "=" not in a) else 1
+            i += 2 if (push_value_option(a) is not None and "=" not in a) else 1
             continue
         positionals.append(a)
         i += 1
@@ -846,7 +931,7 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
     if sub in PLUMBING_SUBS or sub.startswith("remote-"):
         # git runs no pre-push hook for these: in the home they are refused outright, and from
         # anywhere toward the target's origin (Task 13 review, measured: send-pack moved origin's trunk).
-        if under(repo, root.resolve()) or any(names_target(repo, w, cfg, root) for w in positionals(rest)):
+        if under(repo, root.resolve()) or any(names_target(repo, w, cfg, root, penv) for w in positionals(rest)):
             return PLUMBING % (sub, mine, mine), None
         return None, None
     if refused and sub in ("push", "commit") and under(repo, root):
@@ -869,7 +954,7 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
     if sub not in ("push", "commit", "update-ref", "branch"):
         return None, None
     in_scope = (tree is not None or (target is not None and under(repo, target))
-                or (sub == "push" and pushes_to_target(repo, rest, root, cfg)))  # Decision 38
+                or (sub == "push" and pushes_to_target(repo, rest, root, cfg, penv)))  # Decision 38
     if not in_scope:
         return None, None
     if target is None:
@@ -914,7 +999,10 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         # also maps a refspec written without a destination), remote.<name>.mirror, and for a push
         # with no refspec push.default over the branch's upstream (a window's branch is cut from
         # origin/<trunk>, so it tracks the trunk). Read as the command would run, its -c pairs included.
-        conf = config_list(repo, cfg)
+        conf = config_list(repo, cfg, penv)
+        hp = [x for x in conf.get("core.hookspath") or [] if x.strip()]
+        if hp:
+            return HOOKSPATH_SET % hp[-1], None     # critic-fix review, finding 1: git would skip the pre-push hook
         remote = push_remote(repo, rest, conf, cur)
         if truthy((conf.get("remote.%s.mirror" % remote) or [""])[-1]):
             return EVERYTHING % ("%s (remote.%s.mirror is on)" % (remote, remote)), None
@@ -1040,10 +1128,11 @@ def truthy(val: str) -> bool:
     return val.strip().lower() in ("true", "yes", "on", "1")
 
 
-def config_list(repo: Path, cfg: "Cfg") -> Dict[str, List[str]]:
-    """Every configuration value the command would run with (`git config --list -z`, its -c pairs
-    included), by key; git lower-cases section and name, never a branch or remote subsection."""
-    code, out, _ = v.run(with_cfg(repo, cfg) + ["config", "--list", "-z"])
+def config_list(repo: Path, cfg: "Cfg", penv: Optional[Dict[str, str]] = None) -> Dict[str, List[str]]:
+    """Every configuration value the command would run with (`git config --list -z`, its -c pairs and its
+    configuration variables included), by key; git lower-cases section and name, never a branch or remote
+    subsection."""
+    code, out, _ = run_git(with_cfg(repo, cfg) + ["config", "--list", "-z"], penv)
     conf: Dict[str, List[str]] = {}
     for entry in (out.split("\0") if code == 0 else []):
         if entry:
@@ -1209,7 +1298,7 @@ def tree_operands(seg: List[str]) -> Tuple[List[str], List[str]]:
     _, words, _ = split_redirects(seg)
     if not words:
         return [], []
-    head, pos = words[0], positionals(words[1:])
+    head, pos = os.path.basename(words[0]), positionals(words[1:])
     if head in ("rm", "unlink"):
         return pos, []
     if head == "mv" and len(pos) >= 2:
@@ -1226,7 +1315,7 @@ def write_operands(seg: List[str]) -> List[str]:
     seg = words
     if not seg:
         return ops
-    head = seg[0]
+    head = os.path.basename(seg[0])     # critic-fix review, finding 3: `/bin/cp` is cp
     pos = positionals(seg[1:])
     if head == "sed" and any(t == "-i" or t.startswith("-i") for t in seg[1:]):
         ops.extend(t for t in seg[1:] if not t.startswith("-") and ("/" in t or t.endswith((".sh", ".py", ".md", ".json", ".yaml"))))
@@ -1346,13 +1435,456 @@ def extra_writer_operands(head: str, seg: List[str]) -> List[str]:
         if "format-patch" in args:
             ops += option_values(args, {"-o", "--output-directory"}, {"o"})
     elif head in ("awk", "gawk", "mawk", "nawk"):
-        prog = next((a for a in args if not a.startswith("-") and "=" not in a.split(" ", 1)[0]), None)
+        prog = awk_program(args)
         for m in AWK_WRITE.finditer(prog or ""):
             if m.group(1) == "|":
-                continue
+                continue            # a command pipe: embedded_code checks the command it runs
             t = m.group(2)
             ops.append(t[1:-1] if t.startswith('"') and t.endswith('"') else Word(DYN + t))
+        if prog is not None and ("inplace" in option_values(args, {"-i", "--include"}, set())
+                                 or any(a.startswith("--include=inplace") for a in args)):
+            # gawk's inplace extension rewrites every file operand after the program
+            ops += [a for a in args[args.index(prog) + 1:] if not a.startswith("-") and not ASSIGN.match(a)]
+    # critic-fix review, finding 3: the whole-file writers the guard passed with a literal transcript path
+    elif head in ("sed", "gsed"):
+        for script in sed_scripts(args)[0]:
+            ops += sed_parse(script)[0]
+    elif head == "base64":
+        ops += option_values(args, {"-o", "--output"}, {"o"})
+    elif head == "openssl":
+        ops += option_values(args, {"-out", "-keyout"}, set())
+    elif head == "xxd":
+        pos = operands_past(args, {"-c", "-cols", "-g", "-groupsize", "-l", "-len", "-s", "-seek", "-o", "-offset",
+                                   "-n", "-name"})
+        if len(pos) >= 2:
+            ops.append(pos[1])
+    elif head in ("split", "gsplit"):
+        pos = operands_past(args, {"-l", "-b", "-n", "-a", "-p", "-C", "-t", "--lines", "--bytes", "--number",
+                                   "--suffix-length", "--line-bytes", "--additional-suffix", "--separator"})
+        ops.append(pos[1] if len(pos) >= 2 else "x")        # the prefix each piece is named after
+    elif head in ("csplit", "gcsplit"):
+        ops += option_values(args, {"-f", "--prefix"}, {"f"}) or ["xx"]
+    elif head == "plutil":
+        out = option_values(args, {"-o"}, set())
+        if out:
+            ops += [o for o in out if o != "-"]
+        elif any(a in ("-convert", "-insert", "-replace", "-remove", "-create") for a in args) and pos:
+            ops.append(pos[-1])                             # converted or edited in place
+    elif head == "scp":
+        pos = operands_past(args, {"-P", "-i", "-F", "-o", "-c", "-l", "-S", "-J", "-D", "-X"})
+        if len(pos) >= 2 and not SCP_REMOTE.match(pos[-1]):
+            ops.append(pos[-1])
+    elif head == "say":
+        ops += option_values(args, {"-o", "--output-file"}, {"o"})
+    elif head in VIM_HEADS:
+        ops += vim_code(head, args)[0]
     return ops
+
+
+# ---- critic-fix review, finding 3: the whole-file writers past the finding 2 fix ----
+
+def _sed_addr(s: str, i: int) -> int:
+    n = len(s)
+    if i < n and s[i].isdigit():
+        while i < n and s[i].isdigit():
+            i += 1
+        if i < n and s[i] == "~":
+            i += 1
+            while i < n and s[i].isdigit():
+                i += 1
+    elif i < n and s[i] == "$":
+        i += 1
+    elif i < n and s[i] in "/\\":
+        if s[i] == "\\":
+            i += 1
+        d = s[i] if i < n else ""
+        i += 1
+        while i < n and s[i] != d:
+            i += 2 if s[i] == "\\" else 1
+        i += 1
+        while i < n and s[i] in "IM":
+            i += 1
+    return i
+
+
+def sed_parse(s: str) -> Tuple[List[str], bool]:
+    """(the files a sed script writes — its w and W commands and the s///w flag, each file named to the end of its
+    line —, whether it runs a command: GNU's e command or the s///e flag)."""
+    targets: List[str] = []
+    runs = False
+    i, n = 0, len(s)
+
+    def eol(j: int) -> int:
+        k = s.find("\n", j)
+        return n if k < 0 else k
+    while i < n:
+        c = s[i]
+        if c in " \t\n;{}":
+            i += 1
+            continue
+        if c == "#":
+            i = eol(i)
+            continue
+        i = _sed_addr(s, i)
+        while i < n and s[i] in " \t":
+            i += 1
+        if i < n and s[i] == ",":
+            i += 1
+            while i < n and s[i] in " \t":
+                i += 1
+            if i < n and s[i] in "+~":
+                i += 1
+                while i < n and s[i].isdigit():
+                    i += 1
+            else:
+                i = _sed_addr(s, i)
+        while i < n and s[i] in " \t!":
+            i += 1
+        if i >= n:
+            break
+        cmd = s[i]
+        i += 1
+        if cmd in "wW":
+            e = eol(i)
+            if s[i:e].strip():
+                targets.append(s[i:e].strip())
+            i = e
+        elif cmd == "e":
+            runs = True
+            i = eol(i)
+        elif cmd in "aic":
+            e = eol(i)
+            while e < n and s[e - 1] == "\\":
+                e = eol(e + 1)
+            i = e
+        elif cmd in "rR:":
+            i = eol(i)
+        elif cmd in "btTv":
+            ends = [k for k in (s.find(";", i), s.find("\n", i)) if k >= 0]
+            i = min(ends) if ends else n
+        elif cmd in "sy":
+            if i >= n:
+                break
+            d = s[i]
+            i += 1
+            for _ in range(2):
+                while i < n and s[i] != d:
+                    i += 2 if s[i] == "\\" else 1
+                i += 1
+            while cmd == "s" and i < n and s[i].isalnum():
+                f = s[i]
+                i += 1
+                if f == "e":
+                    runs = True
+                if f == "w":
+                    e = eol(i)
+                    if s[i:e].strip():
+                        targets.append(s[i:e].strip())
+                    i = e
+                    break
+        elif cmd in "qQlL":
+            while i < n and s[i] in " \t0123456789":
+                i += 1
+        elif cmd not in "=dDgGhHnNpPxzF":
+            break          # not a sed command: sed refuses the script and writes nothing
+    return targets, runs
+
+
+def sed_scripts(args: List[str]) -> Tuple[List[str], List[str]]:
+    """(every script a sed command may run — its -e values, else its first operand read both as GNU sed reads it and
+    as BSD sed does, whose bare -i takes the next word as a suffix —, the scripts GNU sed would run: only GNU sed has
+    the e command)."""
+    exprs: List[str] = []
+    firsts: Dict[str, Optional[str]] = {}
+    for flavor in ("gnu", "bsd"):
+        i, pos = 0, []
+        while i < len(args):
+            a = args[i]
+            if a == "--":
+                pos += args[i + 1:]
+                break
+            if a in ("-e", "--expression", "-f", "--file"):
+                if flavor == "gnu" and a in ("-e", "--expression") and i + 1 < len(args):
+                    exprs.append(args[i + 1])
+                i += 2
+                continue
+            if a.startswith("--"):
+                if flavor == "gnu" and a.startswith("--expression="):
+                    exprs.append(wslice(a, len("--expression=")))
+                i += 1
+                continue
+            if a.startswith("-") and len(a) > 1:
+                letters = a[1:]
+                k = next((j for j, ch in enumerate(letters) if ch in "ef"), None)
+                if k is not None:
+                    val = letters[k + 1:] or (args[i + 1] if i + 1 < len(args) else "")
+                    if flavor == "gnu" and letters[k] == "e":
+                        exprs.append(wslice(a, k + 2) if letters[k + 1:] else val)
+                    i += 1 if letters[k + 1:] else 2
+                    continue
+                i += 2 if (flavor == "bsd" and a in ("-i", "-I")) else 1
+                continue
+            pos.append(a)
+            i += 1
+        firsts[flavor] = pos[0] if pos else None
+    if exprs:
+        return exprs, exprs
+    return [x for x in (firsts["gnu"], firsts["bsd"]) if x is not None], [x for x in (firsts["gnu"],) if x is not None]
+
+
+VIM_HEADS = {"vi", "vim", "nvim", "ex", "view", "rvim", "rview", "vimdiff", "gvim", "mvim", "evim"}
+# the ex commands a scripted vim may run from here, each with the shortest abbreviation vim accepts; every other
+# command (edit, set, source, normal, !, redir, let, call, execute …) can write anywhere or run anything.
+EX_EDIT = {"substitute": "s", "&&": "&&", "&": "&", "~": "~", "delete": "d", "global": "g", "vglobal": "v",
+           "quit": "q", "qall": "qa", "quitall": "quita", "cquit": "cq", "sort": "sor", "retab": "ret", "join": "j",
+           "move": "m", "copy": "co", "t": "t", "print": "p", "number": "nu", "#": "#", "=": "=", ">": ">", "<": "<",
+           "left": "le", "right": "ri", "center": "ce", "yank": "y", "put": "pu", "undo": "u", "redo": "red",
+           "read": "r", "nohlsearch": "noh"}
+EX_WRITE = {"write": "w", "wq": "wq", "xit": "x", "exit": "exi", "update": "up", "wall": "wa", "wqall": "wqa",
+            "xall": "xa", "saveas": "sav", "file": "f"}
+EX_RANGE = re.compile(r"^(?:\s|:|\d+|[.$%,;]|'[A-Za-z<>\[\]]|/(?:\\.|[^/\\])*/?|\?(?:\\.|[^?\\])*\??|[+-]\d*)*")
+
+
+def _ex_name(word: str, table: Dict[str, str]) -> Optional[str]:
+    return next((full for full, least in table.items() if full.startswith(word) and len(word) >= len(least)), None)
+
+
+def ex_parse(cmd: str, depth: int = 0) -> Tuple[List[str], bool]:
+    """(the files an ex command line writes, whether it holds a command the guard does not read)."""
+    targets: List[str] = []
+    for part in re.split(r"(?<!\\)\|", cmd):
+        part = part[EX_RANGE.match(part).end():]
+        m = re.match(r"[A-Za-z]+|&&|[&~#=<>]", part)
+        if not m:
+            if part.strip():
+                return targets, True
+            continue
+        word, rest = m.group(0), part[m.end():]
+        name = _ex_name(word, EX_EDIT)
+        if name is not None:
+            if name in ("global", "vglobal"):
+                body = rest.lstrip("!").lstrip()
+                if body:
+                    d, j = body[0], 1
+                    while j < len(body) and body[j] != d:
+                        j += 2 if body[j] == "\\" else 1
+                    inner, more = ex_parse(body[j + 1:], depth + 1) if depth < 3 else ([], True)
+                    targets += inner
+                    if more:
+                        return targets, True
+                continue
+            if (name in ("substitute", "&", "&&", "~") and "\\=" in rest) or (name == "put" and "=" in rest) \
+                    or (name == "read" and rest.lstrip("!").lstrip().startswith("!")):
+                return targets, True
+            continue
+        name = _ex_name(word, EX_WRITE)
+        if name is None:
+            return targets, True
+        rest = rest[1:] if rest.startswith("!") else rest
+        rest = re.sub(r"\+\+\S+", "", rest).strip()
+        if rest.startswith("!"):
+            return targets, True          # `w !cmd` pipes the buffer into a shell command
+        rest = rest[2:].strip() if rest.startswith(">>") else rest
+        if rest:
+            if any(ch in rest for ch in "%#<`$") or rest.startswith("="):
+                return targets, True
+            targets.append(rest)
+    return targets, False
+
+
+def vim_code(head: str, args: List[str]) -> Tuple[List[str], bool]:
+    """(the files a scripted vim writes — its file operands, a file its commands write, -i/-w/-W/-V/--startuptime
+    files —, whether it runs something the guard does not read: a command outside EX_EDIT/EX_WRITE, -S or a -s
+    script, a vimrc other than NONE, --remote-*)."""
+    cmds: List[str] = []
+    targets: List[str] = []
+    ex_mode = head == "ex"
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if a == "--":
+            targets += args[i + 1:]
+            break
+        if a.startswith("+"):
+            c = a[1:]
+            if c and not c.isdigit() and not c.startswith("/"):
+                cmds.append(c)
+            i += 1
+            continue
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name in ("--cmd", "--startuptime"):
+                (cmds if name == "--cmd" else targets).append(val if eq else nxt)
+                i += 1 if eq else 2
+                continue
+            if name.startswith("--remote"):
+                return targets, True          # sends keys or an expression to another vim
+            i += 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            letters, took = a[1:], 1
+            for k, ch in enumerate(letters):
+                rest = letters[k + 1:]
+                if ch in "eE":
+                    ex_mode = True
+                    continue
+                if ch == "s" and ex_mode:
+                    continue
+                if ch in "cSsuUiwWTtq":
+                    val = rest or nxt
+                    took = 1 if rest else 2
+                    if ch == "c":
+                        cmds.append(val)
+                    elif ch in "Ss" or (ch in "uU" and val not in ("NONE", "NORC", "DEFAULTS")):
+                        return targets, True
+                    elif (ch == "i" and val != "NONE") or (ch in "wW" and not val.isdigit()):
+                        targets.append(val)
+                    break
+                if ch == "V":
+                    f = rest.lstrip("0123456789")
+                    if f:
+                        targets.append(f)
+                    break
+            i += took
+            continue
+        targets.append(a)
+        i += 1
+    for c in cmds:
+        more, bad = ex_parse(c)
+        targets += more
+        if bad:
+            return targets, True
+    return targets, False
+
+
+AWK_STR = r'"((?:[^"\\\n]|\\.)*)"'
+
+
+def _unescape(s: str) -> str:
+    return re.sub(r"\\(.)", r"\1", s)
+
+
+def awk_commands(prog: str) -> Tuple[List[str], bool]:
+    """(the shell commands an awk program runs — system("…"), print … | "…", "…" | getline, each a literal string
+    —, whether it runs one the guard cannot read: a command built from a variable or by concatenation)."""
+    lits: List[str] = []
+    body = re.sub(AWK_STR, lambda m: "\0%d\0" % (lits.append(m.group(1)) or len(lits) - 1), prog)
+    # regular expression literals, which may hold `|`, after an operator or at the start of a pattern
+    body = re.sub(r"(^|[(~,{;!&|]\s*)/(?:\\.|[^/\\\n])*/", r"\1R", body)
+    cmds: List[str] = []
+    bad = False
+    for m in re.finditer(r"\bsystem\s*\(\s*", body):
+        mm = re.match(r"\0(\d+)\0\s*\)", body[m.end():])
+        if mm:
+            cmds.append(_unescape(lits[int(mm.group(1))]))
+        else:
+            bad = True
+    for m in re.finditer(r"(?<!\|)\|&?(?!\|)\s*", body):
+        after = body[m.end():]
+        if after.startswith("getline"):
+            mm = re.search(r"\0(\d+)\0\s*$", body[:m.start()])
+            if mm:
+                cmds.append(_unescape(lits[int(mm.group(1))]))
+            else:
+                bad = True
+            continue
+        mm = re.match(r"\0(\d+)\0", after)
+        if mm:
+            cmds.append(_unescape(lits[int(mm.group(1))]))
+        else:
+            bad = True
+    return cmds, bad
+
+
+OSA_WRITE = re.compile(r"\bopen\s+for\s+access\b|\bwrite\b|\bsave\b|\bduplicate\b|\bmove\b|\bmake\s+new\s+file\b|"
+                       r"\bdelete\b|writeToFile|NSFileManager|createFileAtPath|\$\.system",
+                       re.I)
+
+
+def osascript_commands(args: List[str]) -> Tuple[List[str], bool]:
+    """(the shell commands `osascript -e …` runs through do shell script / doShellScript, each a literal string —,
+    whether its code runs one the guard cannot read or writes a file itself)."""
+    code = "\n".join(args[i + 1] for i, a in enumerate(args[:-1]) if a == "-e")
+    cmds: List[str] = []
+    bad = bool(OSA_WRITE.search(code))
+    for m in re.finditer(r"\bdo\s+shell\s+script\s+", code, re.I):
+        mm = re.match(AWK_STR + r"[ \t]*(?=$|\n|\)|with\b|user\b|password\b|administrator\b|altering\b|--)",
+                      code[m.end():])
+        if mm:
+            cmds.append(_unescape(mm.group(1)))
+        else:
+            bad = True
+    for m in re.finditer(r"doShellScript\s*\(\s*", code):
+        mm = re.match(r"(['\"])((?:(?!\1)[^\\]|\\.)*)\1\s*\)", code[m.end():])
+        if mm:
+            cmds.append(_unescape(mm.group(2)))
+        else:
+            bad = True
+    return cmds, bad
+
+
+def awk_program(args: List[str]) -> Optional[str]:
+    """awk's inline program: the first operand, past -F / -v / -f values (none when -f names a program file)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-f", "--file"):
+            return None
+        if a in ("-F", "-v", "--assign", "--field-separator", "-i", "--include", "-l", "--load"):
+            i += 2
+            continue
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("-") and len(a) > 1:
+            i += 1
+            continue
+        return a
+    return None
+
+
+def embedded_code(seg: List[str]) -> Tuple[List[str], Optional[str]]:
+    """(the shell commands a writer runs from its own code — checked like any command —, or the name of a language
+    whose code runs or writes what the guard cannot read): awk's system() and pipes, osascript's do shell script,
+    sed's e command, a scripted vim's commands and -S/-s scripts (critic-fix review, finding 3)."""
+    _, words, _ = split_redirects(seg)
+    if not words:
+        return [], None
+    head, args = os.path.basename(words[0]), words[1:]
+    if head in ("awk", "gawk", "mawk", "nawk"):
+        cmds, bad = awk_commands(awk_program(args) or "")
+        return cmds, ("awk" if bad else None)
+    if head == "osascript":
+        cmds, bad = osascript_commands(args)
+        return cmds, ("AppleScript" if bad else None)
+    if head in ("sed", "gsed"):
+        _, gnu = sed_scripts(args)
+        return [], ("sed" if any(sed_parse(s)[1] for s in gnu) else None)
+    if head in VIM_HEADS:
+        return [], ("vim" if vim_code(head, args)[1] else None)
+    if head == "split":
+        f = option_values(args, {"--filter"}, set())
+        return f, None
+    return [], None
+
+
+def operands_past(args: List[str], value_opts: set) -> List[str]:
+    """The operands of a command whose options in value_opts take the next word as their value."""
+    out: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return out + list(args[i + 1:])
+        if a.startswith("-") and len(a) > 1:
+            i += 2 if (a in value_opts and "=" not in a) else 1
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
+SCP_REMOTE = re.compile(r"^(?:scp://|(?:[^@/:]+@)?[^/:]+:)")
 
 
 def fill_dirs(seg: List[str], here: Path) -> List[str]:
@@ -1676,7 +2208,8 @@ def git_argv(run: List[str]) -> List[str]:
 # what write_operands knows how to read, found behind a wrapper (`sudo chmod -x …`)
 WRITE_HEADS = {"sed", "tee", "cp", "install", "ln", "rsync", "mv", "rm", "unlink", "truncate", "dd", "perl", "ruby",
                "patch", "chmod", "chown", "chgrp", "chflags", "touch", "curl", "wget", "sort", "shuf", "uniq", "sqlite3",
-               "ditto", "awk", "gawk", "mawk", "nawk", "tar", "gtar", "bsdtar", "unzip", "cpio"}
+               "ditto", "awk", "gawk", "mawk", "nawk", "tar", "gtar", "bsdtar", "unzip", "cpio", "gsed", "base64",
+               "openssl", "xxd", "split", "gsplit", "csplit", "gcsplit", "plutil", "scp", "say", "osascript"} | VIM_HEADS
 
 
 def exec_index(seg: List[str], heads: set) -> int:
@@ -1877,6 +2410,38 @@ def literal_write(p: Path, op: str, g: G) -> Tuple[Optional[str], Optional[str]]
     return None, context
 
 
+CD_FLAGS = "LPe@"      # bash's cd options (zsh's -q and -s too): none moves the directory elsewhere
+
+
+def cd_target(seg: List[str], here: Path, cmd: str) -> Path:
+    """Where `cd` / `pushd` / `popd` leave the shell (critic-fix review, finding 2): options are read as the shell
+    reads them — -L, -P, -e, -@ (a flag run of them, `-LP`) and `--` before the directory, which is the first operand
+    after them. Any other option, a missing operand after options, `-`, a `+N`/`-N` stack rotation, popd, a word
+    the shell fills in, and a relative directory while CDPATH could redirect it are places the guard cannot know."""
+    if seg[0] == "popd":
+        return UNKNOWN_CWD
+    i = 1
+    while i < len(seg):
+        a = seg[i]
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-") and a != "-":
+            if seg[0] == "cd" and len(a) > 1 and all(ch in CD_FLAGS + "qs" for ch in a[1:]):
+                i += 1
+                continue
+            return UNKNOWN_CWD
+        break
+    if i >= len(seg):
+        return Path(os.path.expanduser("~")).resolve() if i == 1 else UNKNOWN_CWD
+    op = seg[i]
+    if unresolved(op) or op == "-" or op.startswith("+"):
+        return UNKNOWN_CWD                                              # critic finding 1: nowhere the guard knows
+    if ("CDPATH=" in cmd or os.environ.get("CDPATH")) and not op.startswith(("/", "./", "../", "~")) and op != ".":
+        return UNKNOWN_CWD
+    return resolve(here, op)
+
+
 def check_command(cmd: str, cwd: Path, g: G, depth: int = 0) -> Tuple[Optional[str], List[str]]:
     """(deny reason | None, cross-lease warnings to pass on as context) for one
     command string — and, recursively, for every command inside it: $( ),
@@ -1895,6 +2460,13 @@ def check_command(cmd: str, cwd: Path, g: G, depth: int = 0) -> Tuple[Optional[s
         tokens = tokenize(cmd)
     except ValueError:
         return unparseable(cmd, cwd, g), contexts
+    # critic-fix review, finding 1: HOME / XDG_CONFIG_HOME set anywhere in a command that runs git (a prefix, env,
+    # export, a plain assignment, or a shell function or string the git runs in) points git at another global
+    # configuration. A command that runs no git keeps them.
+    home = next((m.group(1) for t in tokens for m in [GLOBAL_CONFIG_VAR.match(t.split()[0] if t.split() else t)] if m),
+                None)
+    if home and any(GIT_WORD.search(t) for t in tokens):
+        return GLOBAL_CONFIG_ENV % home, []
     bodies: List[str] = []
     strip_heredocs(cmd, bodies)
     branch_created = False
@@ -1953,12 +2525,10 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
             head in TTY_TOOLS or any("fixtures/tty/" in t for t in seg)
             or (head in INTERPRETERS and any(re.search(r"\bpty\b", t) for t in seg[1:])))):
         return TTY_WRAP, [], here, branch_created           # Decision 32: a program-made terminal
-    if seg[0] in ("cd", "pushd"):
-        if len(seg) < 2:
-            return None, [], Path(os.path.expanduser("~")).resolve(), branch_created
-        if unresolved(seg[1]) or seg[1] == "-":
-            return None, [], UNKNOWN_CWD, branch_created                # critic finding 1: nowhere the guard knows
-        return None, [], resolve(here, seg[1]), branch_created
+    if seg[0] == "builtin" and len(seg) > 1 and seg[1] in ("cd", "pushd", "popd"):
+        seg = seg[1:]                                                   # `builtin cd …` is cd
+    if seg[0] in ("cd", "pushd", "popd"):
+        return None, [], cd_target(seg, here, cmd), branch_created
     k = exec_index(seg, RUN_HEADS)
     run = seg[k:]
     rhead = os.path.basename(run[0])
@@ -2041,7 +2611,17 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
     ops = write_operands(seg)
     if w:
         ops += write_operands(seg[w:])        # behind a wrapper: `sudo chmod -x …`
-    if seg[0] == "patch" and any(t.startswith("<") for t in seg[1:]):
+    # critic-fix review, finding 3: the commands a writer runs from its own code are commands like any other
+    for part in ([seg[w:]] if w else []) + [seg]:
+        inner_cmds, why = embedded_code(part)
+        if why:
+            return CODE_WRITE % why, [], here, branch_created
+        for inner_cmd in inner_cmds:
+            reason, more = check_command(inner_cmd, here, g, depth + 1)
+            if reason:
+                return reason, [], here, branch_created
+            contexts += more
+    if os.path.basename(seg[0]) == "patch" and any(t.startswith("<") for t in seg[1:]):
         ops.append(".")        # patch < file writes its cwd (§7.3)
     if rhead in INTERPRETERS:
         code = interpreter_code(run)

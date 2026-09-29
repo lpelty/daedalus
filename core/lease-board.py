@@ -3,7 +3,10 @@
 
 Four duties (spec §4.3): render the board for this session, touch this
 session's heartbeat, recompute this session's observed changed set, and
-announce a finished/released state. It never creates, numbers or binds a
+announce a finished/released state. And first, a fifth: record the prompt
+Claude Code reports as submitted, beside the session transcript
+(transcriptlib.record_prompt — promote's transcribed yes is accepted only as
+a prompt reported here; critic-fix review, finding 3). It never creates, numbers or binds a
 lease — session-start.py does that, before the marker is written (§4.2),
 and session-start.py also renders the board at start (an event's hooks run
 in parallel, so a second SessionStart hook could not be ordered after it).
@@ -39,6 +42,13 @@ def main() -> int:
         return 0
     if not isinstance(payload, dict):
         return 0
+    if payload.get("hook_event_name", "UserPromptSubmit") == "UserPromptSubmit" \
+            and isinstance(payload.get("transcript_path"), str) and isinstance(payload.get("prompt"), str):
+        try:
+            import transcriptlib as tl
+            tl.record_prompt(payload["transcript_path"], payload["prompt"], str(payload.get("session_id") or ""))
+        except Exception as e:     # a prompt not recorded is a yes confirm refuses, never one it accepts
+            print("daedalus: the prompt was not recorded: %r" % e, file=sys.stderr)
     sid = v.export_session(payload)
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     signal.signal(signal.SIGALRM, _on_alarm)

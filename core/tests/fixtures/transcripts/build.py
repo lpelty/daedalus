@@ -13,15 +13,20 @@ record: no origin, <command-name> text), no-origin (a user text entry with no
 origin and no tag: unknown provenance), malformed (a user entry whose content
 is neither text nor a list). epoch defaults to now + 1 s. Each entry's parentUuid is
 the file's last uuid, and an operator entry is followed by the harness's reply (an
-assistant tool_use entry chained to it) — the shape transcriptlib.harness_wrote reads."""
+assistant tool_use entry chained to it) — the shape transcriptlib.harness_wrote reads. An operator turn is also
+reported the way Claude Code reports a submitted prompt to the UserPromptSubmit hook (transcriptlib.record_prompt,
+which core/lease-board.py calls — critic-fix review, finding 3): TX_RECORD=before (the default) records it before the
+turn is written, after records it after the turn and before the reply, none never reports it."""
 import copy
 import json
+import os
 import sys
 import time
 import uuid
 from pathlib import Path
 
 LIVE = Path(__file__).resolve().parent / "live.jsonl"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2].parent))       # core/, for transcriptlib
 ROWS = [json.loads(ln) for ln in LIVE.read_text().splitlines() if ln.strip()]
 
 
@@ -110,10 +115,22 @@ def main(argv):
         r.update(uuid=str(uuid.uuid4()), parentUuid=e["uuid"], timestamp=iso(at + 0.001))
         rows.append(r)
     out.parent.mkdir(parents=True, exist_ok=True)
+    order = os.environ.get("TX_RECORD", "before") if kind == "operator" else "none"
+    if order == "before":
+        report(out, text)
     with out.open("a") as fh:
-        for r in rows:
+        for i, r in enumerate(rows):
             fh.write(json.dumps(r) + "\n")
+            if i == 0 and order == "after":
+                fh.flush()
+                report(out, text)
     print(e["uuid"])
+
+
+def report(out, text):
+    """What Claude Code does when the operator submits a prompt: the UserPromptSubmit hook records it."""
+    import transcriptlib as tl
+    tl.record_prompt(str(out), text, out.stem)
 
 
 if __name__ == "__main__":

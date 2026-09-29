@@ -827,6 +827,9 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
                    "block, then ask."
                    % (what[:1].upper() + what[1:], "that yes" if must_be_yes else "those words",
                       "that yes" if must_be_yes else "those words"))
+    except tl.NotSubmitted as e:
+        raise Stop("Those words are in this session's transcript, but %s. Nothing was recorded; show %s to the "
+                   "operator and ask again." % (str(e).replace("the words are", "they are", 1), what))
     except tl.NotWritten:
         raise Stop("Those words are in this session's transcript, but not as a turn Claude Code wrote there: nothing "
                    "in the conversation follows from them, so they were added to the file afterwards. Nothing was "

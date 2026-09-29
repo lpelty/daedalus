@@ -845,3 +845,120 @@ gb.main()
     run guard "$c" "$BATS_TEST_TMPDIR/w"; allowed || { echo "not allowed: $c: $output"; return 1; }
   done
 }
+
+# ---- Plan 4 critic-fix review: routes past the finding 1–3 fixes ----
+
+@test "HOME or XDG_CONFIG_HOME set in a command that runs git is denied — a prefix, through env, exported, or assigned, before git or around a function that runs it — since git reads its global configuration from there; a push whose configuration, read as it runs, sets core.hooksPath is denied; HOME= in front of a command that runs no git is not (critic-fix review, finding 1)" {
+  scratch_and_worktree
+  H="$BATS_TEST_TMPDIR/h"; mkdir -p "$H"
+  printf '[core]\n\thooksPath = /dev/null\n[remote "origin"]\n\tpush = HEAD:refs/heads/main\n' > "$H/.gitconfig"
+  for c in "HOME=$H git push origin" "env HOME=$H git push" "export HOME=$H; git push" "HOME=$H; git push origin lease/02" \
+           "XDG_CONFIG_HOME=$H git push origin" "export XDG_CONFIG_HOME=$H && git status" "env -i HOME=$H PATH=/usr/bin git push" \
+           "HOME=$H bash -c 'git push origin lease/02'" "declare -x HOME=$H; git push origin lease/02" \
+           "HOME=$H sudo git push origin lease/02" "f() { git push origin lease/02; }; HOME=$H f" "git status; HOME=$H ls"; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB "HOME=$H git push origin" "$W2"
+  case "$output" in *"HOME is not set in front of a git command"*"pre-push hook"*) : ;; *) echo "$output"; return 1 ;; esac
+  # anywhere in a command that runs git (a function defined before it runs git after it); a command running no git keeps them
+  for c in "HOME=$H ls" "echo HOME=$H" "XDG_CONFIG_HOME=$H python3 -c 'print(1)'"; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+  # the configuration git runs with already sets core.hooksPath (the hook's own HOME here, or the repo): no push
+  run env HOME="$H" bash -c "$(declare -f guard_as); guard_as sB 'git push origin lease/02' '$W2'"
+  case "$output" in *"core.hooksPath"*"pre-push hook"*) : ;; *) echo "global: $output"; return 1 ;; esac
+  git -C "$W2" config core.hooksPath /dev/null
+  run guard_as sB 'git push origin lease/02' "$W2"; denied
+  git -C "$W2" config --unset core.hooksPath
+  run guard_as sB 'git push origin lease/02' "$W2"; allowed
+  # why: HOME= points git at another global configuration, whose core.hooksPath skips the refusing pre-push hook
+  # and whose remote.origin.push lands the push on main — measured on a plain repo with a bare origin
+  P="$BATS_TEST_TMPDIR/plain"; B="$BATS_TEST_TMPDIR/plain.git"; git init -q --bare -b main "$B"; git clone -q "$B" "$P" 2>/dev/null
+  git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m a; git -C "$P" push -q origin HEAD:main
+  printf '#!/bin/sh\nexit 1\n' > "$P/.git/hooks/pre-push"; chmod +x "$P/.git/hooks/pre-push"
+  git -C "$P" switch -q -c fix/x; git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m b
+  run git -C "$P" push -q origin HEAD:main; [ "$status" -ne 0 ]
+  run env HOME="$H" git -C "$P" push -q origin; [ "$status" -eq 0 ]
+  [ "$(git -C "$B" rev-parse main)" = "$(git -C "$P" rev-parse HEAD)" ]
+}
+
+@test "cd and pushd with options are read as the shell reads them — -L, -P, -e, -@ and -- before the directory, which is the first operand after them; any other option, a missing operand, popd, and a cd through builtin are placed too, so a trunk push or commit after them is denied (critic-fix review, finding 2)" {
+  scratch_and_worktree
+  for c in 'cd -P "$D" && git push origin HEAD:main' 'cd -P "$D" && git commit -m x' 'cd -- "$D" && git commit -m x' \
+           'cd -L "$D"; git status' 'cd -LP "$D" && git status' 'pushd -n "$D" && git status' 'cd -X x && git status' \
+           'cd -P && git status' 'popd && git status' 'builtin cd "$D" && git push origin HEAD:main'; do
+    run guard_as sB "$c" /tmp; denied || { echo "not denied: $c"; return 1; }
+  done
+  for c in 'cd -P target/thing && git push origin HEAD:main' 'cd -- target/thing && git push origin HEAD:main' \
+           'cd -P target/thing && git commit -m x' 'cd -e -P target/thing && git commit -m x' 'cd -LP target/thing && git commit -m x' \
+           'cd -- target/thing && git commit -m x' 'builtin cd target/thing && git commit -m x' 'command cd -P target/thing && git commit -m x' \
+           'pushd -- target/thing && git commit -m x'; do
+    run guard_as sB "$c" "$DAEDALUS_HOME"; denied || { echo "not denied from the home: $c"; return 1; }
+  done
+  run guard_as sB 'cd -P target/thing && git commit -m x' "$DAEDALUS_HOME"
+  case "$output" in *"You are on main in the prime's checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  for c in 'cd -P worktrees/02/thing && git push origin lease/02' 'cd -- worktrees/02/thing && git status' 'cd -P target && ls' \
+           'cd -- vault && ls'; do
+    run guard_as sB "$c" "$DAEDALUS_HOME"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+}
+
+@test "git push --repo=<remote> (and --repo <remote>, --rep=<remote>) is the remote a push with no repository argument goes to: its remote.<name>.push and .mirror are read, and a push toward the target's origin from outside the home is in scope; a repository argument still wins over it (critic-fix review, finding 4)" {
+  scratch_and_worktree
+  git -C "$W2" remote add up "$BATS_TEST_TMPDIR/origin.git"
+  for c in 'git -c remote.up.push=HEAD:refs/heads/main push --repo=up' 'git -c remote.up.push=HEAD:refs/heads/main push --repo up' \
+           'git -c remote.up.mirror=true push --repo=up' 'git -c remote.up.push=HEAD:refs/heads/main push --rep=up' \
+           'git -c remote.up.push=HEAD:refs/heads/main push --rep up'; do
+    run guard_as sB "$c" "$W2"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard_as sB 'git -c remote.up.push=HEAD:refs/heads/main push --repo=up' "$W2"
+  case "$output" in *"remote.up.push sends it there"*) : ;; *) echo "$output"; return 1 ;; esac
+  for c in 'git push --repo=up' 'git -c remote.up.push=HEAD:refs/heads/main push --repo=up origin lease/02'; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+  # from a clone outside the home whose origin is elsewhere: --repo=up names the target's origin
+  C="$BATS_TEST_TMPDIR/outside"; E="$BATS_TEST_TMPDIR/else.git"; git init -q --bare -b main "$E"; git clone -q "$E" "$C" 2>/dev/null
+  git -C "$C" remote add up "$BATS_TEST_TMPDIR/origin.git"
+  run guard_as sB 'git -c remote.up.push=HEAD:refs/heads/main push --repo=up' "$C"; denied
+  # why: with no hook, --repo=up with remote.up.push moved the trunk (the reviewer's measurement, reproduced)
+  P="$BATS_TEST_TMPDIR/plain"; B="$BATS_TEST_TMPDIR/plain.git"; git init -q --bare -b main "$B"; git clone -q "$B" "$P" 2>/dev/null
+  git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m a; git -C "$P" push -q origin HEAD:main
+  git -C "$P" remote add up "$B"; git -C "$P" switch -q -c fix/x; git -C "$P" -c user.email=t@x -c user.name=t commit -q --allow-empty -m b
+  run git -C "$P" -c remote.up.push=HEAD:refs/heads/main push -q --repo=up; [ "$status" -eq 0 ]
+  [ "$(git -C "$B" rev-parse main)" = "$(git -C "$P" rev-parse HEAD)" ]
+}
+
+@test "the whole-file writers past the finding 2 fix are writes toward the transcript — a writer named by its path (/bin/cp, /usr/bin/tee, /usr/bin/sed -i), sed's w and W commands and s///w, base64 -o, openssl -out, xxd -r, split and csplit prefixes, plutil -o, scp, ex/vim commands, say -o, awk's system() and command pipes, osascript's do shell script; ordinary uses of each are not (critic-fix review, finding 3)" {
+  P="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$(cd "$DAEDALUS_HOME" && pwd -P)" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$P"
+  T1="$P/s1.jsonl"; : > "$T1"
+  for c in "/bin/cp /tmp/x $T1" "/usr/bin/tee -a $T1" "/usr/bin/sed -i '' 's/a/b/' $T1" "sudo /bin/mv /tmp/x $T1" \
+           "sed -n 'w $T1' /tmp/x" "sed -e '1w $T1' /tmp/x" "sed -n '/x/W $T1' /tmp/x" "sed 's/a/b/w $T1' /tmp/x" \
+           "sed -n -e p -e '\$w $T1' /tmp/x" "sed --expression='1,3w $T1' /tmp/x" "sed 's/a/b/e' /tmp/x" "sed '1e echo x' /tmp/x" \
+           "base64 -d -o $T1 /tmp/x" "base64 --decode --output=$T1 -i /tmp/x" "openssl enc -d -base64 -in /tmp/x -out $T1" \
+           "openssl base64 -d -in /tmp/x -out $T1" "xxd -r /tmp/x $T1" "xxd -r -p /tmp/x $T1" "split -l 1 /tmp/x $P/s" \
+           "csplit -f $P/x /tmp/x 1" "csplit --prefix=$P/x /tmp/x 1" "plutil -convert json -o $T1 /tmp/x.plist" "plutil -convert json $T1" \
+           "scp /tmp/x $T1" "scp -P 22 host:/tmp/x $T1" "ex -sc 'wq! $T1' /tmp/x" "vim -es -c 'w! $T1' -c q /tmp/x" \
+           "vim -es -c '%s/a/b/' -c wq $T1" "vim -es +'w $T1' +q /tmp/x" "nvim --headless -c 'saveas $T1' -c q /tmp/x" \
+           "vim -es -c '!echo x >> $T1' -c q /tmp/x" "vim -es -c 'e $T1' -c '%s/a/b/' -c wq" "vim -es -c 'redir > $T1' -c q" \
+           "vim -es -c 'set backupdir=$P' -c wq /tmp/x" "vim -es -S /tmp/script.vim /tmp/x" "vim -es -c '%s/a/\\=system(\"x\")/' -c wq /tmp/x" \
+           "say -o $T1 hi" "say --output-file=$T1 hi" "awk 'BEGIN{system(\"echo x >> $T1\")}'" \
+           "awk 'BEGIN{print \"x\" | \"cat >> $T1\"}'" "awk 'BEGIN{c=\"cat >> $T1\"; print \"x\" | c}'" "awk 'BEGIN{system(c)}'" \
+           "awk 'BEGIN{\"cp /tmp/x $T1\" | getline}'" "gawk -i inplace '{print}' $T1" \
+           "osascript -e 'do shell script \"echo x >> $T1\"'" "osascript -e 'do shell script \"echo \" & x'" \
+           "osascript -e 'set f to open for access POSIX file \"$T1\" with write permission'"; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+  done
+  run guard "sed -n 'w $T1' /tmp/x"
+  case "$output" in *"the session transcript is the record of the operator's yes; nothing writes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard "awk 'BEGIN{system(c)}'"
+  case "$output" in *"I can't tell exactly where this awk code writes"*) : ;; *) echo "$output"; return 1 ;; esac
+  mkdir -p "$BATS_TEST_TMPDIR/w"
+  for c in "/bin/cp a.txt /tmp/b.txt" "sed -n '/w/p' a.txt" "sed 's/a/w/' a.txt" "sed 'y/abc/xyz/' a.txt" "sed -n 'w /tmp/out' a.txt" \
+           "sed -i '' 's/a/b/' a.txt" "sed -n p env.txt" "base64 -i a.txt -o /tmp/b64" "base64 a.txt" "openssl dgst -sha256 a.txt" \
+           "openssl enc -in a.txt -out /tmp/enc" "xxd a.txt" "xxd -l 16 $T1" "split -l 100 a.txt /tmp/part" "csplit -f /tmp/xx a.txt 5" \
+           "plutil -lint a.plist" "plutil -convert json -o /tmp/a.json a.plist" "scp a.txt host:/tmp/" "vim -es -c '%s/a/b/g' -c wq a.txt" \
+           "ex -sc 'g/^#/d' -c 'wq' a.txt" "say hello" "awk '{print \$1}' a.txt" "awk '{print | \"sort\"}' a.txt" \
+           "osascript -e 'display notification \"done\"'" "osascript -e 'do shell script \"ls /tmp\"'" "cat $T1"; do
+    run guard "$c" "$BATS_TEST_TMPDIR/w"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+}

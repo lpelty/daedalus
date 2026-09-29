@@ -29,7 +29,11 @@ conversation it went on with (plan 4 completeness critic, finding 2): the
 file's uuids are unique and each parentUuid names an entry written before it
 (else Unreadable), and the entry lies on the chain from the file's last entry
 back through parentUuid with an assistant entry — the harness's reply — after
-it there (else NotWritten). A line appended by another writer fails that.
+it there (else NotWritten). A line appended by another writer fails that. A
+whole-file rewrite does not (critic-fix review, finding 3), so the entry must
+also be a prompt Claude Code reported to the UserPromptSubmit hook as it was
+submitted, with the transcript before it byte-identical to what it was then
+(record_prompt / submitted; else NotSubmitted).
 
 Also: where a session's transcript is (transcript_for — only inside a
 directory nothing may write, Decision 36), the directories the guard and the
@@ -43,6 +47,7 @@ from __future__ import annotations
 
 import calendar
 import functools
+import hashlib
 import json
 import os
 import pwd
@@ -87,6 +92,11 @@ class NotFound(Exception):
 class NotWritten(NotFound):
     """The words are in an entry Claude Code did not write there: nothing it wrote afterwards follows from it
     (plan 4 completeness critic, finding 2 — a line appended to the file by another writer)."""
+
+
+class NotSubmitted(NotFound):
+    """The words are in an operator-typed entry, but not as a prompt Claude Code reported to Daedalus when it was
+    submitted, with the transcript before it unchanged since (critic-fix review, finding 3 — a whole-file rewrite)."""
 
 
 class NotShown(Exception):
@@ -260,9 +270,10 @@ def harness_wrote(seen: dict, e: dict) -> bool:
     another writer fails one or the other: appended last, nothing the harness wrote follows it; passed by the
     harness, the harness's later entries descend from its own last entry, not from the appended line. Measured:
     every operator-typed turn in 400 transcripts lay on its file's final chain, and all but the last turn of a
-    session had an assistant entry after it there. It raises the bar from one appended line to a forged,
-    internally consistent chain written in the very command that runs confirm; it is not proof of who wrote the
-    file — the guard's refusal to write the transcript is the defense, this is a second, independent one."""
+    session had an assistant entry after it there. It stops an appended line; it does not stop a whole-file rewrite,
+    which can insert a yes and a reply after the block and re-parent the entry after them in any earlier turn — every
+    invariant then holds through later harness writes (critic-fix review, finding 3). `submitted` is what stops
+    that; neither is proof of who wrote the file."""
     if not seen:
         return False
     cur: Optional[dict] = list(seen.values())[-1]
@@ -276,6 +287,109 @@ def harness_wrote(seen: dict, e: dict) -> bool:
         d = cur["data"]
         cur = seen.get(d.get("parentUuid") or d.get("logicalParentUuid") or "")
     return False
+
+
+# --- the prompts Claude Code reported (critic-fix review, finding 3) ---------------------------------------------
+# A whole-file rewrite can insert a yes after the block and re-parent the entry after it, and every chain invariant
+# holds through any number of later harness writes. So a yes is bound to something the transcript does not carry:
+# the UserPromptSubmit hook (core/lease-board.py) is handed each prompt by Claude Code as it is submitted, and records
+# a hash of its words with the transcript's size and a hash of its bytes at that moment. confirm accepts an operator
+# entry only when such a record exists for its words, the transcript's first <size> bytes are still those, and the
+# entry is the prompt the record reported: the last typed turn inside that prefix (Claude Code wrote it before the
+# hook ran) or the first typed turn after it (after), with the block it answers inside it. The record lives beside the
+# transcript, where the guard and the Edit check deny every write.
+
+def prompts_path(transcript: Path) -> Path:
+    return Path(transcript).with_name(Path(transcript).name + ".daedalus-prompts")
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(normalize(text).encode("utf-8")).hexdigest()
+
+
+def record_prompt(transcript_path: str, prompt: str, session_id: str = "") -> None:
+    """UserPromptSubmit: record that Claude Code reported `prompt` as submitted into this transcript, with the
+    transcript's size (to its last whole line) and a hash of those bytes, now."""
+    t = Path(transcript_path).expanduser().resolve()
+    try:
+        data = t.read_bytes()
+    except FileNotFoundError:
+        data = b""
+    data = data[:data.rfind(b"\n") + 1]
+    row = {"at": time.time(), "session_id": session_id, "prompt": _digest(prompt), "size": len(data),
+           "prefix": hashlib.sha256(data).hexdigest()}
+    with prompts_path(t).open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+def _records(path: Path) -> list:
+    try:
+        lines = prompts_path(Path(path).resolve()).read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("size"), int) and isinstance(r.get("prefix"), str):
+            out.append(r)
+    return out
+
+
+def _spans(data: bytes) -> dict:
+    """uuid -> (start, end) byte offsets of the line that carries it."""
+    out, pos = {}, 0
+    for line in data.split(b"\n"):
+        end = pos + len(line) + 1
+        try:
+            d = json.loads(line)
+        except ValueError:
+            d = None
+        if isinstance(d, dict) and isinstance(d.get("uuid"), str):
+            out.setdefault(d["uuid"], (pos, end))
+        pos = end
+    return out
+
+
+NEVER_REPORTED = ("the words are in an entry Claude Code never reported to Daedalus as a prompt the operator "
+                  "submitted, so they were written into the file some other way")
+CHANGED_AFTER = ("the transcript before those words was changed after the operator typed them, so the conversation "
+                 "they answer is not the one on screen")
+
+
+def submitted(path: Path, entries: list, e: dict, answers: Optional[dict], after: float) -> Optional[str]:
+    """None when entry e is a prompt Claude Code reported (see above) after `after`, with `answers` — the block it
+    replies to — inside the unchanged prefix; else why not."""
+    uid = (e["data"] or {}).get("uuid")
+    want = _digest(e["text"])
+    recs = [r for r in _records(path) if r.get("prompt") == want and float(r.get("at") or 0) > after]
+    if not recs:
+        return NEVER_REPORTED
+    try:
+        data = Path(path).read_bytes()
+    except OSError as err:
+        raise Unreadable("%s: %s" % (path, err.strerror or err))
+    spans = _spans(data)
+    me = spans.get(uid)
+    if me is None:
+        return NEVER_REPORTED
+    typed = sorted(spans[t["data"]["uuid"]] for t in typed_turns(entries) if t["data"].get("uuid") in spans)
+    ans = spans.get((answers["data"] or {}).get("uuid")) if answers else None
+    why = NEVER_REPORTED
+    for r in recs:
+        size = r["size"]
+        inside = me[1] <= size and all(t[1] <= me[0] or t[1] > size for t in typed if t != me)
+        beyond = me[0] >= size and not any(size <= t[0] < me[0] for t in typed) and (answers is None or (
+            ans is not None and ans[1] <= size))
+        if not (inside or beyond):
+            continue
+        if hashlib.sha256(data[:size]).hexdigest() != r["prefix"]:
+            why = CHANGED_AFTER
+            continue
+        return None
+    return why
 
 
 # Critic finding 4 (A12): the sentence doctor and confirm say when this build's transcript shape is not the one
@@ -407,6 +521,7 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     if drift:
         raise Unreadable(drift)     # critic finding 4: this build's typed turns are not the tested shape
     not_written = False
+    not_submitted: Optional[str] = None
     mark = normalize(shown_text) if shown_text else None
     shown: Optional[dict] = None
     not_shown = unknown_hit = False
@@ -428,6 +543,10 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
             if not harness_wrote(seen, e):
                 not_written = True      # critic finding 2: appended to the file, not written by Claude Code
                 continue
+            why = submitted(path, entries, e, answers, after)
+            if why:
+                not_submitted = why     # critic-fix review, finding 3: not a prompt Claude Code reported
+                continue
             return {"transcript_ref": _ref(e), "shown_ref": _ref(answers) if answers else None, "text": e["text"]}
         if kind == "unknown_provenance":
             unknown_hit = True
@@ -437,6 +556,8 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     if not_written:
         raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
                          "chain, so it was added to the file afterwards")
+    if not_submitted:
+        raise NotSubmitted(not_submitted)
     if not_shown:
         raise NotShown("the words are not the operator's first reply to an assistant turn showing the block "
                        "after the cut-off")
@@ -450,7 +571,8 @@ def operator_entry(path: Path, uuid: str) -> Optional[str]:
     seen = _chain(entries)
     for e in entries:
         if e["readable"] and (e["data"] or {}).get("uuid") == uuid:
-            return e["text"] if classify(e) == "operator" and harness_wrote(seen, e) else None
+            ok = classify(e) == "operator" and harness_wrote(seen, e) and submitted(path, entries, e, None, 0.0) is None
+            return e["text"] if ok else None
     return None
 
 

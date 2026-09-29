@@ -90,15 +90,19 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
   re-derives the evidence, records the operator's yes and pushes that exact
   merge. The yes is checked against the prime's own session transcript by
   default (`promote.confirm: transcribed` — words the operator typed after the
-  block was shown, in a later turn; an unreadable transcript is refused, never
-  passed) or typed at a terminal (`tty`). `--skip-review --reason` records the
+  block was shown, in a later turn, and a prompt Claude Code reported to the
+  UserPromptSubmit hook as it was submitted, with the transcript before it
+  unchanged since; an unreadable transcript is refused, never passed) or typed
+  at a terminal (`tty`). `--skip-review --reason` records the
   operator's written reason beside the verdict it sets aside; gates are never
   skipped. `vault/evidence/promotions.log` keeps one line per promotion.
 - **The pre-push hook** (`core/prepush.py`): git itself refuses a trunk push no
   promotion confirmed; installed idempotently in every target repo.
 - **The guard** covers every trunk-reaching git shape in every repo under the
   home — through `bash -c`, `$( )`, backticks, `env` prefixes and aliases —
-  plus `--no-verify`, `core.hooksPath`, writes under `.git/hooks/`, and
+  plus `--no-verify`, `core.hooksPath` (set by `-c`, `git config`, or already
+  in the configuration a push runs with), HOME or XDG_CONFIG_HOME set in a
+  command that runs git, writes under `.git/hooks/`, and
   distribution code by every git route; its messages say trunk is reached only
   through promote. A modified `core/` blocks at Stop. The session transcript
   cannot be written from either tool.

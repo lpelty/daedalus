@@ -180,3 +180,23 @@ ups=[h for g in d["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
 assert any("lease-board.py" in h["command"] and h["timeout"]==5 for h in ups), ups
 PY
 }
+
+@test "the prompt hook records each prompt Claude Code reports beside its transcript, and a yes it recorded is accepted while one it never saw is not (critic-fix review, finding 3)" {
+  F="$(tx_path sP)"; T0="$(now)"
+  tx "$F" operator "promote window 2" "$(plus "$T0" -60)" >/dev/null
+  tx "$F" assistant "Ready to promote window 02's work onto main." "$(plus "$T0" 2)" >/dev/null
+  printf '{"hook_event_name":"UserPromptSubmit","session_id":"sP","transcript_path":"%s","prompt":"Yes, push it."}' "$F" \
+    | python3 "$DAEDALUS_HOME/core/lease-board.py" >/dev/null
+  [ -s "$F.daedalus-prompts" ]
+  grep -q '"session_id": "sP"' "$F.daedalus-prompts"
+  said="$(TX_RECORD=none tx "$F" operator "Yes, push it." "$(plus "$T0" 5)")"
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl; print(tl.find_operator_words(sys.argv[2], "yes, push it", float(sys.argv[3]), True, "Ready to promote")["transcript_ref"]["uuid"])' \
+    "$DAEDALUS_HOME/core" "$F" "$T0"
+  [ "$output" = "$said" ] || { echo "$output"; return 1; }
+  TX_RECORD=none tx "$F" assistant "Ready to promote window 02's work onto main." "$(plus "$T0" 6)" >/dev/null
+  TX_RECORD=none tx "$F" operator "yes" "$(plus "$T0" 7)" >/dev/null
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl
+try: tl.find_operator_words(sys.argv[2], "yes", float(sys.argv[3]), True, "Ready to promote"); print("accepted")
+except tl.NotSubmitted as e: print("refused:", e)' "$DAEDALUS_HOME/core" "$F" "$T0"
+  case "$output" in "refused: "*"never reported"*) : ;; *) echo "$output"; return 1 ;; esac
+}

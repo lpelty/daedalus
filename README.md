@@ -92,7 +92,10 @@ until it is released.
   A transcript this Claude Code build writes in a shape the parser cannot read
   is refused, never passed — switch to `promote.confirm: tty` until the parser
   is updated. The transcript directory is closed to writes by both the Bash
-  guard and the Edit check.
+  guard and the Edit check, and the yes must also be a prompt Claude Code
+  reported to Daedalus as it was submitted (the UserPromptSubmit hook records
+  each one beside the transcript), with the transcript before it unchanged
+  since — a yes rewritten into the file is refused.
 - `confirm: tty` — the operator pastes one line into their own shell and
   types `yes` at the terminal; that shell pushes and finishes the rest, and
   the prime's next prompt says it happened. The confirm refuses a process
