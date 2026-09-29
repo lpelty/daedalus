@@ -1011,23 +1011,26 @@ def bring_forward(root: Path, p: dict) -> List[str]:
     return []
 
 
-def tell_marker(root: Path, p: dict, tr: Dict[str, str]) -> None:
-    """§7.2 step 6 (b): the prime session's marker told (target_base, promotions) — once per promotion."""
+def tell_marker(root: Path, p: dict, tr: Dict[str, str]) -> List[str]:
+    """§7.2 step 6 (b): the prime session's marker told (target_base, promotions) — once per promotion.
+    What it could not tell is a note (the announcement repeats it, never "brought forward")."""
     repo = p["repo"]
     sid = (p.get("prepared_by") or {}).get("session_id") or (read_leases(root).get("prime") or {}).get("session_id")
     if not sid:
-        return
+        return ["No prime session is known, so no session's marker records the promotion."]
     mp = v.marker_path(root, sid)
     m = read_json(mp)
     if m is None:
-        return
+        return ["The prime session's marker was not found, so it does not record the promotion; its next Stop may "
+                "report the trunk as moved."]
     if any(x.get("id") == p["promote_id"] for x in m.get("promotions") or [] if isinstance(x, dict)):
-        return
+        return []
     if repo == outer_of(tr):
         m["target_base"] = p["merge_sha"]
     m["promotions"] = (m.get("promotions") or []) + [{"id": p["promote_id"], "sha": p["merge_sha"],
                                                       "at": tl.iso_utc(time.time()), "repo": repo}]
     write_json(mp, m)
+    return []
 
 
 def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, yes: dict) -> List[str]:
@@ -1046,18 +1049,24 @@ def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, y
             notes.append(note % reason(e))
             return None
 
-    step(lambda: write_json(pdir / "pushed", {
-        "at": tl.iso_utc(time.time()), "hhmm": time.strftime("%H:%M"), "lease": nn, "merge_sha": p["merge_sha"],
-        "confirm_mode": mode, "tty": (yes.get("typed") or {}).get("tty")}),
-        "The pushed stamp could not be written (%s); a second confirm of this promotion is still refused, because "
-        "the yes is recorded.")
+    stamp = {"at": tl.iso_utc(time.time()), "hhmm": time.strftime("%H:%M"), "lease": nn, "merge_sha": p["merge_sha"],
+             "confirm_mode": mode, "tty": (yes.get("typed") or {}).get("tty")}
+    stamped = step(lambda: write_json(pdir / "pushed", stamp) or True,
+                   "The pushed stamp could not be written (%s); a second confirm of this promotion is still refused, "
+                   "because the yes is recorded.")
     step(lambda: ll.record_promotion(root, nn, p["promote_id"]),
          "Window " + nn + "'s lease file could not record the promotion (%s).")
     notes.extend(step(lambda: bring_forward(root, p),
                       "target/" + p["repo"] + " could not be brought forward (%s); the checkout is untouched.") or [])
-    step(lambda: tell_marker(root, p, tr),
-         "The prime session's marker could not record the promotion (%s); its next Stop may report the trunk as "
-         "moved.")
+    notes.extend(step(lambda: tell_marker(root, p, tr),
+                      "The prime session's marker could not record the promotion (%s); its next Stop may report the "
+                      "trunk as moved.") or [])
+    if stamped:
+        # The stamp is rewritten with how the follow-ups went: the prime's announcement (§4.3) waits for
+        # finished_at and repeats these notes, so it never says "brought forward" before or instead of it.
+        step(lambda: write_json(pdir / "pushed", dict(stamp, followups=list(notes),
+                                                      finished_at=tl.iso_utc(time.time()))),
+             "The pushed stamp could not record how the confirm finished (%s); the prime is not told of this push.")
     return notes
 
 

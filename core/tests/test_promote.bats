@@ -616,6 +616,26 @@ PY
   out="$(board sP)"; case "$out" in *"pushed from your shell"*) echo "announced twice: $out"; return 1 ;; esac
 }
 
+@test "tty mode: the prime's announcement says what the confirm could not finish (a dirty target/thing keeps its checkout), never that the checkout was brought forward; a stamp whose confirm has not finished is not announced yet" {
+  work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(pj merge_sha)"; pid="$(pj promote_id)"; S="$DAEDALUS_HOME/state/promote/$pid/pushed"
+  printf 'local\n' >> "$T/a.txt"; before="$(git -C "$T" rev-parse HEAD)"
+  run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing has uncommitted changes; the trunk ref is updated, the checkout is untouched."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse HEAD)" = "$before" ]; [ "$(origin_main)" = "$m" ]
+  board() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s"}' "$1" | python3 "$DAEDALUS_HOME/core/lease-board.py"; }
+  # a prompt that lands while the confirm is still finishing: the stamp is written, the follow-ups are not
+  cp "$S" "$S.done"; jedit "$S" "d.pop('finished_at', None); d.pop('followups', None)"
+  out="$(board sP)"; case "$out" in *"pushed from your shell"*) echo "announced before the confirm finished: $out"; return 1 ;; esac
+  [ -f "$S" ]; mv "$S.done" "$S"
+  out="$(board sP)"
+  case "$out" in *"already brought forward"*) echo "claimed the checkout was brought forward: $out"; return 1 ;; esac
+  case "$out" in *"Promotion of window 02's work was confirmed and pushed from your shell at "[0-9][0-9]:[0-9][0-9]" (merge ${m:0:7})"*"target/thing has uncommitted changes; the trunk ref is updated, the checkout is untouched."*) : ;; *) echo "$out"; return 1 ;; esac
+  [ -f "$DAEDALUS_HOME/state/promote/$pid/announced" ]; [ ! -f "$S" ]
+}
+
 @test "tty mode: anything but yes at the terminal pushes nothing; a transcribed confirm's stamp is never announced as pushed from a shell" {
   work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"

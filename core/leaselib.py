@@ -2037,8 +2037,9 @@ def waiting_numbers(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
 def announce_pushed(root: Path, sid: Optional[str]) -> list:
     """§4.3 'announce': a promotion confirmed in tty mode — from the operator's
     own shell (§7.4) — for which THIS session prepared is reported once, and its
-    stamp renamed `announced`. The confirming process already did the work
-    (push, target, marker, lease); this only tells the prime. A transcribed
+    stamp renamed `announced`, once the confirming process has finished the
+    work after the push (the stamp's finished_at) and saying what it could
+    not do (its followups) in place of "brought forward"; this only tells the prime. A transcribed
     confirm ran in the prime itself and is never announced (plan 4 Decision 20)."""
     out = []
     base = root / "state" / "promote"
@@ -2052,13 +2053,17 @@ def announce_pushed(root: Path, sid: Optional[str]) -> list:
             continue
         if s.get("confirm_mode") != "tty" or (p.get("prepared_by") or {}).get("session_id") != sid:
             continue
+        if not s.get("finished_at"):
+            continue          # the confirming shell is still bringing the checkout and marker forward
         try:
             os.rename(str(stamp), str(stamp.with_name("announced")))
         except OSError:
             continue          # another prompt of this session announced it first
-        out.append("Promotion of window %s's work was confirmed and pushed from your shell at %s (merge %s); your "
-                   "checkout and marker are already brought forward." % (p.get("lease"), s.get("hhmm") or "?",
-                                                                        str(s.get("merge_sha") or "")[:7]))
+        head = "Promotion of window %s's work was confirmed and pushed from your shell at %s (merge %s)" % (
+            p.get("lease"), s.get("hhmm") or "?", str(s.get("merge_sha") or "")[:7])
+        notes = [str(n) for n in s.get("followups") or [] if str(n).strip()]
+        out.append(head + ("; not everything after the push was done: " + " ".join(notes) if notes else
+                           "; your checkout and marker are already brought forward."))
     return out
 
 
