@@ -84,11 +84,35 @@ assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 @test "trunk: a target.branch origin does not have, and a nested repo with no origin/HEAD, fail closed" {
   work_on_02
   sed -i '' 's/^  branch: main$/  branch: trunk-x/' "$DAEDALUS_HOME/config.yaml"
+  # the window was cut from trunk-x (recorded in its lease file) and origin has no such branch now
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["trunks"]["thing"]="trunk-x"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
   run as_prime bash "$PROMOTE" 02; refused "Cannot resolve origin/trunk-x:"
   case "$output" in *"Fix config target.branch or the remote; promote did nothing."*) : ;; *) echo "$output"; return 1 ;; esac
   sed -i '' 's/^  branch: trunk-x$/  branch: main/' "$DAEDALUS_HOME/config.yaml"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["trunks"]["thing"]="main"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
   git -C "$T/sub" symbolic-ref --delete refs/remotes/origin/HEAD
   run as_prime bash "$PROMOTE" 02; refused "nested repo sub has no origin/HEAD; run \`git -C target/thing/sub remote set-head origin -a\` and try again."
+}
+
+@test "trunk: the window's recorded trunks are what promote merges onto; config target.branch or a nested origin/HEAD moved since the window was cut is refused naming both, before any scratch" {
+  work_on_02
+  git -C "$BATS_TEST_TMPDIR/origin.git" branch dev main
+  sed -i '' 's/^  branch: main$/  branch: dev/' "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02
+  refused "Window 02 was cut from main in thing, but config target.branch now says dev."
+  case "$output" in *"lease.sh rebase"*"main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -z "$(ls -d "$DAEDALUS_HOME"/state/promote/*/ 2>/dev/null)" ]
+  [ "$(git -C "$BATS_TEST_TMPDIR/origin.git" rev-parse dev)" = "$(origin_main)" ]
+  sed -i '' 's/^  branch: dev$/  branch: main/' "$DAEDALUS_HOME/config.yaml"
+  git -C "$BATS_TEST_TMPDIR/sub-origin.git" branch other main
+  git -C "$T/sub" fetch -q origin
+  git -C "$T/sub" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/other
+  run as_prime bash "$PROMOTE" 02
+  refused "Window 02 was cut from main in thing/sub, but that repo's origin/HEAD now points at other."
+  [ -z "$(ls -d "$DAEDALUS_HOME"/state/promote/*/ 2>/dev/null)" ]
+  git -C "$T/sub" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(pj trunk)" = "main" ]
 }
 
 @test "a merge conflict stops the prepare naming the paths and the rebase route, and removes the scratch" {

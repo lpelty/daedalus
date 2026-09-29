@@ -200,7 +200,40 @@ def window(leases: Dict[str, dict], token: str) -> Tuple[str, dict]:
     return nn, lease
 
 
-def trunks(root: Path) -> Dict[str, str]:
+def trunks(root: Path, nn: str, lease: dict) -> Dict[str, str]:
+    """repo -> trunk, outer first: the trunks the window's lease file recorded at
+    create/adopt (§7 preamble) — the same ones `lease.sh rebase` brings the
+    window up to date with. The current config target.branch and each nested
+    repo's origin/HEAD must still name them: a trunk moved since the window was
+    cut is refused, naming both, rather than promoted onto a branch the window
+    was never built or rebased against. A lease with no trunks recorded (cut
+    before they were) takes the current ones, as rebase does."""
+    now = current_trunks(root)
+    rec = lease.get("trunks") or {}
+    if not rec:
+        return now
+    if set(rec) != set(now):
+        raise Stop("Window %s was cut for the repos %s, but config now names %s. Promote merges only onto the trunks "
+                   "a window was cut from. Put config target.nested back, or move window %s's work to a new window; "
+                   "then run promote again." % (nn, ", ".join(sorted(rec)), ", ".join(sorted(now)), nn))
+    outer = next(iter(now))
+    for repo, trunk in now.items():
+        if rec[repo] == trunk:
+            continue
+        if repo == outer:
+            fix = "Set config target.branch back to %s" % rec[repo]
+            moved = "config target.branch now says %s" % trunk
+        else:
+            fix = "Point it back (`git -C target/%s remote set-head origin %s`)" % (repo, rec[repo])
+            moved = "that repo's origin/HEAD now points at %s" % trunk
+        raise Stop("Window %s was cut from %s in %s, but %s. Promote merges only onto the trunk a window was cut "
+                   "from, the one `core/lease.sh rebase` brings it up to date with (%s). %s, or move window %s's "
+                   "work to a window cut from %s; then run promote again."
+                   % (nn, rec[repo], repo, moved, rec[repo], fix, nn, trunk))
+    return {repo: rec[repo] for repo in now}
+
+
+def current_trunks(root: Path) -> Dict[str, str]:
     """repo -> trunk, outer first: config target.branch for the outer repo, each
     nested repo's origin/HEAD (§7 preamble), read now — fail closed."""
     try:
@@ -504,7 +537,7 @@ def prepare(root: Path, a: dict) -> int:
     leases = read_leases(root)
     me = who(root, leases)
     nn, lease = window(leases, a["token"])
-    tr = trunks(root)
+    tr = trunks(root, nn, lease)
     dirty(root, nn, tr)
     shas = fetch_trunks(root, tr)
     fetched_at = time.strftime("%H:%M")
