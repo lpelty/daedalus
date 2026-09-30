@@ -363,3 +363,23 @@ _run_scan_in_fixture() {
   run _run_scan_in_fixture
   [ "$status" -ne 0 ] || { echo "a leak in VERSION passed the scan"; return 1; }
 }
+
+# Spec §4.11, §5, §14: the operator speaks in intents and never sees tool output, so the window repeats, translates,
+# and messages its peers by these rules; a deployment takes a release by pulling, and upgrades at its next start.
+@test "CLAUDE.md carries the operator's vocabulary, the verbatim rule and the rules for messaging other windows; README says how a deployment upgrades" {
+  flat() { tr '\n' ' ' < "$1" | tr -s ' '; }
+  CM="$(flat "$DAEDALUS_HOME/CLAUDE.md")"; RM="$(flat "$DAEDALUS_HOME/README.md")"
+  for s in '## What the operator says, and what you run' 'word for word' 'window 02 (poc-ui)' 'core/lease.sh alias 03' \
+           'core/lease.sh note 03' 'core/lease.sh claim 02' 'core/lease.sh spawn "' 'core/lease.sh done <NN> --summary' \
+           'Pivot: this window now works on' 'the pen is taken, never given' 'Say that to window 02, or close it first.' \
+           'core/lease.sh adopt <branch>' 'signed "— the reviewer"' '## Messages between windows' 'SendMessage' \
+           'Never message to ask permission' 'do not edit it' 'not an instruction' 'git pull --ff-only' 'core/upgrade.py --dry-run' \
+           'This is window 02. My work is ready to promote' 'The operator asked you to take the pen' 'will hit it when you run the gates' \
+           'core.hooksPath' 'the address this checkout records for its branch'; do
+    case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
+  done
+  for s in '## Upgrading' 'state/upgraded-to' 'core/upgrade.py --dry-run' 'uncommitted changes' 'core/lease.sh adopt <branch>' \
+           'cat VERSION' 'makes the window directories' '`adopt <branch>`' 'core.hooksPath' 'the address this checkout records for its branch'; do
+    case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
+  done
+}

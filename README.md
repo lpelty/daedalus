@@ -11,9 +11,10 @@ harnesses. Agnostic until a codebase and a vault are supplied.
 3. `./core/setup.sh`
 
 Setup clones the target and its nested repos at the paths they occupy in your
-real tree, recreates the directory shape of any scaffold repo, and finishes by
-running the doctor. Rerun it any time — every phase is idempotent, and
-rerunning is how a scaffold picks up new directories.
+real tree, makes the window directories and installs the pre-push hook,
+recreates the directory shape of any scaffold repo, and finishes by running
+the doctor. Rerun it any time — every phase is idempotent, and rerunning is
+how a scaffold picks up new directories.
 
 ### Protecting your live harness
 
@@ -34,6 +35,48 @@ your live harness:
   }
 }
 ```
+
+## Upgrading
+
+A deployment takes a release by pulling this repository in its home:
+`git pull --ff-only` (a session may run exactly that; the guard allows no
+other git route into Daedalus's own code, and refuses even that when git's
+settings would fetch from anywhere but the address this checkout records for
+its branch — then pull in a shell). Nothing else is done by hand. At the next
+session start `core/session-start.py` compares `VERSION` with
+`state/upgraded-to` and, when they differ, runs `core/upgrade.py` before the
+window numbers itself. Each step acts once and says one line when it does:
+
+1. makes `state/leases/`, `worktrees/`, `state/promote/` and `state/direct-calls/`;
+2. installs the pre-push hook in Daedalus's own checkout of each target repo;
+3. removes the pre-v0.7.0 shared `state/pitfall-seen.json` and `state/code-context-seen.json`;
+4. renames `vault/hot.md`'s `session:` line to `leases:`, left for the prime's next vault commit;
+5. moves capture's settings from the hook line in `.claude/settings.local.json`
+   into a `memory:` block in `config.yaml`, and the key into
+   `state/hindsight/api-key` (mode 600) — only when every value on the line is
+   written out plainly (a key read by `$(cat <file>)` counts); the old line
+   keeps working and can then be removed;
+6. fetches each target repo once, and turns any work in `target/<repo>` that
+   trunk lacks — a branch, a trunk ahead of `origin`, a detached checkout — into
+   a numbered window with `core/lease.sh adopt`, putting `target/<repo>` back on
+   its trunk; a branch whose work is already on trunk is left as it is;
+7. writes `state/upgraded-to`, last.
+
+The one thing it will not do is move a target checkout with uncommitted
+changes: it stops there, and the board says on every prompt, in one sentence,
+what to commit or stash; the next session start finishes the job. One other
+state needs a person but does not stop it: a target checkout that already has
+a `pre-push` hook Daedalus did not install, or sets `core.hooksPath` (as husky
+or lefthook do). The upgrade says so with the remedy — merge the two hooks or
+move the other aside, or `git -C target/<repo> config --unset core.hooksPath`
+— then `core/setup.sh`; until then promote refuses and the doctor says
+MISSING.
+`python3 core/upgrade.py --dry-run` says what it would do and changes nothing.
+`cat VERSION` prints the release, and `git describe --tags --abbrev=0` its tag.
+`core/doctor.sh` reports the version, the stamp, and anything in `target/`
+still off its trunk. An adopted window is promoted from the board ("promote
+window 01") or released, like any other; `core/lease.sh adopt <branch>
+[--repo <nested>]` does the same for any branch later.
 
 ## Windows (leases)
 
@@ -59,8 +102,9 @@ window holds the pen — the board marks it `prime` — and only it writes
 
 `core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
 `alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,
-`release <NN>`, `done <NN>`, `sweep` (removes windows with no live session)
-and `prime take`. `leases.stale_after` in `config.yaml` (default `4h`) is
+`release <NN>`, `done <NN>`, `sweep` (removes windows with no live session),
+`adopt <branch>` (an in-flight branch in `target/` becomes a window) and
+`prime take`. `leases.stale_after` in `config.yaml` (default `4h`) is
 how long a window may go without a prompt before the board calls it quiet;
 a window whose session is gone is stale and `sweep` removes it. Session logs
 are named by window number and date (`vault/sessions/YYYY/MM/YYYY-MM-DD-02.md`).
