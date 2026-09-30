@@ -245,9 +245,10 @@ Releases before v0.7.0 wired capture as a `SessionEnd` command in
 command line. That line keeps working — its prefixes override the block — so
 nothing breaks while you move the values into `memory:` (the bank, the
 transcript directory, and the key into `state/hindsight/api-key`). Once they
-are there, the line can be removed; `core/doctor.sh` says so. The
-`UserPromptSubmit` line for `recall-inject.py` (below) keeps its prefixes in
-this release.
+are there, the line can be removed; `core/doctor.sh` says so.
+From v0.7.0 the upgrade does this move for you at the first session start after
+the pull (see "Upgrading"), and `recall-inject.py` reads the block too, so its
+line needs no prefixes either.
 
 ### What happens when extraction fails
 
@@ -281,11 +282,8 @@ so continuity survives a session boundary without anyone asking for it. It
 uses the same bank and key as capture, and it is optional — a deployment
 without it works, and the skill still does.
 
-In this release the injector cannot read the `memory:` block yet (a later
-release moves it there), so its hook line still carries its own values as
-prefixes. That makes it the one hook line that names the key — so it reads
-the key from the same file at run time instead of having it typed in, and the
-key itself never appears in the command.
+It reads the same `memory:` block capture does, so its hook line carries no
+values and no key; a `TENANT_*` prefix on the line still overrides the block.
 
 Add to `.claude/settings.local.json`:
 
@@ -297,7 +295,7 @@ Add to `.claude/settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "HINDSIGHT_API_TENANT_API_KEY=\"$(cat /path/to/daedalus/state/hindsight/api-key)\" TENANT_HOME=/path/to/daedalus TENANT_BANK=daedalus TRANSCRIPT_DIR=/path/to/daedalus/transcripts python3 /path/to/daedalus/core/recall-inject.py"
+            "command": "python3 /path/to/daedalus/core/recall-inject.py"
           }
         ]
       }
@@ -310,7 +308,7 @@ The injector fails silent on every path — unreachable backend, absent
 configuration, malformed input, empty result. It emits nothing and exits 0,
 so a session runs normally whether or not memory is reachable. Its gates are
 deliberately conservative: prompts shorter than four words are skipped, and
-at most five memories are surfaced. Those numbers are a starting position,
+at most ten memories are surfaced. Those numbers are a starting position,
 and a recorded miss is what argues for loosening them.
 
 ### Pitfall triggers

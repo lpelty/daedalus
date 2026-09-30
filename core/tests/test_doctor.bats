@@ -1162,3 +1162,20 @@ doctor_upgrade_fixture() {
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   case "$output" in *"OK       session registry: "*"sessions/ present (1 entries)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "doctor: with a usable memory: block, a recall-inject.py line that still carries TENANT_* is a NOTE saying its prefixes can go; a bare one is not" {
+  doctor_memory_fixture
+  printf 'memory:\n  bank: testbank\n' >> "$DAEDALUS_HOME/config.yaml"
+  printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/recall-inject.py"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     .claude/settings.local.json still runs recall-inject.py with TENANT_* on its hook line — it reads the memory: block in config.yaml now; that line's prefixes can be removed"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 core/recall-inject.py"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"still runs recall-inject.py"*) echo "$output"; return 1 ;; esac
+  # A block recall could not use (MISSING already) never says the prefixes can go: they are what still works.
+  printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"TENANT_BANK=b python3 core/recall-inject.py"}]}]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '  capture_interval: 0\n' >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"MISSING"*"memory: memory.capture_interval"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"still runs recall-inject.py"*) echo "$output"; return 1 ;; esac
+}

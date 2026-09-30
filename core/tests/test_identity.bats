@@ -284,11 +284,12 @@ _run_scan_in_fixture() {
 # The recall-inject example is the one hook line that still takes the key as a
 # prefix in this release. It must read the key from the file at run time, never
 # carry a literal key, and must not claim to share the memory: block it cannot read.
-@test "README never shows the key typed on a hook command line; recall-inject reads it from the key file" {
+@test "README never shows the key typed on a hook command line; its recall-inject example carries no prefixes, because the injector reads the memory: block" {
   run grep -nE 'HINDSIGHT_API_TENANT_API_KEY=[^"$ \\]' "$DAEDALUS_HOME/README.md"
   [ "$status" -ne 0 ] || { echo "key typed on a command line: $output"; return 1; }
-  run grep -qF 'HINDSIGHT_API_TENANT_API_KEY=\"$(cat /path/to/daedalus/' "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ]
-  run grep -q "shares the credentials above" "$DAEDALUS_HOME/README.md"; [ "$status" -ne 0 ]
+  run grep -qF '"command": "python3 /path/to/daedalus/core/recall-inject.py"' "$DAEDALUS_HOME/README.md"; [ "$status" -eq 0 ]
+  run grep -q 'TENANT_BANK=daedalus TRANSCRIPT_DIR=/path/to/daedalus/transcripts python3 /path/to/daedalus/core/recall-inject.py' "$DAEDALUS_HOME/README.md"; [ "$status" -ne 0 ]
+  run grep -q "cannot read the \`memory:\` block yet" "$DAEDALUS_HOME/README.md"; [ "$status" -ne 0 ]
 }
 
 @test "runtime-evaluated PEP 604 unions carry the future import (3.9 deployments)" {

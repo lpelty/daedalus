@@ -19,17 +19,24 @@ stdin, absent configuration, empty result — exits 0 and emits nothing. A
 hook that errors is a hook a deployment turns off, and recall is an
 enhancement: a session runs without it.
 
-Consumes the same env as core/capture.py (TENANT_HOME, TENANT_BANK,
-TRANSCRIPT_DIR required; HINDSIGHT_API_URL, HINDSIGHT_API_TENANT_API_KEY
-optional) and reuses its HTTP path rather than opening a second one.
+Its configuration is the deployment's memory: block in config.yaml, read through
+lib.sh memory_env — the one place capture reads it too (spec §4.7). A TENANT_BANK
+(and the other TENANT_* / HINDSIGHT_* variables) in the hook's environment still
+wins, so a hook line written for an older release keeps working. It reuses
+capture.py's HTTP path rather than opening a second one.
 
 Wire it in a deployment's .claude/settings.local.json; see README.md.
 """
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 
 # The query path lives in capture.py. Importing it keeps one HTTP
 # implementation and one credential resolution for the whole product.
@@ -56,13 +63,42 @@ MAX_RESULTS = 10
 TIMEOUT_SECS = 5
 
 
-def _config() -> dict | None:
-    """Resolve the bank and API base, or None when unconfigured."""
-    import os
+def _memory_env() -> dict:
+    """The memory: block through lib.sh memory_env (spec §4.7 "one place"; plan 5 Decision 23), as
+    NAME -> value; {} when the block is absent or unusable, or lib.sh does not answer in two seconds."""
+    try:
+        p = subprocess.run(["bash", "-c", 'source "$1" >/dev/null 2>&1 && memory_configured && memory_env', "_",
+                            str(ROOT / "core" / "lib.sh")], capture_output=True, text=True, timeout=2,
+                           stdin=subprocess.DEVNULL, env=dict(os.environ, DAEDALUS_HOME=str(ROOT)))
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if p.returncode != 0:
+        return {}
+    out = {}
+    for line in p.stdout.splitlines():
+        if not line.startswith("export "):
+            continue
+        try:
+            words = shlex.split(line[len("export "):])
+        except ValueError:
+            continue
+        if len(words) == 1 and "=" in words[0]:
+            k, val = words[0].split("=", 1)
+            out[k] = val
+    return out
 
+
+def _config() -> dict | None:
+    """Resolve the bank and API base, or None when unconfigured. The environment wins; else the memory: block,
+    whose values (the key among them) are placed in the environment for capture._req to read."""
     bank = os.environ.get("TENANT_BANK")
     if not bank:
-        return None
+        env = _memory_env()
+        bank = env.get("TENANT_BANK")
+        if not bank:
+            return None
+        for k, val in env.items():
+            os.environ.setdefault(k, val)
     return {
         "bank": bank,
         "api": os.environ.get("HINDSIGHT_API_URL", "http://127.0.0.1:8888"),

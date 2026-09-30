@@ -204,7 +204,8 @@ fi
 local_settings="$DAEDALUS_HOME/.claude/settings.local.json"
 # How settings.local.json still wires capture.py, judged one hook command at a
 # time by walking the JSON: prints "wired" when some command runs capture.py,
-# and "leftover" when such a command also carries a TENANT_* assignment. A line
+# and "leftover" when such a command also carries a TENANT_* assignment, and
+# "recall-leftover" when a recall-inject.py command carries one. A line
 # grep over a one-line file matched a recall-inject.py TENANT_* prefix
 # followed, later on the same line, by an unprefixed capture.py command.
 local_capture_wiring() {
@@ -216,18 +217,22 @@ try:
 except (OSError, ValueError):
     sys.exit(0)
 hooks = d.get("hooks") if isinstance(d, dict) else None
-cmds = []
+cmds, recall = [], []
 for groups in (hooks.values() if isinstance(hooks, dict) else []):
     for g in (groups if isinstance(groups, list) else []):
         for h in ((g.get("hooks") or []) if isinstance(g, dict) else []):
             c = h.get("command") if isinstance(h, dict) else None
             if isinstance(c, str) and "capture.py" in c:
                 cmds.append(c)
+            if isinstance(c, str) and "recall-inject.py" in c:
+                recall.append(c)
 out = []
 if cmds:
     out.append("wired")
 if any(re.search(r"(^|\s)TENANT_[A-Z_]*=", c) for c in cmds):
     out.append("leftover")
+if any(re.search(r"(^|\s)TENANT_[A-Z_]*=", c) for c in recall):
+    out.append("recall-leftover")
 print(" ".join(out))
 PY
 }
@@ -242,17 +247,22 @@ if memory_configured; then
     mem_bank="$(printf '%s' "$mem_vals" | cut -f1)"
     mem_interval="$(printf '%s' "$mem_vals" | cut -f2)"
     mem_tdir="$(printf '%s' "$mem_vals" | cut -f3)"
+    mem_usable=1
     log "OK       memory: bank $mem_bank, capture every $mem_interval s"
     if [ ! -d "$mem_tdir" ]; then
       log "NOTE     memory: transcript directory $mem_tdir does not exist — set memory.transcript_dir in config.yaml (a hook names its own transcript; this is the fallback core/close.sh uses)"
     fi
   fi
-  # Only the capture.py line: the recall-inject.py line keeps its TENANT_*
-  # prefixes until it moves onto memory_env (plan 5), so it must not be named.
+  # Each line judged alone (recall-inject.py reads the block too since v0.7.0).
+  # The recall line is named only when the block is usable: against a block
+  # recall cannot read, its prefixes are what keeps recall working.
   if case " $local_capture " in *" leftover "*) true ;; *) false ;; esac; then
     log "NOTE     .claude/settings.local.json still runs capture.py with TENANT_* on its hook line — the memory: block in config.yaml now carries them and the tracked SessionEnd hook flushes; that line can be removed"
   fi
-elif [ -n "$local_capture" ]; then
+  if [ "${mem_usable:-0}" = 1 ] && case " $local_capture " in *" recall-leftover "*) true ;; *) false ;; esac; then
+    log "NOTE     .claude/settings.local.json still runs recall-inject.py with TENANT_* on its hook line — it reads the memory: block in config.yaml now; that line's prefixes can be removed"
+  fi
+elif case " $local_capture " in *" wired "*) true ;; *) false ;; esac; then
   log "NOTE     memory: block absent from config.yaml — Stop-cadence capture is off; a SessionEnd capture wired in .claude/settings.local.json still runs"
 else
   log "NOTE     memory: block absent from config.yaml — episodic capture is off (optional; see \"Episodic memory capture\" in README.md)"

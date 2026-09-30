@@ -278,3 +278,44 @@ assert len(rendered) == 10, f'expected 10 rendered memories, got {len(rendered)}
 " "$BATS_TEST_TMPDIR/out.json"
   [ "$status" -eq 0 ]
 }
+
+# A home whose memory: block names the bank, the server and the key file; the stub records the path and the
+# bearer of the one request it gets. No TENANT_* or HINDSIGHT_* in the environment (spec §4.7 "one place").
+block_home() {
+  H="$BATS_TEST_TMPDIR/home2"; mkdir -p "$H/core" "$H/state/hindsight"
+  cp "$ROOT/core/lib.sh" "$ROOT/core/recall-inject.py" "$ROOT/core/capture.py" "$H/core/"
+  printf 'blockkey\n' > "$H/state/hindsight/api-key"; chmod 600 "$H/state/hindsight/api-key"
+  PORT=$(python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()")
+  printf "memory:\n  bank: 'blockbank'\n  api_url: 'http://127.0.0.1:%s'\n  api_key_file: state/hindsight/api-key\n" "$PORT" > "$H/config.yaml"
+  python3 - "$PORT" "$BATS_TEST_TMPDIR/seen" <<'PY' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        open(sys.argv[2], "a").write("%s %s\n" % (self.path, self.headers.get("Authorization")))
+        body = json.dumps({"results": [{"type": "world", "text": "From the block's bank."}]}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  STUB_PID=$!
+  i=0; while [ "$i" -lt 50 ] && ! python3 -c "import socket,sys;s=socket.socket();s.settimeout(0.2);sys.exit(0 if s.connect_ex(('127.0.0.1',$PORT))==0 else 1)"; do i=$((i+1)); done
+  unset TENANT_HOME TENANT_BANK TRANSCRIPT_DIR HINDSIGHT_API_URL HINDSIGHT_API_TENANT_API_KEY DAEDALUS_HOME DAEDALUS_CONFIG
+}
+
+@test "with no TENANT_* in its environment the injector reads the memory: block — its bank, its server, its key — through lib.sh memory_env" {
+  block_home
+  run bash -c "printf '%s' '{\"prompt\":\"what did we establish about how the scheduler runs goals\"}' | python3 '$H/core/recall-inject.py'"
+  stop_stub
+  [ "$status" -eq 0 ]
+  case "$output" in *"From the block's bank."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(cat "$BATS_TEST_TMPDIR/seen")" in *"/banks/blockbank/memories/recall Bearer blockkey"*) : ;; *) cat "$BATS_TEST_TMPDIR/seen"; return 1 ;; esac
+}
+
+@test "a TENANT_BANK on the hook line still wins over the block (the override rule capture has)" {
+  block_home
+  run bash -c "printf '%s' '{\"prompt\":\"what did we establish about how the scheduler runs goals\"}' | TENANT_BANK=linebank HINDSIGHT_API_URL=http://127.0.0.1:$PORT python3 '$H/core/recall-inject.py'"
+  stop_stub
+  case "$(cat "$BATS_TEST_TMPDIR/seen")" in *"/banks/linebank/"*) : ;; *) cat "$BATS_TEST_TMPDIR/seen"; return 1 ;; esac
+}
