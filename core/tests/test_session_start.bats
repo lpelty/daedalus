@@ -598,3 +598,21 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("worktree_ready", True) is not False, d' "$DAEDALUS_HOME/state/leases/02.json"
   [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]
 }
+
+@test "step 0: the upgrade is given its own share of the start, never the whole worktree budget — 12 s of 20 at the default, so the bind always keeps at least 8 s; the share shrinks with the budget" {
+  # A stand-in upgrade records how far away the deadline it was given is. With the share set back to the
+  # whole worktree budget (review, 2026-09-29) every other step-0 test still passed: their fetch cap and
+  # lock hold end long before either deadline. This one reads the deadline itself.
+  printf 'import pathlib, time\ndef run(root, dry=False, deadline=None, upto=6):\n    pathlib.Path(%s).write_text("%%.3f" %% (deadline - time.time()))\n    return [], None\ndef pending_line(root): return None\n' \
+    "'$BATS_TEST_TMPDIR/share'" > "$DAEDALUS_HOME/core/upgrade.py"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1 startup                                    # the default: 30 s hook, 20 s worktree budget
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  python3 -c 'import sys; x=float(open(sys.argv[1]).read()); assert 10.5 < x <= 12.0, "the upgrade was given %.3f s, not its 12 s share of 20 (the bind must keep at least 8 s)" % x' "$BATS_TEST_TMPDIR/share"
+  rm "$BATS_TEST_TMPDIR/share"
+  P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
+  run env LEASE_TEST_HOOK_BUDGET=20 bash -c "$(declare -f start); start s2 startup"   # 10 s worktree budget
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  python3 -c 'import sys; x=float(open(sys.argv[1]).read()); assert 4.5 < x <= 6.0, "the upgrade was given %.3f s, not its 6 s share of 10" % x' "$BATS_TEST_TMPDIR/share"
+}
