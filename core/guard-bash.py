@@ -14,8 +14,16 @@ recursive check_command, so a command reached any of those ways passes every
 rule; nesting deeper than four is denied); distribution code by every git route
 (`apply`, `am`, `cherry-pick`, `merge`, `pull`, `rebase`, `stash pop|apply`,
 `checkout <rev>`, `switch <branch>`, `restore --source` in Daedalus's own
-checkout, `patch < file` writing its cwd — except exactly `git pull --ff-only`
-in Daedalus's own checkout, the release pull (plan 5 Decision 17)); `--no-verify` (abbreviated too —
+checkout, `patch < file` writing its cwd); in Daedalus's own checkout every git
+command but reading ones (status, log, diff, show, fetch …) and the release
+pull — exactly `git pull --ff-only`, with no other global option than -C,
+allowed only while the address git will fetch is the one the checkout's own
+.git/config records for its branch, nothing outside it bending that (plan 5
+Decision 17; Task 9 review — the §6.1 record compares the disk with HEAD, so a
+command that moves HEAD, or a pull aimed elsewhere, would pass it); `git config`
+writes at the global or system scope or into a named file that decide where a
+pull reads from (remote.*, branch.*, url.*, pull.*, http.*, …), from anywhere;
+`--no-verify` (abbreviated too —
 git takes any unique prefix of a long option); `core.hooksPath` by `-c`,
 `--config-env` and `git config`, the GIT_CONFIG_* variables that point git at
 other configuration (GIT_CONFIG_GLOBAL, _SYSTEM, _PARAMETERS, _COUNT/_KEY/_VALUE
@@ -738,6 +746,8 @@ class Cfg(dict):
         super().__init__()
         self.pairs: List[Tuple[str, str]] = []
         self.env_keys: List[str] = []
+        self.globals: List[str] = []     # every global option before the subcommand but -C, -c and --config-env
+        self.base: Optional[Path] = None  # where git runs, after every -C
 
 
 def git_parts(seg: List[str], cwd: Path, penv: Optional[Dict[str, str]] = None) -> Tuple[Path, List[str], Cfg]:
@@ -760,6 +770,8 @@ def git_parts(seg: List[str], cwd: Path, penv: Optional[Dict[str, str]] = None) 
             i += 2
         else:
             i += 1
+        if name not in ("-C", "-c", "--config-env"):
+            cfg.globals.append(name)
         if name == "-C":
             base = resolve(base, val)
         elif name in ("-c", "--config-env"):
@@ -773,6 +785,7 @@ def git_parts(seg: List[str], cwd: Path, penv: Optional[Dict[str, str]] = None) 
             gd = val
         elif name == "--work-tree":
             wt = val
+    cfg.base = base
     # a relative --git-dir / GIT_DIR is relative to where git runs, after every -C
     if gd:
         p = resolve(base, gd)
@@ -842,12 +855,143 @@ RELEASE_PULL_WORDS = {"--ff-only", "-q", "--quiet"}
 
 def release_pull(sub: str, rest: List[str], cfg: "Cfg", penv: Dict[str, str]) -> bool:
     """`git pull --ff-only` and nothing else, in Daedalus's own checkout: the one way a release reaches the home
-    (PRD §5.4 "updating is `git pull`, forever"; spec §13 Q9b; plan 5 Decision 17). A fast-forward from the
-    checkout's own upstream carries no local edit, and the integrity record — disk against HEAD — is unchanged
-    in kind. Any other argument, a -c pair, --config-env or a GIT_* prefix and it is an ordinary pull. Not
-    closed: a session that repointed remote.origin.url before pulling — the unparsed-route class §7.3 concedes."""
+    (PRD §5.4 "updating is `git pull`, forever"; spec §13 Q9b; plan 5 Decision 17). Any other argument, any global
+    option but -C (--git-dir with --work-tree elsewhere moved the home's HEAD and wrote the files outside it — Task 9
+    review, finding 2), a -c pair, --config-env or a GIT_* prefix and it is an ordinary pull. The words alone do not
+    make it the release: release_origin_problem reads, as the command runs, where the pull would read from."""
     return (sub == "pull" and "--ff-only" in rest and all(r in RELEASE_PULL_WORDS for r in rest)
-            and len(cfg) == 0 and not cfg.env_keys and not any(k.startswith("GIT_") for k in penv))
+            and len(cfg) == 0 and not cfg.env_keys and not cfg.globals and not any(k.startswith("GIT_") for k in penv))
+
+
+RELEASE_REFUSED = ("The release pull is refused: %s. A release is taken from the address this checkout itself records "
+                   "for its branch, and nothing else; the operator can pull the release in a shell.")
+
+
+def release_origin_problem(repo: Path) -> Optional[str]:
+    """Why `git pull --ff-only` in Daedalus's own checkout would not read the release from where the checkout
+    itself says it comes from, or None (Task 9 review, finding 1). Read with git's effective configuration — every
+    scope, includes and insteadOf applied — against the checkout's own .git/config, which the guard's parsed routes
+    cannot write (git config and git remote are refused in this checkout, and a write to a .git/config is refused
+    everywhere): the branch follows its own name on a named remote, nothing outside the checkout adds a remote
+    address or changes the branch's remote, the address git will fetch is the recorded one unrewritten, and no
+    upload-pack or remote helper is set for that remote. A fast-forward is invisible to the §6.1 record, which
+    compares the disk with HEAD, so this is the check that stands between the pull and a foreign HEAD."""
+    def get(*args: str) -> List[str]:
+        code, out, _ = v.run(["git", "-C", str(repo), "config"] + list(args))
+        return out.splitlines() if code == 0 else []
+    code, out, _ = v.run(["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "HEAD"])
+    b = out.strip()
+    if code != 0 or not b:
+        return RELEASE_REFUSED % "Daedalus's own checkout is not on a branch"
+    remote, merge = get("--local", "--get", "branch.%s.remote" % b), get("--local", "--get", "branch.%s.merge" % b)
+    if not remote or remote[0] in ("", ".") or merge != ["refs/heads/" + b]:
+        return RELEASE_REFUSED % ("%s does not follow %s on its remote (branch.%s.remote is %s, branch.%s.merge is %s)"
+                                  % (b, b, b, remote[0] if remote else "unset", b, merge[0] if merge else "unset"))
+    r = remote[0]
+    if get("--get-all", "branch.%s.remote" % b) != remote or get("--get-all", "branch.%s.merge" % b) != merge:
+        return RELEASE_REFUSED % ("git settings outside this checkout change which remote or branch %s pulls from" % b)
+    urls, every = get("--local", "--get-all", "remote.%s.url" % r), get("--get-all", "remote.%s.url" % r)
+    if len(urls) != 1 or every != urls:
+        return RELEASE_REFUSED % ("git settings outside this checkout give the remote %s another address (%s)"
+                                  % (r, ", ".join(u for u in every if u not in urls) or "none recorded here"))
+    code, out, _ = v.run(["git", "-C", str(repo), "ls-remote", "--get-url", r])
+    got = out.strip()
+    if code != 0 or got != urls[0]:
+        return RELEASE_REFUSED % ("an address rewrite (insteadOf) turns %s into %s" % (urls[0], got or "nothing"))
+    for k in ("uploadpack", "vcs"):
+        if get("--get-all", "remote.%s.%s" % (r, k)):
+            return RELEASE_REFUSED % ("remote.%s.%s is set, which fetches through another program" % (r, k))
+    return None
+
+
+PRODUCT_WRITE = ("`git %s` changes Daedalus's own checkout, which changes only by the release pull (`git pull "
+                 "--ff-only`); write a proposal instead of editing it. Reading it — status, log, diff, show — is fine.")
+# Task 9 review, finding 1: the §6.1 record compares the disk with HEAD, so any command that moves the checkout's
+# HEAD — or aims the release pull elsewhere — passes it. In Daedalus's own checkout a session reads; it never writes.
+PRODUCT_READ = {"status", "log", "show", "diff", "blame", "annotate", "grep", "ls-files", "ls-tree", "ls-remote",
+                "rev-parse", "rev-list", "describe", "shortlog", "cat-file", "show-ref", "for-each-ref", "name-rev",
+                "merge-base", "whatchanged", "version", "help", "var", "check-ignore", "check-attr", "count-objects",
+                "cherry", "range-diff", "diff-tree", "diff-files", "diff-index", "show-branch", "verify-commit",
+                "verify-tag", "archive", "format-patch", "clone"}
+FETCH_OK = {"-q", "--quiet", "-v", "--verbose", "-t", "--tags", "--no-tags", "-p", "--prune", "--all", "--dry-run"}
+BRANCH_LIST = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "-l", "--show-current", "--contains",
+               "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--color", "--no-color",
+               "--column", "--no-column", "-q", "--quiet", "--abbrev", "--no-abbrev", "-i", "--ignore-case"}
+BRANCH_PATTERN = {"--list", "-l", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort",
+                  "--format"}
+CONFIG_READ = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "-l"}
+CONFIG_SCOPED = {"--global", "--system", "-f", "--file"}
+RELEASE_KEYS = re.compile(r"^(remote|branch|url|pull|submodule|http|protocol)\.|^core\.(sshcommand|gitproxy)$")
+
+
+def config_writes(rest: List[str]) -> bool:
+    """Whether a `git config` command writes (sets, adds, unsets, renames or edits) rather than reads."""
+    names = [r.split("=", 1)[0] for r in rest]
+    if any(n in CONFIG_READ for n in names) or (rest[:1] and rest[0] in ("get", "list")):
+        return False
+    if any(n in ("-e", "--edit") for n in names) or (rest[:1] and rest[0] in CONFIG_VERBS):
+        return True
+    return len(config_words(rest)) != 1 or any(n.startswith("--unset") or n in ("--add", "--replace-all",
+                                                                               "--rename-section", "--remove-section")
+                                               for n in names)
+
+
+def config_release(rest: List[str], words: List[str], product: bool) -> Optional[str]:
+    """Task 9 review, finding 1: a `git config` write in Daedalus's own checkout is refused outright; one at the global
+    or system scope, or into a named file, is refused from anywhere when it sets what decides where a pull reads
+    from — the remote's address, the branch it follows, an address rewrite, the transport — since those scopes
+    reach Daedalus's own checkout too. Reads stay allowed everywhere."""
+    if not config_writes(rest):
+        return None
+    if product:
+        return PRODUCT_WRITE % ("config " + " ".join(words[:1])).strip()
+    names = [r.split("=", 1)[0] for r in rest]
+    if any(n in CONFIG_SCOPED for n in names):
+        key = (words[0] if words else "").lower()
+        if not words or RELEASE_KEYS.match(key):
+            return ("`git config %s` is not set at that scope from here: git settings outside a checkout reach "
+                    "Daedalus's own checkout too, and %s decides where its release pull reads from."
+                    % (" ".join(r for r in rest if r.startswith("-")) + (" " + words[0] if words else ""),
+                       words[0] if words else "an edited configuration file"))
+    return None
+
+
+def product_git(sub: str, rest: List[str], cfg: "Cfg", penv: Dict[str, str], repo: Path) -> Optional[str]:
+    """The deny reason for one git command in Daedalus's own checkout, or None: reading git passes, the release pull
+    passes when release_origin_problem finds nothing, and everything else — any command that could move HEAD, the
+    index or the files, or repoint the remote — is refused (Task 9 review, finding 1)."""
+    if sub == "pull" and release_pull(sub, rest, cfg, penv):
+        return release_origin_problem(repo)
+    d = dist_verb(sub, rest)
+    if d:
+        return DIST % d
+    first = rest[0] if rest else ""
+    if sub in PRODUCT_READ:
+        return None
+    if sub == "fetch":
+        opts = [r.split("=", 1)[0] for r in rest if r.startswith("-")]
+        if all(o in FETCH_OK for o in opts) and not any(":" in r for r in rest if not r.startswith("-")):
+            return None
+    elif sub == "branch":
+        opts = [r.split("=", 1)[0] for r in rest if r.startswith("-")]
+        pos = [r for r in rest if not r.startswith("-")]
+        if all(o in BRANCH_LIST for o in opts) and (not pos or any(o in BRANCH_PATTERN for o in opts)):
+            return None
+    elif sub == "remote":
+        if not rest or first in ("-v", "--verbose", "show", "get-url"):
+            return None
+    elif sub in ("stash", "worktree", "submodule", "reflog", "notes"):
+        if (first in ("list", "show", "status") or (sub == "reflog" and not rest)) and not (sub == "worktree" and first != "list"):
+            return None
+    elif sub == "tag":
+        opts = [r.split("=", 1)[0] for r in rest if r.startswith("-")]
+        pos = [r for r in rest if not r.startswith("-")]
+        if all(o in ("-l", "--list", "-n", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+                     "--sort", "--format", "--column", "--no-column") or re.fullmatch(r"-n[0-9]+", o) for o in opts) \
+                and (not pos or any(o in ("-l", "--list") for o in opts)):
+            return None
+    label = sub + (" " + first if sub in ("remote", "stash", "worktree", "submodule", "reflog", "notes") and first else "")
+    return PRODUCT_WRITE % label
 
 # git push's long options that take a value, each with the shortest abbreviation git accepts for it (parse-options
 # takes any unique prefix: `--rep` is --repo; `--re` is ambiguous with --receive-pack and --recurse-submodules).
@@ -936,6 +1080,9 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         reason = config_route(["git config " + w.lower() for w in words], [])
         if reason:
             return reason, None
+        reason = config_release(rest, words, is_product_repo(root, repo))
+        if reason:
+            return reason, None
         if tree is not None or (target is not None and under(repo, target)):
             reason = config_aims_at_trunk(words, trunk_names(v.target_branch(root), repo), mine)
             if reason:
@@ -955,8 +1102,17 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         if sub == a and (b in rest or (b == "-f" and any(r.startswith("-f") for r in rest))):
             if not (sub == "checkout" and rest and rest[-1] != "."):
                 return "`git %s %s` destroys work; ask the operator." % (a, b), None
-    if is_product_repo(root, repo) or any(v.is_protected(root, resolve(repo, r)) for r in rest if not r.startswith("-")):
-        d = None if (is_product_repo(root, repo) and release_pull(sub, rest, cfg, penv)) else dist_verb(sub, rest)
+    # a work tree named without a git directory: git still finds the repository from where it runs, so
+    # `git -C <home> --work-tree=<elsewhere> pull` moves the home's HEAD (Task 9 review, finding 2)
+    product = is_product_repo(root, repo) or (
+        ("--work-tree" in cfg.globals or penv.get("GIT_WORK_TREE")) and "--git-dir" not in cfg.globals
+        and not penv.get("GIT_DIR") and cfg.base is not None and is_product_repo(root, cfg.base))
+    if product:
+        reason = product_git(sub, rest, cfg, penv, repo)
+        if reason:
+            return reason, None
+    elif any(v.is_protected(root, resolve(repo, r)) for r in rest if not r.startswith("-")):
+        d = dist_verb(sub, rest)
         if d:
             return DIST % d, None
     norm = [long_as(r) or r for r in rest]      # Decision 33: --no-veri is --no-verify

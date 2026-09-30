@@ -546,7 +546,10 @@ scratch_and_worktree() {
     case "$output" in *"distribution code; write a proposal"*) : ;; *) echo "$c: $output"; return 1 ;; esac
   done
   run guard_as sA 'patch -p1 < /tmp/x.patch' "$DAEDALUS_HOME/core"; denied
-  run guard_as sA "git -C $DAEDALUS_HOME switch -c proposal-branch"; allowed
+  # plan 4 Decision 14 let a new branch at HEAD through; Task 9 review: `switch -c x <rev>` / `checkout -b x <rev>` move HEAD
+  # past the §6.1 record, and a branch here only strands the checkout off the one its release pull follows — refused
+  run guard_as sA "git -C $DAEDALUS_HOME switch -c proposal-branch"; denied
+  run guard_as sA "git -C $DAEDALUS_HOME checkout -b proposal-branch"; denied
   run guard_as sB 'git rebase origin/main' "$W2"; allowed
   run guard_as sB 'git merge origin/main' "$W2"; allowed
 }
@@ -963,15 +966,93 @@ gb.main()
   done
 }
 
-@test "the release pull: in Daedalus's own checkout exactly 'git pull --ff-only' (with -q or --quiet) is allowed; any other word, a -c pair or --config-env and it is an ordinary pull, denied as distribution code (plan 5 Decision 17)" {
-  scratch_and_worktree
+product_home() {  # Daedalus's own checkout (lease_fixture made it a repo on main) tracking origin/main, a release ahead on origin
+  H="$DAEDALUS_HOME"; O="$BATS_TEST_TMPDIR/dae-origin.git"
+  git clone -q --bare "$H" "$O"; git -C "$H" remote add origin "$O"; git -C "$H" fetch -q origin; git -C "$H" branch -q -u origin/main
+  git clone -q "$O" "$BATS_TEST_TMPDIR/rel"; printf 'y\n' >> "$BATS_TEST_TMPDIR/rel/CLAUDE.md"
+  git -C "$BATS_TEST_TMPDIR/rel" -c user.email=t@x -c user.name=t commit -q -am v2; git -C "$BATS_TEST_TMPDIR/rel" push -q origin main
+  # the guard reads the effective configuration: an empty global file and no system file, never the developer's own
+  export GIT_CONFIG_GLOBAL="$BATS_TEST_TMPDIR/global.gitconfig" GIT_CONFIG_NOSYSTEM=1; : > "$GIT_CONFIG_GLOBAL"
+}
+
+@test "the release pull: in Daedalus's own checkout exactly 'git pull --ff-only' (with -q or --quiet, through -C or the cwd) is allowed; any other word, any other global option (--git-dir, --work-tree, --namespace, --exec-path), a -c pair, --config-env or a GIT_* prefix and it is denied (plan 5 Decision 17; Task 9 review, finding 2)" {
+  scratch_and_worktree; product_home
   for c in 'pull --ff-only' 'pull --ff-only -q' 'pull --quiet --ff-only'; do
-    run guard_as sA "git -C $DAEDALUS_HOME $c"; allowed || { echo "denied: git $c: $output"; return 1; }
+    run guard_as sA "git -C $H $c"; allowed || { echo "denied: git $c: $output"; return 1; }
   done
-  for c in 'pull' 'pull --ff-only origin main' 'pull --ff-only /tmp/other' 'pull --ff-only --rebase' 'pull --ff-only --no-verify' \
-           'pull --ff' '-c remote.origin.url=/tmp/x pull --ff-only' '--config-env=remote.origin.url=X pull --ff-only'; do
-    run guard_as sA "git -C $DAEDALUS_HOME $c"; denied || { echo "not denied: git $c: $output"; return 1; }
+  run guard_as sA 'git pull --ff-only' "$H/core"; allowed
+  for c in "-C $H pull" "-C $H pull --ff-only origin main" "-C $H pull --ff-only /tmp/other" "-C $H pull --ff-only --rebase" \
+           "-C $H pull --ff-only --no-verify" "-C $H pull --ff" "-C $H -c remote.origin.url=/tmp/x pull --ff-only" \
+           "-C $H --config-env=remote.origin.url=X pull --ff-only" \
+           "--git-dir=$H/.git --work-tree=$BATS_TEST_TMPDIR/elsewhere pull --ff-only" "--git-dir=$H/.git pull --ff-only" \
+           "-C $H --work-tree=$BATS_TEST_TMPDIR/elsewhere pull --ff-only" "-C $H --namespace=x pull --ff-only" \
+           "-C $H --exec-path=$BATS_TEST_TMPDIR pull --ff-only"; do
+    run guard_as sA "git $c"; denied || { echo "not denied: git $c: $output"; return 1; }
   done
-  run guard_as sA "GIT_SSH_COMMAND=/tmp/x git -C $DAEDALUS_HOME pull --ff-only"; denied
+  run guard_as sA "GIT_SSH_COMMAND=/tmp/x git -C $H pull --ff-only"; denied
+  run guard_as sA "GIT_WORK_TREE=$BATS_TEST_TMPDIR/elsewhere git pull --ff-only" "$H"; denied
+  run guard_as sA "git -C $H --work-tree=$BATS_TEST_TMPDIR/elsewhere status"; allowed   # reading, wherever the files are
   run guard_as sB 'git pull --ff-only' "$W2"; allowed      # a window's worktree is not the product repo: unchanged
+}
+
+@test "the release pull reads where it pulls from as git will when it runs: an address rewrite (insteadOf) or a second address from settings outside the checkout, an upload-pack or remote helper, a branch that tracks another name or another remote, a detached HEAD — each refuses it in one sentence (Task 9 review, finding 1)" {
+  scratch_and_worktree; product_home
+  run guard_as sA "git -C $H pull --ff-only"; allowed
+  git config --file "$GIT_CONFIG_GLOBAL" "url.$BATS_TEST_TMPDIR/evil.git.insteadOf" "$O"
+  run guard_as sA "git -C $H pull --ff-only"; denied
+  case "$output" in *"The release pull is refused"*"address rewrite"*"$BATS_TEST_TMPDIR/evil.git"*"pull the release in a shell"*) : ;; *) echo "$output"; return 1 ;; esac
+  : > "$GIT_CONFIG_GLOBAL"; git config --file "$GIT_CONFIG_GLOBAL" remote.origin.url "$BATS_TEST_TMPDIR/evil.git"
+  run guard_as sA "git -C $H pull --ff-only"; denied; case "$output" in *"outside this checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  : > "$GIT_CONFIG_GLOBAL"; git config --file "$GIT_CONFIG_GLOBAL" remote.origin.uploadpack "/tmp/x"
+  run guard_as sA "git -C $H pull --ff-only"; denied; case "$output" in *"remote.origin.uploadpack"*) : ;; *) echo "$output"; return 1 ;; esac
+  : > "$GIT_CONFIG_GLOBAL"; git -C "$H" config remote.origin.vcs evil
+  run guard_as sA "git -C $H pull --ff-only"; denied; case "$output" in *"remote.origin.vcs"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$H" config --unset remote.origin.vcs
+  git -C "$H" config branch.main.merge refs/heads/other
+  run guard_as sA "git -C $H pull --ff-only"; denied; case "$output" in *"does not follow main on its remote"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$H" config branch.main.merge refs/heads/main; git -C "$H" config branch.main.remote .
+  run guard_as sA "git -C $H pull --ff-only"; denied
+  git -C "$H" config branch.main.remote origin
+  run guard_as sA "git -C $H pull --ff-only"; allowed
+  git -C "$H" checkout -q --detach
+  run guard_as sA "git -C $H pull --ff-only"; denied; case "$output" in *"not on a branch"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "Daedalus's own checkout takes reading git and the release pull, nothing else: every command that moves its HEAD, index or files, or repoints where the pull reads from, is denied — the repoint-then-pull chain in one call included; reading is allowed (Task 9 review, finding 1)" {
+  scratch_and_worktree; product_home
+  E="$BATS_TEST_TMPDIR/evil.git"
+  for c in "remote set-url origin $E" "remote add evil $E" "remote rename origin old" "remote remove origin" \
+           "config remote.origin.url $E" "config branch.main.remote evil" "config --add remote.origin.url $E" \
+           "config url.$E.insteadOf $O" "config set remote.origin.url $E" "config --unset branch.main.merge" "config -e" \
+           "branch -u evil/main" "branch --set-upstream-to=evil/main" "branch -f main FETCH_HEAD" "branch x FETCH_HEAD" \
+           "checkout -b x FETCH_HEAD" "checkout -B main FETCH_HEAD" "checkout FETCH_HEAD -- core" "switch -c x FETCH_HEAD" \
+           "reset --soft FETCH_HEAD" "reset FETCH_HEAD" "update-ref refs/heads/main FETCH_HEAD" "symbolic-ref HEAD refs/heads/x" \
+           "read-tree -u -m FETCH_HEAD" "fetch --update-head-ok $E main:main" "fetch -u $E main:main" "fetch --upload-pack=/tmp/x origin" \
+           "commit -am x" "commit --amend --no-edit" "add core" "stash" "worktree add $BATS_TEST_TMPDIR/wt FETCH_HEAD" \
+           "replace HEAD FETCH_HEAD" "bisect start" "notes add -m x" "tag -f v9 FETCH_HEAD"; do
+    run guard_as sA "git -C $H $c"; denied || { echo "not denied: git $c: $output"; return 1; }
+  done
+  run guard_as sA "git -C $H remote set-url origin $E && git -C $H pull --ff-only"; denied
+  case "$output" in *"Daedalus's own checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  for c in status log "log --oneline -3" diff "show HEAD" fetch "fetch origin" "fetch -q --tags origin" "remote" "remote -v" \
+           "remote get-url origin" "remote show origin" branch "branch -a" "branch --show-current" "branch -vv" \
+           "config --get remote.origin.url" "config --list" "config get remote.origin.url" "stash list" "rev-parse HEAD" \
+           "worktree list" "tag" "tag -l" "ls-remote origin" "ls-files core" "describe --tags --always" "blame CLAUDE.md"; do
+    run guard_as sA "git -C $H $c"; allowed || { echo "denied: git $c: $output"; return 1; }
+  done
+}
+
+@test "git settings that decide where a pull reads from are not set from any window at the global or system scope or in a named file — they reach Daedalus's own checkout too; other global settings and every read stay allowed (Task 9 review, finding 1)" {
+  scratch_and_worktree; product_home
+  for c in "config --global url./tmp/evil.insteadOf https://example.com/" "config --global remote.origin.url /tmp/evil" \
+           "config --system branch.main.remote evil" "config --file $HOME/.gitconfig branch.main.merge refs/heads/x" \
+           "config -f $BATS_TEST_TMPDIR/x.cfg pull.rebase true" "config --global http.sslVerify false" \
+           "config --global http.proxy http://127.0.0.1:9" "config --global core.sshCommand /tmp/x" \
+           "config --global protocol.file.allow always" "config --global submodule.recurse true" "config --global --edit"; do
+    run guard_as sA "git $c" "$W1"; denied || { echo "not denied: git $c: $output"; return 1; }
+  done
+  for c in "config --global user.name x" "config --global --get url.x.insteadof" "config --global --list" \
+           "config --local pull.rebase true" "config branch.lease/01.description x"; do
+    run guard_as sA "git $c" "$W1"; allowed || { echo "denied: git $c: $output"; return 1; }
+  done
 }
