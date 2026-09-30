@@ -247,7 +247,9 @@ EOF
   # same upstream: same content, but .git is now a FILE (gitdir: …).
   git clone -q "$NESTED" "$BATS_TEST_TMPDIR/subclone"
   rm -rf "$D/sub"
-  git -C "$BATS_TEST_TMPDIR/subclone" worktree add -q "$D/sub" -b lease/01 origin/main
+  # on the nested trunk (sync-target refuses any other branch, spec §14): free main in the clone first
+  git -C "$BATS_TEST_TMPDIR/subclone" checkout -q --detach
+  git -C "$BATS_TEST_TMPDIR/subclone" worktree add -q "$D/sub" main
   [ -f "$D/sub/.git" ]
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -eq 0 ]
@@ -262,4 +264,34 @@ EOF
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -eq 0 ]
   [ -f "$DAEDALUS_HOME/target/upstream-harness/file.txt" ]
+}
+
+@test "sync-target refuses a target checkout that is not on the trunk — a branch, or no branch — naming it and what turns it into a window; nothing moves" {
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  D="$DAEDALUS_HOME/target/upstream-harness"
+  git -C "$D" checkout -q -b feat/x
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness is on feat/x; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt feat/x)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$D" branch --show-current)" = feat/x ]
+  git -C "$D" checkout -q --detach
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness is not on a branch; the upgrade puts it back on main at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "sync-target refuses a nested checkout that is not on its trunk (origin/HEAD)" {
+  NESTED="$BATS_TEST_TMPDIR/upstream-n"; git init -q -b main "$NESTED"; echo n > "$NESTED/n.txt"
+  git -C "$NESTED" add -A; git -C "$NESTED" -c user.email=t@t -c user.name=t commit -q -m n
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: sub=$NESTED
+EOF
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  git -C "$DAEDALUS_HOME/target/upstream-harness/sub" checkout -q -b feat/n
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness/sub is on feat/n; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt feat/n --repo sub)"*) : ;; *) echo "$output"; return 1 ;; esac
 }

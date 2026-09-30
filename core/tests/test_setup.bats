@@ -262,7 +262,7 @@ EOF
 set -uo pipefail
 source "$DAEDALUS_HOME/core/lib.sh"
 set +e   # undo lib.sh's leaked -e: reproduce setup.sh's OWN stated -uo-pipefail-without-e
-$(sed -n '/^log "phase 3\/4: scaffold"/,/^fi$/p' "$SRC/setup.sh" | tail -n +2)
+$(sed -n '/^log "phase 4\/5: scaffold"/,/^fi$/p' "$SRC/setup.sh" | tail -n +2)
 SCRIPT
 
   run bash "$BATS_TEST_TMPDIR/scaffold-phase.sh"
@@ -279,4 +279,33 @@ SCRIPT
   run find "$DAEDALUS_HOME" -depth -name a -path "*vaults*"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "setup runs five phases in order — leases between vault and scaffold makes the window directories (promote's and the direct calls' mode 700) — and never stamps the upgrade" {
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  for f in setup.sh sync-target.sh sync-vault.sh doctor.sh upgrade.py verifylib.py leaselib.py prepush.py; do cp "$SRC/$f" "$DAEDALUS_HOME/core/"; done
+  cp -R "$SRC/templates" "$DAEDALUS_HOME/core/templates"
+  SHIP="$BATS_TEST_TMPDIR/ship"; git init -q -b main "$SHIP"; echo code > "$SHIP/file.txt"
+  git -C "$SHIP" add -A; git -C "$SHIP" -c user.email=t@t -c user.name=t commit -q -m init
+  KB="$BATS_TEST_TMPDIR/kb"; git init -q -b main "$KB"; echo kb > "$KB/README.md"
+  git -C "$KB" add -A; git -C "$KB" -c user.email=t@t -c user.name=t commit -q -m init
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $SHIP
+  branch: main
+vault:
+  repo: $KB
+gates:
+  - true
+proposals:
+  budget: 5
+EOF
+  run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | sed -n 's/^daedalus: \(phase [0-9]\/5: [a-z]*\)$/\1/p' | tr '\n' ',')" = "phase 1/5: target,phase 2/5: vault,phase 3/5: leases,phase 4/5: scaffold,phase 5/5: doctor," ] || { echo "$output"; return 1; }
+  case "$output" in *"Setup: created state/leases/, worktrees/, state/promote/, state/direct-calls/."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(stat -f %Lp "$DAEDALUS_HOME/state/promote")" = 700 ]; [ "$(stat -f %Lp "$DAEDALUS_HOME/state/direct-calls")" = 700 ]
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ]; case "$output" in *"Setup: created"*) echo "a rerun created something: $output"; return 1 ;; esac
 }

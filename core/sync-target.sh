@@ -31,6 +31,15 @@ esac
 # cloned. lib.sh is_work_tree_root is git's own answer to both questions;
 # it never compares paths (a case-swapped home spelling once failed that).
 if is_work_tree_root "$dest"; then
+  # Spec §14: target/<repo> is the prime's mirror of trunk. A checkout on another branch
+  # (or none) holds work that becomes a window — the upgrade adopts it at the next session
+  # start — never work this script checks out over.
+  cur="$(git -C "$dest" branch --show-current)"
+  if [ -z "$cur" ]; then
+    die "target/$(basename "$dest") is not on a branch; the upgrade puts it back on $branch at the next session start, moving any commit not on origin/$branch into a window"
+  elif [ "$cur" != "$branch" ]; then
+    die "target/$(basename "$dest") is on $cur; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt $cur)"
+  fi
   log "updating $(basename "$dest") ($branch)"
   git -C "$dest" fetch --quiet origin "$branch"
   git -C "$dest" checkout --quiet "$branch"
@@ -105,6 +114,18 @@ if cfg target.nested >/dev/null 2>&1; then
         ;;
     esac
     if is_work_tree_root "$ndest"; then
+      # The same refusal for a nested repo, judged against its own trunk (origin/HEAD). A
+      # nested repo with no origin/HEAD is not judged here; doctor names it ("Nested trunk
+      # resolvable").
+      ncur="$(git -C "$ndest" branch --show-current)"
+      ntrunk="$(git -C "$ndest" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+      ntrunk="${ntrunk#origin/}"
+      if [ -n "$ntrunk" ] && [ "$ncur" != "$ntrunk" ]; then
+        if [ -z "$ncur" ]; then
+          die "target/$(basename "$dest")/$rel is not on a branch; the upgrade puts it back on $ntrunk at the next session start, moving any commit not on origin/$ntrunk into a window"
+        fi
+        die "target/$(basename "$dest")/$rel is on $ncur; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt $ncur --repo $rel)"
+      fi
       log "updating nested $rel"
       git -C "$ndest" fetch --quiet origin
       git -C "$ndest" merge --ff-only --quiet "@{u}"

@@ -6,14 +6,24 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 [ -f "$DAEDALUS_CONFIG" ] || die "no config at $DAEDALUS_CONFIG — copy config.example.yaml to config.yaml and fill it in"
 
-log "phase 1/4: target"
+log "phase 1/5: target"
 bash "$DAEDALUS_HOME/core/sync-target.sh" || die "target sync failed"
 
-log "phase 2/4: vault"
+log "phase 2/5: vault"
 bash "$DAEDALUS_HOME/core/sync-vault.sh" || die "vault sync failed"
 mkdir -p "$DAEDALUS_HOME/state" || die "could not create state/"
 
-log "phase 3/4: scaffold"
+# Spec §15: the window directories, the pre-push hook and the old dedup files — the
+# functions the upgrade runs at a session start (§14), steps 1-3. Never the stamp: the
+# first session start runs the rest, each a no-op on a fresh install (plan 5 Decision 12).
+log "phase 3/5: leases"
+if [ -f "$DAEDALUS_HOME/core/upgrade.py" ]; then
+  python3 "$DAEDALUS_HOME/core/upgrade.py" --setup || die "the window directories could not be made ready (see above)"
+else
+  log "leases: skipped (core/upgrade.py absent)"
+fi
+
+log "phase 4/5: scaffold"
 if cfg target.scaffold >/dev/null 2>&1; then
   # target_path() dies internally if target.repo is unset. A die inside a
   # command substitution only exits that subshell, not the caller — under
@@ -49,7 +59,7 @@ else
   log "scaffold: nothing configured"
 fi
 
-log "phase 4/4: doctor"
+log "phase 5/5: doctor"
 bash "$DAEDALUS_HOME/core/doctor.sh" || die "the deployment is not correctly wired — see the report above"
 
 log "setup complete"
