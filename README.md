@@ -78,6 +78,14 @@ still off its trunk. An adopted window is promoted from the board ("promote
 window 01") or released, like any other; `core/lease.sh adopt <branch>
 [--repo <nested>]` does the same for any branch later.
 
+**Rehearsing two windows.** `bash core/tests/scenarios/two-clones.sh` builds a
+scratch deployment from fixtures (its own small target and a local stand-in
+for origin — your deployment is never read or touched) and walks you through
+two, then three, windows: at each step it says which terminal, what to say,
+and what you should see, then checks the result. `--rehearse` plays every
+window itself (the suite runs it that way); `--keep` leaves the scratch
+directory to inspect.
+
 ## Windows (leases)
 
 Several Daedalus sessions can work the same target at once. Each interactive
