@@ -2631,6 +2631,12 @@ def main(argv: list) -> int:
         print(" ".join(str(e.get("pid")) for e in registry_by_session(args[0]))); return 0
     if cmd == "registry-live-pids":
         print(" ".join(str(e.get("pid")) for e in registry_live_entries(args[0]))); return 0
+    if cmd == "registry-kind":
+        # doctor.sh (spec §15): this session's registry pair, when exactly one live entry names it
+        live = registry_live_entries(args[0]) if args else []
+        if len(live) == 1:
+            print("kind=%s entrypoint=%s" % (live[0].get("kind"), live[0].get("entrypoint")))
+        return 0
     if cmd == "pid-alive":
         return 0 if pid_alive(args[0]) else 1
     if cmd == "create":

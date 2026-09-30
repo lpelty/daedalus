@@ -57,13 +57,9 @@ ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.s
   # dedup gone, hot.md renamed
   [ ! -e "$H/state/pitfall-seen.json" ]; [ ! -e "$H/state/code-context-seen.json" ]
   [ "$(sed -n 3p "$H/vault/hot.md")" = "leases: (see the board; prime's copy at its last write)" ]
-  # doctor: the version line, and nothing MISSING about VERSION, leases or hooks. The upgrade line is upgrade.py's
-  # --doctor until Task 7 wires it into doctor.sh; Task 7 then asserts it here, in doctor.sh's own output, as
-  # *"OK       version: 0.7.0"*"OK       upgrade: state/upgraded-to 0.7.0"* (plan 5 Task 5, recorded deviation).
-  run python3 "$H/core/upgrade.py" --doctor
-  [ "$output" = "OK       upgrade: state/upgraded-to 0.7.0" ] || { echo "$output"; return 1; }
+  # doctor: the version line and the upgrade stamp, and nothing MISSING about VERSION, leases or hooks
   run bash "$H/core/doctor.sh"
-  case "$output" in *"OK       version: 0.7.0"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       version: 0.7.0"*"OK       upgrade: state/upgraded-to 0.7.0"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"MISSING  VERSION"*|*"MISSING  state/"*|*"MISSING  worktrees/"*|*"MISSING  pre-push hook"*) echo "$output"; return 1 ;; esac
   # the old session's Stop after the upgrade blocks (exit 2, reasons on stderr) with only the reasons the spec gives
   # a session left open through an upgrade: config.yaml changed under it (the memory: block; Decision 11 — the

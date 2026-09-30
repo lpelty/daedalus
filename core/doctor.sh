@@ -132,7 +132,7 @@ fi
 # would put it in a subshell and lose the count (see the unverified-claims
 # block below).
 if [ -f "$DAEDALUS_HOME/core/leaselib.py" ]; then
-  for d in state/leases worktrees; do
+  for d in state/leases worktrees state/promote state/direct-calls; do
     if [ ! -d "$DAEDALUS_HOME/$d" ]; then
       note_problem "$d/ — start a session (the upgrade runs at SessionStart) or run core/setup.sh"
     fi
@@ -154,8 +154,16 @@ $lease_out
 EOF
     fi
   fi
+  # From a session, the registry line names what the registry says this session is
+  # (kind and entrypoint — §4.8's interactive-window test); from a shell, it counts entries.
   registry="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
-  if [ -d "$registry" ]; then
+  sess_kind=""
+  if [ -d "$registry" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    sess_kind="$(python3 "$DAEDALUS_HOME/core/leaselib.py" registry-kind "$CLAUDE_CODE_SESSION_ID" 2>/dev/null)"
+  fi
+  if [ -n "$sess_kind" ]; then
+    log "OK       session registry: this session is $sess_kind"
+  elif [ -d "$registry" ]; then
     n="$(ls "$registry"/*.json 2>/dev/null | wc -l | tr -d ' ')"
     log "OK       session registry: $registry/ present ($n entries)"
   else
@@ -164,6 +172,28 @@ EOF
   for old in pitfall-seen.json code-context-seen.json; do
     [ -f "$DAEDALUS_HOME/state/$old" ] && log "NOTE     state/$old is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"
   done
+fi
+
+# The upgrade (spec §14, §15): the stamp, what in target/ it would still move, hot.md's
+# field. One reader, core/upgrade.py --doctor — local refs only, it never fetches; the
+# here-string loop keeps the MISSING count (see the leases block). Skipped when a
+# fixture has no upgrade.py.
+if [ -f "$DAEDALUS_HOME/core/upgrade.py" ]; then
+  up_out="$(python3 "$DAEDALUS_HOME/core/upgrade.py" --doctor 2>/dev/null)"
+  up_rc=$?
+  if [ "$up_rc" -ne 0 ]; then
+    note_problem "upgrade: check failed (core/upgrade.py --doctor exited $up_rc)"
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        "") ;;
+        "MISSING  "*) note_problem "${line#MISSING  }" ;;
+        *) log "$line" ;;
+      esac
+    done <<EOF
+$up_out
+EOF
+  fi
 fi
 
 # Episodic capture (spec §4.7, §15). Optional, so an absent memory: block is a

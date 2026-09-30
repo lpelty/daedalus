@@ -650,15 +650,70 @@ def pending_line(root: Path) -> Optional[str]:
     return "upgrade to %s has not run yet — it runs at the next session start in this home" % ver
 
 
+def _repo_flag(root: Path, key: str) -> str:
+    import leaselib as ll
+    return "" if key == ll.target_name(root) else " --repo %s" % key.split("/", 1)[1]
+
+
 def doctor(root: Path) -> int:
-    """Doctor's upgrade lines (spec §15). Task 7 adds the target/ rows."""
+    """Doctor's upgrade lines (spec §15): the stamp; a target/ checkout off its trunk or ahead of origin; hot.md
+    still carrying session:. Local refs only — it never fetches, so it says what the refs this home last fetched
+    show. While the upgrade is pending the remedy is the next session start; after it, core/lease.sh adopt."""
     ver = version(root)
     if ver is None:
-        return 0
-    if stamped(root) == ver:
-        print("OK       upgrade: state/upgraded-to %s" % ver)
-    else:
-        print("NOTE     %s" % pending_line(root))
+        return 0                                    # doctor.sh's VERSION line says why
+    pend = stamped(root) != ver
+    print("NOTE     %s" % pending_line(root) if pend else "OK       upgrade: state/upgraded-to %s" % ver)
+    try:
+        import leaselib as ll
+        trunks = ll.trunks_of(root, root / "target")
+    except Exception:
+        trunks = {}      # no target yet, or a trunk that cannot be told: promote.py --doctor's trunk row says so
+    for key, p in (target_repos(root) if trunks else []):
+        trunk, flag = trunks.get(key), _repo_flag(root, key)
+        if not trunk:
+            continue
+        _, cur, _ = _git(p, "branch", "--show-current")
+        cur = cur.strip()
+        if cur == trunk:
+            _, out, _ = _git(p, "rev-list", "--count", "origin/%s..%s" % (trunk, trunk))
+            n = int(out.strip() or 0)
+            if n:
+                what = "the commit" if n == 1 else "the commits"
+                print("MISSING  target/%s %s is %s ahead of origin/%s — trunk is reached only through promote; %s"
+                      % (key, trunk, _plural(n, "commit"), trunk,
+                         "the upgrade moves %s to a window at the next session start" % what if pend
+                         else "run core/lease.sh adopt %s%s to move %s to a window" % (trunk, flag, what)))
+            continue
+        if LEASE_BRANCH.fullmatch(cur):
+            print("NOTE     target/%s is on %s, a window's branch — target/%s is the trunk mirror; put it back with "
+                  "git -C target/%s checkout %s" % (key, cur, key, key, trunk))
+            continue
+        try:
+            work = ll.unpromoted_commits(p, trunk, cur or "HEAD")
+        except ll.Refused:
+            continue
+        name = cur or "no branch (a detached checkout)"
+        if work and cur:
+            fix = ("the upgrade adopts it as a numbered window at the next session start (or run core/lease.sh "
+                   "adopt %s%s)" % (cur, flag)) if pend else "run core/lease.sh adopt %s%s to turn it into a window" % (cur, flag)
+        elif work:
+            fix = ("the upgrade moves it to a numbered window at the next session start" if pend else
+                   "name it (git -C target/%s branch <name>), then run core/lease.sh adopt <name>%s" % (key, flag))
+        else:
+            fix = ("the upgrade puts it back on %s at the next session start" % trunk if pend else
+                   "put it back with git -C target/%s checkout %s" % (key, trunk))
+        if work:
+            print("NOTE     target/%s is on %s, %s past origin/%s — %s" % (key, name, _plural(len(work), "commit"), trunk, fix))
+        else:
+            print("NOTE     target/%s is on %s, whose commits are already on origin/%s — %s" % (key, name, trunk, fix))
+    try:
+        hot = (root / "vault" / "hot.md").read_text().split("\n")
+    except OSError:
+        hot = []
+    if _hot_session_line(hot) is not None:
+        print("NOTE     vault/hot.md still carries session: — %s" % ("the upgrade renames it to leases: at the next "
+              "session start" if pend else "rename it to leases: in the prime's next vault commit"))
     return 0
 
 

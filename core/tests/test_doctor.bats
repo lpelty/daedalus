@@ -799,7 +799,7 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
   case "$output" in *"MISSING  state/leases/ — start a session (the upgrade runs at SessionStart) or run core/setup.sh"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"MISSING  worktrees/"*) : ;; *) echo "$output"; return 1 ;; esac
-  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees"
+  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees" "$DAEDALUS_HOME/state/promote" "$DAEDALUS_HOME/state/direct-calls"
   # a genuinely LIVE lease: the bats pid with its real start time (proc_started 1 would read as a re-used pid -> stale)
   ms="$(python3 -c 'import subprocess,sys,time
 out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
@@ -818,7 +818,7 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
 }
 
 @test "doctor: released and finished leases, swept numbers with waiting work, the registry, old shared dedup files — each a NOTE, none turns doctor red" {
-  doctor_leases_fixture; mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees"
+  doctor_leases_fixture; mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees" "$DAEDALUS_HOME/state/promote" "$DAEDALUS_HOME/state/direct-calls"
   printf '{"lease":"02","session_id":"sB","released":"2026-09-25T12:00:00"}' > "$DAEDALUS_HOME/state/leases/02.json"
   printf '{"lease":"04","session_id":"sD","spawned":true,"finished":"2026-09-25T11:42:00","summary":"done"}' > "$DAEDALUS_HOME/state/leases/04.json"
   git -C "$T" branch lease/05; git -C "$T" worktree add -q "$DAEDALUS_HOME/worktrees/05/thing" lease/05
@@ -835,7 +835,7 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
 }
 
 @test "doctor from an operator shell with leases present runs to the end and reports the target checkout OK" {
-  doctor_leases_fixture; mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees"
+  doctor_leases_fixture; mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees" "$DAEDALUS_HOME/state/promote" "$DAEDALUS_HOME/state/direct-calls"
   printf '{"lease":"01","session_id":"sA","worktree":"worktrees/01"}' > "$DAEDALUS_HOME/state/leases/01.json"
   run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID bash '$DAEDALUS_HOME/core/doctor.sh'"
   # With lease files present the path comes from leaselib.py resolve, whose root
@@ -972,7 +972,7 @@ promote_prepared() {
 
 @test "doctor: a promotion the window's current occupant prepared and never confirmed is a NOTE (not counted) naming the window and the time; a confirmed one is not" {
   doctor_promote_fixture
-  mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{"created":"c1"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/state/promote"; printf '{"created":"c1"}' > "$DAEDALUS_HOME/state/leases/02.json"
   run D; base="$(problems)"
   ts="$(python3 -c 'import time; print(time.mktime(time.strptime("2026-09-28 11:31", "%Y-%m-%d %H:%M")))')"
   promote_prepared 02-20260928-113100-abc "{\"lease\":\"02\",\"lease_created\":\"c1\",\"prepared_ts\":$ts,\"prepared_at\":\"x\"}"
@@ -1070,4 +1070,84 @@ EOF
       *) echo "$bad: $output"; return 1 ;;
     esac
   done
+}
+
+# --- the rows plan 5 adds (spec §14, §15) --------------------------------------
+# The registry test starts a live sleep; teardown kills it even when an assertion fails first (a leaked
+# sleep 300 holds bats at the end of the file — fixtures/leases/setup.bash).
+teardown() { teardown_live; }
+
+doctor_upgrade_fixture() {
+  doctor_leases_fixture
+  cp "$SRC/upgrade.py" "$SRC/prepush.py" "$DAEDALUS_HOME/core/"
+  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees" "$DAEDALUS_HOME/state/promote" "$DAEDALUS_HOME/state/direct-calls"
+}
+
+@test "doctor: state/promote/ and state/direct-calls/ absent are MISSING, one line each, naming the fix; present, nothing" {
+  doctor_upgrade_fixture
+  rmdir "$DAEDALUS_HOME/state/promote" "$DAEDALUS_HOME/state/direct-calls"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  for d in state/promote state/direct-calls; do
+    case "$output" in *"MISSING  $d/ — start a session (the upgrade runs at SessionStart) or run core/setup.sh"*) : ;; *) echo "$d: $output"; return 1 ;; esac
+  done
+  mkdir -p "$DAEDALUS_HOME/state/promote" "$DAEDALUS_HOME/state/direct-calls"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "doctor: the upgrade stamp — NOTE while it has not run, NOTE with the stop sentence when it stopped, OK naming the release when done; no line without VERSION" {
+  doctor_upgrade_fixture
+  rm -f "$DAEDALUS_HOME/VERSION"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"upgrade"*"state/upgraded-to"*|*"upgrade to "*) echo "a line without VERSION: $output"; return 1 ;; esac
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     upgrade to 0.7.0 has not run yet — it runs at the next session start in this home"*) : ;; *) echo "$output"; return 1 ;; esac
+  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, or stash them, then start a session again"
+  python3 -c 'import json,sys; json.dump({"version": "0.7.0", "step": 6, "sentence": sys.argv[2]}, open(sys.argv[1], "w"))' "$DAEDALUS_HOME/state/upgrade-stopped.json" "$s"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     $s"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       upgrade: state/upgraded-to 0.7.0"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: target/ off its trunk — a branch with work is a NOTE naming the upgrade (or adopt once it has run); a trunk ahead of origin is MISSING and counted; work already on trunk says it goes back; hot.md's session: is a NOTE until the upgrade" {
+  doctor_upgrade_fixture
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  mkdir -p "$DAEDALUS_HOME/vault"; printf -- '---\ntype: rolling-state\nsession: 011\n---\n' > "$DAEDALUS_HOME/vault/hot.md"
+  git -C "$T" checkout -q -b feat/example; printf 'e\n' > "$T/e.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m example
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"NOTE     target/thing is on feat/example, 1 commit past origin/main — the upgrade adopts it as a numbered window at the next session start (or run core/lease.sh adopt feat/example)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     vault/hot.md still carries session: — the upgrade renames it to leases: at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"NOTE     target/thing is on feat/example, 1 commit past origin/main — run core/lease.sh adopt feat/example to turn it into a window"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     vault/hot.md still carries session: — rename it to leases: in the prime's next vault commit"*) : ;; *) echo "stamped hot.md: $output"; return 1 ;; esac
+  git -C "$T" checkout -q main; git -C "$T" merge -q --ff-only feat/example
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; base="$(problems)"
+  case "$output" in *"MISSING  target/thing main is 1 commit ahead of origin/main — trunk is reached only through promote; run core/lease.sh adopt main to move the commit to a window"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/state/upgraded-to"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"MISSING  target/thing main is 1 commit ahead of origin/main — trunk is reached only through promote; the upgrade moves the commit to a window at the next session start"*) : ;; *) echo "pending: $output"; return 1 ;; esac
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  git -C "$T" push -q origin main
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$(problems)" -eq $((base - 1)) ] || { echo "not counted: $base -> $(problems): $output"; return 1; }
+  git -C "$T" checkout -q feat/example
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"NOTE     target/thing is on feat/example, whose commits are already on origin/main — put it back with git -C target/thing checkout main"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the good cases: on its trunk at origin, and hot.md carrying leases:, say nothing
+  git -C "$T" checkout -q main
+  printf -- '---\ntype: rolling-state\nleases: (see the board)\n---\n' > "$DAEDALUS_HOME/vault/hot.md"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"target/thing is on"*|*"ahead of origin"*|*"hot.md still carries"*) echo "a line for a good state: $output"; return 1 ;; esac
+}
+
+@test "doctor: from a session the registry line names this session's kind and entrypoint; from a shell it counts the entries" {
+  doctor_upgrade_fixture
+  p="$(live_pid)"; registry_entry "$p" sR interactive cli daedalus-01
+  run env CLAUDE_CODE_SESSION_ID=sR bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"OK       session registry: this session is kind=interactive entrypoint=cli"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"OK       session registry: "*"sessions/ present (1 entries)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
