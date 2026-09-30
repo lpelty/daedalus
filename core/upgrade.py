@@ -666,13 +666,18 @@ def doctor(root: Path) -> int:
     print("NOTE     %s" % pending_line(root) if pend else "OK       upgrade: state/upgraded-to %s" % ver)
     try:
         import leaselib as ll
-        trunks = ll.trunks_of(root, root / "target")
+        repos, outer = target_repos(root), v.target_branch(root)
     except Exception:
-        trunks = {}      # no target yet, or a trunk that cannot be told: promote.py --doctor's trunk row says so
-    for key, p in (target_repos(root) if trunks else []):
-        trunk, flag = trunks.get(key), _repo_flag(root, key)
-        if not trunk:
+        repos = []       # no target yet: nothing in target/ to judge
+    for key, p in repos:
+        # Per repo (spec §15: doctor names every problem in one run): a repo whose trunk cannot be told — a
+        # nested repo with no origin/HEAD, a trunk origin lacks — is skipped alone; promote.py --doctor's trunk
+        # row already names its fix, and the other repos are still judged.
+        try:
+            trunk = ll.trunk_of(root / "target", key, outer)
+        except Exception:
             continue
+        flag = _repo_flag(root, key)
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
         if cur == trunk:

@@ -507,18 +507,24 @@ def trunks_of(root: Path, target_base: Path) -> Dict[str, str]:
     closed (cutting its lease branch from a guessed trunk is worse than a
     refusal that names the remedy)."""
     trunk = v.target_branch(root)
-    out: Dict[str, str] = {}
-    for repo in repos_of(root):
-        if "/" not in repo:
-            out[repo] = trunk
-        else:
-            code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-            head = head.strip()
-            if code != 0 or not head.startswith("origin/"):
-                raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
-                              % (repo.split("/", 1)[1], repo))
-            out[repo] = head[len("origin/"):]
-        require_trunk_ref(target_base / repo, repo, out[repo])
+    return {repo: trunk_of(target_base, repo, trunk) for repo in repos_of(root)}
+
+
+def trunk_of(target_base: Path, repo: str, outer_trunk: str) -> str:
+    """One repo's trunk, as trunks_of tells it: outer_trunk (config target.branch)
+    for the main repo, origin/HEAD for a nested one; Refused when it cannot be told
+    or origin/<trunk> does not resolve. Per repo, so a reader that must name every
+    problem (doctor) can skip only the repo that fails."""
+    if "/" not in repo:
+        out = outer_trunk
+    else:
+        code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        head = head.strip()
+        if code != 0 or not head.startswith("origin/"):
+            raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
+                          % (repo.split("/", 1)[1], repo))
+        out = head[len("origin/"):]
+    require_trunk_ref(target_base / repo, repo, out)
     return out
 
 

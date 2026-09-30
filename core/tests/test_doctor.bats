@@ -965,6 +965,17 @@ problems() {
   [ "$(problems)" -eq $((base + 1)) ] || { echo "expected $((base + 1)) problems: $output"; return 1; }
 }
 
+@test "doctor names every problem in one run: a nested repo with no origin/HEAD does not hide the outer trunk ahead of origin" {
+  doctor_promote_fixture
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  printf 'b\n' > "$T/b.txt"; git -C "$T" add b.txt; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m ahead
+  git -C "$T/sub" remote set-head origin -d
+  run D; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  nested repo sub has no origin/HEAD — run git -C target/thing/sub remote set-head origin -a"*) : ;; *) echo "nested row: $output"; return 1 ;; esac
+  case "$output" in *"MISSING  target/thing main is 1 commit ahead of origin/main — trunk is reached only through promote; run core/lease.sh adopt main to move the commit to a window"*) : ;; *) echo "outer row dropped: $output"; return 1 ;; esac
+  case "$output" in *"target/thing/sub"*"ahead of origin"*|*"target/thing/sub is on"*) echo "a row for the repo whose trunk cannot be told: $output"; return 1 ;; esac
+}
+
 # promote_prepared <dir-suffix> <json> — a prepared.json under state/promote/.
 promote_prepared() {
   mkdir -p "$DAEDALUS_HOME/state/promote/$1"; printf '%s' "$2" > "$DAEDALUS_HOME/state/promote/$1/prepared.json"
