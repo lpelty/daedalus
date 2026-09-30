@@ -9,6 +9,21 @@ url="$(cfg target.repo)" || die "config: target.repo is required"
 branch="$(cfg target.branch)" || branch="main"
 dest="$(target_path)"
 
+# refuse_off_trunk <target/rel> <current branch or ""> <trunk> <" --repo <rel>" or ""> — the one refusal
+# for a checkout off its trunk, worded for whether the upgrade is still to run (lib.sh upgrade_pending).
+refuse_off_trunk() {
+  local where="$1" cur="$2" trunk="$3" repo_arg="$4"
+  if upgrade_pending; then
+    [ -n "$cur" ] || die "$where is not on a branch; the upgrade puts it back on $trunk at the next session start, moving any commit not on origin/$trunk into a window"
+    die "$where is on $cur; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt $cur$repo_arg)"
+  fi
+  [ -n "$cur" ] || die "$where is not on a branch; give its commits a branch (git -C $where switch -c <name>) and run core/lease.sh adopt <name>$repo_arg, or check out $trunk if they are already on origin/$trunk"
+  case "$cur" in
+    lease/[0-9][0-9]*) die "$where is on $cur, window ${cur#lease/}'s branch; check out $trunk there (the window keeps its branch)" ;;
+  esac
+  die "$where is on $cur; run core/lease.sh adopt $cur$repo_arg to make it a numbered window"
+}
+
 # A lease worktree is never synced here: its branch is lease/<NN>, and the
 # trunk cannot be checked out twice. `leaselib.py resolve` prints the
 # physical path (DAEDALUS_HOME resolved), so match both spellings of the
@@ -32,13 +47,13 @@ esac
 # it never compares paths (a case-swapped home spelling once failed that).
 if is_work_tree_root "$dest"; then
   # Spec §14: target/<repo> is the prime's mirror of trunk. A checkout on another branch
-  # (or none) holds work that becomes a window — the upgrade adopts it at the next session
-  # start — never work this script checks out over.
+  # (or none) holds work that becomes a window — never work this script checks out over.
+  # Before the upgrade has run, the next session start adopts it (§14's sentence); once the
+  # home is stamped the upgrade never runs again, so the refusal names lease.sh adopt instead
+  # (plan 5 Task 6 review; recorded as a deviation against §14's quoted sentence).
   cur="$(git -C "$dest" branch --show-current)"
-  if [ -z "$cur" ]; then
-    die "target/$(basename "$dest") is not on a branch; the upgrade puts it back on $branch at the next session start, moving any commit not on origin/$branch into a window"
-  elif [ "$cur" != "$branch" ]; then
-    die "target/$(basename "$dest") is on $cur; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt $cur)"
+  if [ "$cur" != "$branch" ]; then
+    refuse_off_trunk "target/$(basename "$dest")" "$cur" "$branch" ""
   fi
   log "updating $(basename "$dest") ($branch)"
   git -C "$dest" fetch --quiet origin "$branch"
@@ -121,10 +136,7 @@ if cfg target.nested >/dev/null 2>&1; then
       ntrunk="$(git -C "$ndest" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
       ntrunk="${ntrunk#origin/}"
       if [ -n "$ntrunk" ] && [ "$ncur" != "$ntrunk" ]; then
-        if [ -z "$ncur" ]; then
-          die "target/$(basename "$dest")/$rel is not on a branch; the upgrade puts it back on $ntrunk at the next session start, moving any commit not on origin/$ntrunk into a window"
-        fi
-        die "target/$(basename "$dest")/$rel is on $ncur; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt $ncur --repo $rel)"
+        refuse_off_trunk "target/$(basename "$dest")/$rel" "$ncur" "$ntrunk" " --repo $rel"
       fi
       log "updating nested $rel"
       git -C "$ndest" fetch --quiet origin

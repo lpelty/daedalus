@@ -267,6 +267,7 @@ EOF
 }
 
 @test "sync-target refuses a target checkout that is not on the trunk — a branch, or no branch — naming it and what turns it into a window; nothing moves" {
+  echo 0.7.0 > "$DAEDALUS_HOME/VERSION"     # a release pulled, not yet upgraded: the next session start adopts it
   bash "$DAEDALUS_HOME/core/sync-target.sh"
   D="$DAEDALUS_HOME/target/upstream-harness"
   git -C "$D" checkout -q -b feat/x
@@ -289,9 +290,63 @@ target:
   branch: main
   nested: sub=$NESTED
 EOF
+  echo 0.7.0 > "$DAEDALUS_HOME/VERSION"
   bash "$DAEDALUS_HOME/core/sync-target.sh"
   git -C "$DAEDALUS_HOME/target/upstream-harness/sub" checkout -q -b feat/n
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -ne 0 ]
   case "$output" in *"target/upstream-harness/sub is on feat/n; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt feat/n --repo sub)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "sync-target on an upgraded home (the stamp matches VERSION) never promises a next-session adoption — the upgrade does not run again; it names lease.sh adopt, or for no branch how to name the commits first" {
+  echo 0.7.0 > "$DAEDALUS_HOME/VERSION"
+  mkdir -p "$DAEDALUS_HOME/state"; echo 0.7.0 > "$DAEDALUS_HOME/state/upgraded-to"
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  D="$DAEDALUS_HOME/target/upstream-harness"
+  git -C "$D" checkout -q -b feat/x
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness is on feat/x; run core/lease.sh adopt feat/x to make it a numbered window"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"next session start"*) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$D" branch --show-current)" = feat/x ]
+  git -C "$D" checkout -q --detach
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness is not on a branch; give its commits a branch (git -C target/upstream-harness switch -c <name>) and run core/lease.sh adopt <name>, or check out main if they are already on origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"next session start"*) echo "$output"; return 1 ;; esac
+  # A window's own branch is never adopted (lease.sh adopt refuses it): the refusal says to go back to the trunk.
+  git -C "$D" checkout -q -b lease/03
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness is on lease/03, window 03's branch; check out main there (the window keeps its branch)"*) : ;; *) echo "$output"; return 1 ;; esac
+  # A home with no VERSION is never upgraded either (session-start's own rule): the same wording.
+  rm -f "$DAEDALUS_HOME/VERSION" "$DAEDALUS_HOME/state/upgraded-to"
+  git -C "$D" checkout -q feat/x
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness is on feat/x; run core/lease.sh adopt feat/x to make it a numbered window"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "sync-target on an upgraded home names lease.sh adopt with --repo for a nested checkout off its trunk" {
+  NESTED="$BATS_TEST_TMPDIR/upstream-n"; git init -q -b main "$NESTED"; echo n > "$NESTED/n.txt"
+  git -C "$NESTED" add -A; git -C "$NESTED" -c user.email=t@t -c user.name=t commit -q -m n
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: $BATS_TEST_TMPDIR/upstream-harness
+  branch: main
+  nested: sub=$NESTED
+EOF
+  echo 0.7.0 > "$DAEDALUS_HOME/VERSION"
+  mkdir -p "$DAEDALUS_HOME/state"; printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  N="$DAEDALUS_HOME/target/upstream-harness/sub"
+  git -C "$N" checkout -q -b feat/n
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness/sub is on feat/n; run core/lease.sh adopt feat/n --repo sub to make it a numbered window"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"next session start"*) echo "$output"; return 1 ;; esac
+  git -C "$N" checkout -q --detach
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/upstream-harness/sub is not on a branch; give its commits a branch (git -C target/upstream-harness/sub switch -c <name>) and run core/lease.sh adopt <name> --repo sub, or check out main if they are already on origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
 }

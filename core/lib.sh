@@ -33,6 +33,16 @@ daedalus_version() {
   esac
 }
 
+# upgrade_pending — true when the next session start will run the upgrade (spec §14 step 0): VERSION reads
+# X.Y.Z and state/upgraded-to (trimmed) is not it. session-start.py upgrade_pending is the same rule; a home
+# with no VERSION, or one already stamped at it, never runs the upgrade again, so nothing may promise that it will.
+upgrade_pending() {
+  local ver done_ver
+  ver="$(daedalus_version)" || return 1
+  done_ver="$(tr -d '[:space:]' < "$DAEDALUS_HOME/state/upgraded-to" 2>/dev/null || true)"
+  [ "$done_ver" != "$ver" ]
+}
+
 # cfg <top.key> | <key> — print a scalar value from the config.
 # A key that is present but has no value (e.g. "repo:" with nothing after
 # the colon) is treated as missing — returns 1, prints nothing — because
