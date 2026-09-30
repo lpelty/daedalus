@@ -14,7 +14,8 @@ recursive check_command, so a command reached any of those ways passes every
 rule; nesting deeper than four is denied); distribution code by every git route
 (`apply`, `am`, `cherry-pick`, `merge`, `pull`, `rebase`, `stash pop|apply`,
 `checkout <rev>`, `switch <branch>`, `restore --source` in Daedalus's own
-checkout, `patch < file` writing its cwd); `--no-verify` (abbreviated too —
+checkout, `patch < file` writing its cwd — except exactly `git pull --ff-only`
+in Daedalus's own checkout, the release pull (plan 5 Decision 17)); `--no-verify` (abbreviated too —
 git takes any unique prefix of a long option); `core.hooksPath` by `-c`,
 `--config-env` and `git config`, the GIT_CONFIG_* variables that point git at
 other configuration (GIT_CONFIG_GLOBAL, _SYSTEM, _PARAMETERS, _COUNT/_KEY/_VALUE
@@ -836,6 +837,18 @@ def dist_verb(sub: str, rest: List[str]) -> Optional[str]:
     return None
 
 
+RELEASE_PULL_WORDS = {"--ff-only", "-q", "--quiet"}
+
+
+def release_pull(sub: str, rest: List[str], cfg: "Cfg", penv: Dict[str, str]) -> bool:
+    """`git pull --ff-only` and nothing else, in Daedalus's own checkout: the one way a release reaches the home
+    (PRD §5.4 "updating is `git pull`, forever"; spec §13 Q9b; plan 5 Decision 17). A fast-forward from the
+    checkout's own upstream carries no local edit, and the integrity record — disk against HEAD — is unchanged
+    in kind. Any other argument, a -c pair, --config-env or a GIT_* prefix and it is an ordinary pull. Not
+    closed: a session that repointed remote.origin.url before pulling — the unparsed-route class §7.3 concedes."""
+    return (sub == "pull" and "--ff-only" in rest and all(r in RELEASE_PULL_WORDS for r in rest)
+            and len(cfg) == 0 and not cfg.env_keys and not any(k.startswith("GIT_") for k in penv))
+
 # git push's long options that take a value, each with the shortest abbreviation git accepts for it (parse-options
 # takes any unique prefix: `--rep` is --repo; `--re` is ambiguous with --receive-pack and --recurse-submodules).
 PUSH_VALUE_LONG = {"--repo": "--rep", "--receive-pack": "--rece", "--exec": "--e", "--push-option": "--pu"}
@@ -943,7 +956,7 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
             if not (sub == "checkout" and rest and rest[-1] != "."):
                 return "`git %s %s` destroys work; ask the operator." % (a, b), None
     if is_product_repo(root, repo) or any(v.is_protected(root, resolve(repo, r)) for r in rest if not r.startswith("-")):
-        d = dist_verb(sub, rest)
+        d = None if (is_product_repo(root, repo) and release_pull(sub, rest, cfg, penv)) else dist_verb(sub, rest)
         if d:
             return DIST % d, None
     norm = [long_as(r) or r for r in rest]      # Decision 33: --no-veri is --no-verify

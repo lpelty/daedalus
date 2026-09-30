@@ -962,3 +962,16 @@ gb.main()
     run guard "$c" "$BATS_TEST_TMPDIR/w"; allowed || { echo "not allowed: $c: $output"; return 1; }
   done
 }
+
+@test "the release pull: in Daedalus's own checkout exactly 'git pull --ff-only' (with -q or --quiet) is allowed; any other word, a -c pair or --config-env and it is an ordinary pull, denied as distribution code (plan 5 Decision 17)" {
+  scratch_and_worktree
+  for c in 'pull --ff-only' 'pull --ff-only -q' 'pull --quiet --ff-only'; do
+    run guard_as sA "git -C $DAEDALUS_HOME $c"; allowed || { echo "denied: git $c: $output"; return 1; }
+  done
+  for c in 'pull' 'pull --ff-only origin main' 'pull --ff-only /tmp/other' 'pull --ff-only --rebase' 'pull --ff-only --no-verify' \
+           'pull --ff' '-c remote.origin.url=/tmp/x pull --ff-only' '--config-env=remote.origin.url=X pull --ff-only'; do
+    run guard_as sA "git -C $DAEDALUS_HOME $c"; denied || { echo "not denied: git $c: $output"; return 1; }
+  done
+  run guard_as sA "GIT_SSH_COMMAND=/tmp/x git -C $DAEDALUS_HOME pull --ff-only"; denied
+  run guard_as sB 'git pull --ff-only' "$W2"; allowed      # a window's worktree is not the product repo: unchanged
+}
