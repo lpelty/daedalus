@@ -134,6 +134,10 @@ def read_lease(root: Path, nn: str) -> Optional[dict]:
         return None
     except OSError as e:
         raise _unreadable(nn, e.strerror or str(e))
+    if text == "":
+        # an empty file is a number reserved by a build that created the file before writing it, cut off in
+        # between: it never held a session (release-candidate review 3, finding 7). read_all removes it.
+        return None
     try:
         d = json.loads(text)
     except ValueError as e:
@@ -154,6 +158,14 @@ def read_all(root: Path) -> Dict[str, dict]:
         key = p.stem
         if key != "prime" and not valid_id(key):
             continue
+        try:
+            if p.stat().st_size == 0:
+                # an interrupted reservation (read_lease): every later start, sweep and board refused on it
+                # before, and the sentence's own remedy refused the same (release-candidate review 3, finding 7)
+                p.unlink()
+                continue
+        except OSError:
+            pass
         data = read_lease(root, key)
         if data is not None:
             out[key] = data
@@ -161,18 +173,31 @@ def read_all(root: Path) -> Dict[str, dict]:
 
 
 def write_lease(root: Path, nn: str, data: dict, exclusive: bool = False) -> None:
-    """tmp + os.replace. exclusive=True: O_CREAT|O_EXCL on the final path so a
-    second allocator that computed the same number gets FileExistsError."""
+    """The content is written to a temporary file first, then lands in one
+    step: os.replace, or with exclusive=True os.link onto the final path, which
+    raises FileExistsError when another allocator took the number. The
+    reservation and its content are one step: an exclusive create followed by
+    the replace left an empty <NN>.json when a start was cut off between them,
+    and every later start, the board and sweep refused on it
+    (release-candidate review 3, finding 7)."""
     d = leases_dir(root)
     d.mkdir(parents=True, exist_ok=True)
     final = lease_path(root, nn)
-    if exclusive:
-        fd = os.open(str(final), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)  # raises FileExistsError
-        os.close(fd)
     fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".lease-", suffix=".json")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(tmp, str(final))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+        if exclusive:
+            os.link(tmp, str(final))       # raises FileExistsError
+        else:
+            os.replace(tmp, str(final))
+            tmp = ""
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def heartbeat(root: Path, nn: str) -> None:
@@ -576,10 +601,12 @@ def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
 
 def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: Dict[str, str]) -> str:
     """The lowest number 01–99 that no lease file holds and no swept lease's
-    unpromoted work is waiting under. Caller holds the lock."""
+    unpromoted work is waiting under, and whose worktrees/<NN> is not another
+    branch's checkout (_foreign_numbers). Caller holds the lock."""
+    foreign = _foreign_numbers(root, trunks)
     for i in range(1, 100):
         nn = "%02d" % i
-        if nn in leases:
+        if nn in leases or nn in foreign:
             continue
         if any(waiting_work(target_base / repo, trunks[repo], nn) for repo in trunks):
             continue
@@ -727,6 +754,112 @@ def _checkout_live(dest: Path) -> bool:
         return False
 
 
+def _common_dir(src: Path) -> Optional[Path]:
+    code, out, _ = _git(src, "rev-parse", "--git-common-dir", timeout=10)
+    if code != 0 or not out.strip():
+        return None
+    d = Path(out.strip())
+    return d if d.is_absolute() else src / d
+
+
+def _under(path: str, base: Path) -> bool:
+    b = os.path.realpath(str(base))
+    return os.path.realpath(path).startswith(b + os.sep)
+
+
+def prune_under(src: Path, base: Path, force: Optional[Path] = None) -> list:
+    """`git worktree prune` for the worktrees under <base> only (worktrees/, or
+    promote's scratch): the record of one whose directory is gone is removed,
+    as git's prune would. A worktree of target/<repo> made anywhere else is the
+    operator's and is never touched: a plain prune removed the record of one on
+    a volume not mounted at that moment — its index and the commits only its
+    detached HEAD held went with it — where git's own gc waits three months
+    (release-candidate review 3, finding 2). A locked record is left, unless it
+    is locked "initializing" by a `git worktree add` no longer running — an add
+    cut off (findings 8, 11). <force>: that worktree's record is removed
+    whatever its lock says; the caller has judged it (its directory is gone).
+    Returns the real paths of the cut-off adds' worktrees whose records it
+    removed: what is left of such a directory is a half-written tree.
+    Caller holds the lock."""
+    dropped: list = []
+    common = _common_dir(src)
+    if common is None:
+        return dropped
+    admin = common / "worktrees"
+    try:
+        entries = sorted(admin.iterdir())
+    except OSError:
+        return dropped
+    want = os.path.realpath(str(force)) if force is not None else None
+    for a in entries:
+        try:
+            gd = (a / "gitdir").read_text().strip()
+        except OSError:
+            continue
+        if not os.path.isabs(gd):
+            gd = os.path.normpath(os.path.join(str(a), gd))
+        wt = os.path.dirname(gd)
+        if not _under(wt, base) or os.path.exists(gd):
+            continue
+        if want is None or os.path.realpath(wt) != want:
+            try:
+                reason = (a / "locked").read_text().strip()
+            except FileNotFoundError:
+                reason = None
+            except OSError:
+                continue
+            if reason is not None and (reason != "initializing" or _add_running(Path(wt)) is not False):
+                continue
+            if reason == "initializing":
+                dropped.append(os.path.realpath(wt))
+        shutil.rmtree(str(a), ignore_errors=True)
+    return dropped
+
+
+def _clear_ref_lock(src: Path, branch: str) -> None:
+    """refs/heads/<branch>.lock for a window's own branch, left by a git command
+    cut off while it wrote that ref (a `worktree add -b`, a branch made): git
+    refuses that ref until it is removed ("remove the file manually"). Only
+    Daedalus writes lease/<NN> refs, under the lease lock this caller holds
+    (release-candidate review 3, finding 8)."""
+    common = _common_dir(src)
+    if common is not None:
+        try:
+            (common / "refs" / "heads" / (branch + ".lock")).unlink()
+        except OSError:
+            pass
+
+
+LOCK_NAMED_RE = re.compile(r"Unable to create '([^']+\.lock)'")
+
+
+def _lock_words(err: str) -> Optional[str]:
+    """git's "Unable to create '<file>.lock': File exists" as the file to remove, or None."""
+    m = LOCK_NAMED_RE.search(err)
+    return m.group(1) if m else None
+
+
+def _foreign_numbers(root: Path, trunks: Dict[str, str]) -> set:
+    """Numbers whose worktrees/<NN>/<repo> is registered to a branch other than lease/<NN> — the debris of an adoption
+    cut off by an earlier build: handing out that number gave the window someone else's checkout
+    (release-candidate review 3, finding 10)."""
+    nums = set()
+    base = os.path.realpath(str(root / "worktrees"))
+    for repo in trunks:
+        code, out, _ = _git(root / "target" / repo, "worktree", "list", "--porcelain")
+        path = None
+        for ln in (out.splitlines() if code == 0 else []) + [""]:
+            if ln.startswith("worktree "):
+                path = os.path.realpath(ln[len("worktree "):])
+            elif ln.startswith("branch refs/heads/") and path and path.startswith(base + os.sep):
+                nn = path[len(base) + 1:].split(os.sep, 1)[0]
+                if valid_id(nn) and ln[len("branch refs/heads/"):] != "lease/" + nn:
+                    nums.add(nn)
+            elif not ln.strip():
+                path = None
+    return nums
+
+
 def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20,
                   deadline: Optional[float] = None) -> bool:
     """§4.2 'Re-use or refuse': prune; adopt a registered worktree in place;
@@ -756,9 +889,13 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
         def git(*args: str, cwd: Path = src):
             return _git_budget(cwd, *args, timeout=timeout, deadline=deadline)
 
-        r = git("worktree", "prune")
-        if r is None or r[0] == 127:
+        if _left(deadline, timeout) < 1:
             return False
+        cut = prune_under(src, root / "worktrees")    # never the operator's own worktrees (review 3, finding 2)
+        if dest.exists() and os.path.realpath(str(dest)) in cut:
+            # an add cut off before it wrote the worktree's .git file: its record is gone now, and what it wrote
+            # of the tree is no one's work (review 3, finding 8)
+            shutil.rmtree(str(dest), ignore_errors=True)
         registered = False
         if dest.exists():
             r = git("worktree", "list", "--porcelain")
@@ -779,24 +916,29 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
                     r2 = git("worktree", "list", "--porcelain")
                     if r2 is None or r2[0] == 127:
                         return False
-                    if _registered(r2[1], dest):
-                        last = r[2].strip().splitlines()[-1:] or ["no output"]
-                        raise Refused("worktrees/%s/%s is a half-finished checkout (its add was interrupted) and git "
-                                      "would not remove it: %s" % (nn, repo, last[0]))
-                    # git deregistered it, then failed on the directory: finish the job.
+                    # git deregistered it and failed on the directory, or would not remove it at all — an add cut
+                    # off before it wrote the worktree's .git file (HEAD 0000, "not a .git file"): nothing in it is
+                    # anyone's work, and no add is running. The directory goes, then its record (review 3, finding 8).
+                    still = _registered(r2[1], dest)
                     shutil.rmtree(str(dest), ignore_errors=True)
                     if dest.exists():
                         raise Refused("worktrees/%s/%s is left over from an interrupted checkout and could not be "
                                       "deleted; move it aside." % (nn, repo))
-                    r = git("worktree", "prune")
-                    if r is None or r[0] == 127:
+                    prune_under(src, root / "worktrees", force=dest if still else None)
+                    r2 = git("worktree", "list", "--porcelain")
+                    if r2 is None or r2[0] == 127:
                         return False
+                    if _registered(r2[1], dest):
+                        last = r[2].strip().splitlines()[-1:] or ["no output"]
+                        raise Refused("worktrees/%s/%s is a half-finished checkout (its add was interrupted) and git "
+                                      "would not remove it: %s" % (nn, repo, last[0]))
                 registered = False
         r = git("rev-parse", "--verify", "-q", branch)
         if r is None or r[0] == 127:
             return False
         has_branch = r[0] == 0
         if not registered:
+            _clear_ref_lock(src, branch)
             if has_branch:
                 r = git("worktree", "add", str(dest), branch)
             else:
@@ -804,6 +946,11 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
             if r is None or r[0] == 127:
                 return False   # no time left, or cut off: claim finishes it
             if r[0] != 0:
+                named = _lock_words(r[2])
+                if named:
+                    raise Refused("git worktree add for window %s (%s) failed: %s is left over from a git command that "
+                                  "was cut off — if no git command is running in target/%s, remove that file, then "
+                                  "start a session again." % (nn, repo, named, repo))
                 last = r[2].strip().splitlines()[-1:] or ["no output"]
                 raise Refused("git worktree add for window %s (%s) failed: %s" % (nn, repo, last[0]))
         if has_branch or registered:
@@ -1212,7 +1359,7 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
                     raise Refused("could not remove worktrees/%s/%s (git worktree remove: %s); nothing was deleted from the lease"
                                   % (nn, repo, last[0]))
             else:
-                _git(src, "worktree", "prune")
+                prune_under(src, root / "worktrees")
             if _git(src, "rev-parse", "--verify", "-q", "lease/%s" % nn)[0] == 0:
                 code, _, err = _git(src, "branch", "-D", "lease/%s" % nn)
                 if code != 0:
@@ -1317,7 +1464,7 @@ def _discard_locked(root: Path, nn: str, trunks: Dict[str, str]) -> None:
     for repo in reversed(list(trunks)):
         src = root / "target" / repo
         _git(src, "worktree", "remove", "--force", str(root / "worktrees" / nn / repo))
-        _git(src, "worktree", "prune")
+        prune_under(src, root / "worktrees")
         _git(src, "branch", "-D", "lease/%s" % nn)
     _remove_lease_files(root, nn)
 
@@ -1461,7 +1608,9 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
                                       new_nn))
 
 
-LEASE_BRANCH = re.compile(r"lease/[0-9]{2}")
+# A window's branch: lease/<NN> for a number ever issued — never lease/00, which an operator's own branch can be named
+# and which no window has (release-candidate review 3, finding 4).
+LEASE_BRANCH = re.compile(r"lease/(?!00)[0-9]{2}")
 ADOPT_DIRTY = ("target/%s has uncommitted changes — commit them on their branch inside that checkout, then "
                "run adopt again.")
 
@@ -1492,7 +1641,25 @@ def unpromoted_commits(src: Path, trunk: str, rev: str) -> list:
         if ln.startswith("+ "):
             _, s, _ = _git(src, "log", "-1", "--format=%s", ln[2:].strip())
             subjects.append(s.strip())
-    return subjects
+    return subjects or merge_work(src, trunk, rev)
+
+
+def merge_work(src: Path, trunk: str, rev: str) -> list:
+    """Subjects, oldest first, of <rev>'s merge commits origin/<trunk> lacks, when merging <rev> into origin/<trunk>
+    would change something: git cherry passes over merge commits, so a branch whose only unpushed content is in a
+    merge — a resolved conflict, an amended merge, notes added while merging — read as already on origin and was named
+    nowhere (release-candidate review 3, finding 3). [] when it has none, or its merge changes nothing there (a merge
+    of origin/<trunk> into a branch already merged). A merge git cannot judge here (`merge-tree --write-tree` needs
+    git 2.38) counts as work: named, never passed over."""
+    code, out, _ = _git(src, "log", "--merges", "--reverse", "--format=%s", "%s..%s" % (remote_ref(trunk), rev))
+    merges = [s for s in out.splitlines() if s.strip()] if code == 0 else []
+    if not merges:
+        return []
+    code, tree, _ = _git(src, "merge-tree", "--write-tree", remote_ref(trunk), rev)
+    _, base, _ = _git(src, "rev-parse", "%s^{tree}" % remote_ref(trunk))
+    if code == 0 and tree.split()[:1] == [base.strip()]:
+        return []
+    return merges
 
 
 def _adopt_number(root: Path, leases: Dict[str, dict], trunks: Dict[str, str]) -> str:
@@ -1692,8 +1859,9 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
           fetch: bool = True, deadline: Optional[float] = None) -> dict:
     """`lease.sh adopt <branch> [--repo <nested>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
     that carries work trunk does not have becomes a numbered window with no session bound — the same allocation
-    `create` and `split` use. target/<repo> goes back to its trunk at origin/<trunk>; the branch is renamed
-    lease/<NN> and checked out at worktrees/<NN>/<repo>; the other repos' worktrees are cut at their trunks.
+    `create` and `split` use. target/<repo> goes back to its trunk at origin/<trunk>; lease/<NN> is made at the
+    branch's tip and checked out at worktrees/<NN>/<repo>, and the branch's own name is removed once the window is
+    whole; the other repos' worktrees are cut at their trunks.
     `adopt <trunk>` moves a trunk that is ahead of origin: lease/<NN> is made at the trunk's tip, the window is
     made, and only then is the trunk reset; adopted_from names it daedalus/upgrade-<stamp>-<short sha> (plan 5
     Decision 14 — a label, no such branch is left). Idempotent: a branch already adopted returns {"already":
@@ -1705,11 +1873,13 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
     not exist or is a live window's, nothing past trunk, a detached checkout holding commits no branch has. The fetch (a shell path, §4.2) runs
     before the lock; the upgrade passes fetch=False — it fetched already — and its start deadline.
 
-    Order (plan 5 Task 2 review, finding 1): the first change is always making lease/<NN> (a rename, or for a
-    trunk a new branch at its tip, the trunk untouched), so a process killed at any later point leaves the work
-    on lease/<NN> — with a lease file the board lists the window, without one the board lists the number as
-    waiting work and `claim <NN>` adopts it. A refusal after that point undoes every change: the lease file,
-    lease/<NN> (renamed back, or deleted when it was made here), and target/<repo>'s checkout."""
+    Order (plan 5 Task 2 review, finding 1): the first change is always making lease/<NN> at the work's tip — one
+    new ref, the operator's branch (or the trunk) untouched — so a process killed at any later point leaves the
+    work on its own branch and on lease/<NN>, and a re-run finishes that window. Never a rename: `git branch -m`
+    is two ref writes and a HEAD write, and a git killed between them left the commit on no ref and the checkout on
+    an unborn branch (release-candidate review 3, finding 9). The branch's own name goes last, after the lease file
+    and the worktrees, and only while it still points at the adopted commit. A refusal before then undoes every
+    change: the lease file, lease/<NN> (unless an earlier run made it), and target/<repo>'s checkout."""
     key = repo_key(root, repo)
     src = root / "target" / key
     if fetch:
@@ -1796,17 +1966,15 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         resumed = nn is not None
         if nn is not None:
             new = "lease/" + nn
-            if (not is_trunk and branch != new and branch != cur and branch.startswith("daedalus/upgrade-")
-                    and _git(src, "rev-parse", "refs/heads/" + branch)[1].strip() == tip):
-                _git(src, "branch", "-D", branch)      # the label a re-run gave the same commit: lease/<NN> holds it
         else:
             nn = _adopt_number(root, leases, trunks)
             new = "lease/" + nn
-            # the first change: lease/<NN> holds the work from here on
-            code, _, err = _git(src, *(("branch", new, tip) if is_trunk else ("branch", "-m", branch, new)))
+            # the first change: lease/<NN> made at the work's tip, one new ref; the branch stays as it is until the
+            # window is whole (review 3, finding 9)
+            _clear_ref_lock(src, new)
+            code, _, err = _git(src, "branch", new, tip)
             if code != 0:
-                raise Refused("could not %s lease/%s in target/%s (%s); nothing was adopted"
-                              % ("make" if is_trunk else "rename %s to" % branch, nn, key, _last(err)))
+                raise Refused("could not make lease/%s in target/%s (%s); nothing was adopted" % (nn, key, _last(err)))
         data = dict(prior) if prior else {
             "lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
             "worktree": "worktrees/%s" % nn, "branch": new, "repos": list(trunks), "trunks": trunks,
@@ -1814,13 +1982,14 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             "adopted_repo": key, "adopted_tip": tip, "worktree_ready": False}
         if note and not prior:
             data["note"] = note
-        wrote = False
+        # whether this call may remove the lease file on a refusal: decided before the write, so a signal between the
+        # write and the next line still removes it (review 3, finding 7)
+        wrote = prior is None and not lease_path(root, nn).exists()
         try:
             if prior is None:
                 write_lease(root, nn, data, exclusive=True)
-                wrote = True
             if not is_trunk and cur != trunk:
-                # off the renamed branch (or wherever it was) before lease/<NN> is checked out in its worktree
+                # off the branch (or wherever it was) before lease/<NN> is checked out in its worktree
                 code, _, err = _git(src, "checkout", "--quiet", trunk)
                 if code != 0:
                     raise Refused("could not put target/%s back on %s (%s); nothing was adopted"
@@ -1833,7 +2002,7 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                 except OSError:
                     pass
             if not resumed:     # a resumed lease/<NN> was there before this call: it stays, holding the work
-                _adopt_undo(root, trunks, src, key, nn, branch, is_trunk, cur, head)
+                _adopt_undo(root, trunks, src, key, nn, cur, head)
             raise
         if ready:
             data.pop("worktree_ready", None)
@@ -1848,6 +2017,11 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                 notes.append("target/%s's %s could not be reset to origin/%s (%s) and still holds these commits too; "
                              "run adopt %s again to finish" % (key, trunk, trunk, _last(err), trunk))
         else:
+            # the branch's own name, and any label Daedalus gave the same commit, go now that lease/<NN> and the
+            # window hold it (review 3, finding 9)
+            left = _drop_names(src, key, tip, new, [branch])
+            if left:
+                notes.append(left)
             code, _, err = _git(src, "merge", "--ff-only", "--quiet", remote_ref(trunk))
             if code != 0:
                 notes.append("target/%s's %s could not be fast-forwarded to origin/%s (%s)"
@@ -1857,6 +2031,28 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                 notes.append("a branch named %s on origin was left alone" % original)
     return {"nn": nn, "repo": key, "branch": original, "trunk": trunk, "subjects": subjects, "already": False,
             "notes": notes}
+
+
+def _drop_names(src: Path, key: str, tip: str, new: str, names: list) -> str:
+    """Delete each of <names> (and every daedalus/upgrade-* label) that still points at <tip>, once lease/<NN> (<new>)
+    holds <tip>: the names an adoption replaces. git refuses a branch checked out in a worktree; that one is left and
+    named in the returned note ("" when none is)."""
+    if _git(src, "merge-base", "--is-ancestor", tip, "refs/heads/" + new)[0] != 0:
+        return ""
+    _, labels, _ = _git(src, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/daedalus/")
+    cands = [b for b in names if b and b != new]
+    cands += [b for b, _, sha in (ln.partition(" ") for ln in labels.splitlines())
+              if b.startswith("daedalus/upgrade-") and sha.strip() == tip and b not in cands]
+    kept = []
+    for b in cands:
+        if _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + b)[1].strip() != tip:
+            continue
+        if _git(src, "branch", "-D", b)[0] != 0:
+            kept.append(b)
+    if not kept:
+        return ""
+    return ("%s, checked out in another worktree, was left as it was in target/%s; window %s holds its commits"
+            % (" and ".join(kept), key, new[len("lease/"):]))
 
 
 def _prior_adoption(src: Path, key: str, tip: str, leases: Dict[str, dict]) -> Tuple[Optional[str], Optional[dict]]:
@@ -1875,7 +2071,8 @@ def _prior_adoption(src: Path, key: str, tip: str, leases: Dict[str, dict]) -> T
     for ln in (out.splitlines() if code == 0 else []):
         ref, _, sha = ln.partition(" ")
         nn = ref[len("refs/heads/lease/"):]
-        if LEASE_BRANCH.fullmatch(ref[len("refs/heads/"):]) and nn not in leases and sha.strip() == tip:
+        if (LEASE_BRANCH.fullmatch(ref[len("refs/heads/"):]) and valid_id(nn) and nn not in leases
+                and sha.strip() == tip):
             return nn, None
     return None, None
 
@@ -1901,7 +2098,10 @@ def finish_adopted(root: Path, key: str, deadline: Optional[float] = None) -> li
             trunk = trunks.get(key) or (d.get("trunks") or {}).get(key)
             _, cur, _ = _git(src, "branch", "--show-current")
             _, head, _ = _git(src, "rev-parse", "HEAD")
-            if cur.strip() == new or (not cur.strip() and head.strip() == d.get("adopted_tip")):
+            tip, orig = d.get("adopted_tip"), str(d.get("adopted_from") or "")
+            on_orig = (cur.strip() == orig and orig != trunk
+                       and _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + orig)[1].strip() == tip)
+            if cur.strip() == new or on_orig or (not cur.strip() and head.strip() == tip):
                 code, _, err = _git(src, "checkout", "--quiet", trunk)
                 if code != 0:
                     raise Refused("could not put target/%s back on %s (%s)" % (key, trunk, git_reason(err)))
@@ -1912,6 +2112,12 @@ def finish_adopted(root: Path, key: str, deadline: Optional[float] = None) -> li
             write_lease(root, nn, d)
             heartbeat(root, nn)
             done.append((nn, True))
+        # the branch's own name (and its labels) an adoption cut off after its window was made left behind: removed
+        # as that adoption would have (review 3, finding 9)
+        for nn, d in sorted(read_all(root).items()):
+            if nn == "prime" or d.get("adopted_repo") != key or not d.get("adopted_tip"):
+                continue
+            _drop_names(src, key, str(d["adopted_tip"]), "lease/" + nn, [str(d.get("adopted_from") or "")])
     return done
 
 
@@ -1922,16 +2128,15 @@ def _trunk_reset(cur: str, trunk: str) -> tuple:
             else ("branch", "-f", trunk, remote_ref(trunk)))
 
 
-def _adopt_undo(root: Path, trunks: Dict[str, str], src: Path, key: str, nn: str, branch: str, is_trunk: bool,
-                cur: str, head: str) -> None:
+def _adopt_undo(root: Path, trunks: Dict[str, str], src: Path, key: str, nn: str, cur: str, head: str) -> None:
     """Best effort, after a refusal. In every repo, a worktree at worktrees/<NN>/<repo> on lease/<NN> is removed
     (only this call can have made one: lease/<NN> existed nowhere before it — _adopt_number; git refuses a dirty
-    one). In the other repos lease/<NN>, cut here from origin/<trunk>, is deleted. In target/<repo>, lease/<NN> is
-    deleted when it was made at a trunk's tip (the trunk still holds the commits), else renamed back to <branch>,
-    and the checkout goes back where it was. Anything git refuses is left as it is — the work stays on
-    lease/<NN>, which the board lists as waiting work."""
+    one), and lease/<NN> is deleted: cut here from origin/<trunk>, or in target/<repo> made at the work's tip, which
+    the branch (or the trunk) still holds — nothing was renamed (review 3, finding 9). The checkout goes back where
+    it was. Anything git refuses is left as it is: lease/<NN> then still holds the work too, and the next adoption
+    of it finishes that window."""
     new = "lease/" + nn
-    for repo in trunks:
+    for repo in reversed(list(trunks)):      # nested first: they sit inside the outer worktree
         rsrc = root / "target" / repo
         dest = root / "worktrees" / nn / repo
         code, listed, _ = _git(rsrc, "worktree", "list", "--porcelain")
@@ -1939,12 +2144,7 @@ def _adopt_undo(root: Path, trunks: Dict[str, str], src: Path, key: str, nn: str
             _, on, _ = _git(dest, "branch", "--show-current")
             if on.strip() == new:
                 _git(rsrc, "worktree", "remove", str(dest))
-        if repo != key:
-            _git(rsrc, "branch", "-D", new)
-    if is_trunk:
-        _git(src, "branch", "-D", new)
-        return
-    _git(src, "branch", "-m", new, branch)
+        _git(rsrc, "branch", "-D", new)
     _, now, _ = _git(src, "branch", "--show-current")
     if cur and now.strip() != cur:
         _git(src, "checkout", "--quiet", cur)

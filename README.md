@@ -69,10 +69,16 @@ window numbers itself. Each step acts once and says one line when it does:
    part-way finishes at the next session start); its ignored files stay in
    `target/<repo>`, named in its window's line; untracked files
    no window is made from stay where they are, named in one line, and
-   `core/doctor.sh` names them until they are moved or removed. A detached
-   checkout whose change is already on trunk keeps its commits on a branch it
-   names. A start cut off part-way through making a window is finished by the
-   next one, never made twice;
+   `core/doctor.sh` names them until they are moved or removed; ignored files
+   no window is made from are named once, in one line. Work in a worktree
+   someone made by hand from a target repo (uncommitted files, a detached commit
+   no branch has) is named in a line and by `core/doctor.sh`, and left as it is.
+   A branch whose only unpushed content is a merge commit counts as work. A
+   detached checkout whose change is already on trunk keeps its commits on a
+   branch it names. Nothing is renamed: `lease/<NN>` is made at the work's tip,
+   and the branch's own name is removed only once the window is whole. A start
+   cut off part-way through making a window is finished by the next one, never
+   made twice;
 7. writes `state/upgraded-to`, last.
 
 It will not move a target checkout that holds work it could lose, and stops
@@ -85,7 +91,10 @@ untracked or ignored files that putting it back on its trunk would overwrite
 local branch named `origin/<trunk>`, which git takes for origin's trunk
 (rename it), or one where a rebase,
 merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
-there, with the `git` command the sentence names). The board says which on
+there, with the `git` command the sentence names), or one where a `git`
+command was cut off and left lock files, or the checkout on a branch that is
+gone (the sentence names the files to remove, or the `git branch` command that
+brings the branch back from HEAD's reflog). The board says which on
 every prompt, in one sentence, with what to do; the next session start
 finishes the job. One other state needs a person but does not stop it: a
 target checkout that already has a `pre-push` hook Daedalus did not install,

@@ -210,7 +210,10 @@ it back on its trunk would overwrite (it stops there and tells the operator
 to move them out of that checkout, or commit them on its branch), or a local
 branch named `origin/<trunk>` (it stops until that is renamed), or a
 rebase, merge, cherry-pick, revert or bisect stopped part-way there (it stops
-and names the `git` command that finishes or undoes it). The other
+and names the `git` command that finishes or undoes it), or lock files a
+cut-off `git` command left, or a checkout on a branch that is gone (it stops,
+naming the files to remove or the `git branch` command that brings the branch
+back — never commit in that checkout to get past it). The other
 is a target checkout whose pre-push hook Daedalus cannot install — another
 tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
 That one does not stop the upgrade; its line names the remedy, promote

@@ -717,7 +717,7 @@ print(stop); sys.exit(1)'
   [ ! -e "$DAEDALUS_HOME/worktrees/01/.upgrade-carry" ]
 }
 
-@test "a trunk-ahead adoption killed after lease/NN was made and before its lease file: the next run finishes that window — one window holds the commits, outer and nested; a checked-out branch killed after its rename the same (review 2, finding 11)" {
+@test "a trunk-ahead adoption killed after lease/NN was made and before its lease file: the next run finishes that window — one window holds the commits, outer and nested; a checked-out branch killed after lease/NN was made the same (review 2, finding 11; review 3, finding 9)" {
   printf 'ahead1\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-1"
   printf 'ahead2\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-2"
   printf 'n\n' > "$T/notes.txt"
@@ -751,16 +751,19 @@ ll.write_lease = k'
   case "$output" in *"target/thing/sub's main was 1 commit ahead of origin/main"*"that work is now window 03"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -e "$DAEDALUS_HOME/state/leases/03.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/04.json" ]
   ! git -C "$T/sub" rev-parse -q --verify refs/heads/lease/04 >/dev/null
-  # a checked-out branch cut off after its rename to lease/NN: adopted as that window, not left as a stray branch
+  # a checked-out branch cut off after lease/NN was made at its tip (never renamed: review 3, finding 9): the branch
+  # is still checked out, and the next run adopts it as that window, not a second one beside it
   rm -f "$DAEDALUS_HOME/state/upgraded-to"
   git -C "$T" checkout -q -b feat/x main; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
   printf 'u\n' > "$T/u.txt"
   killed_run "$kill_at_lease_file"
-  [ "$status" -eq 9 ]; [ "$(git -C "$T" branch --show-current)" = lease/04 ]; [ ! -e "$DAEDALUS_HOME/state/leases/04.json" ]
+  [ "$status" -eq 9 ]; [ "$(git -C "$T" branch --show-current)" = feat/x ]; [ ! -e "$DAEDALUS_HOME/state/leases/04.json" ]
+  [ "$(git -C "$T" rev-parse lease/04)" = "$(git -C "$T" rev-parse feat/x)" ]
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"target/thing was on lease/04 (1 commit not on origin/main: \"in flight\"); that work is now window 04"*"worktrees/04/thing: u.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing was on feat/x (1 commit not on origin/main: \"in flight\"); that work is now window 04"*"worktrees/04/thing: u.txt"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$T" branch --show-current)" = main ]; [ ! -e "$DAEDALUS_HOME/state/leases/05.json" ]
+  ! git -C "$T" rev-parse -q --verify refs/heads/feat/x >/dev/null
   [ "$(cat "$DAEDALUS_HOME/worktrees/04/thing/u.txt")" = u ]
 }
 

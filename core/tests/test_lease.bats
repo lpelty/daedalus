@@ -1511,3 +1511,74 @@ on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, c
   run bash "$DAEDALUS_HOME/core/lease.sh" list
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+@test "a lease write cut off after its number is reserved leaves no file, and an empty lease file an earlier build left is cleared: create, sweep and the board work over it (release-candidate review 3, finding 7)" {
+  run python3 -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import leaselib as ll
+from pathlib import Path
+def cut(*a, **kw):
+    raise SystemExit(143)          # a SIGTERM, as session-start.py turns it
+ll.json.dump = cut
+try:
+    ll.write_lease(Path(sys.argv[2]), "01", {"lease": "01"}, exclusive=True)
+except SystemExit:
+    pass
+print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() if not p.name.startswith(".")))' \
+    "$DAEDALUS_HOME/core" "$DAEDALUS_HOME"
+  [ "$output" = "[]" ] || { echo "a cut-off reservation left: $output"; return 1; }
+  : > "$DAEDALUS_HOME/state/leases/01.json"; : > "$DAEDALUS_HOME/state/leases/prime.json"
+  run LS sweep
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  : > "$DAEDALUS_HOME/state/leases/01.json"
+  run LS create
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 01 lease)" = 01 ]
+  run python3 "$LL" doctor-lines
+  case "$output" in *MISSING*) echo "$output"; return 1 ;; esac
+}
+
+@test "a worktree add cut off so early that git cannot remove what it left — a record locked 'initializing' over a directory with no usable .git file, over a missing directory in the nested repo, or a window branch's .lock — never wedges a number: create clears it and makes the window (release-candidate review 3, findings 8, 11)" {
+  W="$DAEDALUS_HOME/worktrees"
+  # the outer repo: the .git file not written yet (git: "is not a .git file"), then not there at all
+  git -C "$T" worktree add -q --lock --reason initializing "$W/01/thing" -b lease/01 origin/main; : > "$W/01/thing/.git"
+  run LS create
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W/01/thing" branch --show-current)" = lease/01 ]; [ "$(git -C "$W/01/thing/sub" branch --show-current)" = lease/01 ]
+  git -C "$T" worktree add -q --lock --reason initializing "$W/02/thing" -b lease/02 origin/main; rm "$W/02/thing/.git"
+  run LS create
+  case "$output" in *"Window 02 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W/02/thing" branch --show-current)" = lease/02 ]
+  # the nested repo: its record locked over a directory that is gone, with orphan lease/03 branches at trunk
+  git -C "$T" branch lease/03 origin/main
+  git -C "$T/sub" worktree add -q --lock --reason initializing "$W/03/thing/sub" -b lease/03 origin/main; rm -rf "$W/03"
+  run LS create
+  case "$output" in *"Window 03 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W/03/thing/sub" branch --show-current)" = lease/03 ]
+  # a cut-off `worktree add -b` left the window branch's lock file
+  : > "$T/.git/refs/heads/lease/04.lock"
+  run LS create
+  case "$output" in *"Window 04 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$T/.git/refs/heads/lease/04.lock" ]
+}
+
+@test "allocating a window never prunes a worktree the operator made outside the home: one on a volume not mounted at that moment keeps its record, its index and its detached commits (release-candidate review 3, finding 2)" {
+  V="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/vol"
+  git -C "$T" worktree add -q --detach "$V/exp" main
+  printf 'e\n' > "$V/exp/e.txt"; git -C "$V/exp" add -A; git -C "$V/exp" -c user.email=t@x -c user.name=t commit -q -m "exp-only"
+  sha="$(git -C "$V/exp" rev-parse HEAD)"; printf 'staged\n' > "$V/exp/s.txt"; git -C "$V/exp" add s.txt
+  mv "$V" "$V-unmounted"
+  run LS create
+  case "$output" in *"Window 01 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  mv "$V-unmounted" "$V"
+  [ "$(git -C "$V/exp" rev-parse HEAD)" = "$sha" ] || { git -C "$V/exp" status; return 1; }
+  [ "$(git -C "$V/exp" show :s.txt)" = staged ]
+  # a window's own worktree whose directory is gone is still pruned, so its number can be cut again
+  rm -rf "$DAEDALUS_HOME/worktrees/01"; rm -f "$DAEDALUS_HOME/state/leases/01".*
+  run LS create
+  case "$output" in *"Window 01 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$V/exp" rev-parse HEAD)" = "$sha" ]
+}

@@ -322,7 +322,8 @@ def remove_scratch(root: Path, pdir: Path, tr: Dict[str, str]) -> None:
         dest = pdir / repo
         if dest.exists():
             run(["git", "-C", str(root / "target" / repo), "worktree", "remove", "--force", str(dest)])
-        run(["git", "-C", str(root / "target" / repo), "worktree", "prune"])
+        # only promote's own scratch records: never a worktree the operator made elsewhere (review 3, finding 2)
+        ll.prune_under(root / "target" / repo, promote_root(root))
     if pdir.is_dir():
         for child in pdir.iterdir():
             if child.name in RECORDS:

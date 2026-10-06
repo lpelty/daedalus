@@ -70,12 +70,15 @@ verify:
   refute: false
   refute_off_reason: bats fixture — a real claude must never be invoked in tests
 EOF
+  # V061_TARGET_DIR: config target.dir, the checkout's directory under target/ (review 3, finding 1)
+  [ -z "${V061_TARGET_DIR:-}" ] || sed -i '' "s|^  branch: main\$|  branch: main\\
+  dir: $V061_TARGET_DIR|" "$H/config.yaml"
   mkdir -p "$H/.claude"
   export DAEDALUS_HOME="$H" CLAUDE_CONFIG_DIR="$B" FAKE_CLAUDE_DIR="$B/fake-claude" PATH="$REPO/core/tests/fixtures/caller/bin:$PATH"
   unset CLAUDECODE DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID DAEDALUS_LEASE DIRECT_CALL_ID \
         DAEDALUS_TARGET_OVERRIDE DAEDALUS_PROMOTE_ID TENANT_BANK TENANT_HOME TRANSCRIPT_DIR HINDSIGHT_API_TENANT_API_KEY
   bash "$H/core/setup.sh" </dev/null >"$B/setup-v061.log" 2>&1 || { cat "$B/setup-v061.log"; return 1; }
-  T="$H/target/thing"
+  T="$H/target/${V061_TARGET_DIR:-thing}"
   [ -d "$T/.git" ] && [ -d "$T/sub/.git" ] && [ -d "$H/vault/.git" ] || { cat "$B/setup-v061.log"; return 1; }
   v061_state
   git -C "$T" checkout -q -b fix/in-flight; printf 'f\n' > "$T/f.txt"; git -C "$T" add -A; cmt "$T" -m "the waiting fix"

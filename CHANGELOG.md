@@ -73,6 +73,9 @@ start a new session, and it finishes the upgrade.
   rename it.
 - A rebase, merge or similar was left half done in a target checkout: the
   sentence names the `git` command that finishes or undoes it.
+- A `git` command was cut off part-way in a target checkout. It left lock
+  files, or the checkout on a branch that is gone. The sentence names the
+  files to remove, or the command that brings the branch back.
 
 Never stash the changes to get past a stop. A stash is saved work that no
 window shows. If the upgrade finds one, it names it, and `core/doctor.sh`
@@ -207,7 +210,10 @@ shows what is left.
   written out plainly, or the key is read from a file; the old line keeps
   working); then one bounded fetch, and every branch of each target repo
   (outer and nested) with commits `git cherry` finds missing from
-  `origin/<trunk>` adopted as its own window — the checked-out one first, a
+  `origin/<trunk>` — or a merge commit whose result adds something
+  `origin/<trunk>` lacks, which `git cherry` passes over — adopted as its own
+  window (a branch named `lease/00` is the operator's own, like any other) —
+  the checked-out one first, a
   branch another window already carries left alone, a merged one (a squash
   merge too) left as it was, and one checked out in another worktree, or
   whose branch on origin was deleted, named in a line with the adopt command
@@ -216,20 +222,42 @@ shows what is left.
   copied into its window's worktree under a temporary name, checked, put in
   place, and only then removed from `target/` (a run cut off part-way, or out
   of time, finishes the move at the next session start), the temporary copies
-  in `worktrees/<NN>/.upgrade-carry/`, and an original removed only while it is
-  still untracked under that name; its ignored files stay and are named in the
-  window's line; untracked files no window takes, and stash entries, are named
-  in a line and by doctor. A detached checkout whose change is on origin as a
+  in `state/upgrade-carry-tmp/<NN>/` (never under `worktrees/`, where a target
+  named `.upgrade-carry` would be the window's own checkout), and an original
+  removed only while it is still untracked under that name; its ignored files
+  stay and are named in the window's line; untracked files no window takes, and
+  stash entries, are named in a line and by doctor; ignored files in a checkout
+  no window is made from are named once, in a line (doctor does not name ignored
+  files: build output and `.env` files live there too); work in a worktree
+  someone made by hand from a target repo — uncommitted or untracked files, a
+  detached HEAD with commits no branch has — is named in a line and by doctor,
+  and left as it is. A detached checkout whose change is on origin as a
   squash keeps its commits on a `daedalus/upgrade-…` branch, named in its line.
-  A start cut off while making a window — after `lease/<NN>` was made, before
-  its lease file, or before its worktrees — is finished by the next start into
-  that same window, never adopted twice. It stops before anything in `target/`
+  A window is made without renaming anything: `lease/<NN>` is made at the
+  work's tip, and the branch's own name is removed only once the lease file and
+  the worktrees exist, so a `git` killed at any point leaves the commits on a
+  branch. A start cut off while making a window — after `lease/<NN>` was made,
+  before its lease file, or before its worktrees — is finished by the next start
+  into that same window, never adopted twice; a worktree an earlier build's
+  cut-off adoption left under `worktrees/` on the branch itself is cleared and
+  the branch adopted. A lease file is written to a temporary file and linked into
+  place, so a cut-off start never leaves an empty one (an empty one an earlier
+  build left is cleared); a `git worktree add` cut off so early that git will
+  not remove what it left (a record locked "initializing", a window branch's
+  `.lock`) is cleared by the next allocation of that number. Allocation and
+  release prune worktree records under `worktrees/` (and promote's scratch)
+  only, never the operator's own worktrees: a plain `git worktree prune` dropped
+  one on a volume not mounted at that moment, its index and its detached
+  commits with it. It stops before anything in `target/`
   moves, repeated by the board on every prompt, on uncommitted changes (an edit
   hidden by skip-worktree or assume-unchanged included), an untracked or
   ignored file where the move back to the trunk, the trunk's reset or its
   fast-forward would write (paths compared without case where git ignores
-  case), a local branch named `origin/<trunk>`, or a rebase, merge,
-  cherry-pick, revert or bisect stopped part-way. Doctor names such a hidden
+  case), a local branch named `origin/<trunk>`, a rebase, merge,
+  cherry-pick, revert or bisect stopped part-way, lock files a cut-off `git`
+  left in its git directory, or a checkout on a branch that is gone (the
+  sentence gives the branch's last commit from HEAD's reflog and the command
+  that brings it back — never "commit them"). Doctor names such a hidden
   edit, a branch named `origin/<trunk>`, a branch whose branch on origin was
   deleted, and the uncommitted or untracked files of a swept window's
   worktree; the board and doctor name a swept window's waiting commits in a

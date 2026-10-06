@@ -109,7 +109,11 @@ move them out of that checkout, or commit them on its branch, then start a
 session again." A local branch named `origin/<trunk>` stops it too, until it is
 renamed. If a rebase, merge, cherry-pick, revert or bisect had stopped
 part-way there, it stopped before anything moved, naming the operation and the
-`git -C target/<repo>` command that finishes or undoes it. Either way that work is yours to commit, in your own session;
+`git -C target/<repo>` command that finishes or undoes it. If a `git` command
+had been cut off there, leaving lock files or the checkout on a branch that is
+gone, it stopped naming the files to remove, or the `git branch` command that
+brings the branch back from HEAD's reflog — never commit in that checkout to
+get past it. Either way that work is yours to commit, in your own session;
 nobody else touches it, and the next session start finishes the upgrade.
 
 **The one other thing that needs a person** does not stop the upgrade: a
