@@ -213,7 +213,12 @@ rebase, merge, cherry-pick, revert or bisect stopped part-way there (it stops
 and names the `git` command that finishes or undoes it), or lock files a
 cut-off `git` command left, or a checkout on a branch that is gone (it stops,
 naming the files to remove or the `git branch` command that brings the branch
-back — never commit in that checkout to get past it). The other
+back — never commit in that checkout to get past it), or two branches whose
+names differ only in case (it stops, naming the rename). A checkout or reset
+the upgrade itself began and was cut off is finished by the next start; tell
+the operator not to commit there. Work in a submodule of a target repo, and in
+a worktree someone made by hand (under `worktrees/` too), is named in a line,
+never moved. The other
 is a target checkout whose pre-push hook Daedalus cannot install — another
 tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
 That one does not stop the upgrade; its line names the remedy, promote

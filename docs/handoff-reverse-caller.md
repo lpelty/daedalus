@@ -113,7 +113,11 @@ part-way there, it stopped before anything moved, naming the operation and the
 had been cut off there, leaving lock files or the checkout on a branch that is
 gone, it stopped naming the files to remove, or the `git branch` command that
 brings the branch back from HEAD's reflog — never commit in that checkout to
-get past it. Either way that work is yours to commit, in your own session;
+get past it. Two branches whose names differ only in case, where git ignores
+case, stop it too, until one is renamed (the sentence gives the commands). A
+checkout or reset the upgrade itself began and was cut off part-way is not
+yours to fix: the next session start finishes it, so do not commit there in
+between. Either way that work is yours to commit, in your own session;
 nobody else touches it, and the next session start finishes the upgrade.
 
 **The one other thing that needs a person** does not stop the upgrade: a

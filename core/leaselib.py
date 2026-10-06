@@ -618,6 +618,66 @@ def _git(repo: Path, *args: str, timeout: int = 20) -> Tuple[int, str, str]:
     return v.run(["git", "-C", str(repo)] + list(args), timeout=timeout)
 
 
+def git_finish(repo: Path, *args: str, timeout: int = 600) -> Tuple[int, str, str]:
+    """A git command that rewrites a checkout — the move back to the trunk, a trunk's hard reset — run so that it is
+    never killed part-way: v.run SIGKILLs git at its 20 s timeout, and an exception in the caller (SIGTERM at a hook's
+    timeout is SystemExit) killed it too, mid-write, leaving the tree half switched (release-candidate review 4,
+    findings 5-6). It runs in its own session with no pipe to break: past `timeout`, or when the caller is stopped, it
+    is left to finish on its own. (code, "", stderr); 127 with "still running" past the timeout."""
+    try:
+        err_f = tempfile.TemporaryFile(mode="w+")
+    except OSError as e:
+        return 127, "", str(e)
+    with err_f:
+        try:
+            pr = subprocess.Popen(["git", "-C", str(repo)] + list(args), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=err_f, start_new_session=True)
+        except OSError as e:
+            return 127, "", str(e)
+        try:
+            code = pr.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return 127, "", "still running after %d s" % timeout
+        err_f.seek(0)
+        return code, "", err_f.read()
+
+
+def ref_oid(src: Path, ref: str) -> Optional[str]:
+    """The commit the ref named exactly <ref> (refs/heads/<b>) points at, from for-each-ref's listing — or None. Where
+    git ignores case, `rev-parse refs/heads/Wip` opens a loose refs/heads/wip and answers for that other branch
+    (release-candidate review 4, finding 1); the listing keeps the two apart."""
+    # the whole of refs/heads/ (never refs/heads/Feat/): a loose directory read under a case-folded prefix comes
+    # back with that prefix's spelling
+    code, out, _ = _git(src, "for-each-ref", "--format=%(refname) %(objectname)", "/".join(ref.split("/")[:2]) + "/")
+    for ln in (out.splitlines() if code == 0 else []):
+        name, _, sha = ln.partition(" ")
+        if name == ref:
+            return sha.strip()
+    return None
+
+
+def case_twins(src: Path) -> list:
+    """Groups of <src>'s local branch names that differ only in case or Unicode normalization, where git ignores
+    case (core.ignorecase) or precomposes Unicode (core.precomposeunicode): this filesystem keeps one file for both,
+    so git reads one branch in place of the other and deleting one deletes both (release-candidate review 4,
+    finding 1). Each group sorted; [] when there are none or git tells such names apart here."""
+    fold = ignores_case(src)
+    code, pre, _ = _git(src, "config", "--bool", "core.precomposeunicode")
+    if not fold and not (code == 0 and pre.strip() == "true"):
+        return []
+    code, out, _ = _git(src, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/")
+    seen: Dict[str, list] = {}
+    for b in (out.splitlines() if code == 0 else []):
+        if b.strip():
+            k = unicodedata.normalize("NFC", b)
+            seen.setdefault(k.casefold() if fold else k, []).append(b)
+    return sorted(sorted(g) for g in seen.values() if len(g) > 1)
+
+
+def twins_words(groups: list) -> str:
+    return "; ".join(", ".join(g) for g in groups)
+
+
 # Only when `ps` cannot answer: an interrupted add's checkout then counts as
 # possibly still writing while the worktree's index.lock is younger than this.
 CHECKOUT_FRESH_SECS = 60
@@ -1613,6 +1673,12 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
 LEASE_BRANCH = re.compile(r"lease/(?!00)[0-9]{2}")
 ADOPT_DIRTY = ("target/%s has uncommitted changes — commit them on their branch inside that checkout, then "
                "run adopt again.")
+# Two branch names that differ only in case share one file where git ignores case: git reads one for the other, and
+# deleting one deletes both (release-candidate review 4, finding 1). The rename goes through packed-refs, which keeps
+# the two apart.
+ADOPT_TWINS = ("target/%s has branches whose names differ only in case (%s), which this filesystem cannot keep apart "
+               "— git reads one in place of the other. Give one a new name (git -C target/%s pack-refs --all, then "
+               "git -C target/%s branch -m %s <new name>), then run adopt again.")
 
 
 def repo_key(root: Path, repo: Optional[str]) -> str:
@@ -1903,10 +1969,15 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         # adopted as window <NN> again, below (release-candidate review 2, finding 11)
         trunks = trunks_of(root, root / "target")
         trunk = trunks[key]
+        twins = case_twins(src)
+        if any(branch in g for g in twins):
+            raise Refused(ADOPT_TWINS % (key, twins_words(twins), key, key, branch))
         code, _, _ = _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + branch)
         if code != 0:
             raise Refused("target/%s has no branch %s." % (key, branch))
-        code, dirt, _ = _git(src, "status", "--porcelain", "--untracked-files=no")
+        # a submodule's own edits and untracked files are its work, named by the upgrade and doctor; they never
+        # leave the checkout, and committing here cannot clear them (release-candidate review 4, finding 4)
+        code, dirt, _ = _git(src, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=dirty")
         if code != 0 or dirt.strip():
             raise Refused(ADOPT_DIRTY % key)
         hidden = hidden_edits(src)
@@ -1916,8 +1987,11 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         cur = cur.strip()
         _, head, _ = _git(src, "rev-parse", "HEAD")
         head = head.strip()
-        _, tip, _ = _git(src, "rev-parse", branch)
-        tip = tip.strip()
+        # the branch's own commit, by its exact name: a bare name is a tag's when a tag has it too (review 4,
+        # finding 2), and rev-parse answers for a case twin's loose file (finding 1) — the two must agree
+        tip = ref_oid(src, "refs/heads/" + branch) or ""
+        if not tip or _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + branch)[1].strip() != tip:
+            raise Refused("target/%s's branch %s cannot be read by its exact name; nothing was adopted." % (key, branch))
         notes = []
         is_trunk = branch == trunk
         if is_trunk and cur == trunk:
@@ -1942,7 +2016,7 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                 # a run cut off after the window was made, before the trunk was reset: finish it
                 if (nn != "prime" and d.get("adopted_repo") == key and d.get("adopted_tip") == tip
                         and str(d.get("adopted_from", "")).startswith("daedalus/upgrade-")):
-                    code, _, err = _git(src, *_trunk_reset(cur, trunk))
+                    code, _, err = git_finish(src, *_trunk_reset(cur, trunk))
                     if code != 0:
                         raise Refused("could not reset target/%s's %s to origin/%s (%s); window %s holds its commits"
                                       % (key, trunk, trunk, _last(err), nn))
@@ -1952,7 +2026,7 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             # on origin" note cannot fire for a trunk, and a later trunk-ahead case is adopted again
             original = "daedalus/upgrade-%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), tip[:7])
         else:
-            subjects = unpromoted_commits(src, trunk, branch)
+            subjects = unpromoted_commits(src, trunk, "refs/heads/" + branch)
             if not subjects:
                 raise Refused("%s in target/%s has no commits that are not already on origin/%s — nothing to adopt."
                               % (branch, key, trunk))
@@ -1989,8 +2063,9 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             if prior is None:
                 write_lease(root, nn, data, exclusive=True)
             if not is_trunk and cur != trunk:
-                # off the branch (or wherever it was) before lease/<NN> is checked out in its worktree
-                code, _, err = _git(src, "checkout", "--quiet", trunk)
+                # off the branch (or wherever it was) before lease/<NN> is checked out in its worktree; never killed
+                # part-way (review 4, finding 6)
+                code, _, err = git_finish(src, "checkout", "--quiet", trunk)
                 if code != 0:
                     raise Refused("could not put target/%s back on %s (%s); nothing was adopted"
                                   % (key, trunk, git_reason(err)))
@@ -2012,7 +2087,7 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         # last: target/<repo> to origin/<trunk>. For a trunk this is the reset — lease/<NN> and the lease file
         # already hold the commits; a re-run finishes a reset that did not happen (above).
         if is_trunk:
-            code, _, err = _git(src, *_trunk_reset(cur, trunk))
+            code, _, err = git_finish(src, *_trunk_reset(cur, trunk))
             if code != 0:
                 notes.append("target/%s's %s could not be reset to origin/%s (%s) and still holds these commits too; "
                              "run adopt %s again to finish" % (key, trunk, trunk, _last(err), trunk))
@@ -2035,19 +2110,24 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
 
 def _drop_names(src: Path, key: str, tip: str, new: str, names: list) -> str:
     """Delete each of <names> (and every daedalus/upgrade-* label) that still points at <tip>, once lease/<NN> (<new>)
-    holds <tip>: the names an adoption replaces. git refuses a branch checked out in a worktree; that one is left and
-    named in the returned note ("" when none is)."""
+    holds <tip>: the names an adoption replaces. Each is read and deleted by its exact name, and only while its
+    listing and rev-parse agree on <tip> (`update-ref -d <ref> <tip>`): where git ignores case, `branch -D Wip` also
+    unlinked a loose refs/heads/wip holding other work (release-candidate review 4, finding 1). A branch checked out
+    in a worktree is left and named in the returned note ("" when none is)."""
     if _git(src, "merge-base", "--is-ancestor", tip, "refs/heads/" + new)[0] != 0:
         return ""
-    _, labels, _ = _git(src, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/daedalus/")
+    _, labels, _ = _git(src, "for-each-ref", "--format=%(refname:lstrip=2) %(objectname)", "refs/heads/daedalus/")
     cands = [b for b in names if b and b != new]
     cands += [b for b, _, sha in (ln.partition(" ") for ln in labels.splitlines())
               if b.startswith("daedalus/upgrade-") and sha.strip() == tip and b not in cands]
+    _, wl, _ = _git(src, "worktree", "list", "--porcelain")
+    out_there = {ln[len("branch refs/heads/"):] for ln in wl.splitlines() if ln.startswith("branch refs/heads/")}
     kept = []
     for b in cands:
-        if _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + b)[1].strip() != tip:
+        ref = "refs/heads/" + b
+        if ref_oid(src, ref) != tip or _git(src, "rev-parse", "--verify", "-q", ref)[1].strip() != tip:
             continue
-        if _git(src, "branch", "-D", b)[0] != 0:
+        if b in out_there or _git(src, "update-ref", "-d", ref, tip)[0] != 0:
             kept.append(b)
     if not kept:
         return ""
@@ -2099,10 +2179,9 @@ def finish_adopted(root: Path, key: str, deadline: Optional[float] = None) -> li
             _, cur, _ = _git(src, "branch", "--show-current")
             _, head, _ = _git(src, "rev-parse", "HEAD")
             tip, orig = d.get("adopted_tip"), str(d.get("adopted_from") or "")
-            on_orig = (cur.strip() == orig and orig != trunk
-                       and _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + orig)[1].strip() == tip)
+            on_orig = cur.strip() == orig and orig != trunk and ref_oid(src, "refs/heads/" + orig) == tip
             if cur.strip() == new or on_orig or (not cur.strip() and head.strip() == tip):
-                code, _, err = _git(src, "checkout", "--quiet", trunk)
+                code, _, err = git_finish(src, "checkout", "--quiet", trunk)
                 if code != 0:
                     raise Refused("could not put target/%s back on %s (%s)" % (key, trunk, git_reason(err)))
             if not add_worktrees(root, nn, trunks, deadline=deadline):

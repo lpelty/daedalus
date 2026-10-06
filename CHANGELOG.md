@@ -76,6 +76,10 @@ start a new session, and it finishes the upgrade.
 - A `git` command was cut off part-way in a target checkout. It left lock
   files, or the checkout on a branch that is gone. The sentence names the
   files to remove, or the command that brings the branch back.
+- Two branches have names that differ only in capital letters, which this
+  disk cannot keep apart. Rename one with the commands the sentence names.
+- If the upgrade's own `git` command was cut off, the next session start
+  finishes it. Do not commit anything there in between.
 
 Never stash the changes to get past a stop. A stash is saved work that no
 window shows. If the upgrade finds one, it names it, and `core/doctor.sh`
@@ -231,7 +235,27 @@ shows what is left.
   files: build output and `.env` files live there too); work in a worktree
   someone made by hand from a target repo — uncommitted or untracked files, a
   detached HEAD with commits no branch has — is named in a line and by doctor,
-  and left as it is. A detached checkout whose change is on origin as a
+  and left as it is, under `worktrees/` too (`worktrees/hotfix`, or a number no
+  lease file has); work inside a target repo's submodule (uncommitted or
+  untracked files, a branch with commits its origin lacks, a detached HEAD past
+  the recorded commit, a stash) is named in a line and by doctor and stays in
+  the trunk mirror — a window's worktree starts with its submodules empty, and
+  a submodule's own edits no longer read as the checkout's uncommitted changes.
+  Branches are read by their exact names (`refs/heads/<b>`): a tag with a
+  branch's name, or a tag named after the trunk, no longer makes a branch
+  unreadable. Where git ignores case, two branches whose names differ only in
+  case stop the upgrade, and `lease.sh adopt`, naming both and the rename
+  (`pack-refs --all`, then `branch -m`): git read one for the other, and the
+  adoption deleted the commit of one; a name an adoption drops is deleted only
+  by its exact ref, at the adopted commit. The move back to the trunk and the
+  trunk's reset are never killed part-way (no 20 s cap; a stopped session
+  start leaves them to finish), and one cut off anyway — the checkout still on
+  what a window already holds, the tree half switched, git's lock files left —
+  is finished by the next start (git's own locks cleared, then the reset or a
+  forced checkout of the trunk), never "commit them", which put the same
+  commit in a second window; a file whose content is neither side's is named
+  instead, and doctor says the window already holds a trunk's commits. A
+  detached checkout whose change is on origin as a
   squash keeps its commits on a `daedalus/upgrade-…` branch, named in its line.
   A window is made without renaming anything: `lease/<NN>` is made at the
   work's tip, and the branch's own name is removed only once the lease file and

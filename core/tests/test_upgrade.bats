@@ -771,13 +771,14 @@ ll.write_lease = k'
   printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-1"
   git -C "$T" checkout -q --detach main; printf 'd\n' > "$T/d.txt"; git -C "$T" add -A; cmt "$T" -m "detached-work"
   printf 'n\n' > "$T/notes.txt"
-  # (a) killed at adopt's checkout of the trunk, after the lease file was written
-  killed_run 'o = ll._git
+  # (a) killed at adopt's checkout of the trunk, after the lease file was written (run through git_finish since
+  # release-candidate review 4, finding 6)
+  killed_run 'o = ll.git_finish
 def k(repo, *args, **kw):
     if args[:2] == ("checkout", "--quiet"):
         os._exit(9)
     return o(repo, *args, **kw)
-ll._git = k'
+ll.git_finish = k'
   [ "$status" -eq 9 ]; [ -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ -z "$(git -C "$T" branch --show-current)" ]
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }

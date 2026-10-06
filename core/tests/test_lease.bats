@@ -1360,6 +1360,28 @@ on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, c
   case "$output" in *"target/thing has no branch feat/none."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "adopt where git does not tell case apart, with branch Wip packed and branch wip a loose file: adopt refuses either, naming both and the rename, and changes nothing; the names an adoption drops are deleted only by their exact name, never a case twin's (release-candidate review 4, finding 1)" {
+  [ "$(git -C "$T" config --bool core.ignorecase)" = true ] || skip "git here tells branch names apart by case"
+  on_feat "$T" Wip 1; c1="$(git -C "$T" rev-parse HEAD)"; git -C "$T" checkout -q main; git -C "$T" pack-refs --all
+  on_feat "$T" tmp/lower 1; c2="$(git -C "$T" rev-parse HEAD)"; git -C "$T" checkout -q main
+  git -C "$T" branch wip "$c2"; git -C "$T" branch -q -D tmp/lower
+  refs="$(git -C "$T" for-each-ref --format='%(refname) %(objectname)' refs/heads/)"
+  case "$refs" in *"refs/heads/Wip $c1"*"refs/heads/wip $c2"*) : ;; *) echo "$refs"; return 1 ;; esac
+  for b in Wip wip; do
+    run bash "$DAEDALUS_HOME/core/lease.sh" adopt "$b"
+    [ "$status" -ne 0 ]
+    case "$output" in *"target/thing has branches whose names differ only in case (Wip, wip)"*"git -C target/thing pack-refs --all, then git -C target/thing branch -m $b <new name>"*) : ;; *) echo "$output"; return 1 ;; esac
+  done
+  [ "$(git -C "$T" for-each-ref --format='%(refname) %(objectname)' refs/heads/)" = "$refs" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  # rev-parse reads Wip through the loose file wip: the drop of Wip "at $c2" must not happen
+  git -C "$T" branch lease/01 "$c2"
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path
+print(ll._drop_names(Path(sys.argv[2]), "thing", sys.argv[3], "lease/01", ["Wip"]))' "$DAEDALUS_HOME/core" "$T" "$c2"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  refs="$(git -C "$T" for-each-ref --format='%(refname) %(objectname)' refs/heads/)"
+  case "$refs" in *"refs/heads/Wip $c1"*"refs/heads/wip $c2"*) : ;; *) echo "$refs"; return 1 ;; esac
+}
+
 # --- adopt: refusals leave everything where it was (plan 5 Task 2 review, findings 1-3) ---
 
 @test "adopt of a branch refused by the worktree add leaves target/thing on the branch it was on and the branch under its own name — no lease/01, no lease file; adopt then works once the directory is moved aside" {

@@ -72,7 +72,11 @@ window numbers itself. Each step acts once and says one line when it does:
    `core/doctor.sh` names them until they are moved or removed; ignored files
    no window is made from are named once, in one line. Work in a worktree
    someone made by hand from a target repo (uncommitted files, a detached commit
-   no branch has) is named in a line and by `core/doctor.sh`, and left as it is.
+   no branch has) is named in a line and by `core/doctor.sh`, and left as it is
+   — under `worktrees/` too, wherever no window's lease file is. Work inside a
+   target repo's submodule (files, a branch's commits, a stash) is named the
+   same way and stays in `target/<repo>`: a window's worktree starts with its
+   submodules empty.
    A branch whose only unpushed content is a merge commit counts as work. A
    detached checkout whose change is already on trunk keeps its commits on a
    branch it names. Nothing is renamed: `lease/<NN>` is made at the work's tip,
@@ -94,7 +98,11 @@ merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
 there, with the `git` command the sentence names), or one where a `git`
 command was cut off and left lock files, or the checkout on a branch that is
 gone (the sentence names the files to remove, or the `git branch` command that
-brings the branch back from HEAD's reflog). The board says which on
+brings the branch back from HEAD's reflog), or one with two branches whose names
+differ only in case where git ignores case (rename one: `git pack-refs --all`,
+then `git branch -m`). A checkout or reset the upgrade itself began and was cut
+off part-way is not a stop: the next session start finishes it — never commit
+in that checkout in between. The board says which on
 every prompt, in one sentence, with what to do; the next session start
 finishes the job. One other state needs a person but does not stop it: a
 target checkout that already has a `pre-push` hook Daedalus did not install,
