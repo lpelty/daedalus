@@ -552,7 +552,18 @@ PY
 # Critic finding 7: the session open through a release pull is told config.yaml changed under it. When the release
 # made the change — the upgrade's own write, recorded in state/, or the pull's own commits to a tracked config.yaml
 # — the reason says so, says not to restore it and to have the operator start a new session, and blocks once.
+# release_under_session <sid> — session <sid> starts in a home at 0.6.1 (stamped, so no upgrade runs), then a pull
+# brings VERSION 0.7.0 in under it: the case the upgrade's recorded config.yaml write is for.
+release_under_session() {
+  printf '0.6.1\n' > "$DAEDALUS_HOME/VERSION"; printf '0.6.1\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  git -C "$DAEDALUS_HOME" add VERSION; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m "0.6.1"
+  printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"startup"}' "$1" | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -am "the release"     # what the pull brings
+}
+
 @test "config.yaml changed by the release (the upgrade's recorded write, or the pull's commits) is not 'restore it': one block saying do not restore it and start a new session, then no block; a change by hand on top still says restore it (critic finding 7)" {
+  release_under_session s1
   python3 - "$DAEDALUS_HOME" "$SRC" <<'PY'
 import sys; from pathlib import Path
 root = Path(sys.argv[1]); sys.path.insert(0, sys.argv[2])     # the upgrade module as it ships; core/ stays clean
@@ -588,4 +599,41 @@ PY
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s5\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 2 ]
   case "$output" in *"config.yaml changed under this session, by the release pulled into this home — not by this session. Do not restore it"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# Release-candidate review, finding 4: state/ is outside the protected snapshot, so the session itself could write a
+# record there. A record is the release's only when a release came in under the session, names that release, and is
+# the upgrade's one write for it; anything else is the session's change and says restore it.
+@test "a config.yaml change recorded in state/config-changes.json by the session itself still says restore it: with no release pulled under the session, and a second record on top of the upgrade's own (release-candidate review, finding 4)" {
+  python3 - "$DAEDALUS_HOME" <<'PY'
+import hashlib, json, sys, time; from pathlib import Path
+root = Path(sys.argv[1]); p = root / "config.yaml"
+sha = lambda: hashlib.sha256(p.read_bytes()).hexdigest()
+before = sha(); p.write_text(p.read_text() + "  - echo forged\n")
+(root / "state" / "config-changes.json").write_text(json.dumps({"changes": [
+    {"from": before, "to": sha(), "by": "the upgrade to 0.7.0", "version": "0.7.0", "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+     "at_epoch": time.time()}]}))
+PY
+  run hook Stop
+  [ "$status" -eq 2 ]
+  case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*"state/config-changes.json was written during this session"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Do not restore it"*) echo "$output"; return 1 ;; esac
+  # a release did come in under s7, and the upgrade recorded its one write; a second record on top is the session's
+  release_under_session s7
+  python3 - "$DAEDALUS_HOME" "$SRC" <<'PY'
+import json, sys, time; from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, sys.argv[2])
+import verifylib as v, upgrade
+p = root / "config.yaml"; before = v.sha256_file(p)
+p.write_text(p.read_text() + "\nmemory:\n  bank: 'b'\n")
+upgrade.record_config_change(root, before, v.sha256_file(p), "the upgrade to 0.7.0")
+mid = v.sha256_file(p); p.write_text(p.read_text() + "  - echo forged\n")
+d = json.loads((root / "state" / "config-changes.json").read_text())
+d["changes"].append({"from": mid, "to": v.sha256_file(p), "by": "the upgrade to 0.7.0", "version": "0.7.0",
+                     "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "at_epoch": time.time()})
+(root / "state" / "config-changes.json").write_text(json.dumps(d))
+PY
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s7\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ]
+  case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*) : ;; *) echo "$output"; return 1 ;; esac
 }

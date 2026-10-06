@@ -275,6 +275,10 @@ def main() -> int:
                 "started_epoch": time.time(),
                 "vault_head": v.vault_head(root),
                 "config_sha": v.sha256_file(root / "config.yaml"),
+                # the release this session started on, and the upgrade's record of its config.yaml writes as it
+                # stood: a record is the release's only when a release came in under the session (review, 4)
+                "version": v.home_version(root),
+                "config_changes_sha": v.sha256_file(root / v.CONFIG_CHANGES),
                 "local_settings_sha": v.local_settings_sha(root),
                 "target_branch": branch,
                 "target_base": base,

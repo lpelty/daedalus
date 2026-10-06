@@ -443,13 +443,109 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
 @test "an untracked file whose copy fails stays in target/ untouched, named in the window's line and by doctor — never removed before a checked copy exists (critic finding 2)" {
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
   printf 'keep\n' > "$T/newfile.py"
-  killed_run 'import shutil
-def bad(*a, **kw):
+  killed_run 'def bad(*a, **kw):
     raise OSError("disk full")
-shutil.copy2 = bad'
+u._copy_bytes = bad'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"that work is now window 01"*"Untracked files that could not go with it stay in target/thing (newfile.py); core/doctor.sh names them until they are moved into worktrees/01/thing or removed."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(cat "$T/newfile.py")" = keep ]; [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/newfile.py" ]
   run python3 "$UP" --doctor
   case "$output" in *"NOTE     target/thing has untracked files no window holds (newfile.py)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a branch checked out in a worktree someone made by hand is not adopted: one line names it, where it is and what to do; the upgrade completes and stamps; the worktree and its uncommitted edit are untouched; doctor says the same (release-candidate review, finding 1)" {
+  git -C "$T" checkout -q -b feat/parked; printf 'p\n' > "$T/p.txt"; git -C "$T" add -A; cmt "$T" -m "parked work"
+  git -C "$T" checkout -q main
+  UW="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/userwt"
+  git -C "$T" worktree add -q "$UW" feat/parked
+  printf 'edit\n' >> "$UW/p.txt"
+  rest="is checked out in another worktree, at $UW, so it was not made a window — once its work there is committed, remove that worktree (git -C target/thing worktree remove $UW) and run core/lease.sh adopt feat/parked"
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing has branch feat/parked, 1 commit past origin/main, in no window — it $rest"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: target/thing's branch feat/parked (1 commit not on origin/main: \"parked work\") $rest."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lease/01"*|*incomplete*) echo "$output"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(git -C "$UW" branch --show-current)" = feat/parked ]; [ "$(cat "$UW/p.txt")" = "$(printf 'p\nedit')" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing has branch feat/parked, 1 commit past origin/main, in no window — it $rest"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a run killed in the middle of copying an untracked file leaves no partial file under its name in the window; the next run finishes the carry into that window, checks it, and removes the original (release-candidate review, finding 2)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  head -c 100001 /dev/zero | tr '\0' 'b' > "$T/big.dat"; printf 'small\n' > "$T/a-small.txt"
+  killed_run 'u.CARRY_CHUNK = 10
+n = [0]
+o = u._out_of_time
+def k(d):
+    n[0] += 1
+    if n[0] > 6:
+        os._exit(9)
+    return o(d)
+u._out_of_time = k'
+  [ "$status" -eq 9 ] || { echo "$output"; return 1; }
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  [ -d "$W" ]; [ ! -e "$W/big.dat" ]; [ "$(wc -c < "$T/big.dat" | tr -d ' ')" = 100001 ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's work became window 01 at an earlier start; its untracked files went with it into worktrees/01/thing: "*"big.dat"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"no window has"*|*"window 02"*) echo "$output"; return 1 ;; esac
+  [ "$(wc -c < "$W/big.dat" | tr -d ' ')" = 100001 ]; [ "$(cat "$W/a-small.txt")" = small ]
+  [ ! -e "$T/big.dat" ]; [ ! -e "$T/a-small.txt" ]
+  [ -z "$(cd "$W" && ls -A | grep -v -e '^\.git$' -e '^a\.txt$' -e '^x\.txt$' -e '^big\.dat$' -e '^a-small\.txt$' -e '^sub$' -e '^\.gitignore$')" ] || { ls -A "$W"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  run python3 "$UP" --doctor
+  case "$output" in *"untracked files no window holds"*) echo "$output"; return 1 ;; esac
+}
+
+@test "a run killed after the window was made and before its untracked files moved: the next run carries them into that window, not into the trunk mirror's 'no window has' line (release-candidate review, finding 2)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'new\n' > "$T/new.py"
+  killed_run 'u._carry = lambda *a, **kw: os._exit(9)'
+  [ "$status" -eq 9 ]; [ -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ "$(cat "$T/new.py")" = new ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's work became window 01 at an earlier start; its untracked files went with it into worktrees/01/thing: new.py."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"no window has"*) echo "$output"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/worktrees/01/thing/new.py")" = new ]; [ ! -e "$T/new.py" ]
+}
+
+@test "the carry watches the session start's deadline: out of time between files it stops with 'it runs again', and the next run finishes the carry (release-candidate review, finding 2)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf '1\n' > "$T/one.txt"; printf '2\n' > "$T/two.txt"
+  killed_run 'u._out_of_time = lambda d: True
+lines, stop = u.run(u.v.ROOT, deadline=__import__("time").time() + 60)
+print(stop); sys.exit(1)'
+  case "$output" in *"upgrade to 0.7.0 incomplete: stopped while moving in-flight work in target/ into windows — the session start ran out of time; it runs again at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ "$(cat "$T/one.txt")" = 1 ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"its untracked files went with it into worktrees/01/thing: one.txt, two.txt."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$T/one.txt" ]; [ "$(cat "$DAEDALUS_HOME/worktrees/01/thing/two.txt")" = 2 ]
+}
+
+@test "a branch squash-merged on origin is not made a window — its change is already on origin/main; a branch whose branch on origin was deleted is left as it was and named in one line (release-candidate review, finding 3)" {
+  git -C "$T" checkout -q -b feat/sq; printf '1\n' > "$T/sq.txt"; git -C "$T" add -A; cmt "$T" -m sq1
+  printf '2\n' >> "$T/sq.txt"; git -C "$T" add -A; cmt "$T" -m sq2
+  git -C "$T" push -q origin feat/sq
+  git -C "$T" checkout -q -b feat/gone main; printf 'g\n' > "$T/g.txt"; git -C "$T" add -A; cmt "$T" -m gone1
+  git -C "$T" push -q -u origin feat/gone
+  git -C "$T" checkout -q main
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  git -C "$BATS_TEST_TMPDIR/hand" merge -q --squash origin/feat/sq
+  git -C "$BATS_TEST_TMPDIR/hand" -c user.email=t@x -c user.name=t commit -q -m "feat/sq (squashed)"
+  git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
+  git -C "$BATS_TEST_TMPDIR/hand" push -q origin --delete feat/gone
+  git -C "$T" fetch -q --prune origin
+  run python3 "$UP" --doctor
+  case "$output" in *"feat/sq"*|*"feat/gone"*) echo "$output"; return 1 ;; esac
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"window 01"*|*"could not be fast-forwarded"*|*"feat/sq"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"Upgrade to 0.7.0: target/thing's branch feat/gone holds commits origin/main has no copy of, but its branch on origin was deleted, which usually means it was merged — it was left as it was; if it was not merged, run core/lease.sh adopt feat/gone."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  git -C "$T" rev-parse -q --verify refs/heads/feat/sq >/dev/null; git -C "$T" rev-parse -q --verify refs/heads/feat/gone >/dev/null
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
 }

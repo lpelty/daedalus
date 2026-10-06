@@ -202,10 +202,14 @@ shows what is left.
   working); then one bounded fetch, and every branch of each target repo
   (outer and nested) with commits `git cherry` finds missing from
   `origin/<trunk>` adopted as its own window — the checked-out one first, a
-  branch another window already carries left alone, a merged one left as it
-  was — and a trunk ahead of origin adopted or, when a window carries it,
-  reset. The checked-out work's untracked, not-ignored files are copied into
-  its window's worktree, checked, and only then removed from `target/`;
+  branch another window already carries left alone, a merged one (a squash
+  merge too) left as it was, and one checked out in another worktree, or
+  whose branch on origin was deleted, named in a line with the adopt command
+  and left as it was — and a trunk ahead of origin adopted or, when a window
+  carries it, reset. The checked-out work's untracked, not-ignored files are
+  copied into its window's worktree under a temporary name, checked, put in
+  place, and only then removed from `target/` (a run cut off part-way, or out
+  of time, finishes the move at the next session start);
   untracked files no window takes, and stash entries, are named in a line and
   by doctor. It stops before anything in `target/` moves, repeated by the board
   on every prompt, on uncommitted changes, an untracked file where the move
@@ -213,7 +217,9 @@ shows what is left.
   bisect stopped part-way. Its write to `config.yaml` is recorded in
   `state/config-changes.json`, so a session open through the pull is told
   "Do not restore it" (once) instead of "restore it"; a tracked `config.yaml`
-  changed by the pull's own commits reads the same way.
+  changed by the pull's own commits reads the same way. A record counts only
+  for a session the release came in under, and only the release's first one;
+  any other change still says "restore it".
 - Doctor shows the `config.yaml` lines only the operator may write
   (`promote.release_note`, `promote.update_command`, `direct_call.callers`,
   `verify.refute_model` on a cloud provider) as one paste, printed bare:

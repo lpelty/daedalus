@@ -60,9 +60,13 @@ window numbers itself. Each step acts once and says one line when it does:
    trunk lacks — the branch checked out, every other local branch, a trunk
    ahead of `origin`, a detached checkout — into a numbered window each with
    `core/lease.sh adopt`, one line per window, putting `target/<repo>` back on
-   its trunk; a branch whose work is already on trunk is left as it is. The
-   checked-out work's untracked files go with it into its window's worktree
-   (each copied and checked before the original is removed); untracked files
+   its trunk; a branch whose work is already on trunk (squash-merged too) is
+   left as it is. A branch checked out in another worktree, or whose branch on
+   `origin` was deleted (usually after a merge), is named in a line with the
+   adopt command and left as it is. The checked-out work's untracked files go
+   with it into its window's worktree (each copied under a temporary name,
+   checked, and put in place before the original is removed; a run cut off
+   part-way finishes at the next session start); untracked files
    no window is made from stay where they are, named in one line, and
    `core/doctor.sh` names them until they are moved or removed;
 7. writes `state/upgraded-to`, last.

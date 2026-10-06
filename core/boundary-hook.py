@@ -167,18 +167,51 @@ def _pull_edge(root: Path, marker: dict) -> Optional[Tuple[str, str]]:
     return (a, b) if a and b and a != b else None
 
 
+def release_came_in(root: Path, marker: dict) -> Optional[str]:
+    """The release pulled into this home under this session — VERSION now, when it differs from the one the session
+    started on — or None. A marker with no "version" was written by a session start older than v0.7.0, the first
+    release to record it, so any release now is one pulled under it."""
+    now = v.home_version(root)
+    if now is None:
+        return None
+    if "version" not in marker:
+        return now
+    return now if marker.get("version") != now else None
+
+
+def _upgrade_edges(root: Path, marker: dict) -> List[Tuple[str, str, str]]:
+    """The upgrade's recorded config.yaml writes (state/config-changes.json) this session may read as the release's
+    (release-candidate review, finding 4). state/ is outside the protected snapshot, so the session itself could
+    write a record; one counts only when a release came in under this session, the record names that release and
+    was written after the session started, and it is that release's first record — the upgrade writes config.yaml
+    once per release, so any record after it is someone else's."""
+    rel = release_came_in(root, marker)
+    if rel is None:
+        return []
+    try:
+        d = json.loads((root / v.CONFIG_CHANGES).read_text())
+    except (OSError, ValueError):
+        return []
+    start = marker.get("started_epoch")
+    for e in (d.get("changes") or []) if isinstance(d, dict) else []:
+        if not (isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("from", "to", "by"))):
+            continue
+        if e.get("version") != rel:
+            continue
+        at = e.get("at_epoch")
+        if isinstance(start, (int, float)) and not (isinstance(at, (int, float)) and at >= start):
+            return []           # this release's first record predates the session: not a change under it
+        return [(e["from"], e["to"], e["by"])]
+    return []
+
+
 def release_change(root: Path, marker: dict, now: str) -> Optional[str]:
     """What changed config.yaml from the marker's sha to <now>, when only the release did: a chain of the
     upgrade's recorded writes (state/config-changes.json, written by core/upgrade.py) and the pull's own commits
     to a tracked config.yaml. The words naming who did it, or None when any step of the change is not theirs."""
     edges: List[Tuple[str, str, str]] = []
-    try:
-        d = json.loads((root / "state" / "config-changes.json").read_text())
-        for e in (d.get("changes") or []) if isinstance(d, dict) else []:
-            if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("from", "to", "by")):
-                edges.append((e["from"], e["to"], e["by"]))
-    except (OSError, ValueError):
-        pass
+    for e in _upgrade_edges(root, marker):
+        edges.append(e)
     pe = _pull_edge(root, marker)
     if pe:
         edges.append((pe[0], pe[1], "the release pulled into this home"))
@@ -217,7 +250,13 @@ def check_config(root: Path, marker: dict, reasons: List[str], notes: Optional[L
                 except OSError:
                     pass
         else:
-            reasons.append("The gate definition (config.yaml) changed this session; restore it.%s" % RESTART)
+            told = ""
+            if ("config_changes_sha" in marker and release_came_in(root, marker) is None
+                    and v.sha256_file(root / v.CONFIG_CHANGES) != marker.get("config_changes_sha")):
+                # no release came in, yet the upgrade's record changed: only this session can have written it
+                told = (" state/config-changes.json was written during this session too, but only the upgrade "
+                        "writes it, and no release came in under this session.")
+            reasons.append("The gate definition (config.yaml) changed this session; restore it.%s%s" % (told, RESTART))
     if marker.get("local_settings_sha") != v.local_settings_sha(root):
         reasons.append("The deny rules or hooks in .claude/settings.local.json changed this session; restore them.%s" % RESTART)
 

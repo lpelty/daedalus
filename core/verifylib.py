@@ -143,6 +143,18 @@ def sha256_file(p: Path) -> str:
         return ""
 
 
+CONFIG_CHANGES = Path("state") / "config-changes.json"
+
+
+def home_version(root: Path) -> Optional[str]:
+    """VERSION's first line when it is X.Y.Z, else None — the same rule as upgrade.version."""
+    try:
+        first = (root / "VERSION").read_text().split("\n", 1)[0].strip()
+    except OSError:
+        return None
+    return first if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", first) else None
+
+
 def local_settings_sha(root: Path) -> str:
     """Only the keys that change what the harness enforces. A permission
     prompt's "don't ask again" writes `allow`, which must not count.
