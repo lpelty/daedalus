@@ -11,8 +11,9 @@ step is idempotent — the second run changes nothing — and says one line the 
   4. vault/hot.md's `session:` line renamed `leases:` once, left uncommitted for the prime
   5. capture's settings moved from the hook line in .claude/settings.local.json into config.yaml's memory:
      block, the key into state/hindsight/api-key (mode 600); the old line is left and still works
-  6. in-flight work in target/ moved into numbered windows (leaselib.adopt) — the checked-out branch, then a
-     trunk still ahead of origin — each checkout put back on its trunk at origin, after one bounded fetch of
+  6. in-flight work in target/ moved into numbered windows (leaselib.adopt) — the checked-out branch, then
+     every other local branch with work origin lacks, one window each (critic finding 1), then a trunk still
+     ahead of origin — each checkout put back on its trunk at origin, after one bounded fetch of
      all of them at once (plan 5 Decision 3). It will not move a checkout with uncommitted changes, nor one
      with an untracked file where the move back to the trunk would write, nor one where a rebase, merge,
      cherry-pick, revert or bisect stopped part-way (critic finding 3): it stops there, saying what to do,
@@ -445,6 +446,35 @@ def _stash_words(entries: List[str]) -> Tuple[str, str]:
         "; ".join(entries[:3]) + (" and %d more" % (len(entries) - 3) if len(entries) > 3 else "")
 
 
+def _carried(p: Path, ref: str, extra: List[str]) -> bool:
+    """Is every commit of <ref> already on a window's branch in <p> (any lease/<NN>) or on one of <extra>?"""
+    _, out, _ = _git(p, "for-each-ref", "--format=%(refname:short)", "refs/heads/lease/")
+    for c in [b for b in out.split() if LEASE_BRANCH.fullmatch(b)] + extra:
+        if c and c != ref and _git(p, "merge-base", "--is-ancestor", ref, c)[0] == 0:
+            return True
+    return False
+
+
+def _parked(p: Path, trunk: str, skip: str) -> List[Tuple[str, List[str]]]:
+    """(branch, subjects) for each local branch of <p> other than <trunk>, <skip> (the checked-out one) and a
+    window's lease/<NN>, holding commits origin/<trunk> has no equivalent of (git cherry, as adopt judges) —
+    the branches waiting beside the checkout (critic finding 1). Most commits first, so a branch built on
+    another is adopted before it and the other is then found carried, never a second copy. Merged ones: none."""
+    import leaselib as ll
+    _, out, _ = _git(p, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    found = []
+    for b in out.split():
+        if b in (trunk, skip) or LEASE_BRANCH.fullmatch(b):
+            continue
+        try:
+            work = ll.unpromoted_commits(p, trunk, b)
+        except ll.Refused as e:
+            raise Stop("could not tell whether target branch %s holds work origin/%s lacks (%s)" % (b, trunk, e))
+        if work:
+            found.append((b, work))
+    return sorted(found, key=lambda bw: (-len(bw[1]), bw[0]))
+
+
 def _now_window(head: str, what: str, r: dict, key: str, trunk: str, stale: str) -> str:
     tail = " Note: %s." % "; ".join(r["notes"]) if r["notes"] else ""
     return ("%s: %s; that work is now window %s (branch lease/%s), and target/%s is back on %s. Promote it from the "
@@ -543,23 +573,47 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 r = _into_window(root, key, rel, adopt_ref, ver, deadline)
                 carrier, carrier_nn = "lease/" + r["nn"], r["nn"]
                 lines.append(_now_window(head, what, r, key, trunk, stale))
+        # every other local branch with work origin/<trunk> lacks: a window each, named in one line each; the
+        # checkout is not touched (critic finding 1). One a window already carries is left as it was.
+        # (ref, what a line calls the window it became): in a dry run the ref it would be made from
+        carriers = [(carrier, (cur or "the detached HEAD") if dry else carrier_nn)] if carrier else []
+        for b, work in _parked(p, trunk, cur):
+            if _carried(p, b, [c for c, _ in carriers]):
+                continue
+            n = _plural(len(work), "commit")
+            if dry:
+                lines.append("%s: would move target/%s's branch %s (%s not on origin/%s) into a numbered window%s."
+                             % (head, key, b, n, trunk, stale))
+                carriers.append((b, b))
+                continue
+            r = _into_window(root, key, rel, b, ver, deadline)
+            tail = " Note: %s." % "; ".join(r["notes"]) if r["notes"] else ""
+            if r["already"]:
+                lines.append("%s: target/%s's branch %s (%s not on origin/%s: %s) has the name of the branch window %s "
+                             "was adopted from, so it was not adopted; run core/lease.sh adopt after renaming it.%s%s"
+                             % (head, key, b, n, trunk, _quoted(work), r["nn"], tail, stale))
+                continue
+            carriers.append(("lease/" + r["nn"], r["nn"]))
+            lines.append("%s: target/%s's branch %s (%s not on origin/%s: %s) is now window %s (branch lease/%s); "
+                         "target/%s stays on %s. Promote it from the board (\"promote window %s\") or release it.%s%s"
+                         % (head, key, b, n, trunk, _quoted(work), r["nn"], r["nn"], key, trunk, r["nn"], tail, stale))
         ahead = _ahead(p, trunk)
         if not ahead:
             if not dry and cur == trunk:
                 _git(p, "merge", "--ff-only", "--quiet", "origin/" + trunk)
             continue
         n = _plural(len(ahead), "commit")
-        if carrier and _git(p, "merge-base", "--is-ancestor", trunk, carrier)[0] == 0:
+        hit = next((lbl for c, lbl in carriers if _git(p, "merge-base", "--is-ancestor", trunk, c)[0] == 0), None)
+        if hit:
             if dry:
                 lines.append("%s: would reset target/%s's %s (also %s ahead of origin/%s) to origin/%s — the window "
-                             "made from %s carries those commits%s." % (head, key, trunk, n, trunk, trunk,
-                                                                       cur or "the detached HEAD", stale))
+                             "made from %s carries those commits%s." % (head, key, trunk, n, trunk, trunk, hit, stale))
                 continue
             code, _, err = _git(p, "reset", "--hard", "--quiet", "origin/" + trunk)
             if code != 0:
                 raise Stop("could not reset target/%s's %s to origin/%s (%s)" % (key, trunk, trunk, _last(err)))
             lines.append("%s: target/%s's %s was also %s ahead of origin/%s; window %s carries those commits, so %s is "
-                         "reset to origin/%s.%s" % (head, key, trunk, n, trunk, carrier_nn, trunk, trunk, stale))
+                         "reset to origin/%s.%s" % (head, key, trunk, n, trunk, hit, trunk, trunk, stale))
             continue
         prior = _carried_by(root, p, key, trunk)
         if prior:
@@ -726,6 +780,18 @@ def doctor(root: Path) -> int:
                   % ((key,) + _stash_words(stash) + (key,)))
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
+        try:
+            parked = _parked(p, trunk, cur)
+        except Stop:
+            parked = []
+        for b, work in parked:          # a branch beside the checkout, in no window (critic finding 1)
+            if _carried(p, b, [] if LEASE_BRANCH.fullmatch(cur) or cur == trunk else [cur or "HEAD"]):
+                continue
+            print("NOTE     target/%s has branch %s, %s past origin/%s, in no window — %s"
+                  % (key, b, _plural(len(work), "commit"), trunk,
+                     "the upgrade adopts it as a numbered window at the next session start (or run core/lease.sh "
+                     "adopt %s%s)" % (b, flag) if pend else "run core/lease.sh adopt %s%s to turn it into a window"
+                     % (b, flag)))
         if cur == trunk:
             _, out, _ = _git(p, "rev-list", "--count", "origin/%s..%s" % (trunk, trunk))
             n = int(out.strip() or 0)

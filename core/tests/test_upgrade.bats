@@ -379,3 +379,40 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   run python3 "$UP" --doctor
   case "$output" in *stash*) echo "$output"; return 1 ;; esac
 }
+
+@test "every local branch with work origin lacks becomes its own window, checked out or not, each named in one line; a merged branch, and one a window already carries, are left as they were; doctor names a parked branch before the upgrade (critic finding 1)" {
+  git -C "$T" checkout -q -b feat/parked; printf 'p\n' > "$T/p.txt"; git -C "$T" add -A; cmt "$T" -m "parked work"
+  git -C "$T" checkout -q -b feat/parked-base main; printf 'b\n' > "$T/b.txt"; git -C "$T" add -A; cmt "$T" -m "base work"
+  git -C "$T" checkout -q -b feat/on-base; printf 'o\n' > "$T/o.txt"; git -C "$T" add -A; cmt "$T" -m "on base"
+  git -C "$T" checkout -q -b fix/merged main; printf 'm\n' > "$T/m.txt"; git -C "$T" add -A; cmt "$T" -m "merged fix"
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  git -C "$T" push -q origin fix/merged
+  git -C "$BATS_TEST_TMPDIR/hand" fetch -q origin
+  git -C "$BATS_TEST_TMPDIR/hand" -c user.email=t@x -c user.name=t merge -q --no-ff origin/fix/merged -m "Merge fix/merged"
+  git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
+  git -C "$T/sub" checkout -q -b feat/sub-parked; printf 's\n' > "$T/sub/s.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m "sub parked"
+  git -C "$T/sub" checkout -q main
+  git -C "$T" checkout -q -b feat/active main; printf 'a\n' > "$T/act.txt"; git -C "$T" add -A; cmt "$T" -m "active work"
+  run python3 "$UP" --doctor
+  for s in "NOTE     target/thing has branch feat/parked, 1 commit past origin/main, in no window — the upgrade adopts it as a numbered window at the next session start (or run core/lease.sh adopt feat/parked)" \
+           "NOTE     target/thing/sub has branch feat/sub-parked, 1 commit past origin/main, in no window — the upgrade adopts it as a numbered window at the next session start (or run core/lease.sh adopt feat/sub-parked --repo sub)"; do
+    case "$output" in *"$s"*) : ;; *) echo "doctor lacks: $s"; echo "$output"; return 1 ;; esac
+  done
+  run python3 "$UP" --dry-run
+  case "$output" in *"would move target/thing's branch feat/on-base (2 commits not on origin/main) into a numbered window"*"would move target/thing's branch feat/parked (1 commit not on origin/main) into a numbered window"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"feat/parked-base"*) echo "$output"; return 1 ;; esac     # carried by feat/on-base's window
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing was on feat/active (1 commit not on origin/main: \"active work\"); that work is now window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Upgrade to 0.7.0: target/thing's branch feat/on-base (2 commits not on origin/main: \"base work\", \"on base\") is now window 02 (branch lease/02); target/thing stays on main. Promote it from the board (\"promote window 02\") or release it."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing's branch feat/parked (1 commit not on origin/main: \"parked work\") is now window 03"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing/sub's branch feat/sub-parked (1 commit not on origin/main: \"sub parked\") is now window 04"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 05"*|*"feat/parked-base"*|*"fix/merged"*) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 03 adopted_from)" = feat/parked ]; [ "$(lease_json 04 adopted_repo)" = thing/sub ]
+  [ "$(git -C "$T" rev-parse lease/02)" = "$(git -C "$T" rev-parse feat/parked-base)" ] || git -C "$T" merge-base --is-ancestor feat/parked-base lease/02
+  git -C "$T" rev-parse -q --verify refs/heads/fix/merged >/dev/null; git -C "$T" rev-parse -q --verify refs/heads/feat/parked-base >/dev/null
+  [ -d "$DAEDALUS_HOME/worktrees/03/thing" ]; [ "$(git -C "$DAEDALUS_HOME/worktrees/04/thing/sub" branch --show-current)" = lease/04 ]
+  [ "$(git -C "$T" branch --show-current)" = main ]; [ "$(git -C "$T/sub" branch --show-current)" = main ]
+  run python3 "$UP" --doctor
+  case "$output" in *"in no window"*) echo "$output"; return 1 ;; esac
+}

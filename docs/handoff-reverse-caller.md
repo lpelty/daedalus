@@ -78,8 +78,9 @@ checkout on the machine); removed the old shared `state/pitfall-seen.json` /
 `state/code-context-seen.json`; renamed `hot.md`'s `session:` to `leases:`
 once; moved capture's settings from the hook line into `memory:` (the key into
 the file `memory.api_key_file` names, mode 600); fetched each target repo once
-and turned any work there that trunk lacks — a branch, a trunk ahead of
-origin, a detached checkout — into a numbered window, putting the checkout
+and turned any work there that trunk lacks — the branch checked out, every
+other local branch, a trunk ahead of origin, a detached checkout — into a
+numbered window each, putting the checkout
 back on its trunk; then wrote `state/upgraded-to`. It said one line for each
 thing it did. Check: `core/doctor.sh` prints
 `OK       upgrade: state/upgraded-to 0.7.0` and no MISSING line about

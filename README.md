@@ -57,8 +57,9 @@ window numbers itself. Each step acts once and says one line when it does:
    written out plainly (a key read by `$(cat <file>)` counts); the old line
    keeps working and can then be removed;
 6. fetches each target repo once, and turns any work in `target/<repo>` that
-   trunk lacks — a branch, a trunk ahead of `origin`, a detached checkout — into
-   a numbered window with `core/lease.sh adopt`, putting `target/<repo>` back on
+   trunk lacks — the branch checked out, every other local branch, a trunk
+   ahead of `origin`, a detached checkout — into a numbered window each with
+   `core/lease.sh adopt`, one line per window, putting `target/<repo>` back on
    its trunk; a branch whose work is already on trunk is left as it is;
 7. writes `state/upgraded-to`, last.
 
