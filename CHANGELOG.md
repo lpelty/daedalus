@@ -18,6 +18,9 @@ Every deployment takes this release, and the next, the same way: `git pull
 **What you will see at the first session after the pull.**
 - The session upgrades the home before anything else. It says one line for
   each thing it did.
+- Before it changes anything in `target/`, it keeps a safety copy of all of
+  it; `python3 core/upgrade.py --restore-help` lists anything missing, and
+  `--forget-snapshot` removes the copy.
 - Work that was waiting in `target/` becomes numbered windows, one line each.
   That is every branch with work its origin does not have yet, whether or not
   it was checked out, and the trunk if it was ahead.

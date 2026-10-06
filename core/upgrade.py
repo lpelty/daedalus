@@ -27,10 +27,19 @@ step is idempotent — the second run changes nothing — and says one line the 
      again and finished, never made twice (review 2, findings 11-13).
   7. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
-    python3 core/upgrade.py              every step now, as a session start would
-    python3 core/upgrade.py --dry-run    what each step would do; changes nothing, fetches nothing
-    python3 core/upgrade.py --setup      steps 1-3 (setup.sh's leases phase, spec §15); never stamps
-    python3 core/upgrade.py --doctor     doctor's upgrade lines (§15)
+Before step 2, the first that can touch target/, every run takes a safety copy of everything in target/ into
+state/upgrade-snapshot/<stamp>/ and checks it, or stops before changing anything (see "the safety copy" below):
+the upgrade is recoverable by construction, whatever shape of work target/ holds. A copy too big for a session
+start's share of time is taken, and the upgrade finished, by a detached run logged to state/upgrade.log. The
+board names the copy until --forget-snapshot removes it; nothing else ever does.
+
+    python3 core/upgrade.py                    every step now, as a session start would
+    python3 core/upgrade.py --dry-run          what each step would do; changes nothing, fetches nothing
+    python3 core/upgrade.py --setup            steps 1-3 (setup.sh's leases phase, spec §15); never stamps
+    python3 core/upgrade.py --doctor           doctor's upgrade lines (§15)
+    python3 core/upgrade.py --restore-help     what a safety copy holds that target/ no longer has, and the
+                                               commands that bring each back
+    python3 core/upgrade.py --forget-snapshot  removes the safety copies, only when nothing in them is missing
 
 Python 3.9, standard library.
 """
@@ -38,14 +47,17 @@ from __future__ import annotations
 
 import fcntl
 import filecmp
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -1492,6 +1504,975 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
     return lines
 
 
+# --- the safety copy: the upgrade is recoverable by construction -----------------------------------------------
+# Three rounds of review each found another shape of work in target/ the upgrade could lose or hide; patching each
+# shape did not converge. So before its first change to anything under target/, the upgrade copies everything there
+# to state/upgrade-snapshot/<stamp>/ and checks the copy: for every repository (outer, nested, submodule — found by
+# walking target/ and asking git, never from config alone) (a) a git bundle of every ref, every worktree's HEAD,
+# every stash entry and every commit a reflog reached in the last REFLOG_DAYS days, under refs/upgrade-snapshot/*
+# in the bundle only, never in the repository; (b) a tar of every file a working tree holds that git does not
+# track (untracked and ignored) or that differs from its last commit, for the checkout and every linked worktree;
+# (c) git's in-progress files (index, rebase, merge, cherry-pick, revert, bisect); (d) manifest.json with every
+# ref's sha and every file's sha256. Each bundle is checked with git bundle verify and its list of heads; the
+# tar is read back and every file hashed again. A copy that cannot be written or checked, or would be over
+# upgrade.snapshot_max_mb, stops the upgrade before anything changes. Nothing deletes a copy but
+# --forget-snapshot, and only when everything in it is still there. The per-shape fixes stay: they make the copy
+# needed less often.
+SNAPS = Path("state") / "upgrade-snapshot"
+SNAP_RECORD = Path("state") / "upgrade-snapshot.json"     # the newest copy, and target/'s state before and after
+BACKGROUND = Path("state") / "upgrade-background.json"    # a detached run: its pid while running, then how it ended
+UPGRADE_LOG = Path("state") / "upgrade.log"
+RESTORE = Path("state") / "upgrade-restore"
+SNAP_MAX_MB = 2048
+REFLOG_DAYS = 30
+BG_BYTES = 256 << 20     # at a session start, a copy estimated bigger than this is taken by a detached run at once
+SNAP_REF = "refs/upgrade-snapshot/"
+GIT_STATE = ("rebase-merge", "rebase-apply", "sequencer", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE",
+             "CHERRY_PICK_HEAD", "REVERT_HEAD", "ORIG_HEAD", "index")
+SNAP_BIG = ("upgrade to %s incomplete: before it changes anything in target/ it keeps a safety copy of it, and that "
+            "copy would be about %s, over the %d MB limit (upgrade.snapshot_max_mb in config.yaml) — raise the limit, "
+            "or remove files target/ does not need (ignored build output counts), then start a session again")
+SNAP_DISK = ("upgrade to %s incomplete: before it changes anything in target/ it keeps a safety copy of it, about %s, "
+             "and the disk has %s free — free some space, then start a session again")
+SNAP_FAIL = ("upgrade to %s incomplete: the safety copy of target/ it keeps before changing anything could not be %s "
+             "(%s) — nothing in target/ was changed; if it stops the same way again, ask this home's agent to look "
+             "into the reason given")
+SNAP_BG = ("The upgrade to %s needs a few minutes the first time; it runs in the background and the board will say "
+           "when it is done")
+SNAP_BG_FAIL = ("upgrade to %s incomplete: the safety copy of target/ it keeps before changing anything takes longer "
+                "than a session start allows, and it could not be started in the background (%s) — run python3 "
+                "core/upgrade.py once from a terminal in this home")
+SNAP_BG_GONE = ("upgrade to %s incomplete: the run in the background ended before it finished (state/upgrade.log "
+                "says how far it got); it runs again at the next session start")
+SNAP_LINE = ("A safety copy of everything in target/ from before the upgrade is in state/upgrade-snapshot/%s; nothing "
+             "was lost, but if anything looks missing, core/upgrade.py --restore-help lists it")
+SNAP_BG_DONE = "The upgrade to %s finished in the background (what it did is in state/upgrade.log)."
+FILE_WORDS = {"untracked": "untracked file", "ignored": "ignored file", "changed": "uncommitted change to file",
+              "unlisted": "file"}
+SNAP_NOTHING = ("every branch, tag, stash entry, recent commit and file it holds is still in target/ or in a window")
+
+
+class _SnapFail(Exception):
+    """The copy could not be made: (verb, reason) — "written" or "checked" or "read"."""
+
+
+class _Background(Exception):
+    """The copy will not fit in this session start's budget: a detached run takes it."""
+
+
+def _gb(args: List[str], inp: Optional[bytes] = None, deadline: Optional[float] = None) -> Tuple[int, bytes, str]:
+    """git <args>, bytes out. Never takes an optional lock (no index refresh): the copy changes nothing it copies.
+    Under a deadline, a call that outlives it is out of time."""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    timeout = 3600.0
+    if deadline is not None:
+        timeout = deadline - time.time()
+        if timeout <= 0:
+            raise _OutOfTime()
+    try:
+        r = subprocess.run(["git"] + args, input=inp, capture_output=True, env=env, timeout=timeout,
+                           stdin=None if inp is not None else subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise _OutOfTime()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, b"", str(e)
+    return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace")
+
+
+def _snap_late(deadline: Optional[float]) -> bool:
+    """Out of this session start's time — or, as a test knob that can only make a start give up sooner,
+    UPGRADE_TEST_SNAPSHOT_SLOW set (never in a detached run, which has no deadline)."""
+    if deadline is None:
+        return False
+    return bool(os.environ.get("UPGRADE_TEST_SNAPSHOT_SLOW")) or time.time() >= deadline
+
+
+def _z(out: bytes) -> List[str]:
+    return [os.fsdecode(x) for x in out.split(b"\0") if x]
+
+
+def _common_dir(args: List[str]) -> Optional[str]:
+    code, out, _ = _gb(args + ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if code != 0 or not out.strip():
+        return None
+    return os.path.realpath(os.fsdecode(out.rstrip(b"\n")))
+
+
+def _rel(root: Path, path: str) -> str:
+    try:
+        return str(Path(path).relative_to(root))
+    except ValueError:
+        return path
+
+
+def _snap_repos(root: Path) -> List[dict]:
+    """Every git repository under target/, once each (one entry per common git directory): every directory with a
+    .git found by walking target/ (nested repos, submodules, worktrees made by hand there), each one's submodules
+    by git submodule status --recursive, and the submodule git directories under .git/modules that have no
+    checkout now. {"label", "common", "work"}; work is None for a git directory with no checkout."""
+    tgt = root / "target"
+    if not tgt.is_dir():
+        return []
+    cands: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(str(tgt)):
+        if ".git" in dirnames or ".git" in filenames:
+            cands.append(Path(dirpath))
+        if ".git" in dirnames:
+            dirnames.remove(".git")
+    seen = set(cands)
+    for c in list(cands):
+        if not (c / ".gitmodules").is_file():
+            continue
+        code, out, _ = _gb(["-C", str(c), "submodule", "status", "--recursive"])
+        for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
+            parts = ln[1:].split(" ", 1)
+            if len(parts) != 2:
+                continue
+            rel = parts[1]
+            if rel.endswith(")") and " (" in rel:
+                rel = rel.rsplit(" (", 1)[0]
+            sub = c / rel
+            if sub not in seen and (sub / ".git").exists():
+                seen.add(sub)
+                cands.append(sub)
+    repos: Dict[str, dict] = {}
+    for c in sorted(cands, key=lambda q: (len(q.parts), str(q))):
+        common = _common_dir(["-C", str(c)])
+        if common and common not in repos:
+            repos[common] = {"label": _rel(root, str(c)), "common": common, "work": str(c)}
+    for common in list(repos):
+        for dirpath, dirnames, filenames in os.walk(os.path.join(common, "modules")):
+            if "HEAD" in filenames and "objects" in dirnames and "refs" in dirnames:
+                cm = _common_dir(["--git-dir", dirpath])
+                if cm and cm not in repos:
+                    repos[cm] = {"label": _rel(root, cm), "common": cm, "work": None}
+                dirnames[:] = [d for d in dirnames if d == "modules"]
+    return list(repos.values())
+
+
+def _g(repo: dict) -> List[str]:
+    return ["-C", repo["work"]] if repo["work"] else ["--git-dir", repo["common"]]
+
+
+def _worktree_list(g: List[str]) -> List[Dict[str, str]]:
+    code, out, _ = _gb(g + ["worktree", "list", "--porcelain", "-z"])
+    wts: List[Dict[str, str]] = []
+    cur: Dict[str, str] = {}
+    for tok in (out.split(b"\0") if code == 0 else []):
+        if not tok:
+            if cur:
+                wts.append(cur)
+            cur = {}
+            continue
+        k, _, val = os.fsdecode(tok).partition(" ")
+        cur[k] = val
+    if cur:
+        wts.append(cur)
+    return wts
+
+
+def _reflogs(common: str) -> List[Tuple[str, str, int, str]]:
+    """(ref, sha, unix time, message) for every reflog entry in <common>, the per-worktree HEAD logs included."""
+    out = []
+    files = []
+    base = Path(common) / "logs"
+    for dirpath, _, filenames in os.walk(str(base)):
+        for f in filenames:
+            files.append((str(Path(dirpath, f).relative_to(base)), Path(dirpath, f)))
+    for hp in sorted((Path(common) / "worktrees").glob("*/logs/HEAD")):
+        files.append(("HEAD of worktree %s" % hp.parent.parent.name, hp))
+    for ref, path in files:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        for ln in data.split(b"\n"):
+            head, _, msg = ln.partition(b"\t")
+            parts = head.split(b" ")
+            if len(parts) < 4:
+                continue
+            try:
+                ts = int(parts[-2])
+            except ValueError:
+                continue
+            for sha in (parts[0], parts[1]):
+                s = sha.decode("ascii", "replace")
+                if s.strip("0"):
+                    out.append((ref, s, ts, os.fsdecode(msg)))
+    return out
+
+
+def _stash_list(common: str) -> List[Tuple[int, str, str]]:
+    """(n, sha, message) of every stash entry, stash@{n}, newest first as git numbers them."""
+    try:
+        lines = [ln for ln in (Path(common) / "logs" / "refs" / "stash").read_bytes().split(b"\n") if ln.strip()]
+    except OSError:
+        return []
+    out = []
+    for i, ln in enumerate(reversed(lines)):
+        head, _, msg = ln.partition(b"\t")
+        parts = head.split(b" ")
+        if len(parts) >= 2:
+            out.append((i, parts[1].decode("ascii", "replace"), os.fsdecode(msg)))
+    return out
+
+
+def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
+    """What the copy of one repository holds, read without changing anything: refs, worktrees, the files to tar
+    (with lstat), git's in-progress files. Content is read only when written."""
+    g = _g(repo)
+    common = repo["common"]
+    label = repo["label"]
+    code, out, err = _gb(g + ["for-each-ref", "--format=%(objectname) %(objecttype) %(refname)"], deadline=deadline)
+    if code != 0:
+        raise _SnapFail("read", "git could not list the refs of %s: %s" % (label, _last(err)))
+    refs: List[dict] = []
+    for ln in os.fsdecode(out).splitlines():
+        sha, typ, name = (ln.split(" ", 2) + ["", ""])[:3]
+        kind = ("branch" if name.startswith("refs/heads/") else "tag" if name.startswith("refs/tags/") else
+                "remote" if name.startswith("refs/remotes/") else "stash" if name == "refs/stash" else "other")
+        refs.append({"name": name, "sha": sha, "type": typ, "kind": kind})
+    wts = []
+    for i, w in enumerate(_worktree_list(g)):
+        path = w.get("worktree", "")
+        if i == 0 and repo["work"] and "bare" not in w:
+            path = repo["work"]      # a submodule's main worktree is listed as its git directory
+        bare = "bare" in w
+        exists = bool(path) and not bare and Path(path).is_dir()
+        head = w.get("HEAD", "")
+        wts.append({"i": i, "path": path, "head": head if head.strip("0") else "", "branch": w.get("branch", ""),
+                    "exists": exists})
+        if head.strip("0"):
+            refs.append({"name": "HEAD", "sha": head, "type": "commit", "kind": "head", "worktree": path,
+                         "branch": w.get("branch", "")})
+        if exists and i > 0:     # a linked worktree's own refs (bisect, worktree-local) only it lists
+            c2, o2, _ = _gb(["-C", path, "for-each-ref", "--format=%(objectname) %(objecttype) %(refname)",
+                             "refs/bisect/", "refs/worktree/", "refs/rewritten/"], deadline=deadline)
+            for ln in (os.fsdecode(o2).splitlines() if c2 == 0 else []):
+                sha, typ, name = (ln.split(" ", 2) + ["", ""])[:3]
+                refs.append({"name": name, "sha": sha, "type": typ, "kind": "other", "worktree": path})
+    for n, sha, msg in _stash_list(common):
+        refs.append({"name": "stash@{%d}" % n, "sha": sha, "type": "commit", "kind": "stash-entry", "message": msg})
+    have = {r["sha"] for r in refs}
+    cutoff = time.time() - REFLOG_DAYS * 86400
+    tips: Dict[str, str] = {}
+    for ref, sha, ts, _ in _reflogs(common):
+        if ts >= cutoff and sha not in have and sha not in tips:
+            tips[sha] = ref
+    if tips:
+        code, out, _ = _gb(g + ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                           inp="".join(s + "\n" for s in tips).encode(), deadline=deadline)
+        types = dict(ln.split(" ", 1) for ln in os.fsdecode(out).splitlines() if " " in ln) if code == 0 else {}
+        for sha, ref in tips.items():
+            if types.get(sha) in ("commit", "tag"):
+                refs.append({"name": ref, "sha": sha, "type": types[sha], "kind": "reflog"})
+    commits = sorted({r["sha"] for r in refs if r["type"] == "commit"})
+    subjects: Dict[str, str] = {}
+    if commits:
+        code, out, _ = _gb(g + ["log", "--no-walk=unsorted", "--stdin", "--format=%H%x00%s"],
+                           inp="".join(s + "\n" for s in commits).encode(), deadline=deadline)
+        for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
+            sha, _, subj = ln.partition("\0")
+            subjects[sha] = subj
+    for r in refs:
+        r["subject"] = subjects.get(r["sha"], "")
+    files: List[dict] = []
+    state: List[dict] = []
+    for w in wts:
+        if not w["exists"]:
+            continue
+        wp = w["path"]
+        kinds = _wt_kinds(wp, bool(w["head"]), deadline)
+        if kinds is None:
+            # a directory git cannot read as a worktree (a cut-off worktree add left it without a usable .git file):
+            # git cannot say what it tracks, so every file in it is copied
+            kinds = {}
+            for dp, dns, fns in os.walk(wp):
+                dns[:] = [d for d in dns if not os.path.exists(os.path.join(dp, d, ".git"))]
+                for f in fns:
+                    if not (dp == wp and f == ".git"):
+                        kinds[os.path.relpath(os.path.join(dp, f), wp)] = "unlisted"
+        for p in sorted(kinds):
+            if p.endswith("/"):
+                continue        # a nested repository or worktree: copied as its own
+            try:
+                st = os.lstat(os.path.join(wp, p))
+            except OSError:
+                continue        # deleted: its content is in the commit
+            if not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
+                continue
+            files.append({"w": w["i"], "path": p, "kind": kinds[p], "size": st.st_size,
+                          "mtime_ns": st.st_mtime_ns, "link": stat.S_ISLNK(st.st_mode)})
+        if w["i"] == 0:
+            gd = common
+        else:
+            code, out, _ = _gb(["-C", wp, "rev-parse", "--absolute-git-dir"], deadline=deadline)
+            gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
+        if not gd or not os.path.isdir(gd):
+            continue
+        names = [n for n in sorted(os.listdir(gd)) if n in GIT_STATE or n.startswith("BISECT_")]
+        for n in names:
+            full = os.path.join(gd, n)
+            walk = [(full, n)] if not os.path.isdir(full) else [
+                (os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), gd))
+                for dp, _, fs in os.walk(full) for f in fs]
+            for fp, rel in walk:
+                try:
+                    st = os.lstat(fp)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    state.append({"w": w["i"], "path": rel, "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                                  "src": fp})
+    code, out, _ = _gb(["--git-dir", common, "count-objects", "-v"], deadline=deadline)
+    kib = 0
+    for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
+        k, _, val = ln.partition(": ")
+        if k in ("size", "size-pack", "size-garbage") and val.strip().isdigit():
+            kib += int(val)
+    return dict(repo, refs=refs, worktrees=wts, files=files, state=state, pack_bytes=kib * 1024)
+
+
+def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[str, str]]:
+    """{path: untracked|ignored|changed} for the files of the worktree at <wp> that its last commit does not hold as
+    they are: untracked and ignored ones, and tracked ones that differ from HEAD (a change hidden by skip-worktree
+    or assume-unchanged included). None when git cannot read <wp> as a worktree."""
+    lists = {}
+    for key, args in (("untracked", ["ls-files", "-z", "--others", "--exclude-standard"]),
+                      ("others", ["ls-files", "-z", "--others"]),
+                      ("tags", ["ls-files", "-z", "-v"]),
+                      ("changed", ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"] if head else
+                       ["ls-files", "-z"])):
+        code, out, _ = _gb(["-C", wp] + args, deadline=deadline)
+        if code != 0:
+            return None
+        lists[key] = _z(out)
+    untracked = set(lists["untracked"])
+    changed = set(lists["changed"])
+    changed |= {t[2:] for t in lists["tags"] if len(t) > 2 and (t[0].islower() or t[0] == "S")}
+    kinds: Dict[str, str] = {}
+    for p in lists["others"]:
+        kinds[p] = "untracked" if p in untracked else "ignored"
+    for p in changed:
+        kinds.setdefault(p, "changed")
+    return kinds
+
+
+def _snap_fp(coll: List[dict]) -> str:
+    """target/'s state in one hash: refs, worktrees, stash, and every copied file's name, size and time — never
+    the index, which a read can rewrite. Equal hashes: nothing a copy holds has changed."""
+    parts = []
+    for r in coll:
+        parts.append([r["common"],
+                      sorted((x["name"], x.get("worktree", ""), x["sha"]) for x in r["refs"] if x["kind"] != "reflog"),
+                      [(w["path"], w["head"], w["branch"], w["exists"]) for w in r["worktrees"]],
+                      sorted((r["worktrees"][f["w"]]["path"], f["path"], f["kind"], f["size"], f["mtime_ns"])
+                             for f in r["files"]),
+                      sorted((r["worktrees"][s["w"]]["path"], s["path"], s["size"], s["mtime_ns"])
+                             for s in r["state"] if s["path"] != "index")])
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def _snap_estimate(coll: List[dict]) -> int:
+    seen: Set[str] = set()
+    n = 0
+    for r in coll:
+        if r["common"] not in seen:
+            seen.add(r["common"])
+            n += r["pack_bytes"]
+        n += sum(f["size"] for f in r["files"]) + sum(s["size"] for s in r["state"])
+    return n
+
+
+def _mb(n: int) -> str:
+    return "under 1 MB" if n < (1 << 20) else "%d MB" % -(-n // (1 << 20))
+
+
+def _snap_cap(root: Path) -> int:
+    val = _cfg(root, "upgrade.snapshot_max_mb")
+    return int(val) if val.isdigit() and int(val) > 0 else SNAP_MAX_MB
+
+
+def _snapshots(root: Path) -> List[str]:
+    """The stamps of every finished, checked copy, oldest first (a copy's directory gets its name only then)."""
+    try:
+        names = os.listdir(str(root / SNAPS))
+    except OSError:
+        return []
+    return sorted(n for n in names if not n.startswith(".") and (root / SNAPS / n / "manifest.json").is_file())
+
+
+def _read_json(path: Path) -> Optional[dict]:
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+class _Hashing:
+    """A file read through tarfile, hashed on the way, looking at the deadline between chunks."""
+    def __init__(self, f, deadline: Optional[float]) -> None:
+        self.f, self.h, self.deadline = f, hashlib.sha256(), deadline
+
+    def read(self, size: int = -1) -> bytes:
+        b = self.f.read(size)
+        self.h.update(b)
+        if _snap_late(self.deadline):
+            raise _OutOfTime()
+        return b
+
+
+def _name(n: int, label: str) -> str:
+    base = label[len("target/"):] if label.startswith("target/") else label
+    return "%d-%s" % (n, re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-") or "repo")
+
+
+def _snap_write(root: Path, coll: List[dict], ver: str, fp: str, cap: int, deadline: Optional[float]) -> Tuple[str, int]:
+    """Write the copy to state/upgrade-snapshot/.partial-<stamp>, check it, and only then name it <stamp>. Anything
+    short of a checked copy is removed: it is this run's own scratch, never a copy anyone relies on."""
+    base = root / SNAPS
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        for old in base.glob(".partial-*"):
+            shutil.rmtree(str(old), ignore_errors=True)
+    except OSError as e:
+        raise _SnapFail("written", "%s: %s" % (SNAPS, e.strerror or e))
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    k = 1
+    while (base / stamp).exists():
+        k += 1
+        stamp = "%s-%d" % (time.strftime("%Y%m%d-%H%M%S"), k)
+    part = base / (".partial-" + stamp)
+    try:
+        part.mkdir()
+        manifest = {"format": 1, "stamp": stamp, "version": ver, "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "fingerprint": fp, "reflog_days": REFLOG_DAYS, "verified": False, "repos": []}
+        for n, r in enumerate(coll, 1):
+            if _snap_late(deadline):
+                raise _OutOfTime()
+            manifest["repos"].append(_snap_repo(part, n, r, deadline))
+        _snap_verify(part, manifest)
+        size = sum(f.stat().st_size for f in part.iterdir() if f.is_file())
+        if size > cap * (1 << 20):
+            raise Stop(SNAP_BIG % (ver, _mb(size), cap))
+        manifest["verified"] = True
+        manifest["size_bytes"] = size
+        (part / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
+        os.rename(str(part), str(base / stamp))
+    except BaseException as e:
+        shutil.rmtree(str(part), ignore_errors=True)
+        if isinstance(e, OSError):
+            raise _SnapFail("written", "%s%s" % (e.strerror or e, " (%s)" % e.filename if e.filename else ""))
+        raise
+    return stamp, size
+
+
+def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
+    name = _name(n, r["label"])
+    entry = {"n": n, "label": r["label"], "path": r["work"], "git_dir": r["common"], "bundle": None,
+             "tar": name + ".tar", "worktrees": [{"i": w["i"], "path": w["path"], "head": w["head"],
+                                                  "branch": w["branch"]} for w in r["worktrees"]],
+             "refs": [], "files": [], "git_state": []}
+    by_sha: Dict[str, str] = {}
+    for x in r["refs"]:
+        if x["sha"] not in by_sha:
+            by_sha[x["sha"]] = "%s%04d" % (SNAP_REF, len(by_sha) + 1)
+        entry["refs"].append(dict(x, bundle_ref=by_sha[x["sha"]]))
+    if by_sha:
+        tmp = part / (".git-" + name)
+        bundle = part / (name + ".bundle")
+        code, _, err = _gb(["init", "--bare", "-q", str(tmp)])
+        if code != 0:
+            raise _SnapFail("written", "git init: %s" % _last(err))
+        (tmp / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (tmp / "objects" / "info" / "alternates").write_text(os.path.join(r["common"], "objects") + "\n")
+        if os.path.isfile(os.path.join(r["common"], "shallow")):
+            shutil.copy2(os.path.join(r["common"], "shallow"), str(tmp / "shallow"))
+        code, _, err = _gb(["-C", str(tmp), "update-ref", "--stdin"],
+                           inp="".join("create %s %s\n" % (b, s) for s, b in by_sha.items()).encode())
+        if code != 0:
+            raise _SnapFail("written", "the refs of %s: %s" % (r["label"], _last(err)))
+        code, _, err = _gb(["-C", str(tmp), "bundle", "create", "-q", str(bundle), "--all"], deadline=deadline)
+        if code != 0:
+            raise _SnapFail("written", "the bundle of %s: %s" % (r["label"], _last(err)))
+        shutil.rmtree(str(tmp), ignore_errors=True)
+        entry["bundle"] = bundle.name
+    paths = {w["i"]: w["path"] for w in r["worktrees"]}
+    with tarfile.open(str(part / entry["tar"]), "w", format=tarfile.PAX_FORMAT, encoding="utf-8",
+                      errors="surrogateescape") as tar:
+        for f in r["files"]:
+            src = os.path.join(paths[f["w"]], f["path"])
+            member = "w%d/%s" % (f["w"], f["path"])
+            entry["files"].append(dict([(k, x) for k, x in f.items() if k != "mtime_ns"],
+                                       member=member, sha256=_tar_add(tar, src, member, deadline)))
+        for s in r["state"]:
+            member = "git/w%d/%s" % (s["w"], s["path"])
+            entry["git_state"].append({"w": s["w"], "path": s["path"], "size": s["size"], "member": member,
+                                       "sha256": _tar_add(tar, s["src"], member, deadline)})
+    return entry
+
+
+def _tar_add(tar: tarfile.TarFile, src: str, member: str, deadline: Optional[float]) -> str:
+    if _snap_late(deadline):
+        raise _OutOfTime()
+    info = tar.gettarinfo(name=src, arcname=member)
+    if info is None:
+        raise _SnapFail("written", "%s is neither a file nor a link" % src)
+    if info.issym():
+        tar.addfile(info)
+        return hashlib.sha256(os.fsencode(info.linkname)).hexdigest()
+    with open(src, "rb") as fh:
+        hf = _Hashing(fh, deadline)
+        tar.addfile(info, hf)
+    return hf.h.hexdigest()
+
+
+def _snap_verify(part: Path, manifest: dict) -> None:
+    """Every bundle passes git bundle verify in an empty repository (so it needs nothing outside itself) and lists
+    exactly the refs the manifest gives it; every file read back from the tar hashes to the manifest's sha256."""
+    vt = part / ".verify"
+    code, _, err = _gb(["init", "--bare", "-q", str(vt)])
+    if code != 0:
+        raise _SnapFail("checked", "git init: %s" % _last(err))
+    try:
+        for r in manifest["repos"]:
+            if r["bundle"]:
+                b = str(part / r["bundle"])
+                code, _, err = _gb(["-C", str(vt), "bundle", "verify", "-q", b])
+                if code != 0:
+                    raise _SnapFail("checked", "git bundle verify %s: %s" % (r["bundle"], _last(err) or "failed"))
+                code, out, err = _gb(["-C", str(vt), "bundle", "list-heads", b])
+                heads = {tuple(ln.split(" ", 1)[::-1]) for ln in os.fsdecode(out).splitlines() if " " in ln}
+                want = {(x["bundle_ref"], x["sha"]) for x in r["refs"]}
+                if code != 0 or heads != want:
+                    raise _SnapFail("checked", "%s does not list the refs it was given" % r["bundle"])
+            want_files = {f["member"]: f["sha256"] for f in r["files"] + r["git_state"]}
+            got: Dict[str, str] = {}
+            with tarfile.open(str(part / r["tar"]), "r", encoding="utf-8", errors="surrogateescape") as tar:
+                for m in tar:
+                    if m.issym():
+                        got[m.name] = hashlib.sha256(os.fsencode(m.linkname)).hexdigest()
+                    elif m.isfile():
+                        h = hashlib.sha256()
+                        fh = tar.extractfile(m)
+                        for chunk in iter(lambda: fh.read(CARRY_CHUNK), b""):
+                            h.update(chunk)
+                        got[m.name] = h.hexdigest()
+            if got != want_files:
+                bad = sorted(k for k in set(got) | set(want_files) if got.get(k) != want_files.get(k))
+                raise _SnapFail("checked", "%s reads back different from what was written (%s)"
+                                % (r["tar"], ", ".join(bad[:3])))
+    finally:
+        shutil.rmtree(str(vt), ignore_errors=True)
+
+
+def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: bool = False) -> Optional[str]:
+    """Before the upgrade's first change in target/: a checked copy of everything there, or a Stop. None when
+    target/ holds no repository, or is exactly as the newest copy found it or the last run left it (that copy
+    covers it). At a session start (a deadline), a copy that will not fit raises _Background."""
+    try:
+        repos = _snap_repos(root)
+        if not repos:
+            return None
+        coll = []
+        for r in repos:
+            if _snap_late(deadline) and not prefer_bg:
+                raise _OutOfTime()
+            coll.append(_snap_collect(root, r, deadline))
+    except _OutOfTime:
+        raise _Background()
+    except _SnapFail as e:
+        raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
+    fp = _snap_fp(coll)
+    rec = _read_json(root / SNAP_RECORD) or {}
+    if rec.get("stamp") in _snapshots(root) and fp in (rec.get("before"), rec.get("after")):
+        return None
+    est = _snap_estimate(coll)
+    cap = _snap_cap(root)
+    if est > cap * (1 << 20):
+        raise Stop(SNAP_BIG % (ver, _mb(est), cap))
+    try:
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(str(root / "state")).free
+    except OSError:
+        free = None
+    if free is not None and free < est + (64 << 20):
+        raise Stop(SNAP_DISK % (ver, _mb(est), _mb(free)))
+    if deadline is not None and (prefer_bg or est > BG_BYTES):
+        raise _Background()
+    try:
+        stamp, size = _snap_write(root, coll, ver, fp, cap, deadline)
+    except _OutOfTime:
+        raise _Background()
+    except _SnapFail as e:
+        raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
+    try:
+        _write(root / SNAP_RECORD, json.dumps({"stamp": stamp, "before": fp, "after": None}, indent=2) + "\n")
+    except OSError:
+        pass
+    return "a safety copy of everything in target/ is in state/upgrade-snapshot/%s (%s), taken before anything " \
+           "there changed." % (stamp, _mb(size))
+
+
+def _snap_after(root: Path) -> None:
+    """Record target/'s state as this run leaves it, so the next run takes no second copy of the same state."""
+    rec = _read_json(root / SNAP_RECORD)
+    if not rec or rec.get("stamp") not in _snapshots(root):
+        return
+    try:
+        fp = _snap_fp([_snap_collect(root, r, None) for r in _snap_repos(root)])
+    except (_SnapFail, _OutOfTime, OSError):
+        return
+    if rec.get("after") != fp:
+        rec["after"] = fp
+        try:
+            _write(root / SNAP_RECORD, json.dumps(rec, indent=2) + "\n")
+        except OSError:
+            pass
+
+
+# --- the run in the background --------------------------------------------------------------------------------
+
+def _bg_running(root: Path) -> bool:
+    rec = _read_json(root / BACKGROUND)
+    if not rec or not rec.get("running"):
+        return False
+    try:
+        pid = int(rec.get("pid"))
+        os.kill(pid, 0)
+    except (TypeError, ValueError, OSError):
+        return False
+    code, out, _ = v.run(["ps", "-o", "command=", "-p", str(pid)], timeout=5)
+    return code == 0 and "upgrade.py" in out and "--background" in out
+
+
+def _go_background(root: Path, ver: str) -> str:
+    """Start `core/upgrade.py --background` detached (its own session, no pipe to this hook, logged to
+    state/upgrade.log) and record it; the sentence the board repeats until it is done."""
+    try:
+        log = open(str(root / UPGRADE_LOG), "ab")
+    except OSError as e:
+        return _stopped(root, ver, 2, SNAP_BG_FAIL % (ver, e.strerror or e))
+    try:
+        with log:
+            log.write(("--- %s: the upgrade to %s, started in the background by a session start\n"
+                       % (time.strftime("%Y-%m-%dT%H:%M:%S"), ver)).encode())
+            log.flush()
+            pr = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--background"],
+                                  stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, cwd=str(root),
+                                  env=dict(os.environ, DAEDALUS_HOME=str(root)), start_new_session=True,
+                                  close_fds=True)
+    except OSError as e:
+        return _stopped(root, ver, 2, SNAP_BG_FAIL % (ver, e.strerror or e))
+    try:
+        _write(root / BACKGROUND, json.dumps({"pid": pr.pid, "version": ver, "running": True,
+                                              "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+    except OSError:
+        pass
+    return _stopped(root, ver, 2, SNAP_BG % ver, background=True)
+
+
+def background_main(root: Path) -> int:
+    ver = version(root)
+    _write(root / BACKGROUND, json.dumps({"pid": os.getpid(), "version": ver, "running": True,
+                                          "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+    finished = False
+    try:
+        lines, stop = run(root, background=True)
+        for ln in lines:
+            print(ln)
+        if stop:
+            print(stop)
+        finished = stop is None and stamped(root) == ver
+        return 0 if finished else 1
+    finally:
+        sys.stdout.flush()
+        _write(root / BACKGROUND, json.dumps({"pid": None, "version": ver, "running": False, "finished": finished,
+                                              "at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+
+
+def snapshot_line(root: Path) -> Optional[str]:
+    """The board's line while a copy is kept (and, once, that a background run finished the upgrade)."""
+    snaps = _snapshots(root)
+    if not snaps:
+        return None
+    line = SNAP_LINE % snaps[-1]
+    bg = _read_json(root / BACKGROUND)
+    ver = version(root)
+    if bg and bg.get("finished") and bg.get("version") == ver and stamped(root) == ver:
+        line = SNAP_BG_DONE % ver + " " + line
+    return line
+
+
+# --- --restore-help and --forget-snapshot ---------------------------------------------------------------------
+
+def _sh(s: str) -> str:
+    """A word for the shell: shlex.quote, or $'...' when it holds a newline or another control byte, or bytes that
+    are not UTF-8 (bash and zsh both read $'...')."""
+    if not re.search(CTRL, s):
+        return shlex.quote(s)
+    return "$'" + _escaped(s, True) + "'"
+
+
+CTRL = "[\x00-\x1f\x7f\udc80-\udcff]"
+ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
+
+
+def _escaped(s: str, quoting: bool = False) -> str:
+    """<s> with each newline, tab or other control character (and each byte that is not UTF-8) written as \\n, \\t or
+    \\xHH, so a name said in a sentence stays on its line; quoting: also ' and \\, for inside $'...'."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if quoting and ch in "'\\":
+            out.append("\\" + ch)
+        elif ch in ESCAPES:
+            out.append(ESCAPES[ch])
+        elif o < 32 or o == 127:
+            out.append("\\x%02x" % o)
+        elif 0xdc80 <= o <= 0xdcff:
+            out.append("\\x%02x" % (o - 0xdc00))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _repo_now(r: dict) -> Optional[List[str]]:
+    if r.get("path") and (Path(r["path"]) / ".git").exists():
+        return ["-C", r["path"]]
+    if r.get("git_dir") and Path(r["git_dir"]).is_dir():
+        return ["--git-dir", r["git_dir"]]
+    return None
+
+
+def _sha256(path: str, link: bool) -> Optional[str]:
+    try:
+        if link:
+            return hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(CARRY_CHUNK), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _snap_missing(root: Path, stamp: str) -> Tuple[dict, List[Tuple[dict, str, object]]]:
+    """(manifest, [(repo entry, "commit"|"file", what)]) — what the copy holds that target/ no longer has. A ref's
+    commit is there while any ref, reflog or stash still reaches it (a window's branch counts: the upgrade moves
+    work there); origin's branches as last fetched are origin's, not counted. A file is there while any worktree
+    of its repository — a window's included — holds it at the same path with the same content."""
+    m = _read_json(root / SNAPS / stamp / "manifest.json")
+    if not m:
+        raise Stop("the safety copy in %s/%s has no readable manifest.json" % (SNAPS, stamp))
+    out: List[Tuple[dict, str, object]] = []
+    for r in m.get("repos", []):
+        g = _repo_now(r)
+        reach: Optional[Set[str]] = None
+        targets: Set[str] = set()
+        wts: List[str] = []
+        if g is not None:
+            code, o, _ = _gb(g + ["rev-list", "--all", "--reflog"])
+            reach = set(os.fsdecode(o).split()) if code == 0 else None
+            code, o, _ = _gb(g + ["for-each-ref", "--format=%(objectname)"])
+            targets = set(os.fsdecode(o).split())
+            targets |= {s for _, s, _ in _stash_list(r["git_dir"])}
+            wts = [w.get("worktree", "") for w in _worktree_list(g) if "bare" not in w]
+            if r.get("path") and g[0] == "-C":
+                wts = [r["path"]] + wts[1:]     # a submodule's main worktree is listed as its git directory
+        lost: Dict[str, List[dict]] = {}
+        for x in r.get("refs", []):
+            if x["kind"] == "remote":
+                continue
+            sha = x["sha"]
+            if g is not None and (sha in targets or (reach is not None and sha in reach)):
+                continue
+            if g is not None and reach is None and _gb(g + ["cat-file", "-e", sha])[0] == 0:
+                continue
+            lost.setdefault(sha, []).append(x)
+        for sha, xs in lost.items():
+            out.append((r, "commit", xs))
+        for f in r.get("files", []):
+            there = False
+            for wp in wts:
+                p = os.path.join(wp, f["path"])
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if st.st_size == f["size"] or f.get("link"):
+                    if _sha256(p, bool(f.get("link"))) == f["sha256"]:
+                        there = True
+                        break
+            if not there:
+                out.append((r, "file", f))
+    return m, out
+
+
+def _ref_words(x: dict, wt0: str) -> str:
+    k = x["kind"]
+    if k == "branch":
+        return "branch %s" % x["name"][len("refs/heads/"):]
+    if k == "tag":
+        return "tag %s" % x["name"][len("refs/tags/"):]
+    if k in ("stash", "stash-entry"):
+        return "stash entry %s%s" % ("stash@{0}" if k == "stash" else x["name"],
+                                     " (%s)" % x["message"] if x.get("message") else "")
+    if k == "head":
+        return "the commit checked out in %s" % _escaped(x.get("worktree") or wt0)
+    if k == "reflog":
+        return "a commit from the last %d days of %s's history" % (REFLOG_DAYS, x["name"])
+    return "ref %s" % x["name"]
+
+
+def _restore_name(xs: List[dict], sha: str) -> str:
+    for x in xs:
+        if x["kind"] == "branch":
+            return "restored/%s-%s" % (x["name"][len("refs/heads/"):], sha[:7])
+    for x in xs:
+        if x["kind"] == "tag":
+            return "restored/tag-%s-%s" % (x["name"][len("refs/tags/"):], sha[:7])
+    return "restored/%s-%s" % ("detached" if any(x["kind"] == "head" for x in xs) else "commit", sha[:7])
+
+
+def _restore_lines(root: Path, stamp: str, m: dict, missing: List[Tuple[dict, str, object]]) -> List[str]:
+    snapdir = root / SNAPS / stamp
+    lines = []
+    commits = [(r, xs) for r, what, xs in missing if what == "commit"]
+    # stash entries oldest first, so storing them one by one rebuilds the stash in its order
+    def order(item: Tuple[dict, List[dict]]) -> Tuple[int, int]:
+        xs = item[1]
+        st = [x for x in xs if x["kind"] == "stash-entry"]
+        return (1, -int(st[0]["name"][len("stash@{"):-1])) if st else (0, 0)
+    for r, xs in sorted(commits, key=order):
+        sha = xs[0]["sha"]
+        wt0 = (r.get("worktrees") or [{}])[0].get("path") or r["label"]
+        names = []
+        entry_kinds = {x["kind"] for x in xs}
+        for x in xs:
+            if x["kind"] == "stash" and "stash-entry" in entry_kinds:
+                continue        # refs/stash is stash@{0}, named with its message below
+            w = _ref_words(x, wt0)
+            if w not in names:
+                names.append(w)
+        subj = next((x.get("subject") for x in xs if x.get("subject")), "")
+        lead = "- %s: commit %s%s — %s." % (r["label"], sha[:7], ' ("%s")' % subj if subj else "", "; ".join(names))
+        g = "git -C %s" % _sh(r["path"]) if r.get("path") else "git --git-dir=%s" % _sh(r["git_dir"])
+        bundle = _sh(str(snapdir / r["bundle"])) if r.get("bundle") else None
+        bref = xs[0]["bundle_ref"]
+        stash = next((x for x in xs if x["kind"] == "stash-entry"), None)
+        if bundle is None:
+            lines += [lead + " The copy has no bundle for this repository."]
+        elif stash is not None and r.get("path"):
+            lines += [lead + " Bring it back into the stash:",
+                      "    %s fetch -q %s %s && %s stash store -m %s %s" % (g, bundle, bref, g,
+                                                                         _sh(stash.get("message") or "restored"), sha)]
+        else:
+            typ = xs[0].get("type")
+            name = _restore_name(xs, sha)
+            dest = ("refs/tags/" if typ == "tag" else "refs/heads/") + name
+            lines += [lead + " Bring it back as %s %s:" % ("tag" if typ == "tag" else "branch", name),
+                      "    %s fetch -q %s %s:%s" % (g, bundle, bref, dest)]
+    for r, what, f in missing:
+        if what != "file":
+            continue
+        wt = next((w for w in r.get("worktrees", []) if w["i"] == f["w"]), {})
+        where = "" if f["w"] == 0 else " in the worktree at %s" % _escaped(wt.get("path", "?"))
+        dest = root / RESTORE / stamp / _name(r["n"], r["label"])
+        lines += ["- %s: %s %s%s (%s) — bring it back; it lands in %s, from where you move it where you "
+                  "want it:" % (r["label"], FILE_WORDS.get(f["kind"], "file"), _escaped(f["path"]), where,
+                                _plural(f["size"], "byte"), _escaped(_rel(root, str(dest / f["member"])))),
+                  "    mkdir -p %s && tar -xf %s -C %s %s" % (_sh(str(dest)), _sh(str(snapdir / r["tar"])),
+                                                              _sh(str(dest)), _sh(f["member"]))]
+    return lines
+
+
+def _snap_report(root: Path, stamp: str) -> Tuple[List[str], int]:
+    m, missing = _snap_missing(root, stamp)
+    head = "The safety copy in state/upgrade-snapshot/%s (taken %s, before the upgrade to %s)" % (
+        stamp, str(m.get("taken_at", "")).replace("T", " "), m.get("version", "?"))
+    if not missing:
+        return [head + ": nothing in it is missing — " + SNAP_NOTHING + "."], 0
+    lines = [head + " holds %s target/ no longer has. Each command can be run from anywhere; none overwrites "
+             "anything — a branch comes back under restored/, a file under state/upgrade-restore/:"
+             % _plural(len(missing), "thing")]
+    return lines + _restore_lines(root, stamp, m, missing), len(missing)
+
+
+def _names_out() -> None:
+    try:
+        sys.stdout.reconfigure(errors="surrogateescape")      # a name that is not UTF-8 is printed, never a crash
+    except (AttributeError, ValueError):
+        pass
+
+
+def restore_help(root: Path) -> int:
+    _names_out()
+    snaps = _snapshots(root)
+    if not snaps:
+        print("There is no safety copy in state/upgrade-snapshot/ — the upgrade has not needed to take one here.")
+        return 0
+    for s in snaps:
+        try:
+            lines, _ = _snap_report(root, s)
+        except Stop as e:
+            lines = [str(e)]
+        for ln in lines:
+            print(ln)
+    return 0
+
+
+def forget_snapshot(root: Path) -> int:
+    _names_out()
+    if pending(root) or _bg_running(root):
+        print("The upgrade has not finished, so the safety copy is kept — it is what brings back anything the "
+              "upgrade could lose. Run this again once the board no longer names the upgrade.")
+        return 1
+    snaps = _snapshots(root)
+    if not snaps:
+        print("There is no safety copy to remove.")
+        return 0
+    held, report = [], []
+    for s in snaps:
+        try:
+            lines, n = _snap_report(root, s)
+        except Stop as e:
+            lines, n = [str(e)], 1
+        if n:
+            held.append(s)
+            report += lines
+    if held:
+        for ln in report:
+            print(ln)
+        print("Nothing was removed: the copy holds what is listed above, which target/ no longer has. Bring back "
+              "what you need with the commands above; if none of it is needed, remove %s by hand."
+              % " and ".join("state/upgrade-snapshot/%s" % s for s in held))
+        return 1
+    for s in snaps:
+        size = sum(f.stat().st_size for f in (root / SNAPS / s).iterdir() if f.is_file())
+        shutil.rmtree(str(root / SNAPS / s))
+        print("Removed the safety copy in state/upgrade-snapshot/%s (%s); %s." % (s, _mb(size), SNAP_NOTHING))
+    for p in (SNAP_RECORD, BACKGROUND):
+        try:
+            (root / p).unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def _snap_doctor(root: Path) -> None:
+    for s in _snapshots(root):
+        try:
+            size = sum(f.stat().st_size for f in (root / SNAPS / s).iterdir() if f.is_file())
+        except OSError:
+            size = 0
+        print("NOTE     a safety copy of everything in target/ from before the upgrade is in state/upgrade-snapshot/%s "
+              "(%s) — core/upgrade.py --restore-help lists anything in it that target/ no longer has; "
+              "core/upgrade.py --forget-snapshot removes it once nothing is" % (s, _mb(size)))
+
+
 STEPS = ((1, "creating the window directories", step_dirs),
          (2, "installing the pre-push hook", step_hooks),
          (3, "removing the old shared reminder files", step_dedup),
@@ -1518,19 +2499,25 @@ def _lock(root: Path, deadline: Optional[float]) -> Optional[int]:
 
 
 def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
-        upto: int = 6) -> Tuple[List[str], Optional[str]]:
+        upto: int = 6, background: bool = False) -> Tuple[List[str], Optional[str]]:
     """Steps 1..upto in order, then (upto 6, not dry) the stamp. Returns (the lines of the steps that acted, the
     stop sentence or None). A stop is recorded in state/upgrade-stopped.json (not in a dry run) and the stamp is
-    not written, so the next run starts again from the top."""
+    not written, so the next run starts again from the top. Before step 2, the first that can touch target/, a
+    full run (upto 6, not dry) takes the safety copy of target/ or stops; at a session start (a deadline) a copy
+    that will not fit in it is taken, and the upgrade finished, by a detached run (`background`), and a start
+    while that run is going leaves it alone."""
     ver = version(root)
     if ver is None and upto == 6:
         return [], None
     head = "Upgrade to %s" % ver if upto == 6 else "Setup"
+    if not dry and upto == 6 and not background and _bg_running(root):
+        return [], None              # a detached run holds the upgrade; the board says so
     fd = None
     if not dry:
         fd = _lock(root, deadline)
         if fd is None:
             return [], None
+    covered = False
     try:
         if fd is not None and upto == 6 and stamped(root) == ver:
             return [], None          # the run that held the lock finished it while this one waited
@@ -1540,6 +2527,20 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                 break
             if not dry and deadline is not None and time.time() >= deadline:
                 return lines, _stopped(root, ver, n, STOPPED_TIME % (ver, what))
+            if n == 2 and upto == 6 and not dry:
+                rec = _read_json(root / STOPPED) or {}
+                try:
+                    said = ensure_snapshot(root, ver or "", deadline,
+                                           prefer_bg=bool(rec.get("background")) and rec.get("version") == ver)
+                except _Background:
+                    return lines, _go_background(root, ver or "")
+                except Stop as e:
+                    return lines, _stopped(root, ver, n, str(e))
+                covered = True
+                if said:
+                    lines.append("%s: %s" % (head, said))
+            elif n == 2 and upto == 6 and dry:
+                lines += _dry_snapshot(root, head)
             try:
                 lines += fn(root, head, dry, deadline)
             except Stop as e:
@@ -1561,15 +2562,33 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                              "ask of you is in docs/handoff-reverse-caller.md." % (head, ver))
         return lines, None
     finally:
+        if covered and (deadline is None or time.time() < deadline):
+            _snap_after(root)
         if fd is not None:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
 
-def _stopped(root: Path, ver: Optional[str], step: int, sentence: str) -> str:
+def _dry_snapshot(root: Path, head: str) -> List[str]:
     try:
-        _write(root / STOPPED, json.dumps({"version": ver, "step": step, "sentence": sentence,
-                                           "at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+        coll = [_snap_collect(root, r, None) for r in _snap_repos(root)]
+    except (_SnapFail, _OutOfTime):
+        return []
+    if not coll:
+        return []
+    rec = _read_json(root / SNAP_RECORD) or {}
+    if rec.get("stamp") in _snapshots(root) and _snap_fp(coll) in (rec.get("before"), rec.get("after")):
+        return []
+    return ["%s: would keep a safety copy of everything in target/ (about %s, in state/upgrade-snapshot/) before "
+            "changing anything there." % (head, _mb(_snap_estimate(coll)))]
+
+
+def _stopped(root: Path, ver: Optional[str], step: int, sentence: str, background: bool = False) -> str:
+    rec = {"version": ver, "step": step, "sentence": sentence, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if background:
+        rec["background"] = True
+    try:
+        _write(root / STOPPED, json.dumps(rec, indent=2) + "\n")
     except OSError:
         pass
     return sentence
@@ -1586,6 +2605,8 @@ def pending_line(root: Path) -> Optional[str]:
     except (OSError, ValueError):
         rec = None
     if isinstance(rec, dict) and rec.get("version") == ver and isinstance(rec.get("sentence"), str):
+        if rec.get("background") and not _bg_running(root):
+            return SNAP_BG_GONE % ver
         return rec["sentence"]
     return "upgrade to %s has not run yet — it runs at the next session start in this home" % ver
 
@@ -1662,6 +2683,7 @@ def doctor(root: Path) -> int:
         return 0                                    # doctor.sh's VERSION line says why
     pend = stamped(root) != ver
     print("NOTE     %s" % pending_line(root) if pend else "OK       upgrade: state/upgraded-to %s" % ver)
+    _snap_doctor(root)
     paste = operator_paste(root)
     if paste:
         print(OPERATOR_NOTE)
@@ -1805,8 +2827,15 @@ def main(argv: List[str]) -> int:
     args = argv[1:]
     if args == ["--doctor"]:
         return doctor(root)
+    if args == ["--restore-help"]:
+        return restore_help(root)
+    if args == ["--forget-snapshot"]:
+        return forget_snapshot(root)
+    if args == ["--background"]:
+        return background_main(root)
     if [a for a in args if a not in ("--dry-run", "--setup")]:
-        sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] | --doctor\n")
+        sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] | --doctor | --restore-help | "
+                         "--forget-snapshot\n")
         return 2
     dry, upto = "--dry-run" in args, (3 if "--setup" in args else 6)
     ver = version(root)
@@ -1815,6 +2844,10 @@ def main(argv: List[str]) -> int:
         return 1
     if upto == 6 and not dry and stamped(root) == ver:
         print("Already upgraded to %s; nothing to do." % ver)
+        return 0
+    if upto == 6 and not dry and _bg_running(root):
+        print("The upgrade to %s is running in the background (state/upgrade.log); the board says when it is done."
+              % ver)
         return 0
     lines, stop = run(root, dry=dry, upto=upto)
     for ln in lines:

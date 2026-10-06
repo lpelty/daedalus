@@ -62,14 +62,18 @@ def main() -> int:
     finally:
         signal.alarm(0)
     # §14: while the stamp differs from VERSION, the upgrade's line leads the board on every prompt, even when
-    # no window is open (board_for returns '' then). Absent upgrade.py (a fixture) or any failure: no line.
+    # no window is open (board_for returns '' then); so does the line naming the upgrade's safety copy of target/
+    # until the operator forgets it. Absent upgrade.py (a fixture) or any failure: no line.
+    lead = []
     try:
         import upgrade as up
-        pend = up.pending_line(v.ROOT)
+        lead.append(up.pending_line(v.ROOT))
+        lead.append(up.snapshot_line(v.ROOT))
     except Exception:
-        pend = None
-    if pend:
-        text = pend + ("\n" + text if text else "")
+        pass
+    lead = [x for x in lead if x]
+    if lead:
+        text = "\n".join(lead) + ("\n" + text if text else "")
     if text:
         v.emit({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "UserPromptSubmit"),
                                        "additionalContext": text}})
