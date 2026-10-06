@@ -202,7 +202,9 @@ sentence on every prompt. Two things it leaves to a person. One is a target
 checkout holding work the upgrade could lose: uncommitted changes (it stops
 there until they are committed or stashed), or untracked files that putting
 it back on its trunk would overwrite (it stops there and tells the operator
-to move them out of that checkout, or commit them on its branch). The other
+to move them out of that checkout, or commit them on its branch), or a
+rebase, merge, cherry-pick, revert or bisect stopped part-way there (it stops
+and names the `git` command that finishes or undoes it). The other
 is a target checkout whose pre-push hook Daedalus cannot install — another
 tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
 That one does not stop the upgrade; its line names the remedy, promote

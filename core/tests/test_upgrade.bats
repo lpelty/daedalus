@@ -327,3 +327,36 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   [ "${lines[0]}" = "untracked files would be overwritten: a.txt, b/c.txt" ] || { echo "$output"; return 1; }
   [ "${lines[1]}" = "not a git repository" ]; [ "${lines[2]}" = "no output" ]
 }
+
+@test "a rebase, merge or bisect left part-way in a target checkout stops the upgrade before anything moves, in one sentence naming the operation and its remedy — even when the checkout reads clean (critic finding 3)" {
+  git -C "$T" checkout -q -b feat/x; printf '1\n' > "$T/one.txt"; git -C "$T" add -A; cmt "$T" -m one
+  printf '2\n' > "$T/two.txt"; git -C "$T" add -A; cmt "$T" -m two
+  GIT_SEQUENCE_EDITOR="sed -i.bak -e 1s/^pick/edit/" git -C "$T" -c user.email=t@x -c user.name=t rebase -q -i main >/dev/null 2>&1
+  [ -z "$(git -C "$T" status --porcelain --untracked-files=no)" ]          # a rebase stopped at "edit" reads clean
+  s="upgrade to 0.7.0 incomplete: target/thing is in the middle of a rebase — finish it with git -C target/thing rebase --continue, or undo it with git -C target/thing rebase --abort, then start a session again"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  git -C "$T" rev-parse -q --verify refs/heads/feat/x >/dev/null
+  run python3 "$UP" --dry-run
+  case "$output" in *"would stop: $s"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" rebase --abort
+  # a merge stopped on a conflict: the in-progress sentence, not the uncommitted-changes one
+  git -C "$T" checkout -q main; printf 'm\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main side"
+  git -C "$T" checkout -q feat/x; printf 'f\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "branch side"
+  git -C "$T" -c user.email=t@x -c user.name=t merge -q main >/dev/null 2>&1 || true
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing is in the middle of a merge — finish it with git -C target/thing merge --continue, or undo it with git -C target/thing merge --abort, then start a session again" ] || { echo "$output"; return 1; }
+  git -C "$T" merge --abort
+  # a bisect in a nested repo: its own remedy
+  git -C "$T/sub" bisect start >/dev/null 2>&1
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing/sub is in the middle of a bisect — end it with git -C target/thing/sub bisect reset, then start a session again" ] || { echo "$output"; return 1; }
+  git -C "$T/sub" bisect reset >/dev/null 2>&1
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"that work is now window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+}

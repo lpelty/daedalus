@@ -66,7 +66,9 @@ It will not move a target checkout that holds work it could lose, and stops
 there before anything in that checkout moves: one with uncommitted changes
 (commit them on their branch inside that checkout, or stash them), or one with
 untracked files that putting it back on its trunk would overwrite (move them
-out of that checkout, or commit them on its branch). The board says which on
+out of that checkout, or commit them on its branch), or one where a rebase,
+merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
+there, with the `git` command the sentence names). The board says which on
 every prompt, in one sentence, with what to do; the next session start
 finishes the job. One other state needs a person but does not stop it: a
 target checkout that already has a `pre-push` hook Daedalus did not install,

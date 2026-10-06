@@ -96,7 +96,9 @@ stash them, then start a session again." If it had untracked files where
 putting it back on its trunk would write, the sentence names them: "… has
 untracked files that putting it back on <trunk> would overwrite (<files>) —
 move them out of that checkout, or commit them on its branch, then start a
-session again." Either way that work is yours to commit, in your own session;
+session again." If a rebase, merge, cherry-pick, revert or bisect had stopped
+part-way there, it stopped before anything moved, naming the operation and the
+`git -C target/<repo>` command that finishes or undoes it. Either way that work is yours to commit, in your own session;
 nobody else touches it, and the next session start finishes the upgrade.
 
 **The one other thing that needs a person** does not stop the upgrade: a

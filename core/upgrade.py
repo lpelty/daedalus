@@ -14,7 +14,8 @@ step is idempotent — the second run changes nothing — and says one line the 
   6. in-flight work in target/ moved into numbered windows (leaselib.adopt) — the checked-out branch, then a
      trunk still ahead of origin — each checkout put back on its trunk at origin, after one bounded fetch of
      all of them at once (plan 5 Decision 3). It will not move a checkout with uncommitted changes, nor one
-     with an untracked file where the move back to the trunk would write: it stops there, saying what to do,
+     with an untracked file where the move back to the trunk would write, nor one where a rebase, merge,
+     cherry-pick, revert or bisect stopped part-way (critic finding 3): it stops there, saying what to do,
      and the board repeats the sentence until a later start finishes. A window an earlier, cut-off run made
      is found again, never made twice.
   7. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
@@ -64,6 +65,10 @@ UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s wo
              "of that checkout, or commit them on its branch, then start a session again")
 # A stop the upgrade cannot say will clear by itself names what to do if it comes back (review finding 3); only
 # running out of time at a session start is sure to clear, so only it says "it runs again".
+IN_PROGRESS = ("upgrade to %s incomplete: target/%s is in the middle of a %s — finish it with git -C target/%s %s "
+               "--continue, or undo it with git -C target/%s %s --abort, then start a session again")
+BISECTING = ("upgrade to %s incomplete: target/%s is in the middle of a bisect — end it with git -C target/%s bisect "
+             "reset, then start a session again")
 STOPPED_WHILE = ("upgrade to %s incomplete: stopped while %s — %s; it tries again at the next session start — if it "
                  "stops the same way again, ask this home's agent to look into the reason given")
 STOPPED_TIME = "upgrade to %s incomplete: stopped while %s — the session start ran out of time; it runs again at the next session start"
@@ -409,6 +414,22 @@ def _in_the_way(p: Path, key: str, trunk: str, cur: str, ver: str) -> None:
         raise Stop(UNTRACKED % (ver, key, doing, ll.name_paths(hit)))
 
 
+def _half_done(p: Path, key: str, ver: str) -> None:
+    """Stop, before anything in target/ moves, when a git operation stopped part-way in target/<key> (critic
+    finding 3): a rebase stopped at "edit" reads clean and its detached HEAD would be adopted without the rest of
+    the branch, and the rebase left behind in the trunk mirror. Uses leaselib's markers, plus a bisect's."""
+    import leaselib as ll
+    for marker, what, cmd in tuple(ll._IN_PROGRESS) + (("BISECT_LOG", "bisect", "bisect"),):
+        code, out, _ = _git(p, "rev-parse", "--git-path", marker)
+        path = Path(out.strip()) if code == 0 and out.strip() else None
+        if path is not None and not path.is_absolute():
+            path = p / path
+        if path is not None and path.exists():
+            if what == "bisect":
+                raise Stop(BISECTING % (ver, key, key))
+            raise Stop(IN_PROGRESS % (ver, key, what, key, cmd, key, cmd))
+
+
 def _now_window(head: str, what: str, r: dict, key: str, trunk: str, stale: str) -> str:
     tail = " Note: %s." % "; ".join(r["notes"]) if r["notes"] else ""
     return ("%s: %s; that work is now window %s (branch lease/%s), and target/%s is back on %s. Promote it from the "
@@ -417,8 +438,8 @@ def _now_window(head: str, what: str, r: dict, key: str, trunk: str, stale: str)
 
 
 def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
-    """Spec §14 step 6. Every checkout is checked for uncommitted changes before anything in target/ moves;
-    one dirty checkout stops the step (Decision 6). Then one bounded fetch of all of them at once (Decision 3)
+    """Spec §14 step 6. Every checkout is checked for a git operation stopped part-way, then for uncommitted
+    changes, before anything in target/ moves; either stops the step (Decision 6; critic finding 3). Then one bounded fetch of all of them at once (Decision 3)
     and, per repo (outer first, then nested): the checked-out ref — a branch or a detached HEAD with work that
     origin/<trunk> lacks is adopted as a numbered window, one whose work is already there goes back to the trunk
     and is left as it was (Decisions 4, 5) — and then the trunk itself: a trunk still ahead of origin is adopted
@@ -436,6 +457,8 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
     except ll.Refused as e:
         raise Stop("could not tell each target repo's trunk (%s)" % e)
     ver = version(root) or "this release"
+    for key, p in repos:
+        _half_done(p, key, ver)
     for key, p in repos:
         code, dirt, _ = _git(p, "status", "--porcelain", "--untracked-files=no")
         if code != 0 or dirt.strip():
