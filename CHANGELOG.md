@@ -20,9 +20,11 @@ own agent a read-only question, and an agent you allow can ask Daedalus one.
 
 **On each kind of deployment.**
 - *Where a promote is a release* — the target's users receive its trunk
-  through an update command — set `promote.release_note: true` and
-  `promote.update_command` in `config.yaml`: the block and the pushed line then
-  say "this is a release", because the next update ships it to everyone. Let
+  through an update command — the operator adds `promote.release_note: true`
+  and `promote.update_command` to `config.yaml`, in one paste that
+  `core/doctor.sh` shows (with `direct_call.callers`, and `verify.refute_model`
+  on a cloud provider): the block and the pushed line then say "this is a
+  release", because the next update ships it to everyone. Let
   that deployment's `gates:` exercise what the update exercises.
 - *Where the target's harness runs from its live tree* — no update step between
   the push and the harness that loads it — a promote is live at the harness's

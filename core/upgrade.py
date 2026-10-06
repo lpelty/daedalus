@@ -872,6 +872,64 @@ def _repo_flag(root: Path, key: str) -> str:
     return "" if key == ll.target_name(root) else " --repo %s" % key.split("/", 1)[1]
 
 
+OPERATOR_NOTE = ("NOTE     config.yaml lacks lines only the operator may write (the agent may not edit config.yaml) — "
+                 "one paste: add the lines below to the end of config.yaml, replace each <...> with your answer, then "
+                 "start a new session")
+CLOUD_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+
+
+def _cfg(root: Path, key: str) -> str:
+    """config.yaml's <key> through lib.sh cfg, as every reader reads it; "" when unset or still a <...>."""
+    val = v._lib(root, "cfg %s 2>/dev/null || true" % key).strip()
+    return "" if val.startswith("<") else val
+
+
+def _cloud_provider(root: Path) -> bool:
+    """Does Claude Code run on a cloud provider here — the environment, or an env block in the settings it reads?"""
+    def on(val: object) -> bool:
+        return str(val or "").strip().lower() not in ("", "0", "false", "no")
+    if any(on(os.environ.get(k)) for k in CLOUD_ENV):
+        return True
+    conf = Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
+    for p in (root / ".claude" / "settings.json", root / ".claude" / "settings.local.json", conf / "settings.json"):
+        try:
+            env = json.loads(p.read_text()).get("env") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(env, dict) and any(on(env.get(k)) for k in CLOUD_ENV):
+            return True
+    return False
+
+
+def operator_paste(root: Path) -> List[str]:
+    """The config.yaml lines this release needs that only a person may write (critic finding 5): Edit of
+    config.yaml is denied to the agent and a write to it trips the Stop check. Exact where the answer is known
+    (update_command set: a promote is a release), a <...> with its question on a comment line above where only the
+    operator knows it, and never a grant invented (callers). Repeated top-level blocks are read as one by lib.sh
+    cfg, so the whole paste goes at the end of the file. [] when nothing is missing."""
+    blocks: List[Tuple[str, List[str]]] = []
+    note, cmd = _cfg(root, "promote.release_note"), _cfg(root, "promote.update_command")
+    promote = []
+    if note not in ("true", "false"):
+        if cmd:
+            promote += ["  # a promote here is a release: update_command is set", "  release_note: true"]
+        else:
+            promote += ["  # true if this target's users receive its trunk through an update command (a promote is "
+                        "then a release), false if not", "  release_note: <true or false>"]
+    if note != "false" and not cmd:
+        promote += ["  # the command this target's users run to receive its trunk; leave this line out if "
+                    "release_note is false", "  update_command: '<the update command>'"]
+    if promote:
+        blocks.append(("promote:", promote))
+    if not _cfg(root, "direct_call.callers"):
+        blocks.append(("direct_call:", ["  # the agents allowed to ask this Daedalus a question, comma separated; leave "
+                                        "these two lines out to allow none", "  callers: <agent names>"]))
+    if _cloud_provider(root) and not _cfg(root, "verify.refute_model"):
+        blocks.append(("verify:", ["  # the model id the reviewer runs on with this provider; the charter's short "
+                                   "name may not resolve here", "  refute_model: <your provider's model id>"]))
+    return [ln for hdr, body in blocks for ln in [hdr] + body]
+
+
 def doctor(root: Path) -> int:
     """Doctor's upgrade lines (spec §15): the stamp; a target/ checkout off its trunk or ahead of origin; hot.md
     still carrying session:. Local refs only — it never fetches, so it says what the refs this home last fetched
@@ -881,6 +939,11 @@ def doctor(root: Path) -> int:
         return 0                                    # doctor.sh's VERSION line says why
     pend = stamped(root) != ver
     print("NOTE     %s" % pending_line(root) if pend else "OK       upgrade: state/upgraded-to %s" % ver)
+    paste = operator_paste(root)
+    if paste:
+        print(OPERATOR_NOTE)
+        for ln in paste:
+            print("PASTE    " + ln)
     try:
         import leaselib as ll
         repos, outer = target_repos(root), v.target_branch(root)

@@ -1179,3 +1179,47 @@ doctor_upgrade_fixture() {
   case "$output" in *"MISSING"*"memory: memory.capture_interval"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"still runs recall-inject.py"*) echo "$output"; return 1 ;; esac
 }
+
+# Critic finding 5: config.yaml is the operator's (the agent's Edit of it is denied, a write trips the Stop check), so
+# the lines a release needs there are shown by doctor as one paste — exact where the answer is known, a <...> with its
+# question where only the operator knows it, and never an invented grant.
+@test "doctor: the config.yaml lines only the operator writes are one paste — release_note exact when update_command says a promote is a release, a question otherwise; callers never invented; refute_model on a cloud provider; pasted at the end, they are read and the note is gone (critic finding 5)" {
+  doctor_upgrade_fixture
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX
+  note="NOTE     config.yaml lacks lines only the operator may write (the agent may not edit config.yaml) — one paste: add the lines below to the end of config.yaml, replace each <...> with your answer, then start a new session"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  paste="$(printf '%s\n' "$output" | grep -v '^daedalus: ')"
+  [ "$paste" = "promote:
+  # true if this target's users receive its trunk through an update command (a promote is then a release), false if not
+  release_note: <true or false>
+  # the command this target's users run to receive its trunk; leave this line out if release_note is false
+  update_command: '<the update command>'
+direct_call:
+  # the agents allowed to ask this Daedalus a question, comma separated; leave these two lines out to allow none
+  callers: <agent names>" ] || { echo "$output"; return 1; }
+  printf 'promote:\n  update_command: '"'"'thing update'"'"'\n' >> "$DAEDALUS_HOME/config.yaml"
+  run env CLAUDE_CODE_USE_BEDROCK=1 bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  paste="$(printf '%s\n' "$output" | grep -v '^daedalus: ')"
+  [ "$paste" = "promote:
+  # a promote here is a release: update_command is set
+  release_note: true
+direct_call:
+  # the agents allowed to ask this Daedalus a question, comma separated; leave these two lines out to allow none
+  callers: <agent names>
+verify:
+  # the model id the reviewer runs on with this provider; the charter's short name may not resolve here
+  refute_model: <your provider's model id>" ] || { echo "$output"; return 1; }
+  # the paste, answered, at the end of a config.yaml that already has a promote: block (update_command, above)
+  printf '%s\n' "$paste" | sed -e 's/<agent names>/caller-a/' -e "s/<your provider's model id>/provider-model/" >> "$DAEDALUS_HOME/config.yaml"
+  for kv in promote.release_note=true promote.update_command="thing update" direct_call.callers=caller-a verify.refute_model=provider-model; do
+    [ "$(bash -c 'source "$1/core/lib.sh"; cfg "$2"' _ "$DAEDALUS_HOME" "${kv%%=*}")" = "${kv#*=}" ] || { echo "cfg ${kv%%=*}"; return 1; }
+  done
+  run env CLAUDE_CODE_USE_BEDROCK=1 bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"lacks lines only the operator"*) echo "$output"; return 1 ;; esac
+  # a <...> left unanswered is still missing
+  sed -i.bak 's/^  callers: caller-a$/  callers: <agent names>/' "$DAEDALUS_HOME/config.yaml"; rm -f "$DAEDALUS_HOME/config.yaml.bak"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"$note"*"  callers: <agent names>"*) : ;; *) echo "$output"; return 1 ;; esac
+}

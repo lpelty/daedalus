@@ -188,6 +188,8 @@ if [ -f "$DAEDALUS_HOME/core/upgrade.py" ]; then
       case "$line" in
         "") ;;
         "MISSING  "*) note_problem "${line#MISSING  }" ;;
+        # a line to paste into config.yaml, printed bare so it can be copied as it is (critic finding 5)
+        "PASTE    "*) printf '%s\n' "${line#PASTE    }" ;;
         *) log "$line" ;;
       esac
     done <<EOF

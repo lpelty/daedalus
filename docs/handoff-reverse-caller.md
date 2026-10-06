@@ -67,8 +67,8 @@ target's code: every path is under your home or its `config.yaml`.
 | `hot.md` and vault commits are the prime's | `core/vault-commit.sh` is the only way to commit the vault; a raw `git commit` under `vault/` is denied. | That `git commit` from a Bash tool is denied, naming `core/vault-commit.sh`. |
 | Capture reads a `memory:` block | The upgrade moved it there from your old hook line, and a Stop hook now captures every couple of minutes. The old line still works and can be removed once `core/capture-tick.sh --dry-run` prints the bank with no `TENANT_*` in the environment; `core/doctor.sh` says when a leftover line can go. | `core/doctor.sh` prints `OK       memory: bank …`. |
 | The reviewer runs through the launcher, resumable | The same verdict file, plus `call-id:` in its frontmatter; "ask the reviewer why" is `core/call-agent.sh --resume-review <NN> "<question>"`. | `bats core/tests/test_refuter_charter.bats` passes, its positive control included. |
-| A model alias may not resolve on a managed or cloud-provider build | `verify.refute_model` in `config.yaml` names your provider's model id. | A gate run with the reviewer completes with a verdict, not exit 2. |
-| The promote block can say a yes is a release | On a deployment whose users receive trunk through an update command, `promote.release_note: true` (and `promote.update_command`) in `config.yaml` makes the block say so. | The block printed by `promote <NN>` carries the release sentence. |
+| A model alias may not resolve on a managed or cloud-provider build | `verify.refute_model` in `config.yaml` names your provider's model id; `core/doctor.sh` shows the line to paste when it runs on a cloud provider. | A gate run with the reviewer completes with a verdict, not exit 2. |
+| The promote block can say a yes is a release | On a deployment whose users receive trunk through an update command, `promote.release_note: true` (and `promote.update_command`) in `config.yaml` makes the block say so. The operator pastes them, once: `core/doctor.sh` prints every such line as one paste (you may not edit `config.yaml`). | The block printed by `promote <NN>` carries the release sentence. |
 
 **How the upgrade ran.** At your first session after the pull, before the
 window numbered itself, it: made `state/leases/`, `worktrees/`,
@@ -155,6 +155,8 @@ direct_call:
   callers: <the target agent's name>
 ```
 
+The operator pastes it — you may not edit `config.yaml`; `core/doctor.sh` shows
+this line, with the name left for the operator to fill in, in its one paste.
 Deny by default; absent means nobody. The name is a claim (one user account,
 no separation between processes); the receipt records the invoking pid,
 command, working directory, user and window as evidence. A second caller later

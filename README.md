@@ -170,7 +170,15 @@ until it is released.
   terminal program other than login, sshd, tmux or screen.
 - `release_note: true` (and optionally `update_command: '…'`) — for a
   deployment where a promote is a release; the decision block and the pushed
-  line say so.
+  line say so. `release_note: false` says a promote is not one.
+
+`config.yaml` is the operator's: the agent may not edit it. The lines a
+release needs there and only a person can answer — `promote.release_note`,
+`promote.update_command`, `direct_call.callers`, and on a cloud provider
+`verify.refute_model` — are shown by `core/doctor.sh` as one paste, printed
+bare so it can be copied as it is: exact where the answer is known, a `<...>`
+with its question on a comment line above where only the operator knows it.
+Doctor never fills in who may call (`callers`).
 
 **When it refuses.** Every refusal ends "Nothing was pushed." (or "Nothing
 changed on origin." after a rejected push). A merge conflict: the window runs
