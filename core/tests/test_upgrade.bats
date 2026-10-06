@@ -150,7 +150,7 @@ teardown() { teardown_live; }
   printf 'dirt\n' >> "$T/a.txt"
   run python3 "$UP"
   [ "$status" -eq 1 ]
-  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, or stash them, then start a session again"
+  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, then start a session again"
   [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["sentence"] == sys.argv[2] and d["version"] == "0.7.0" and d["step"] == 6, d' "$DAEDALUS_HOME/state/upgrade-stopped.json" "$s"
@@ -359,4 +359,23 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"that work is now window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "no remedy says 'stash them'; a stash in a target checkout is named in one upgrade line and by doctor, and stays where it is (critic finding 4)" {
+  R="$BATS_TEST_DIRNAME/../.."
+  for f in core/upgrade.py core/leaselib.py README.md CLAUDE.md CHANGELOG.md docs/handoff-reverse-caller.md; do
+    ! tr '\n' ' ' < "$R/$f" | tr -s ' ' | grep -qiE 'or stash(ed)? them|or stashed|commit or stash' || { echo "$f still offers a stash"; return 1; }
+  done
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'saved\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t stash -q
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: target/thing holds 1 stash entry (stash@{0}: WIP on feat/x: "*"in flight) — saved work no window shows; the upgrade leaves it there, and core/doctor.sh names it until it is applied or dropped."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"that work is now window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" stash list | wc -l | tr -d ' ')" = 1 ]
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing holds 1 stash entry (stash@{0}: WIP on feat/x: "*"in flight) — saved work no window shows; apply it in a window's worktree (git -C worktrees/<NN>/thing stash apply) or drop it once it is not needed"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" stash drop -q
+  run python3 "$UP" --doctor
+  case "$output" in *stash*) echo "$output"; return 1 ;; esac
 }

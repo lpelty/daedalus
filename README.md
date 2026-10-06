@@ -64,7 +64,7 @@ window numbers itself. Each step acts once and says one line when it does:
 
 It will not move a target checkout that holds work it could lose, and stops
 there before anything in that checkout moves: one with uncommitted changes
-(commit them on their branch inside that checkout, or stash them), or one with
+(commit them on their branch inside that checkout), or one with
 untracked files that putting it back on its trunk would overwrite (move them
 out of that checkout, or commit them on its branch), or one where a rebase,
 merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
@@ -79,7 +79,9 @@ MISSING.
 `python3 core/upgrade.py --dry-run` says what it would do and changes nothing.
 `cat VERSION` prints the release, and `git describe --tags --abbrev=0` its tag.
 `core/doctor.sh` reports the version, the stamp, and anything in `target/`
-still off its trunk. An adopted window is promoted from the board ("promote
+still off its trunk. A stash in a target checkout is saved work no window
+shows, so it is never the remedy: the upgrade names any stash it finds there in
+one line, and `core/doctor.sh` names it until it is applied or dropped. An adopted window is promoted from the board ("promote
 window 01") or released, like any other; `core/lease.sh adopt <branch>
 [--repo <nested>]` does the same for any branch later.
 

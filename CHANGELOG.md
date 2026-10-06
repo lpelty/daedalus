@@ -47,7 +47,7 @@ trunk. Then the window numbers itself — window 01 if nothing was waiting, the
 next number otherwise — and takes the pen. If a target checkout has
 uncommitted changes, or an untracked file where putting it back on its trunk
 would write, the upgrade stops before moving anything there and the board says
-so in one sentence on every prompt: commit or stash them (or move the file),
+so in one sentence on every prompt: commit them on their branch (or move the file),
 and the next session finishes it. If a target checkout already has another
 tool's `pre-push` hook, or sets `core.hooksPath`, the upgrade finishes but says
 so with the remedy, and promote refuses until the hooks are merged or

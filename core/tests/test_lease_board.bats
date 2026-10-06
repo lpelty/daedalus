@@ -204,7 +204,7 @@ except tl.NotSubmitted as e: print("refused:", e)' "$DAEDALUS_HOME/core" "$F" "$
 @test "the board's first line, on every prompt, is the upgrade's stop sentence until the stamp is written — even with no window open; then it is gone (spec §14)" {
   cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; mkdir -p "$DAEDALUS_HOME/state"
-  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, or stash them, then start a session again"
+  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, then start a session again"
   python3 -c 'import json,sys; json.dump({"version": "0.7.0", "step": 6, "sentence": sys.argv[2]}, open(sys.argv[1], "w"))' "$DAEDALUS_HOME/state/upgrade-stopped.json" "$s"
   run board s1
   [ "$(ctx | head -1)" = "$s" ] || { echo "$output"; return 1; }

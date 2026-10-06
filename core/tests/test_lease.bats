@@ -1292,7 +1292,7 @@ on_feat() {   # on_feat <repo dir> <branch> <n> — n commits on a new branch, c
   printf 'uncommitted\n' >> "$T/a.txt"
   run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/x
   [ "$status" -ne 0 ]
-  case "$output" in *"target/thing has uncommitted changes — commit them on their branch inside that checkout, or stash them, then run adopt again."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing has uncommitted changes — commit them on their branch inside that checkout, then run adopt again."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$T" branch --show-current)" = feat/x ]
   [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
   git -C "$T" checkout -q -- a.txt

@@ -1113,7 +1113,7 @@ doctor_upgrade_fixture() {
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"NOTE     upgrade to 0.7.0 has not run yet — it runs at the next session start in this home"*) : ;; *) echo "$output"; return 1 ;; esac
-  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, or stash them, then start a session again"
+  s="upgrade to 0.7.0 incomplete: target/thing has uncommitted changes — commit them on their branch inside that checkout, then start a session again"
   python3 -c 'import json,sys; json.dump({"version": "0.7.0", "step": 6, "sentence": sys.argv[2]}, open(sys.argv[1], "w"))' "$DAEDALUS_HOME/state/upgrade-stopped.json" "$s"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"NOTE     $s"*) : ;; *) echo "$output"; return 1 ;; esac

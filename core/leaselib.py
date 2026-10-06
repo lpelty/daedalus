@@ -1451,8 +1451,8 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
 
 
 LEASE_BRANCH = re.compile(r"lease/[0-9]{2}")
-ADOPT_DIRTY = ("target/%s has uncommitted changes — commit them on their branch inside that checkout, or stash them, "
-               "then run adopt again.")
+ADOPT_DIRTY = ("target/%s has uncommitted changes — commit them on their branch inside that checkout, then "
+               "run adopt again.")
 
 
 def repo_key(root: Path, repo: Optional[str]) -> str:

@@ -200,7 +200,8 @@ moves capture's settings into `config.yaml`, turns any work waiting in
 repeat those lines to the operator. If it stops, the board says why in one
 sentence on every prompt. Two things it leaves to a person. One is a target
 checkout holding work the upgrade could lose: uncommitted changes (it stops
-there until they are committed or stashed), or untracked files that putting
+there until they are committed on their branch — never stash them: a stash is
+saved work no window shows), or untracked files that putting
 it back on its trunk would overwrite (it stops there and tells the operator
 to move them out of that checkout, or commit them on its branch), or a
 rebase, merge, cherry-pick, revert or bisect stopped part-way there (it stops

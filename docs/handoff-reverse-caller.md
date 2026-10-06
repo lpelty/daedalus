@@ -91,8 +91,10 @@ nothing.
 **What it would not do: move a target checkout that holds work it could
 lose.** If yours had uncommitted changes, the upgrade stopped there and the
 board says on every prompt: "upgrade to 0.7.0 incomplete: target/<repo> has
-uncommitted changes — commit them on their branch inside that checkout, or
-stash them, then start a session again." If it had untracked files where
+uncommitted changes — commit them on their branch inside that checkout, then
+start a session again." A stash in that checkout is not a way out: it stays
+in the trunk mirror, where no window shows it — the upgrade names any stash it
+finds in one line, and `core/doctor.sh` names it until it is applied or dropped. If it had untracked files where
 putting it back on its trunk would write, the sentence names them: "… has
 untracked files that putting it back on <trunk> would overwrite (<files>) —
 move them out of that checkout, or commit them on its branch, then start a

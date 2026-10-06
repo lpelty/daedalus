@@ -59,8 +59,11 @@ FIELDS = (("TENANT_BANK", "bank"), ("HINDSIGHT_API_URL", "api_url"), ("TRANSCRIP
           ("TENANT_USER_LABEL", "user_label"), ("TENANT_ASSISTANT_LABEL", "assistant_label"))
 FETCH_SECS = 4          # one cap for every target repo's fetch together, never over half the deadline left
 NOTE_ADOPTED = "adopted at the upgrade to %s"
+# Commit, never stash: a stash stays in the trunk mirror, where no window shows it (critic finding 4).
 DIRTY = ("upgrade to %s incomplete: target/%s has uncommitted changes — commit them on their branch inside that "
-         "checkout, or stash them, then start a session again")
+         "checkout, then start a session again")
+STASHED = ("%s: target/%s holds %s (%s) — saved work no window shows; the upgrade leaves it there, and core/doctor.sh "
+           "names it until it is applied or dropped.")
 UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s would overwrite (%s) — move them out "
              "of that checkout, or commit them on its branch, then start a session again")
 # A stop the upgrade cannot say will clear by itself names what to do if it comes back (review finding 3); only
@@ -430,6 +433,18 @@ def _half_done(p: Path, key: str, ver: str) -> None:
             raise Stop(IN_PROGRESS % (ver, key, what, key, cmd, key, cmd))
 
 
+def _stash_entries(p: Path) -> List[str]:
+    """`stash@{N}: <subject>` for each entry of <p>'s stash list, newest first; [] when it has none."""
+    code, out, _ = _git(p, "stash", "list", "--format=%gd: %gs")
+    return [ln for ln in out.splitlines() if ln.strip()] if code == 0 else []
+
+
+def _stash_words(entries: List[str]) -> Tuple[str, str]:
+    n = len(entries)
+    return "%d stash %s" % (n, "entry" if n == 1 else "entries"), \
+        "; ".join(entries[:3]) + (" and %d more" % (len(entries) - 3) if len(entries) > 3 else "")
+
+
 def _now_window(head: str, what: str, r: dict, key: str, trunk: str, stale: str) -> str:
     tail = " Note: %s." % "; ".join(r["notes"]) if r["notes"] else ""
     return ("%s: %s; that work is now window %s (branch lease/%s), and target/%s is back on %s. Promote it from the "
@@ -469,6 +484,9 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         _in_the_way(p, key, trunks[key], cur.strip(), ver)
     lines = []
     for key, p in repos:
+        stash = _stash_entries(p)
+        if stash:       # never moved, never invisible (critic finding 4)
+            lines.append(STASHED % ((head, key) + _stash_words(stash)))
         trunk = trunks[key]
         if dry:
             stale = " (judged against origin/%s as last fetched; the real run fetches first)" % trunk
@@ -701,6 +719,11 @@ def doctor(root: Path) -> int:
         except Exception:
             continue
         flag = _repo_flag(root, key)
+        stash = _stash_entries(p)
+        if stash:
+            print("NOTE     target/%s holds %s (%s) — saved work no window shows; apply it in a window's worktree "
+                  "(git -C worktrees/<NN>/%s stash apply) or drop it once it is not needed"
+                  % ((key,) + _stash_words(stash) + (key,)))
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
         if cur == trunk:
