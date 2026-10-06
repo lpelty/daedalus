@@ -68,6 +68,9 @@ step()  {   # step <n> <terminal> <what the operator says> <what to expect>
 }
 note()  { say "$*"; if [ "$mode" = interactive ]; then printf '  (press Enter to go on) '; read -r _ </dev/tty; fi; }
 has()   { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+# Text a window writes in its own words (a note) is checked loosely: it contains the expected words, in any case,
+# with whatever punctuation or wording the window kept around them. Exact matches are for values the commands fix.
+loosely() { has "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; }
 lj()    { python3 -c 'import json,sys
 try: d=json.load(open(sys.argv[1]))
 except Exception: sys.exit(0)
@@ -212,10 +215,10 @@ step 2 "Terminal 2 (run \`claude\`); then terminal 1" "note for this window: pro
   "terminal 2 is told \"You are window 02\"; terminal 1's board shows window 02 with that note"
 if [ "$mode" = rehearse ]; then
   c="$(open_window sC)"; has "$c" "You are window 02" || fail "terminal 2: $c"
-  said sC "note for this window: probe of hooks/capture.py."; as sC bash core/lease.sh note 02 "probe of hooks/capture.py" >/dev/null
+  said sC "note for this window: probe of hooks/capture.py."; as sC bash core/lease.sh note 02 "probe of hooks/capture.py." >/dev/null   # the operator's words as said, period and all (CLAUDE.md: "<their words>")
   said sP "who is working on what?"; has "$(board sP)" "note: probe of hooks/capture.py" || fail "no note on the board"
 fi
-check "window 02 carries the note" test "$(lj 02 note)" = "probe of hooks/capture.py"
+check "window 02 carries the note" loosely "$(lj 02 note)" "probe of hooks/capture.py"
 term2_session="$(lj 02 session_id)"   # step 9 flushes this session's transcript
 
 step 3 "Terminal 3 (run \`claude\`)" "call this window electron." \
