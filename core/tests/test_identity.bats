@@ -412,3 +412,17 @@ _run_scan_in_fixture() {
   ! grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"
   ! grep -qi 'not yet in this release' "$DAEDALUS_HOME/CHANGELOG.md"
 }
+
+@test "CHANGELOG: a session left open through the pull is told to restart unconditionally, and told that a config.yaml Stop reason after the upgrade is the upgrade's own change, not something to restore — the hook's sentence quoted as the hook says it (plan 5 Task 13 review)" {
+  flat="$(tr '\n' ' ' < "$DAEDALUS_HOME/CHANGELOG.md" | tr -s ' ')"
+  # the old promise: a Stop asks for the restart only when the upgrade wrote config.yaml, and then it says restore first
+  case "$flat" in *"Stop asks for exactly that"*) echo "CHANGELOG still promises the old session's Stop asks for a restart"; return 1 ;; esac
+  for s in 'Close and reopen any session that was open through the pull; it is still running the old hooks.' \
+           'do not restore the file'; do
+    case "$flat" in *"$s"*) : ;; *) echo "CHANGELOG lacks: $s"; return 1 ;; esac
+  done
+  # the quoted Stop sentence is the one the boundary hook really emits
+  q='The gate definition (config.yaml) changed this session'
+  case "$flat" in *"$q"*) : ;; *) echo "CHANGELOG does not quote the hook's sentence"; return 1 ;; esac
+  grep -qF "$q" "$DAEDALUS_HOME/core/boundary-hook.py"
+}

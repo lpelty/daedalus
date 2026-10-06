@@ -52,10 +52,12 @@ and the next session finishes it. If a target checkout already has another
 tool's `pre-push` hook, or sets `core.hooksPath`, the upgrade finishes but says
 so with the remedy, and promote refuses until the hooks are merged or
 `core.hooksPath` is unset and `core/setup.sh` has run. Close and reopen any
-session that was open through the pull — once a new session has upgraded the
-home, the old session's next Stop asks for exactly that. `python3
-core/upgrade.py --dry-run` shows what it would do; `core/doctor.sh` shows what
-is left. Session logs are named by window and date from now on; earlier logs
+session that was open through the pull; it is still running the old hooks.
+If the upgrade moved capture's settings, that session's next Stop says "The
+gate definition (config.yaml) changed this session; restore it." That change
+was the upgrade's, so do not restore the file: restart the session instead.
+`python3 core/upgrade.py --dry-run` shows what it would do; `core/doctor.sh`
+shows what is left. Session logs are named by window and date from now on; earlier logs
 keep their names.
 
 **How to tell you have it.** `cat VERSION` prints `0.7.0`; `git describe
