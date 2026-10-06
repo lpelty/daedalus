@@ -548,3 +548,44 @@ PY
   git -C "$DAEDALUS_HOME" checkout -q -- core/fingerprint.sh
   run hook_as Stop s9; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+# Critic finding 7: the session open through a release pull is told config.yaml changed under it. When the release
+# made the change — the upgrade's own write, recorded in state/, or the pull's own commits to a tracked config.yaml
+# — the reason says so, says not to restore it and to have the operator start a new session, and blocks once.
+@test "config.yaml changed by the release (the upgrade's recorded write, or the pull's commits) is not 'restore it': one block saying do not restore it and start a new session, then no block; a change by hand on top still says restore it (critic finding 7)" {
+  python3 - "$DAEDALUS_HOME" "$SRC" <<'PY'
+import sys; from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, sys.argv[2])     # the upgrade module as it ships; core/ stays clean
+import verifylib as v, upgrade
+p = root / "config.yaml"; before = v.sha256_file(p)
+p.write_text(p.read_text() + "\nmemory:\n  bank: 'b'\n")
+upgrade.record_config_change(root, before, v.sha256_file(p), "the upgrade to 0.7.0")
+PY
+  run hook Stop
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  s="config.yaml changed under this session, by the upgrade to 0.7.0 — not by this session. Do not restore it: this session started before the release and still runs its old hooks; tell the operator to close it and start a new session."
+  case "$output" in *"$s"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"changed this session; restore it"*) echo "$output"; return 1 ;; esac
+  run hook Stop
+  [ "$status" -eq 0 ] || { echo "a second block: $output"; return 1; }
+  run hook PostToolUse
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '  - echo x\n' >> "$DAEDALUS_HOME/config.yaml"
+  run hook Stop
+  [ "$status" -eq 2 ]
+  case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a tracked config.yaml changed by the release pull's own commits is the release's change, not the session's (critic finding 7)" {
+  printf 'target/\nvault/\nstate/\n.claude/settings.local.json\n__pycache__/\n' > "$DAEDALUS_HOME/.gitignore"
+  then="$(( $(date +%s) - 100 ))"
+  git -C "$DAEDALUS_HOME" add -A
+  GIT_COMMITTER_DATE="@$then" git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m "config tracked"
+  printf '{"hook_event_name":"SessionStart","session_id":"s5","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["started_epoch"]-=50; json.dump(d, open(p,"w"))' "$DAEDALUS_HOME/state/session-s5.json"
+  printf '\npromote:\n  release_note: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -am "the release"     # what the pull brings
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s5\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ]
+  case "$output" in *"config.yaml changed under this session, by the release pulled into this home — not by this session. Do not restore it"*) : ;; *) echo "$output"; return 1 ;; esac
+}

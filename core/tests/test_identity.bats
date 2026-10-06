@@ -421,10 +421,15 @@ _run_scan_in_fixture() {
            'do not restore the file'; do
     case "$flat" in *"$s"*) : ;; *) echo "CHANGELOG lacks: $s"; return 1 ;; esac
   done
-  # the quoted Stop sentence is the one the boundary hook really emits
-  q='The gate definition (config.yaml) changed this session'
+  # the quoted Stop sentence is the one the boundary hook really emits for the release's own change (critic finding 7)
+  q='config.yaml changed under this session, by'
   case "$flat" in *"$q"*) : ;; *) echo "CHANGELOG does not quote the hook's sentence"; return 1 ;; esac
   grep -qF "$q" "$DAEDALUS_HOME/core/boundary-hook.py"
+  # and CLAUDE.md's "Taking a release" tells the agent the same: do not restore it; the operator starts a new session
+  sec="$(awk '/^\*\*Taking a release\.\*\*/{f=1} f&&/^## /{exit} f' "$DAEDALUS_HOME/CLAUDE.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in "$q" 'do not restore it' 'start a new session'; do
+    case "$sec" in *"$s"*) : ;; *) echo "'Taking a release' lacks: $s"; return 1 ;; esac
+  done
 }
 
 @test "README's upgrade section and CLAUDE.md's 'Taking a release' name the untracked-files stop with its remedy, worded as core/upgrade.py's UNTRACKED says it, and README no longer calls the uncommitted-changes stop the only one (plan 5 Decision 25; Task 14 review)" {

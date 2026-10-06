@@ -212,7 +212,11 @@ is a target checkout whose pre-push hook Daedalus cannot install — another
 tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
 That one does not stop the upgrade; its line names the remedy, promote
 refuses until it is resolved, and `core/doctor.sh` says MISSING. Repeat
-either sentence to the operator word for word. `python3 core/upgrade.py
+either sentence to the operator word for word. A session that was open
+through the pull may hear at a Stop "config.yaml changed under this session,
+by the upgrade to 0.7.0 — not by this session": the release made that change,
+so do not restore it; tell the operator to close this session and start a new
+session, which runs the new hooks. `python3 core/upgrade.py
 --dry-run` says what it would do.
 
 ## How you answer

@@ -22,7 +22,7 @@ stop_s0() {         # ... and its Stop
 }
 ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
 
-@test "v0.6.1, built and started by its own code, then pulled: the open session's next prompt says the upgrade has not run and its Stop passes, with no traceback; the first new session upgrades the home with nobody's hands on it — every §14 predicate holds; the old session's Stop then gives only the restart and promotion-backstop reasons; the second session changes nothing" {
+@test "v0.6.1, built and started by its own code, then pulled: the open session's next prompt says the upgrade has not run and its Stop passes, with no traceback; the first new session upgrades the home with nobody's hands on it — every §14 predicate holds; the old session's Stop then gives only the release's config.yaml reason (do not restore it; start a new session) and the promotion backstop; the second session changes nothing" {
   pull_current
   # the session that pulled keeps running: its board leads with the pending line; nothing is created by reading
   run --separate-stderr prompt_s0
@@ -69,9 +69,14 @@ ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.s
   run --separate-stderr stop_s0
   case "$status" in 0|2) : ;; *) echo "status $status: $output $stderr"; return 1 ;; esac
   case "$stderr" in *Traceback*) echo "$stderr"; return 1 ;; esac
-  case "$stderr" in *"The gate definition (config.yaml) changed this session"*"restart the session"*) : ;; *) echo "$stderr"; return 1 ;; esac
-  [ -z "$(printf '%s\n' "$stderr" | grep -v -e '^$' -e '^The gate definition (config.yaml) changed this session' -e '^Promotion check')" ] \
+  # Since the critic's finding 7 the config.yaml reason names the upgrade as the one that changed it and says not to
+  # restore it; it blocks once (test_boundary_hook.bats), and here the promotion backstop still blocks on its own.
+  case "$stderr" in *"config.yaml changed under this session, by the upgrade to 0.7.0 — not by this session. Do not restore it"*"tell the operator to close it and start a new session."*) : ;; *) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac
+  [ -z "$(printf '%s\n' "$stderr" | grep -v -e '^$' -e '^config.yaml changed under this session, by the upgrade' -e '^Promotion check')" ] \
     || { echo "an unexpected Stop reason for the old session: $stderr"; return 1; }
+  run --separate-stderr stop_s0
+  case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac
   # the second session: nothing upgrades again
   before="$(cd "$H" && find config.yaml vault/hot.md state/hindsight state/upgraded-to -type f | sort | xargs shasum)"
   run start_session s2

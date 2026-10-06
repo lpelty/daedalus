@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 
 STAMP = Path("state") / "upgraded-to"
+CONFIG_CHANGES = Path("state") / "config-changes.json"
 STOPPED = Path("state") / "upgrade-stopped.json"
 LOCK = Path("state") / ".upgrade.lock"
 DIRS = (("state/leases", 0o755), ("worktrees", 0o755), ("state/promote", 0o700), ("state/direct-calls", 0o700))
@@ -122,6 +123,21 @@ def _write(path: Path, text: str, mode: Optional[int] = None) -> None:
     elif path.exists():
         os.chmod(str(tmp), path.stat().st_mode & 0o777)
     os.replace(str(tmp), str(path))
+
+
+def record_config_change(root: Path, before: str, after: str, by: str) -> None:
+    """Record that <by> (the upgrade, never a session) rewrote config.yaml from sha256 <before> to <after>, so the
+    boundary hook of a session open through the release reads that change as the release's own and does not tell
+    its agent to restore the file (critic finding 7). The last 20 kept."""
+    p = root / CONFIG_CHANGES
+    try:
+        d = json.loads(p.read_text())
+        changes = d.get("changes") if isinstance(d, dict) and isinstance(d.get("changes"), list) else []
+    except (OSError, ValueError):
+        changes = []
+    changes.append({"from": before, "to": after, "by": by, "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write(p, json.dumps({"changes": changes[-20:]}, indent=2) + "\n")
 
 
 def _plural(n: int, word: str) -> str:
@@ -322,7 +338,9 @@ def step_memory(root: Path, head: str, dry: bool, deadline: Optional[float]) -> 
     block += ["  %s: %s" % (k, q) for k, q in fields]
     if key_val:
         block.append("  api_key_file: %s" % KEY_FILE)
+    before = v.sha256_file(cfgp)
     _write(cfgp, text + ("" if text.endswith("\n") or not text else "\n") + "\n" + "\n".join(block) + "\n")
+    record_config_change(root, before, v.sha256_file(cfgp), "the upgrade to %s" % version(root))
     return ["%s: moved capture's settings from the hook line in .claude/settings.local.json into config.yaml's "
             "memory: block (bank %s%s). The old line still works and can be removed; sessions opened before this "
             "upgrade should be closed and reopened." % (head, bank, "; the key is in %s, mode 600" % KEY_FILE

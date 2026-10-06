@@ -43,8 +43,11 @@ read-only session nothing).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -125,9 +128,96 @@ def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
                        % (", ".join(sorted(bad)), RESTART))
 
 
-def check_config(root: Path, marker: dict, reasons: List[str]) -> None:
-    if marker.get("config_sha") != v.sha256_file(root / "config.yaml"):
-        reasons.append("The gate definition (config.yaml) changed this session; restore it.%s" % RESTART)
+RELEASE_CONFIG = ("config.yaml changed under this session, by %s — not by this session. Do not restore it: this "
+                  "session started before the release and still runs its old hooks; tell the operator to close it and "
+                  "start a new session.")
+
+
+def _show_sha(root: Path, rev: str) -> Optional[str]:
+    try:
+        r = subprocess.run(["git", "-C", str(root), "show", "%s:config.yaml" % rev], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return hashlib.sha256(r.stdout).hexdigest() if r.returncode == 0 else None
+
+
+def _pull_edge(root: Path, marker: dict) -> Optional[Tuple[str, str]]:
+    """(config.yaml's sha256 at the home's HEAD when the session started, at HEAD now) when config.yaml is tracked
+    and a pull since then changed it — the release pull's own commit range, read from HEAD's reflog. A marker
+    from before v0.7.0 has only the local `started` stamp; it is read as local time."""
+    t = marker.get("started_epoch")
+    if not isinstance(t, (int, float)):
+        try:
+            t = time.mktime(time.strptime(str(marker.get("started")), "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, OverflowError):
+            return None
+    code, out, _ = v.run(["git", "-C", str(root), "reflog", "--date=unix", "--format=%H %gd", "HEAD"])
+    if code != 0:
+        return None
+    start = None
+    for ln in out.splitlines():                 # newest first: HEAD's value at the session's start
+        sha, _, gd = ln.partition(" ")
+        m = re.search(r"\{([0-9]+)\}", gd)
+        if m and int(m.group(1)) <= t:
+            start = sha
+            break
+    if not start:
+        return None
+    a, b = _show_sha(root, start), _show_sha(root, "HEAD")
+    return (a, b) if a and b and a != b else None
+
+
+def release_change(root: Path, marker: dict, now: str) -> Optional[str]:
+    """What changed config.yaml from the marker's sha to <now>, when only the release did: a chain of the
+    upgrade's recorded writes (state/config-changes.json, written by core/upgrade.py) and the pull's own commits
+    to a tracked config.yaml. The words naming who did it, or None when any step of the change is not theirs."""
+    edges: List[Tuple[str, str, str]] = []
+    try:
+        d = json.loads((root / "state" / "config-changes.json").read_text())
+        for e in (d.get("changes") or []) if isinstance(d, dict) else []:
+            if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("from", "to", "by")):
+                edges.append((e["from"], e["to"], e["by"]))
+    except (OSError, ValueError):
+        pass
+    pe = _pull_edge(root, marker)
+    if pe:
+        edges.append((pe[0], pe[1], "the release pulled into this home"))
+    cur, seen, bys = marker.get("config_sha"), set(), []
+    while cur != now:
+        step = next(((t, b) for f, t, b in edges if f == cur and t not in seen), None)
+        if step is None:
+            return None
+        cur = step[0]
+        seen.add(cur)
+        if step[1] not in bys:
+            bys.append(step[1])
+    return " and ".join(bys) or None
+
+
+def check_config(root: Path, marker: dict, reasons: List[str], notes: Optional[List[str]] = None) -> None:
+    now = v.sha256_file(root / "config.yaml")
+    if marker.get("config_sha") != now:
+        try:
+            by = release_change(root, marker, now)
+        except Exception:
+            by = None
+        if by:
+            # the release's change (critic finding 7): said once as a block, so the agent hears it and tells the
+            # operator; after that only a note — a restart is the remedy, and no Stop can bring it about
+            sid = marker.get("session_id")
+            b = load_boundary(root, sid)
+            if b.get("release_config_told") == now:
+                if notes is not None:
+                    notes.append(RELEASE_CONFIG % by)
+            else:
+                reasons.append(RELEASE_CONFIG % by)
+                b["release_config_told"] = now
+                try:
+                    save_boundary(root, sid, b)
+                except OSError:
+                    pass
+        else:
+            reasons.append("The gate definition (config.yaml) changed this session; restore it.%s" % RESTART)
     if marker.get("local_settings_sha") != v.local_settings_sha(root):
         reasons.append("The deny rules or hooks in .claude/settings.local.json changed this session; restore them.%s" % RESTART)
 
@@ -611,7 +701,7 @@ def main() -> int:
             notes.append("The session-start hook did not run; boundary checks compare against the current state.%s" % RESTART)
             # With no snapshot, any protected dirt counts.
         check_protected(root, marker, reasons)
-        check_config(root, marker, reasons)
+        check_config(root, marker, reasons, notes)
         check_evidence(root, marker, reasons)
         if event == "Stop":
             if not visitor:

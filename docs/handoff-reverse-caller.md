@@ -84,7 +84,10 @@ numbered window each (the checked-out work's untracked files went with it into
 the window's worktree; any left in `target/` were named, and doctor names them),
 putting the checkout
 back on its trunk; then wrote `state/upgraded-to`. It said one line for each
-thing it did. Check: `core/doctor.sh` prints
+thing it did. The session that ran the pull still runs the old hooks: it is
+closed and a new one started. If its Stop says "config.yaml changed under this
+session, by the upgrade to 0.7.0 — not by this session", that is the release's
+own change: it is not restored. Check: `core/doctor.sh` prints
 `OK       upgrade: state/upgraded-to 0.7.0` and no MISSING line about
 leases, hooks or `VERSION`; `git -C target/<repo> status -sb` shows the trunk
 with no `ahead`; the board lists any adopted window with "adopted from".
