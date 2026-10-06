@@ -426,3 +426,22 @@ _run_scan_in_fixture() {
   case "$flat" in *"$q"*) : ;; *) echo "CHANGELOG does not quote the hook's sentence"; return 1 ;; esac
   grep -qF "$q" "$DAEDALUS_HOME/core/boundary-hook.py"
 }
+
+@test "README's upgrade section and CLAUDE.md's 'Taking a release' name the untracked-files stop with its remedy, worded as core/upgrade.py's UNTRACKED says it, and README no longer calls the uncommitted-changes stop the only one (plan 5 Decision 25; Task 14 review)" {
+  remedy='move them out of that checkout, or commit them on its branch'
+  # the remedy the docs quote is the one the upgrade really says
+  said="$(cd "$DAEDALUS_HOME/core" && python3 -c 'import upgrade; print(upgrade.UNTRACKED)')"
+  case "$said" in *"has untracked files that"*"$remedy"*) : ;; *) echo "upgrade.py's UNTRACKED no longer says: $remedy"; return 1 ;; esac
+  RM="$(tr '\n' ' ' < "$DAEDALUS_HOME/README.md" | tr -s ' ')"
+  CM="$(tr '\n' ' ' < "$DAEDALUS_HOME/CLAUDE.md" | tr -s ' ')"
+  case "$RM" in *"The one thing it will not do is move a target checkout with uncommitted"*) echo "README still says uncommitted changes are the only stop"; return 1 ;; esac
+  for f in README CLAUDE; do
+    [ "$f" = README ] && flat="$RM" || flat="$CM"
+    for s in 'untracked files' "$remedy"; do
+      case "$flat" in *"$s"*) : ;; *) echo "$f.md lacks: $s"; return 1 ;; esac
+    done
+  done
+  # CLAUDE.md's sentence sits in "Taking a release", not elsewhere
+  sec="$(awk '/^\*\*Taking a release\.\*\*/{f=1} f&&/^## /{exit} f' "$DAEDALUS_HOME/CLAUDE.md" | tr '\n' ' ' | tr -s ' ')"
+  case "$sec" in *'untracked files'*"$remedy"*) : ;; *) echo "'Taking a release' lacks the untracked-files stop"; return 1 ;; esac
+}

@@ -62,12 +62,15 @@ window numbers itself. Each step acts once and says one line when it does:
    its trunk; a branch whose work is already on trunk is left as it is;
 7. writes `state/upgraded-to`, last.
 
-The one thing it will not do is move a target checkout with uncommitted
-changes: it stops there, and the board says on every prompt, in one sentence,
-what to commit or stash; the next session start finishes the job. One other
-state needs a person but does not stop it: a target checkout that already has
-a `pre-push` hook Daedalus did not install, or sets `core.hooksPath` (as husky
-or lefthook do). The upgrade says so with the remedy — merge the two hooks or
+It will not move a target checkout that holds work it could lose, and stops
+there before anything in that checkout moves: one with uncommitted changes
+(commit them on their branch inside that checkout, or stash them), or one with
+untracked files that putting it back on its trunk would overwrite (move them
+out of that checkout, or commit them on its branch). The board says which on
+every prompt, in one sentence, with what to do; the next session start
+finishes the job. One other state needs a person but does not stop it: a
+target checkout that already has a `pre-push` hook Daedalus did not install,
+or sets `core.hooksPath` (as husky or lefthook do). The upgrade says so with the remedy — merge the two hooks or
 move the other aside, or `git -C target/<repo> config --unset core.hooksPath`
 — then `core/setup.sh`; until then promote refuses and the doctor says
 MISSING.

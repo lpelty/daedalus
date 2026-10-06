@@ -198,10 +198,13 @@ itself before the window numbers itself: it makes what the release needs,
 moves capture's settings into `config.yaml`, turns any work waiting in
 `target/` into a numbered window, and says one line for each thing it did —
 repeat those lines to the operator. If it stops, the board says why in one
-sentence on every prompt. Two things it leaves to a person: a target checkout
-with uncommitted changes (it stops there until they are committed or
-stashed), and a target checkout whose pre-push hook Daedalus cannot install —
-another tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
+sentence on every prompt. Two things it leaves to a person. One is a target
+checkout holding work the upgrade could lose: uncommitted changes (it stops
+there until they are committed or stashed), or untracked files that putting
+it back on its trunk would overwrite (it stops there and tells the operator
+to move them out of that checkout, or commit them on its branch). The other
+is a target checkout whose pre-push hook Daedalus cannot install — another
+tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
 That one does not stop the upgrade; its line names the remedy, promote
 refuses until it is resolved, and `core/doctor.sh` says MISSING. Repeat
 either sentence to the operator word for word. `python3 core/upgrade.py
