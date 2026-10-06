@@ -401,14 +401,33 @@ _run_scan_in_fixture() {
   done
 }
 
-@test "CHANGELOG: v0.7.0 is the newest release — a one-line headline for the tag, then what changes for an operator on each kind of deployment, what the first session after the pull does, and how to tell; nothing left unreleased" {
+@test "CHANGELOG: v0.7.0 is the newest release — a one-line headline for the tag, then, in short plain sentences, what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
   [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself" ]
   flat="$(tr '\n' ' ' < "$DAEDALUS_HOME/CHANGELOG.md" | tr -s ' ')"
-  for s in '**What changes for an operator.**' '**On each kind of deployment.**' '**At the first session after the pull.**' '**How to tell you have it.**' \
-           'git pull --ff-only' 'core/upgrade.py --dry-run' 'uncommitted changes' 'promote.release_note' 'cat VERSION' \
+  for s in 'git pull --ff-only' 'core/upgrade.py --dry-run' 'uncommitted changes' 'promote.release_note' 'cat VERSION' \
            'upgrade: state/upgraded-to 0.7.0' 'core/lease.sh adopt' 'docs/handoff-reverse-caller.md' 'core/tests/scenarios/two-clones.sh'; do
     case "$flat" in *"$s"*) : ;; *) echo "CHANGELOG lacks: $s"; return 1 ;; esac
   done
+  # The top section is for an operator with no engineering background (critic finding 6): its parts in this order,
+  # short plain sentences, the one paste and the stops each in a part of their own, 'In detail' kept below.
+  top="$(awk '/^## v0.7.0 /{f=1; next} /^### In detail/{exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  order=""
+  for h in '**In short.**' '**What you will see at the first session after the pull.**' '**What the windows are.**' \
+           '**How a change reaches trunk now.**' '**One paste into config.yaml, by the operator.**' '**If the upgrade stops.**' \
+           '**How to tell you have it.**'; do
+    case "$top" in *"$h"*) : ;; *) echo "the top section lacks: $h"; return 1 ;; esac
+    order="$order$(printf '%s' "$top" | awk -v h="$h" '{print index($0, h)}') "
+  done
+  [ "$(printf '%s\n' $order | sort -n | tr '\n' ' ')" = "$order" ] || { echo "the parts are out of order: $order"; return 1; }
+  for s in 'you say yes' '`core/doctor.sh` shows them as one paste' 'Nothing else is done by hand.' 'start a new session' 'commit them on their branch'; do
+    case "$top" in *"$s"*) : ;; *) echo "the top section lacks: $s"; return 1 ;; esac
+  done
+  grep -q '^### In detail' "$DAEDALUS_HOME/CHANGELOG.md"
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$top"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the top section:"; echo "$output"; return 1; }
   ! grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"
   ! grep -qi 'not yet in this release' "$DAEDALUS_HOME/CHANGELOG.md"
 }

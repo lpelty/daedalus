@@ -6,66 +6,78 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
 ## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself
 
-**What changes for an operator.** Several Daedalus sessions can now work one
-target at once. Each terminal you open in the Daedalus home numbers itself —
-"You are window 02" — and builds in its own copy of the target; you talk to
-windows by number ("promote window 2", "release window 3"), or by a name you
-give one. The first window up holds the pen: only it writes `hot.md`, commits
-the vault and promotes. Nothing reaches the target's trunk except
-`core/promote.sh`, which merges a window's work onto current trunk, runs the
-gates and a fresh reviewer on exactly that merge, shows you one plain-language
-block, and pushes only after your yes. Capture records each session every
-couple of minutes instead of only at its end. Daedalus can ask the target's
-own agent a read-only question, and an agent you allow can ask Daedalus one.
+**In short.** Several Daedalus sessions can now work on one target at the
+same time. Each one is a numbered window. A change reaches the target's trunk
+only after you say yes to it. Daedalus can ask the target's own agent a
+question, and an agent you allow can ask Daedalus one. Each session's memory
+is now saved every couple of minutes, not only when it ends.
 
-**On each kind of deployment.**
-- *Where a promote is a release* — the target's users receive its trunk
-  through an update command — the operator adds `promote.release_note: true`
-  and `promote.update_command` to `config.yaml`, in one paste that
-  `core/doctor.sh` shows (with `direct_call.callers`, and `verify.refute_model`
-  on a cloud provider): the block and the pushed line then say "this is a
-  release", because the next update ships it to everyone. Let
-  that deployment's `gates:` exercise what the update exercises.
-- *Where the target's harness runs from its live tree* — no update step between
-  the push and the harness that loads it — a promote is live at the harness's
-  next start. This release does not change that; a pinned checkout for such a
-  deployment is separate work.
-- *Every deployment* takes this release, and the next, the same way:
-  `git pull --ff-only` in the Daedalus home, then a new session.
+Every deployment takes this release, and the next, the same way: `git pull
+--ff-only` in the Daedalus home, then a new session.
 
-**At the first session after the pull.** Nobody runs a step by hand. The
-session's start runs the upgrade (`core/upgrade.py`) before the window numbers
-itself, and says one line for each thing it did: made the window directories;
-installed the pre-push hook in Daedalus's own checkout of each target repo;
-removed the old shared reminder files; renamed `hot.md`'s `session:` line to
-`leases:` (left for the prime's first vault commit); moved capture's settings
-from the hook line in `.claude/settings.local.json` into a `memory:` block in
-`config.yaml`, with the key in `state/hindsight/api-key` (only when every value
-on that line is written out plainly, or the key is read from a file; the old
-line keeps working and can be removed later); and turned any work waiting in
-`target/` — the branch checked out, every other branch with work origin
-lacks, a trunk ahead of origin, a detached checkout — into a numbered window
-each, named in one line each, that you can promote or release (the checked-out
-work's untracked files go with it into its window), putting the checkout back on its
-trunk. Then the window numbers itself — window 01 if nothing was waiting, the
-next number otherwise — and takes the pen. If a target checkout has
-uncommitted changes, or an untracked file where putting it back on its trunk
-would write, the upgrade stops before moving anything there and the board says
-so in one sentence on every prompt: commit them on their branch (or move the file),
-and the next session finishes it. If a target checkout already has another
-tool's `pre-push` hook, or sets `core.hooksPath`, the upgrade finishes but says
-so with the remedy, and promote refuses until the hooks are merged or
-`core.hooksPath` is unset and `core/setup.sh` has run. Close and reopen any
-session that was open through the pull; it is still running the old hooks.
-If the upgrade moved capture's settings, that session's next Stop says
-"config.yaml changed under this session, by the upgrade to 0.7.0 — not by this
-session. Do not restore it", once; do not restore the file: restart the session instead.
-`python3 core/upgrade.py --dry-run` shows what it would do; `core/doctor.sh`
-shows what is left. Session logs are named by window and date from now on; earlier logs
-keep their names.
+**What you will see at the first session after the pull.**
+- The session upgrades the home before anything else. It says one line for
+  each thing it did.
+- Work that was waiting in `target/` becomes numbered windows, one line each.
+  That is every branch with work its origin does not have yet, whether or not
+  it was checked out, and the trunk if it was ahead.
+- Files a branch had not committed yet go with it into its window.
+- Then the session says "You are window 01", or the next free number, and
+  that it holds the pen.
+- Close and reopen any session that was open through the pull; it is still running the old hooks.
+- That old session may say "config.yaml changed under this session, by the
+  upgrade to 0.7.0 — not by this session. Do not restore it". It means what
+  it says: do not restore the file. Start a new session instead.
 
-**How to tell you have it.** `cat VERSION` prints `0.7.0`; `git describe
---tags --abbrev=0` prints `v0.7.0`; `core/doctor.sh` prints `OK       version:
+**What the windows are.** Each terminal you open in the Daedalus home is a
+window with a number, like "window 02". Each window works in its own copy of
+the target, so two windows never write over each other. You talk to a window
+by its number ("promote window 2", "release window 3"), or by a name you give
+it. The first window to start holds the pen. Only the window with the pen
+writes the shared notes and ships changes.
+
+**How a change reaches trunk now.**
+1. You tell the window with the pen: "promote window 02".
+2. It prepares the change. It puts that window's work on top of the current
+   trunk, runs the checks, and has a fresh reviewer read exactly that.
+3. It shows you one short block in plain words.
+4. You say yes, or you do not.
+5. Only after your yes does it ship the change to trunk.
+
+Nothing else can push to trunk. Where the target's users receive its trunk
+through an update command, a promote is a release. The block then says so,
+because the next update ships it to everyone. Where the target runs straight
+from its trunk, a promote is live the next time it starts.
+
+**One paste into config.yaml, by the operator.** Daedalus may not edit
+`config.yaml`, so a few lines there are yours to add, once. `core/doctor.sh`
+shows them as one paste. They say whether a promote here is a release
+(`promote.release_note`), what the update command is, which agents may call
+Daedalus (`direct_call.callers`), and, on a cloud provider, the reviewer's
+model. Answer each `<...>`, paste the lines at the end of `config.yaml`, then
+start a new session. Doctor never chooses who may call Daedalus; that is your
+decision. Nothing else is done by hand.
+
+**If the upgrade stops.** It stops only to keep work safe. The board then
+says why on every prompt, in one sentence, with what to do. Do that, then
+start a new session, and it finishes the upgrade.
+- A target checkout has uncommitted changes: commit them on their branch
+  inside that checkout.
+- A target checkout has untracked files where putting it back on its trunk
+  would write: move them out of that checkout, or commit them on its branch.
+- A rebase, merge or similar was left half done in a target checkout: the
+  sentence names the `git` command that finishes or undoes it.
+
+Never stash the changes to get past a stop. A stash is saved work that no
+window shows. If the upgrade finds one, it names it, and `core/doctor.sh`
+keeps naming it. One thing does not stop the upgrade: a target checkout with
+another tool's `pre-push` hook, or a `core.hooksPath` setting. The upgrade
+says so with the remedy, and promote waits until that is fixed. `python3
+core/upgrade.py --dry-run` shows what the upgrade would do. `core/doctor.sh`
+shows what is left.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.0`. `git describe
+--tags --abbrev=0` prints `v0.7.0`. `core/doctor.sh` prints `OK       version:
 0.7.0` and `OK       upgrade: state/upgraded-to 0.7.0`.
 
 ### In detail
@@ -179,8 +191,38 @@ keep their names.
 - **The upgrade** (`core/upgrade.py`): run at SessionStart when `VERSION` and
   `state/upgraded-to` differ (never in a direct-call session), inside the start's
   time budget, one run at a time; every step idempotent and said once when it
-  acts; the stamp written last; a dirty target checkout the one stop, repeated
-  by the board on every prompt; `--dry-run`; `--setup` for setup's leases phase.
+  acts; the stamp written last; `--dry-run`; `--setup` for setup's leases phase.
+  Its steps: the window directories; the pre-push hook in Daedalus's own
+  checkout of each target repo; the old shared reminder files removed;
+  `hot.md`'s `session:` line renamed `leases:` (left for the prime's first
+  vault commit); capture's settings moved from the hook line in
+  `.claude/settings.local.json` into a `memory:` block in `config.yaml`, the
+  key into `state/hindsight/api-key` (only when every value on that line is
+  written out plainly, or the key is read from a file; the old line keeps
+  working); then one bounded fetch, and every branch of each target repo
+  (outer and nested) with commits `git cherry` finds missing from
+  `origin/<trunk>` adopted as its own window — the checked-out one first, a
+  branch another window already carries left alone, a merged one left as it
+  was — and a trunk ahead of origin adopted or, when a window carries it,
+  reset. The checked-out work's untracked, not-ignored files are copied into
+  its window's worktree, checked, and only then removed from `target/`;
+  untracked files no window takes, and stash entries, are named in a line and
+  by doctor. It stops before anything in `target/` moves, repeated by the board
+  on every prompt, on uncommitted changes, an untracked file where the move
+  back to the trunk would write, or a rebase, merge, cherry-pick, revert or
+  bisect stopped part-way. Its write to `config.yaml` is recorded in
+  `state/config-changes.json`, so a session open through the pull is told
+  "Do not restore it" (once) instead of "restore it"; a tracked `config.yaml`
+  changed by the pull's own commits reads the same way.
+- Doctor shows the `config.yaml` lines only the operator may write
+  (`promote.release_note`, `promote.update_command`, `direct_call.callers`,
+  `verify.refute_model` on a cloud provider) as one paste, printed bare:
+  exact where the answer is known, a `<...>` with its question otherwise,
+  never a caller filled in.
+- Where a promote is a release, let that deployment's `gates:` exercise what
+  the update exercises, as far as a command that exits 0 can. Where the
+  target's harness runs from its live tree, a promote is live at its next
+  start; a pinned checkout for such a deployment is separate work.
 - `core/lease.sh adopt <branch> [--repo <nested>] [--note "…"]`: an in-flight
   branch in `target/` becomes a numbered window and the checkout goes back to
   its trunk; `adopt <trunk>` moves a trunk that is ahead of origin into one; a
