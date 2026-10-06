@@ -417,23 +417,24 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   case "$output" in *"in no window"*) echo "$output"; return 1 ;; esac
 }
 
-@test "untracked files of a checkout that becomes a window go with it — copied into its worktree, checked, then removed from target/; ignored files and nested repos stay; untracked files in a checkout no window is made from are named in one line and by doctor (critic finding 2)" {
+@test "untracked files of a checkout that becomes a window go with it — copied into its worktree, checked, then removed from target/; ignored files and nested repos stay, the ignored ones named in the window's line; untracked files in a checkout no window is made from are named in one line and by doctor (critic finding 2; review 2, finding 9)" {
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
   printf 'new\n' > "$T/newfile.py"; mkdir -p "$T/notes/deep"; printf 'n\n' > "$T/notes/deep/a.md"; ln -s newfile.py "$T/link.py"
-  printf '*.log\n' >> "$T/.git/info/exclude"; printf 'ignored\n' > "$T/build.log"
+  printf '*.log\nextra/\n' >> "$T/.git/info/exclude"; printf 'ignored\n' > "$T/build.log"; : > "$T/empty.log"
+  git init -q "$T/extra"; printf 'e\n' > "$T/extra/e.txt"; git -C "$T/extra" add -A; cmt "$T/extra" -m "a repo of its own"
   printf 'stray\n' > "$T/sub/stray.txt"
   run python3 "$UP" --doctor
   case "$output" in *"NOTE     target/thing has untracked files no window holds (link.py, newfile.py, notes/deep/a.md) — the upgrade takes them into the window it makes from feat/x at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"that work is now window 01 (branch lease/01), and target/thing is back on main."*"Its untracked files went with it into worktrees/01/thing: link.py, newfile.py, notes/deep/a.md."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"that work is now window 01 (branch lease/01), and target/thing is back on main."*"Its untracked files went with it into worktrees/01/thing: link.py, newfile.py, notes/deep/a.md."*" Ignored files stay in target/thing and are not in the window (build.log, extra/) — if any of them is work, move it into worktrees/01/thing."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"Upgrade to 0.7.0: target/thing/sub holds untracked files no window has (stray.txt) — they stay there, and core/doctor.sh names them until they are moved into a window's worktree or removed."*) : ;; *) echo "$output"; return 1 ;; esac
   W="$DAEDALUS_HOME/worktrees/01/thing"
   [ "$(cat "$W/newfile.py")" = new ]; [ "$(cat "$W/notes/deep/a.md")" = n ]; [ "$(readlink "$W/link.py")" = newfile.py ]
   [ ! -e "$T/newfile.py" ]; [ ! -e "$T/notes" ]; [ ! -L "$T/link.py" ]
   [ "$(cat "$T/build.log")" = ignored ]; [ ! -e "$W/build.log" ]
-  [ "$(cat "$T/sub/stray.txt")" = stray ]
-  case "$output" in *build.log*|*"sub/"*) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/sub/stray.txt")" = stray ]; [ "$(git -C "$T/extra" log --format=%s)" = "a repo of its own" ]
+  case "$output" in *empty.log*|*"sub/"*) echo "$output"; return 1 ;; esac
   [ "$(git -C "$W" status --porcelain | sort | tr '\n' '|')" = "?? link.py|?? newfile.py|?? notes/|" ]
   run python3 "$UP" --doctor
   case "$output" in *"NOTE     target/thing/sub has untracked files no window holds (stray.txt) — target/thing/sub is the trunk mirror, which no session works in; move them into a window's worktree (worktrees/<NN>/thing/sub) or remove them"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -539,13 +540,286 @@ print(stop); sys.exit(1)'
   git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
   git -C "$BATS_TEST_TMPDIR/hand" push -q origin --delete feat/gone
   git -C "$T" fetch -q --prune origin
+  gone_note="NOTE     target/thing has branch feat/gone, 1 commit past origin/main, whose branch on origin was deleted — if it was not merged, run core/lease.sh adopt feat/gone"
   run python3 "$UP" --doctor
-  case "$output" in *"feat/sq"*|*"feat/gone"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"feat/sq"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"$gone_note"*) : ;; *) echo "$output"; return 1 ;; esac
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"window 01"*|*"could not be fast-forwarded"*|*"feat/sq"*) echo "$output"; return 1 ;; esac
   case "$output" in *"Upgrade to 0.7.0: target/thing's branch feat/gone holds commits origin/main has no copy of, but its branch on origin was deleted, which usually means it was merged — it was left as it was; if it was not merged, run core/lease.sh adopt feat/gone."*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
   git -C "$T" rev-parse -q --verify refs/heads/feat/sq >/dev/null; git -C "$T" rev-parse -q --verify refs/heads/feat/gone >/dev/null
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  # after the upgrade, when its one line has scrolled away, doctor still names it (review 2, finding 8)
+  run python3 "$UP" --doctor
+  case "$output" in *"$gone_note"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- release-candidate review 2 -------------------------------------------------------------------------------
+
+@test "a gitignored file where putting the checkout back on the trunk would write stops the upgrade before anything moves — the file is kept, no stamp; lease.sh adopt refuses the same (review 2, finding 1)" {
+  git -C "$T" checkout -q -b fix/in-flight
+  git -C "$T" rm -q --cached a.txt; printf 'a.txt\n' >> "$T/.gitignore"; git -C "$T" add -A; cmt "$T" -m "stop tracking a.txt"
+  printf 'OPERATOR LOCAL SETTINGS\n' > "$T/a.txt"
+  [ -z "$(git -C "$T" status --porcelain)" ]          # git status shows nothing: it is ignored
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing has untracked files that putting it back on main would overwrite (a.txt) — move them out of that checkout, or commit them on its branch, then start a session again" ] || { echo "$output"; return 1; }
+  [ "$(cat "$T/a.txt")" = "OPERATOR LOCAL SETTINGS" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt fix/in-flight
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/thing has ignored files that putting it back on main at origin/main would overwrite (a.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/a.txt")" = "OPERATOR LOCAL SETTINGS" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+}
+
+@test "a gitignored file that resetting a trunk ahead of origin would write over stops the upgrade before anything moves — the file is kept, main still ahead (review 2, finding 2)" {
+  git -C "$T" rm -q --cached a.txt; printf 'a.txt\n' >> "$T/.gitignore"; git -C "$T" add -A; cmt "$T" -m "stop tracking a.txt"
+  printf 'OPERATOR LOCAL SETTINGS on trunk\n' > "$T/a.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing has untracked files that resetting main to origin/main would overwrite (a.txt) — move them out of that checkout, or commit them on its branch, then start a session again" ] || { echo "$output"; return 1; }
+  [ "$(cat "$T/a.txt")" = "OPERATOR LOCAL SETTINGS on trunk" ]; [ "$(git -C "$T" rev-list --count origin/main..main)" = 1 ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt main
+  [ "$status" -ne 0 ]
+  case "$output" in *"resetting main to origin/main would overwrite (a.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/a.txt")" = "OPERATOR LOCAL SETTINGS on trunk" ]
+  # a wholly ignored directory is in the way only where origin/main tracks a path that is on disk inside it
+  mv "$T/a.txt" "$BATS_TEST_TMPDIR/a.txt"
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  mkdir -p "$BATS_TEST_TMPDIR/hand/build"; printf 'k\n' > "$BATS_TEST_TMPDIR/hand/build/keep.txt"
+  git -C "$BATS_TEST_TMPDIR/hand" add -A; cmt "$BATS_TEST_TMPDIR/hand" -m "build/keep.txt"; git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
+  printf 'build/\n' >> "$T/.git/info/exclude"; mkdir -p "$T/build"; printf 'mine\n' > "$T/build/other.txt"
+  run python3 "$UP" --dry-run
+  case "$output" in *"would stop"*) echo "$output"; return 1 ;; esac
+  git -C "$T" fetch -q origin
+  printf 'MY BUILD KEEP\n' > "$T/build/keep.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  case "$(printf '%s\n' "$output" | tail -1)" in *"resetting main to origin/main would overwrite (build/keep.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/build/keep.txt")" = "MY BUILD KEEP" ]
+}
+
+@test "on a filesystem that ignores case, an untracked Thing-style file where a trunk reset writes its lower-case twin stops the upgrade; and a carry never removes a file that is no longer untracked under its name (review 2, finding 3)" {
+  [ "$(git -C "$T" config --bool core.ignorecase)" = true ] || skip "this filesystem tells case apart"
+  mkdir -p "$T/docs"; git -C "$T" mv a.txt docs/a.txt; cmt "$T" -m "move a.txt"
+  printf 'SCRATCH NOTES, untracked, capital A\n' > "$T/A.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing has untracked files that resetting main to origin/main would overwrite (A.txt) — move them out of that checkout, or commit them on its branch, then start a session again" ] || { echo "$output"; return 1; }
+  [ "$(cat "$T/A.txt")" = "SCRATCH NOTES, untracked, capital A" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  # the carry's own check, with the stop blinded: the reset writes a.txt where A.txt was; the trunk's tracked file
+  # stays in target/thing and nothing is copied into the window under the untracked name
+  killed_run 'll.untracked_in_way = lambda *a, **kw: []'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -z "$(git -C "$T" status --porcelain)" ] || { git -C "$T" status --porcelain; return 1; }
+  [ "$(cat "$T/a.txt")" = a ]
+  [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/A.txt" ]
+  case "$output" in *"went with it"*) echo "$output"; return 1 ;; esac
+}
+
+@test "a detached HEAD whose change is already on origin as a squash keeps its commits on a named branch, said in the line, before the checkout goes back on the trunk (review 2, finding 4)" {
+  git -C "$T" checkout -q --detach main
+  printf '1\n' > "$T/d.txt"; git -C "$T" add -A; cmt "$T" -m "detached d1"
+  printf '2\n' >> "$T/d.txt"; git -C "$T" add -A; cmt "$T" -m "detached d2 - unique message"
+  h="$(git -C "$T" rev-parse HEAD)"
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  cp "$T/d.txt" "$BATS_TEST_TMPDIR/hand/d.txt"; printf '3\n' > "$BATS_TEST_TMPDIR/hand/e.txt"
+  git -C "$BATS_TEST_TMPDIR/hand" add -A; cmt "$BATS_TEST_TMPDIR/hand" -m "d1+d2+d3 squashed"; git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: target/thing was not on a branch; its change is already on origin/main, and it is back on main — its commits are kept on branch daedalus/upgrade-"*"-${h:0:7}, left as it was."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = main ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ -n "$(git -C "$T" for-each-ref --points-at "$h" refs/heads/daedalus/)" ]
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
+
+@test "a local branch named origin/main stops the upgrade before anything moves, and doctor names it; renamed, the upgrade finishes; a window is still cut from origin's main when such a branch comes back (review 2, finding 5)" {
+  git -C "$T" checkout -q -b origin/main; printf 'o\n' > "$T/o.txt"; git -C "$T" add -A; cmt "$T" -m "on a branch named origin/main"
+  git -C "$T" checkout -q main
+  s="upgrade to 0.7.0 incomplete: target/thing has a local branch named origin/main, which git takes for origin's main — rename it (git -C target/thing branch -m origin/main <new name>), then start a session again"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing has a local branch named origin/main, which git takes for origin's main — rename it (git -C target/thing branch -m origin/main <new name>)"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" branch -m origin/main feat/o
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's branch feat/o (1 commit not on origin/main: \"on a branch named origin/main\") is now window 01"*"complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  # the branch comes back; a branch adopted by hand still becomes a window cut from origin's main in every repo
+  git -C "$T" branch origin/main lease/01
+  git -C "$T" checkout -q -b feat/y main; printf 'y\n' > "$T/y.txt"; git -C "$T" add -A; cmt "$T" -m "y work"; git -C "$T" checkout -q main
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat/y
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 02 now holds feat/y"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/02/thing" branch --show-current)" = lease/02 ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/02/thing/sub" rev-parse HEAD)" = "$(git -C "$T/sub" rev-parse refs/remotes/origin/main)" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
+}
+
+@test "an uncommitted edit hidden from git status by skip-worktree or assume-unchanged stops the upgrade before anything moves, naming the file and how to clear the mark; doctor and lease.sh adopt name it too; a marked file with no edit is no stop (review 2, finding 6)" {
+  git -C "$T" checkout -q -b fix/in-flight; printf 'f\n' > "$T/f.txt"; git -C "$T" add -A; cmt "$T" -m "the waiting fix"
+  printf 'MY UNCOMMITTED EDIT\n' > "$T/a.txt"; git -C "$T" update-index --skip-worktree a.txt
+  git -C "$T/sub" update-index --assume-unchanged n.txt            # marked, unchanged: not work
+  [ -z "$(git -C "$T" status --porcelain --untracked-files=no)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: target/thing has uncommitted changes git status does not show, in files marked skip-worktree (a.txt) — clear the mark (git -C target/thing update-index --no-skip-worktree a.txt), commit them on their branch inside that checkout, then start a session again" ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(cat "$T/a.txt")" = "MY UNCOMMITTED EDIT" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing has uncommitted changes git status does not show, in files marked skip-worktree (a.txt) — no window has them; clear the mark (git -C target/thing update-index --no-skip-worktree a.txt) and commit them on a branch"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing/sub has uncommitted"*) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt fix/in-flight
+  [ "$status" -ne 0 ]
+  case "$output" in *"target/thing has uncommitted changes git status does not show, in files marked skip-worktree (a.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
+  # assume-unchanged: the same stop, its own remedy
+  git -C "$T" update-index --no-skip-worktree a.txt; git -C "$T" update-index --assume-unchanged a.txt
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  case "$(printf '%s\n' "$output" | tail -1)" in *"in files marked assume-unchanged (a.txt) — clear the mark (git -C target/thing update-index --no-assume-unchanged a.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" update-index --no-assume-unchanged a.txt; git -C "$T" add -A; cmt "$T" -m "the edit, committed"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"that work is now window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/worktrees/01/thing/a.txt")" = "MY UNCOMMITTED EDIT" ]
+}
+
+@test "a nested repo's adopted window, swept: its unpromoted commits are named by doctor and the board, its untracked files by doctor, and its number is never silently held back (review 2, finding 7)" {
+  git -C "$T/sub" checkout -q -b fix/nested; printf 'n2\n' > "$T/sub/n2.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m "nested waiting fix"
+  printf 'notes\n' > "$T/sub/notes-untracked.txt"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing/sub was on fix/nested"*"now window 01"*"worktrees/01/thing/sub: notes-untracked.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"
+  run bash "$DAEDALUS_HOME/core/lease.sh" sweep
+  case "$output" in *"removed the lease of window 01 (stale)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$DAEDALUS_HOME/core/leaselib.py" doctor-lines
+  case "$output" in *"NOTE     leases: 01 swept with 1 unpromoted commit waiting"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     leases: worktrees/01/thing/sub holds uncommitted or untracked files of swept window 01 (notes-untracked.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  case "$output" in *"- 01 — swept, 1 unpromoted commit waiting (\"nested waiting fix\")"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "an untracked file named like the carry's temporary name for another goes with it too, both whole (review 2, finding 10)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'IMPORTANT NOTES\n' > "$T/.notes.upgrade-carry"; printf 'plain notes\n' > "$T/notes"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"went with it into worktrees/01/thing: .notes.upgrade-carry, notes."*) : ;; *) echo "$output"; return 1 ;; esac
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  [ "$(cat "$W/.notes.upgrade-carry")" = "IMPORTANT NOTES" ]; [ "$(cat "$W/notes")" = "plain notes" ]
+  [ ! -e "$DAEDALUS_HOME/worktrees/01/.upgrade-carry" ]
+}
+
+@test "a trunk-ahead adoption killed after lease/NN was made and before its lease file: the next run finishes that window — one window holds the commits, outer and nested; a checked-out branch killed after its rename the same (review 2, finding 11)" {
+  printf 'ahead1\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-1"
+  printf 'ahead2\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-2"
+  printf 'n\n' > "$T/notes.txt"
+  printf 's\n' >> "$T/sub/n.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m "sub-ahead"
+  kill_at_lease_file='o = ll.write_lease
+def k(root, nn, data, exclusive=False):
+    if exclusive:
+        os._exit(9)
+    return o(root, nn, data, exclusive)
+ll.write_lease = k'
+  killed_run "$kill_at_lease_file"
+  [ "$status" -eq 9 ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]; git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing's main was 2 commits ahead of origin/main"*"that work is now window 01"*"worktrees/01/thing: notes.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing/sub's main was 1 commit ahead of origin/main"*"that work is now window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 03"*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/03.json" ]; ! git -C "$T" rev-parse -q --verify refs/heads/lease/03 >/dev/null
+  [ "$(git -C "$T" log --format=%s lease/01 | head -2 | tr '\n' '|')" = "main-ahead-2|main-ahead-1|" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(cat "$DAEDALUS_HOME/worktrees/01/thing/notes.txt")" = n ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  case "$output" in *"swept"*) echo "$output"; return 1 ;; esac
+  # the nested repo's trunk cut off the same way
+  rm -f "$DAEDALUS_HOME/state/upgraded-to"
+  printf 's2\n' >> "$T/sub/n.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m "sub-ahead-2"
+  killed_run "$kill_at_lease_file"
+  [ "$status" -eq 9 ]; [ ! -e "$DAEDALUS_HOME/state/leases/03.json" ]; git -C "$T/sub" rev-parse -q --verify refs/heads/lease/03 >/dev/null
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing/sub's main was 1 commit ahead of origin/main"*"that work is now window 03"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -e "$DAEDALUS_HOME/state/leases/03.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/04.json" ]
+  ! git -C "$T/sub" rev-parse -q --verify refs/heads/lease/04 >/dev/null
+  # a checked-out branch cut off after its rename to lease/NN: adopted as that window, not left as a stray branch
+  rm -f "$DAEDALUS_HOME/state/upgraded-to"
+  git -C "$T" checkout -q -b feat/x main; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'u\n' > "$T/u.txt"
+  killed_run "$kill_at_lease_file"
+  [ "$status" -eq 9 ]; [ "$(git -C "$T" branch --show-current)" = lease/04 ]; [ ! -e "$DAEDALUS_HOME/state/leases/04.json" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing was on lease/04 (1 commit not on origin/main: \"in flight\"); that work is now window 04"*"worktrees/04/thing: u.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = main ]; [ ! -e "$DAEDALUS_HOME/state/leases/05.json" ]
+  [ "$(cat "$DAEDALUS_HOME/worktrees/04/thing/u.txt")" = u ]
+}
+
+@test "a detached checkout's adoption killed part-way — before the trunk checkout, or after the rename before the lease file — is finished by the next run: one window, the untracked files in it, no stray label (review 2, finding 12)" {
+  printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-1"
+  git -C "$T" checkout -q --detach main; printf 'd\n' > "$T/d.txt"; git -C "$T" add -A; cmt "$T" -m "detached-work"
+  printf 'n\n' > "$T/notes.txt"
+  # (a) killed at adopt's checkout of the trunk, after the lease file was written
+  killed_run 'o = ll._git
+def k(repo, *args, **kw):
+    if args[:2] == ("checkout", "--quiet"):
+        os._exit(9)
+    return o(repo, *args, **kw)
+ll._git = k'
+  [ "$status" -eq 9 ]; [ -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ -z "$(git -C "$T" branch --show-current)" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"window 01, adopted from target/thing at an earlier start, now has its worktree"*"target/thing's work became window 01 at an earlier start; its untracked files went with it into worktrees/01/thing: notes.txt."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 02"*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]; [ "$(git -C "$T" branch --show-current)" = main ]
+  [ "$(cat "$DAEDALUS_HOME/worktrees/01/thing/notes.txt")" = n ]; [ ! -e "$T/notes.txt" ]
+  [ -z "$(git -C "$T" for-each-ref refs/heads/daedalus/)" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse origin/main)" ]
+  [ "$(lease_json 01 worktree_ready)" = None ]
+  # (b) killed after the label became lease/NN, before the lease file
+  rm -f "$DAEDALUS_HOME/state/upgraded-to"
+  printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "main-ahead-again"
+  git -C "$T" checkout -q --detach main; printf 'd2\n' > "$T/d2.txt"; git -C "$T" add -A; cmt "$T" -m "detached-work-2"
+  printf 'm\n' > "$T/more.txt"
+  killed_run 'o = ll.write_lease
+def k(root, nn, data, exclusive=False):
+    if exclusive:
+        os._exit(9)
+    return o(root, nn, data, exclusive)
+ll.write_lease = k'
+  [ "$status" -eq 9 ]; [ ! -e "$DAEDALUS_HOME/state/leases/02.json" ]; git -C "$T" rev-parse -q --verify refs/heads/lease/02 >/dev/null
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing was not on a branch (2 commits not on origin/main"*"that work is now window 02"*"worktrees/02/thing: more.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 03"*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/03.json" ]; [ -z "$(git -C "$T" for-each-ref refs/heads/daedalus/)" ]
+  [ "$(cat "$DAEDALUS_HOME/worktrees/02/thing/more.txt")" = m ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  case "$output" in *"swept"*|*"STALE"*) echo "$output"; return 1 ;; esac
+}
+
+@test "an adoption killed between its lease file and the end of its worktrees: the next run makes the worktree, carries the untracked files into it, and the board does not call it stale (review 2, finding 13)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "the waiting fix"
+  printf 'n\n' > "$T/notes.txt"
+  killed_run 'll.add_worktrees = lambda *a, **kw: os._exit(9)'
+  [ "$status" -eq 9 ]; [ "$(lease_json 01 worktree_ready)" = False ]; [ ! -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"window 01, adopted from target/thing at an earlier start, now has its worktree (worktrees/01/thing)."*"its untracked files went with it into worktrees/01/thing: notes.txt."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"could not go"*|*"window 02"*) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 01 worktree_ready)" = None ]; [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" branch --show-current)" = lease/01 ]
+  [ "$(cat "$DAEDALUS_HOME/worktrees/01/thing/notes.txt")" = n ]; [ ! -e "$T/notes.txt" ]
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  case "$output" in *"STALE"*) echo "$output"; return 1 ;; esac
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
 }

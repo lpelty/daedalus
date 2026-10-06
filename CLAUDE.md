@@ -202,11 +202,13 @@ numbered window each (the untracked files of the checked-out work go with
 it into the window's worktree; any that stay in `target/` are named), and says one line for each thing it did —
 repeat those lines to the operator. If it stops, the board says why in one
 sentence on every prompt. Two things it leaves to a person. One is a target
-checkout holding work the upgrade could lose: uncommitted changes (it stops
+checkout holding work the upgrade could lose: uncommitted changes, a file
+marked skip-worktree or assume-unchanged included (it stops
 there until they are committed on their branch — never stash them: a stash is
-saved work no window shows), or untracked files that putting
+saved work no window shows), or untracked or ignored files that putting
 it back on its trunk would overwrite (it stops there and tells the operator
-to move them out of that checkout, or commit them on its branch), or a
+to move them out of that checkout, or commit them on its branch), or a local
+branch named `origin/<trunk>` (it stops until that is renamed), or a
 rebase, merge, cherry-pick, revert or bisect stopped part-way there (it stops
 and names the `git` command that finishes or undoes it). The other
 is a target checkout whose pre-push hook Daedalus cannot install — another

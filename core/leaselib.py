@@ -20,12 +20,14 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, Iterator, Optional, Tuple
 
@@ -528,12 +530,19 @@ def trunk_of(target_base: Path, repo: str, outer_trunk: str) -> str:
     return out
 
 
+def remote_ref(trunk: str) -> str:
+    """origin/<trunk> as a revision git cannot mistake: a local branch named origin/<trunk> (refs/heads/origin/main)
+    shadows the bare name — git resolves refs/heads/ before refs/remotes/ and `worktree add` calls it ambiguous
+    (release-candidate review 2, finding 5)."""
+    return "refs/remotes/origin/" + trunk
+
+
 def require_trunk_ref(target_repo: Path, repo: str, trunk: str) -> None:
     """origin/<trunk> must resolve before any number is judged or cut. Without
     it, `merge-base --is-ancestor` exits 128 and `git log origin/x..lease/NN`
     prints nothing — which read as "nothing waiting", and a swept window's
     unpromoted commits were silently adopted by the next session (§4.2)."""
-    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", "origin/" + trunk])
+    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", remote_ref(trunk)])
     if code != 0:
         raise Refused("target/%s has no origin/%s — check config target.branch, or run git -C target/%s fetch origin"
                       % (repo, trunk, repo))
@@ -543,10 +552,11 @@ def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
     """Subjects of commits on lease/<NN> that origin/<trunk> does not contain;
     [] when there are none or the branch is absent (§4.2 'Numbering')."""
     branch = "lease/%s" % nn
-    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", branch])
+    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", "refs/heads/" + branch])
     if code != 0:
         return []
-    code, _, err = v.run(["git", "-C", str(target_repo), "merge-base", "--is-ancestor", branch, "origin/" + trunk])
+    code, _, err = v.run(["git", "-C", str(target_repo), "merge-base", "--is-ancestor", "refs/heads/" + branch,
+                          remote_ref(trunk)])
     if code == 0:
         return []
     if code != 1:
@@ -555,7 +565,8 @@ def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot tell whether %s has unpromoted work in %s (git merge-base against origin/%s failed: %s)"
                       % (branch, target_repo.name, trunk, last[0]))
-    code, out, err = v.run(["git", "-C", str(target_repo), "log", "--format=%s", "origin/%s..%s" % (trunk, branch)])
+    code, out, err = v.run(["git", "-C", str(target_repo), "log", "--format=%s",
+                            "%s..refs/heads/%s" % (remote_ref(trunk), branch)])
     if code != 0:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot list %s's unpromoted work in %s (git log origin/%s..%s failed: %s)"
@@ -789,14 +800,14 @@ def add_worktrees(root: Path, nn: str, trunks: Dict[str, str], timeout: int = 20
             if has_branch:
                 r = git("worktree", "add", str(dest), branch)
             else:
-                r = git("worktree", "add", str(dest), "-b", branch, "origin/" + trunk)
+                r = git("worktree", "add", str(dest), "-b", branch, remote_ref(trunk))
             if r is None or r[0] == 127:
                 return False   # no time left, or cut off: claim finishes it
             if r[0] != 0:
                 last = r[2].strip().splitlines()[-1:] or ["no output"]
                 raise Refused("git worktree add for window %s (%s) failed: %s" % (nn, repo, last[0]))
         if has_branch or registered:
-            r = git("merge", "--ff-only", "--quiet", "origin/" + trunk, cwd=dest)
+            r = git("merge", "--ff-only", "--quiet", remote_ref(trunk), cwd=dest)
             if r is None or r[0] == 127:
                 return False   # not started, or cut off: claim fast-forwards it (Decision 19)
             if r[0] != 0:
@@ -1272,8 +1283,8 @@ def rebase(root: Path, token: str, sid: Optional[str]) -> str:
             raise Refused("could not fetch origin in target/%s (%s); window %s was not rebased" % (repo, last[0], nn))
     # Every repo is counted before any is rebased: a count that fails refuses
     # while no worktree has moved, so "was not rebased" stays true.
-    counts = {repo: (_count(root, nn, repo, trunk, "origin/%s..HEAD" % trunk),
-                     _count(root, nn, repo, trunk, "HEAD..origin/%s" % trunk)) for repo, trunk in trunks.items()}
+    counts = {repo: (_count(root, nn, repo, trunk, "%s..HEAD" % remote_ref(trunk)),
+                     _count(root, nn, repo, trunk, "HEAD..%s" % remote_ref(trunk))) for repo, trunk in trunks.items()}
     report = []
     for repo, trunk in trunks.items():
         wt = root / "worktrees" / nn / repo
@@ -1281,7 +1292,7 @@ def rebase(root: Path, token: str, sid: Optional[str]) -> str:
         if behind == 0:
             report.append("%s already up to date" % repo)
             continue
-        code, _, err = _git(wt, "rebase", "--quiet", "origin/" + trunk, timeout=300)
+        code, _, err = _git(wt, "rebase", "--quiet", remote_ref(trunk), timeout=300)
         if code != 0:
             _, unmerged, _ = _git(wt, "diff", "--name-only", "--diff-filter=U")
             conflicts = [f for f in unmerged.splitlines() if f.strip()]
@@ -1416,7 +1427,7 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
         if data.get("worktree_ready") is False or key not in new_trunks or not dest.is_dir():
             _discard_locked(root, new_nn, new_trunks)
             raise Refused("window %s's worktree for %s could not be made; nothing was split" % (new_nn, key))
-        code, _, err = _git(dest, "cherry-pick", "origin/%s..lease/%s" % (ntrunk, nn), timeout=300)
+        code, _, err = _git(dest, "cherry-pick", "%s..refs/heads/lease/%s" % (remote_ref(ntrunk), nn), timeout=300)
         if code != 0:
             _git(dest, "cherry-pick", "--abort")
             _discard_locked(root, new_nn, new_trunks)
@@ -1429,7 +1440,7 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
         if code != 0:
             raise Refused("could not keep lease/%s's old tip in %s (%s); window %s now holds copies and window %s is "
                           "unchanged" % (nn, key, err.strip(), new_nn, nn))
-        code, _, err = _git(root / "worktrees" / nn / key, "reset", "--hard", "--quiet", "origin/" + ntrunk)
+        code, _, err = _git(root / "worktrees" / nn / key, "reset", "--hard", "--quiet", remote_ref(ntrunk))
         if code != 0:
             raise Refused("could not reset window %s's branch in %s (%s); its old tip is kept as %s"
                           % (nn, key, err.strip(), kept))
@@ -1472,7 +1483,7 @@ def unpromoted_commits(src: Path, trunk: str, rev: str) -> list:
     """Subjects, oldest first, of the commits on <rev> that origin/<trunk> has no equivalent of. `git cherry`
     compares changes, not shas: a commit that reached trunk as part of a merge, or cherry-picked under another
     sha, is on trunk (spec §14 step 6 adopts only work that is not; plan 5 Decision 4)."""
-    code, out, err = _git(src, "cherry", "origin/" + trunk, rev)
+    code, out, err = _git(src, "cherry", remote_ref(trunk), rev)
     if code != 0:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot compare %s with origin/%s in %s (%s)" % (rev, trunk, src.name, last[0]))
@@ -1525,32 +1536,135 @@ def git_reason(err: str) -> str:
     return (lines[-1:] or ["no output"])[0].strip() or "no output"
 
 
-def untracked_in_way(src: Path, refs: list) -> list:
-    """Untracked, not-ignored paths of <src>'s working tree that checking out, fast-forwarding or hard-resetting to
-    any of <refs> would overwrite: a file the ref tracks, a directory where it has a file, or a file where it has a
-    directory. A checkout or merge refuses over them; `reset --hard` deletes them without a word, so a trunk reset
-    asks first (plan 5 Task 3 review, finding 3). Sorted; [] when there are none or git cannot answer."""
-    code, out, _ = _git(src, "ls-files", "--others", "--exclude-standard", "-z")
-    untracked = [u.rstrip("/") for u in out.split("\0") if u] if code == 0 else []
-    if not untracked:
+def ignores_case(src: Path) -> bool:
+    """Does git in <src> treat paths that differ only in case as one (core.ignorecase — set by git on a
+    case-insensitive filesystem, macOS's default)?"""
+    code, out, _ = _git(src, "config", "--bool", "core.ignorecase")
+    return code == 0 and out.strip() == "true"
+
+
+def untracked_in_way(src: Path, refs: list, ignored_only: bool = False) -> list:
+    """Untracked paths of <src>'s working tree — ignored ones too — that checking out, fast-forwarding or
+    hard-resetting to any of <refs> would overwrite: a file the ref tracks, a directory where it has a file, or a
+    file where it has a directory. A checkout or merge refuses over an untracked file, but writes over an ignored
+    one without a word, as `reset --hard` does over both (plan 5 Task 3 review, finding 3; release-candidate review
+    2, findings 1-2: a file someone stopped tracking and listed in .gitignore). Paths are compared casefolded and
+    NFC-normalized when git ignores case (finding 3: an untracked Thing.txt is where a reset writes thing.txt).
+    ignored_only: only the ignored ones (a fast-forward refuses over the others by itself). Sorted; [] when there
+    are none or git cannot answer."""
+    untracked: list = []
+    if not ignored_only:
+        code, out, _ = _git(src, "ls-files", "--others", "--exclude-standard", "-z")
+        untracked = [u.rstrip("/") for u in out.split("\0") if u] if code == 0 else []
+    # --directory: a wholly ignored directory (node_modules/) is one entry, looked into below only where a ref tracks
+    code, out, _ = _git(src, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    ignored = [u for u in out.split("\0") if u] if code == 0 else []
+    if not untracked and not ignored:
         return []
+    fold = ignores_case(src)
+
+    def norm(path: str) -> str:
+        return unicodedata.normalize("NFC", path).casefold() if fold else path
+
+    ign_dirs = {norm(u.rstrip("/")): u.rstrip("/") for u in ignored if u.endswith("/")}
     files: set = set()
     dirs: set = set()
+    under: Dict[str, set] = {}          # an ignored directory -> the paths a ref tracks below it
     for ref in refs:
         code, out, _ = _git(src, "ls-tree", "-r", "--name-only", "-z", ref)
         if code != 0:
             continue
         for t in out.split("\0"):
-            if t:
-                files.add(t)
-                parts = t.split("/")
-                dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
-    hit = []
-    for u in untracked:
-        parts = u.split("/")
-        if u in files or u in dirs or any("/".join(parts[:i]) in files for i in range(1, len(parts))):
-            hit.append(u)
+            if not t:
+                continue
+            n = norm(t)
+            files.add(n)
+            parts = n.split("/")
+            for i in range(1, len(parts)):
+                pre = "/".join(parts[:i])
+                dirs.add(pre)
+                if pre in ign_dirs:
+                    under.setdefault(pre, set()).add(t)
+
+    def in_way(u: str) -> bool:
+        n = norm(u)
+        parts = n.split("/")
+        return n in files or n in dirs or any("/".join(parts[:i]) in files for i in range(1, len(parts)))
+
+    hit = {u for u in untracked if in_way(u)}
+    for u in ignored:
+        if not u.endswith("/"):
+            if in_way(u):
+                hit.add(u)
+            continue
+        d = u.rstrip("/")
+        if norm(d) in files:
+            hit.add(d)                  # a directory where a ref has a file
+            continue
+        # every path below an ignored directory is untracked here: one a ref tracks is in the way where anything
+        # is on disk at it, or a file is where it needs a directory
+        for t in sorted(under.get(norm(d), ())):
+            rest = t.split("/")[len(d.split("/")):]
+            for i in range(1, len(rest) + 1):
+                q = "/".join([d] + rest[:i])
+                if not os.path.lexists(str(src / q)):
+                    break
+                if i == len(rest) or not os.path.isdir(str(src / q)):
+                    hit.add(q)
+                    break
     return sorted(hit)
+
+
+def hidden_edits(src: Path) -> Dict[str, str]:
+    """{path: "skip-worktree" | "assume-unchanged"} for each tracked file of <src> carrying that mark whose file on
+    disk differs from the index: an uncommitted change `git status` does not show (release-candidate review 2,
+    finding 6). A marked file absent from disk (a sparse checkout) is no change. {} when there are none."""
+    code, out, _ = _git(src, "ls-files", "-v", "-s", "-z")
+    if code != 0:
+        return {}
+    marked = []
+    for ent in out.split("\0"):
+        if len(ent) < 3 or "\t" not in ent:
+            continue
+        tag, rest = ent[0], ent[2:]
+        meta, path = rest.split("\t", 1)
+        bits = meta.split()
+        if len(bits) < 2 or bits[0] == "160000":
+            continue                    # a submodule
+        if tag == "S" or tag == "s":
+            marked.append((path, bits[1], "skip-worktree"))
+        elif tag.islower():
+            marked.append((path, bits[1], "assume-unchanged"))
+    found: Dict[str, str] = {}
+    for path, blob, mark in marked:
+        f = src / path
+        if not os.path.lexists(str(f)):
+            continue
+        if os.path.islink(str(f)):
+            data = os.readlink(str(f)).encode()
+            import hashlib
+            sha = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+        else:
+            code, sha, _ = _git(src, "hash-object", "--", path)
+            if code != 0:
+                found[path] = mark      # cannot tell: say so rather than miss it
+                continue
+            sha = sha.strip()
+        if sha != blob:
+            found[path] = mark
+    return found
+
+
+def hidden_words(key: str, hidden: Dict[str, str]) -> Tuple[str, str, str]:
+    """(the marks, the paths named, the commands that clear the marks) for a sentence about hidden_edits."""
+    marks = sorted(set(hidden.values()))
+    paths = sorted(hidden)
+    cmds = []
+    for mark in marks:
+        mine = [p for p in paths if hidden[p] == mark]
+        cmds.append("git -C target/%s update-index --no-%s %s"
+                    % (key, mark, " ".join(shlex.quote(p) for p in mine) if len(mine) <= 5 else "<file>"))
+    return " or ".join(marks), name_paths(paths), ", and ".join(cmds)
 
 
 def name_paths(paths: list, most: int = 5) -> str:
@@ -1559,6 +1673,14 @@ def name_paths(paths: list, most: int = 5) -> str:
 
 ADOPT_UNTRACKED = ("target/%s has untracked files that resetting %s to origin/%s would overwrite (%s) — move them out "
                    "of that checkout, or commit them, then run adopt again; nothing was adopted.")
+
+
+ADOPT_IGNORED = ("target/%s has ignored files that putting it back on %s at origin/%s would overwrite (%s) — move them out "
+                 "of that checkout, then run adopt again; nothing was adopted.")
+
+
+ADOPT_HIDDEN = ("target/%s has uncommitted changes git status does not show, in files marked %s (%s) — clear the mark "
+                "(%s), commit them on their branch inside that checkout, then run adopt again; nothing was adopted.")
 
 
 ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branch has; adopting %s would put the "
@@ -1576,8 +1698,11 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
     made, and only then is the trunk reset; adopted_from names it daedalus/upgrade-<stamp>-<short sha> (plan 5
     Decision 14 — a label, no such branch is left). Idempotent: a branch already adopted returns {"already":
     True}; a trunk whose tip is a window's adopted_tip (a run cut off before the reset) is reset and returns
-    "already". Refused: a dirty target/<repo> (tracked changes), a branch that does not exist or is a window's,
-    nothing past trunk, a detached checkout holding commits no branch has. The fetch (a shell path, §4.2) runs
+    "already". A lease/<NN> already at the adopted commit — an earlier adoption cut off before its lease file or
+    its worktrees (release-candidate review 2, findings 11-12) — is finished as window <NN>, never adopted a
+    second time. Refused: a dirty target/<repo> (tracked changes, or a change hidden by skip-worktree or
+    assume-unchanged), an ignored file where the trunk's checkout or fast-forward would write, a branch that does
+    not exist or is a live window's, nothing past trunk, a detached checkout holding commits no branch has. The fetch (a shell path, §4.2) runs
     before the lock; the upgrade passes fetch=False — it fetched already — and its start deadline.
 
     Order (plan 5 Task 2 review, finding 1): the first change is always making lease/<NN> (a rename, or for a
@@ -1602,8 +1727,10 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             if nn != "prime" and d.get("adopted_from") == branch and d.get("adopted_repo") == key:
                 return {"nn": nn, "repo": key, "branch": branch, "trunk": (d.get("trunks") or {}).get(key, ""),
                         "subjects": [], "already": True, "notes": []}
-        if LEASE_BRANCH.fullmatch(branch):
+        if LEASE_BRANCH.fullmatch(branch) and branch[len("lease/"):] in leases:
             raise Refused("%s is already a window's branch; nothing to adopt." % branch)
+        # a lease/<NN> with no lease file — an earlier adoption cut off before it wrote one, or a swept window — is
+        # adopted as window <NN> again, below (release-candidate review 2, finding 11)
         trunks = trunks_of(root, root / "target")
         trunk = trunks[key]
         code, _, _ = _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + branch)
@@ -1612,6 +1739,9 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         code, dirt, _ = _git(src, "status", "--porcelain", "--untracked-files=no")
         if code != 0 or dirt.strip():
             raise Refused(ADOPT_DIRTY % key)
+        hidden = hidden_edits(src)
+        if hidden:
+            raise Refused(ADOPT_HIDDEN % ((key,) + hidden_words(key, hidden)))
         _, cur, _ = _git(src, "branch", "--show-current")
         cur = cur.strip()
         _, head, _ = _git(src, "rev-parse", "HEAD")
@@ -1622,11 +1752,18 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         is_trunk = branch == trunk
         if is_trunk and cur == trunk:
             # the trunk's reset is a `reset --hard`, which deletes an untracked file in its way without a word
-            in_way = untracked_in_way(src, ["origin/" + trunk])
+            in_way = untracked_in_way(src, [remote_ref(trunk)])
             if in_way:
                 raise Refused(ADOPT_UNTRACKED % (key, trunk, trunk, name_paths(in_way)))
+        elif not is_trunk:
+            # the checkout of the trunk and its fast-forward refuse over an untracked file, but write over an
+            # ignored one (release-candidate review 2, finding 1)
+            in_way = untracked_in_way(src, ([] if cur == trunk else ["refs/heads/" + trunk]) + [remote_ref(trunk)],
+                                      ignored_only=True)
+            if in_way:
+                raise Refused(ADOPT_IGNORED % (key, trunk, trunk, name_paths(in_way)))
         if is_trunk:
-            code, out, _ = _git(src, "log", "--reverse", "--format=%s", "origin/%s..%s" % (trunk, trunk))
+            code, out, _ = _git(src, "log", "--reverse", "--format=%s", "%s..refs/heads/%s" % (remote_ref(trunk), trunk))
             subjects = [s for s in out.splitlines() if s.strip()] if code == 0 else []
             if not subjects:
                 raise Refused("target/%s's %s has no commits that are not already on origin/%s — nothing to adopt."
@@ -1652,23 +1789,36 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             if not cur and not _held_elsewhere(src, head):
                 raise Refused(ADOPT_DETACHED % (key, head[:7], branch, trunk, key))
             original = branch
-        nn = _adopt_number(root, leases, trunks)
-        new = "lease/" + nn
-        # the first change: lease/<NN> holds the work from here on
-        code, _, err = _git(src, *(("branch", new, tip) if is_trunk else ("branch", "-m", branch, new)))
-        if code != 0:
-            raise Refused("could not %s lease/%s in target/%s (%s); nothing was adopted"
-                          % ("make" if is_trunk else "rename %s to" % branch, nn, key, _last(err)))
-        data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
-                "worktree": "worktrees/%s" % nn, "branch": new, "repos": list(trunks), "trunks": trunks,
-                "created": now_stamp(), "bound_at": None, "promoted": [], "adopted_from": original,
-                "adopted_repo": key, "adopted_tip": tip, "worktree_ready": False}
-        if note:
+        # an earlier adoption of this same commit, cut off part-way, left lease/<NN> at it: with a lease file whose
+        # worktree was never made, or with none yet. That window is finished here — never a second one made beside
+        # it (release-candidate review 2, findings 11-12).
+        nn, prior = _prior_adoption(src, key, tip, leases)
+        resumed = nn is not None
+        if nn is not None:
+            new = "lease/" + nn
+            if (not is_trunk and branch != new and branch != cur and branch.startswith("daedalus/upgrade-")
+                    and _git(src, "rev-parse", "refs/heads/" + branch)[1].strip() == tip):
+                _git(src, "branch", "-D", branch)      # the label a re-run gave the same commit: lease/<NN> holds it
+        else:
+            nn = _adopt_number(root, leases, trunks)
+            new = "lease/" + nn
+            # the first change: lease/<NN> holds the work from here on
+            code, _, err = _git(src, *(("branch", new, tip) if is_trunk else ("branch", "-m", branch, new)))
+            if code != 0:
+                raise Refused("could not %s lease/%s in target/%s (%s); nothing was adopted"
+                              % ("make" if is_trunk else "rename %s to" % branch, nn, key, _last(err)))
+        data = dict(prior) if prior else {
+            "lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
+            "worktree": "worktrees/%s" % nn, "branch": new, "repos": list(trunks), "trunks": trunks,
+            "created": now_stamp(), "bound_at": None, "promoted": [], "adopted_from": original,
+            "adopted_repo": key, "adopted_tip": tip, "worktree_ready": False}
+        if note and not prior:
             data["note"] = note
         wrote = False
         try:
-            write_lease(root, nn, data, exclusive=True)
-            wrote = True
+            if prior is None:
+                write_lease(root, nn, data, exclusive=True)
+                wrote = True
             if not is_trunk and cur != trunk:
                 # off the renamed branch (or wherever it was) before lease/<NN> is checked out in its worktree
                 code, _, err = _git(src, "checkout", "--quiet", trunk)
@@ -1682,7 +1832,8 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                     os.unlink(str(lease_path(root, nn)))
                 except OSError:
                     pass
-            _adopt_undo(root, trunks, src, key, nn, branch, is_trunk, cur, head)
+            if not resumed:     # a resumed lease/<NN> was there before this call: it stays, holding the work
+                _adopt_undo(root, trunks, src, key, nn, branch, is_trunk, cur, head)
             raise
         if ready:
             data.pop("worktree_ready", None)
@@ -1697,7 +1848,7 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
                 notes.append("target/%s's %s could not be reset to origin/%s (%s) and still holds these commits too; "
                              "run adopt %s again to finish" % (key, trunk, trunk, _last(err), trunk))
         else:
-            code, _, err = _git(src, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+            code, _, err = _git(src, "merge", "--ff-only", "--quiet", remote_ref(trunk))
             if code != 0:
                 notes.append("target/%s's %s could not be fast-forwarded to origin/%s (%s)"
                              % (key, trunk, trunk, _last(err)))
@@ -1708,11 +1859,67 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             "notes": notes}
 
 
+def _prior_adoption(src: Path, key: str, tip: str, leases: Dict[str, dict]) -> Tuple[Optional[str], Optional[dict]]:
+    """(NN, its lease) of an adoption of commit <tip> from target/<key> that an earlier run began and was cut off
+    in: a lease file adopted at <tip> whose worktree was never made, its lease/<NN> still at <tip>; else (NN, None)
+    for a lease/<NN> at <tip> with no lease file — made, or renamed, before the lease file was written (or a swept
+    window's, which adopting again revives). (None, None) when there is neither."""
+    def at(nn: str) -> bool:
+        code, out, _ = _git(src, "rev-parse", "--verify", "-q", "refs/heads/lease/" + nn)
+        return code == 0 and out.strip() == tip
+    for nn, d in sorted(leases.items()):
+        if (nn != "prime" and d.get("adopted_repo") == key and d.get("adopted_tip") == tip
+                and d.get("worktree_ready") is False and not d.get("session_id") and at(nn)):
+            return nn, d
+    code, out, _ = _git(src, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/lease/")
+    for ln in (out.splitlines() if code == 0 else []):
+        ref, _, sha = ln.partition(" ")
+        nn = ref[len("refs/heads/lease/"):]
+        if LEASE_BRANCH.fullmatch(ref[len("refs/heads/"):]) and nn not in leases and sha.strip() == tip:
+            return nn, None
+    return None, None
+
+
+def finish_adopted(root: Path, key: str, deadline: Optional[float] = None) -> list:
+    """Each window adopted from target/<key> with no session whose worktree was never made — a start cut off
+    between its lease file and the end of its worktrees (release-candidate review 2, findings 12-13): target/<key>
+    is put back on its trunk if it is still on lease/<NN> or detached at the adopted commit, the worktrees are
+    added, and the lease is marked ready. Returns [(NN, finished)] — finished False when the worktrees ran out of
+    the deadline's time. Refused when the checkout cannot be moved or a worktree add fails."""
+    src = root / "target" / key
+    done = []
+    with lock(root, deadline=deadline, busy="the lease lock stayed busy; the window was not finished"):
+        leases = read_all(root)
+        for nn, d in sorted(leases.items()):
+            if (nn == "prime" or d.get("adopted_repo") != key or d.get("worktree_ready") is not False
+                    or d.get("session_id")):
+                continue
+            new = "lease/" + nn
+            if _git(src, "rev-parse", "--verify", "-q", "refs/heads/" + new)[0] != 0:
+                continue
+            trunks = trunks_of(root, root / "target")
+            trunk = trunks.get(key) or (d.get("trunks") or {}).get(key)
+            _, cur, _ = _git(src, "branch", "--show-current")
+            _, head, _ = _git(src, "rev-parse", "HEAD")
+            if cur.strip() == new or (not cur.strip() and head.strip() == d.get("adopted_tip")):
+                code, _, err = _git(src, "checkout", "--quiet", trunk)
+                if code != 0:
+                    raise Refused("could not put target/%s back on %s (%s)" % (key, trunk, git_reason(err)))
+            if not add_worktrees(root, nn, trunks, deadline=deadline):
+                done.append((nn, False))
+                continue
+            d.pop("worktree_ready", None)
+            write_lease(root, nn, d)
+            heartbeat(root, nn)
+            done.append((nn, True))
+    return done
+
+
 def _trunk_reset(cur: str, trunk: str) -> tuple:
     """The git arguments that put <trunk> at origin/<trunk>: a hard reset when it is checked out (the checkout
     is clean — adopt refused otherwise), else a forced branch move."""
-    return (("reset", "--hard", "--quiet", "origin/" + trunk) if cur == trunk
-            else ("branch", "-f", trunk, "origin/" + trunk))
+    return (("reset", "--hard", "--quiet", remote_ref(trunk)) if cur == trunk
+            else ("branch", "-f", trunk, remote_ref(trunk)))
 
 
 def _adopt_undo(root: Path, trunks: Dict[str, str], src: Path, key: str, nn: str, branch: str, is_trunk: bool,
@@ -2222,7 +2429,7 @@ def last_commit_subject(root: Path, lease: dict, nn: str) -> str:
     for repo, trunk in (lease.get("trunks") or {}).items():
         if not (base / repo).is_dir():
             continue
-        code, out, _ = _git(base / repo, "log", "-1", "--format=%s", "origin/%s..HEAD" % trunk)
+        code, out, _ = _git(base / repo, "log", "-1", "--format=%s", "%s..HEAD" % remote_ref(trunk))
         if code == 0 and out.strip():
             return out.strip().splitlines()[0]
     return ""
@@ -2360,17 +2567,62 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
 
 
 def waiting_numbers(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
-    """Swept numbers whose lease/<NN> still carries unpromoted commits (§4.2)."""
+    """Swept numbers whose lease/<NN> still carries unpromoted commits (§4.2), in any target repo — the outer one
+    and each nested one, as free_number judges them (release-candidate review 2, finding 7: a nested window's work
+    was held back from new windows and named nowhere). Subjects of every repo, outer first. A nested repo whose
+    trunk cannot be told is skipped (promote's doctor row names it); the outer one's failure is raised."""
     out: Dict[str, list] = {}
-    target = root / "target" / target_name(root)
-    trunk = v.target_branch(root)
-    _, refs, _ = _git(target, "for-each-ref", "--format=%(refname:short)", "refs/heads/lease/")
-    for ref in refs.splitlines():
-        nn = ref.strip()[len("lease/"):]
-        if valid_id(nn) and nn not in leases:
-            subs = waiting_work(target, trunk, nn)
-            if subs:
-                out[nn] = subs
+    outer, trunk0 = target_name(root), v.target_branch(root)
+    for repo in repos_of(root):
+        target = root / "target" / repo
+        if repo != outer:
+            if not target.is_dir():
+                continue
+            try:
+                trunk = trunk_of(root / "target", repo, trunk0)
+            except Refused:
+                continue
+        else:
+            trunk = trunk0
+        _, refs, _ = _git(target, "for-each-ref", "--format=%(refname)", "refs/heads/lease/")
+        for ref in refs.splitlines():
+            nn = ref.strip()[len("refs/heads/lease/"):]
+            if valid_id(nn) and nn not in leases:
+                subs = waiting_work(target, trunk, nn)
+                if subs:
+                    out.setdefault(nn, []).extend(subs)
+    return out
+
+
+def swept_loose(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
+    """{"<NN>/<repo>": paths} — untracked files, and files with uncommitted changes, in the worktree of a window
+    whose lease file is gone (swept: §4.5 keeps worktrees): work no board line names (release-candidate review 2,
+    finding 7). Nested target repos inside a worktree are left out; they are judged as their own."""
+    out: Dict[str, list] = {}
+    base = root / "worktrees"
+    try:
+        nums = sorted(n for n in os.listdir(str(base)) if valid_id(n) and n not in leases)
+    except OSError:
+        return out
+    repos = repos_of(root)
+    for nn in nums:
+        for repo in repos:
+            wt = base / nn / repo
+            if not (wt / ".git").exists():
+                continue
+            code, st, _ = _git(wt, "status", "--porcelain", "-z", "--untracked-files=all")
+            if code != 0:
+                continue
+            nested = [r[len(repo) + 1:] for r in repos if r.startswith(repo + "/")]
+            paths = []
+            for ent in st.split("\0"):
+                if len(ent) < 4:
+                    continue
+                path = ent[3:]
+                if not any(path.rstrip("/") == n or path.startswith(n + "/") for n in nested):
+                    paths.append(path)
+            if paths:
+                out["%s/%s" % (nn, repo)] = sorted(paths)
     return out
 
 
@@ -2422,8 +2674,8 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     BOARD_UNRENDERED."""
     with lock(root, shared=True, deadline=deadline, busy=BOARD_LOCK_BUSY):
         leases = read_all(root)
-    if not any(k != "prime" for k in leases):
-        return ""
+    if not any(k != "prime" for k in leases) and not waiting_numbers(root, leases):
+        return ""       # with no window open, swept work still waiting is still listed (review 2, finding 7)
     mine, _ = lease_of_session(leases, sid or "")
     for nn, d in leases.items():
         if nn == "prime" or not (recompute_all or nn == mine):
@@ -2510,6 +2762,11 @@ def doctor_lines(root: Path) -> list:
         k = len(waiting[nn])
         lines.append("NOTE     leases: %s swept with %d unpromoted commit%s waiting — say \"this is window %s\" to a window "
                      "to continue it, or \"delete %s's work\"" % (nn, k, "" if k == 1 else "s", nn, nn))
+    for where, paths in sorted(swept_loose(root, leases).items()):
+        nn = where.split("/", 1)[0]
+        lines.append("NOTE     leases: worktrees/%s holds uncommitted or untracked files of swept window %s (%s) — say "
+                     "\"this is window %s\" to a window to continue it, or remove them"
+                     % (where, nn, name_paths(paths), nn))
     return lines
 
 

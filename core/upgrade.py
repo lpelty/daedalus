@@ -17,11 +17,13 @@ step is idempotent — the second run changes nothing — and says one line the 
      (release-candidate review, findings 1 and 3) — then a trunk still
      ahead of origin; the checked-out work's untracked files go into its window's worktree, copied and checked
      before the original is removed, and any no window takes are named (critic finding 2) — each checkout put back on its trunk at origin, after one bounded fetch of
-     all of them at once (plan 5 Decision 3). It will not move a checkout with uncommitted changes, nor one
-     with an untracked file where the move back to the trunk would write, nor one where a rebase, merge,
-     cherry-pick, revert or bisect stopped part-way (critic finding 3): it stops there, saying what to do,
-     and the board repeats the sentence until a later start finishes. A window an earlier, cut-off run made
-     is found again, never made twice.
+     all of them at once (plan 5 Decision 3). It will not move a checkout with uncommitted changes (one
+     hidden by skip-worktree or assume-unchanged included), nor one with an untracked or ignored file where
+     the move back to the trunk would write, nor one with a local branch named origin/<trunk>, nor one where a
+     rebase, merge, cherry-pick, revert or bisect stopped part-way (critic finding 3; release-candidate review
+     2, findings 1-6): it stops there, saying what to do, and the board repeats the sentence until a later
+     start finishes. A window an earlier, cut-off run made — lease file or not, worktree or not — is found
+     again and finished, never made twice (review 2, findings 11-13).
   7. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
     python3 core/upgrade.py              every step now, as a session start would
@@ -75,6 +77,13 @@ STASHED = ("%s: target/%s holds %s (%s) — saved work no window shows; the upgr
            "names it until it is applied or dropped.")
 UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s would overwrite (%s) — move them out "
              "of that checkout, or commit them on its branch, then start a session again")
+# A local branch named origin/<trunk> shadows the remote-tracking ref in every bare "origin/<trunk>" git is given
+# (release-candidate review 2, finding 5): stopped on before anything moves.
+SHADOW = ("upgrade to %s incomplete: target/%s has a local branch named origin/%s, which git takes for origin's %s — "
+          "rename it (git -C target/%s branch -m origin/%s <new name>), then start a session again")
+# An edit to a tracked file marked skip-worktree or assume-unchanged is not in git status (review 2, finding 6).
+HIDDEN = ("upgrade to %s incomplete: target/%s has uncommitted changes git status does not show, in files marked %s "
+          "(%s) — clear the mark (%s), commit them on their branch inside that checkout, then start a session again")
 # A branch whose branch on origin was deleted (on GitHub, what follows a merge) is not made a window: a squash merge
 # leaves its commits looking unmerged to git cherry (release-candidate review, finding 3). Named, so one that was not
 # merged can still be adopted.
@@ -401,9 +410,14 @@ def _fetch_all(repos: List[Tuple[str, Path]], deadline: Optional[float]) -> Set[
     return done
 
 
+def _origin(trunk: str) -> str:
+    """origin/<trunk> as a revision a local branch of that name cannot shadow (release-candidate review 2, 5)."""
+    return "refs/remotes/origin/" + trunk
+
+
 def _ahead(p: Path, trunk: str) -> List[str]:
     """Subjects, oldest first, of the commits on the local trunk that origin/<trunk> lacks."""
-    _, out, _ = _git(p, "log", "--reverse", "--format=%s", "origin/%s..%s" % (trunk, trunk))
+    _, out, _ = _git(p, "log", "--reverse", "--format=%s", "%s..refs/heads/%s" % (_origin(trunk), trunk))
     return [s for s in out.splitlines() if s.strip()]
 
 
@@ -411,7 +425,7 @@ def _back_on_trunk(p: Path, key: str, trunk: str) -> None:
     code, _, err = _git(p, "checkout", "--quiet", trunk)
     if code != 0:
         raise Stop("could not put target/%s back on %s (%s)" % (key, trunk, _last(err)))
-    _git(p, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+    _git(p, "merge", "--ff-only", "--quiet", _origin(trunk))
 
 
 def _into_window(root: Path, key: str, rel: str, ref: str, ver: str, deadline: Optional[float]) -> dict:
@@ -440,15 +454,20 @@ def _carried_by(root: Path, p: Path, key: str, trunk: str) -> Optional[str]:
 def _in_the_way(p: Path, key: str, trunk: str, cur: str, ver: str) -> None:
     """Stop, before anything in target/ moves, when an untracked file is where the move back to the trunk or the
     trunk's reset would write (review finding 3): git refuses the checkout over it on every run, and a reset
-    deletes it silently. Checked after the fetch, against origin/<trunk> as the run will see it."""
+    deletes it silently — and an ignored one, which a checkout, a reset and a fast-forward all write over
+    without a word (release-candidate review 2, findings 1-2). Checked after the fetch, against origin/<trunk>
+    as the run will see it."""
     import leaselib as ll
+    ignored_only = False
     if cur != trunk:
-        refs, doing = [trunk, "origin/" + trunk], "putting it back on %s" % trunk
+        refs, doing = ["refs/heads/" + trunk, _origin(trunk)], "putting it back on %s" % trunk
     elif _ahead(p, trunk):
-        refs, doing = ["origin/" + trunk], "resetting %s to origin/%s" % (trunk, trunk)
+        refs, doing = [_origin(trunk)], "resetting %s to origin/%s" % (trunk, trunk)
     else:
-        return
-    hit = ll.untracked_in_way(p, refs)
+        # the trunk's fast-forward refuses over an untracked file, which is then left as it was; it writes over
+        # an ignored one (release-candidate review 2, finding 1)
+        refs, doing, ignored_only = [_origin(trunk)], "fast-forwarding %s to origin/%s" % (trunk, trunk), True
+    hit = ll.untracked_in_way(p, refs, ignored_only=ignored_only)
     if hit:
         raise Stop(UNTRACKED % (ver, key, doing, ll.name_paths(hit)))
 
@@ -515,10 +534,10 @@ def _squashed(p: Path, trunk: str, b: str) -> bool:
     usual way a branch reaches a GitHub trunk (release-candidate review, finding 3)? Yes when merging <b> into
     origin/<trunk> would change nothing: `git merge-tree --write-tree` (git 2.38+) gives origin/<trunk>'s own tree.
     No when the merge conflicts, or the git here cannot say."""
-    code, out, _ = _git(p, "merge-tree", "--write-tree", "origin/" + trunk, b)
+    code, out, _ = _git(p, "merge-tree", "--write-tree", _origin(trunk), b)
     if code != 0 or not out.strip():
         return False
-    _, tree, _ = _git(p, "rev-parse", "origin/%s^{tree}" % trunk)
+    _, tree, _ = _git(p, "rev-parse", "%s^{tree}" % _origin(trunk))
     return out.split()[0] == tree.strip()
 
 
@@ -544,7 +563,8 @@ def _branches(p: Path, trunk: str, skip: str) -> Tuple[List[Tuple[str, List[str]
               adopted before it and the other is then found carried, never a second copy.
       elsewhere: (branch, path, subjects) — checked out in another worktree; named, never adopted (finding 1 of
               the release-candidate review: adopting it fails every time).
-      gone: branch — its branch on origin was deleted, which usually follows a merge; named, left as it was.
+      gone: (branch, subjects) — its branch on origin was deleted, which usually follows a merge; named, left as
+              it was (by doctor too: release-candidate review 2, finding 8).
     A branch whose change is already on origin/<trunk> (git cherry, or a squash merge) is none of them."""
     import leaselib as ll
     _, out, _ = _git(p, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
@@ -562,7 +582,7 @@ def _branches(p: Path, trunk: str, skip: str) -> Tuple[List[Tuple[str, List[str]
         if b in held:
             elsewhere.append((b, held[b], work))
         elif _upstream_gone(p, b):
-            gone.append(b)
+            gone.append((b, work))
         else:
             parked.append((b, work))
     return sorted(parked, key=lambda bw: (-len(bw[1]), bw[0])), elsewhere, gone
@@ -581,6 +601,33 @@ def _loose(p: Path, key: str, keys: List[str]) -> List[str]:
     nested = [k[len(key) + 1:] for k in keys if k.startswith(key + "/")]
     return sorted(u for u in (out.split("\0") if code == 0 else [])
                   if u and not any(u.rstrip("/") == n or u.startswith(n + "/") for n in nested))
+
+
+def _ignored(p: Path, key: str, keys: List[str]) -> List[str]:
+    """Ignored, non-empty entries of target/<key>'s working tree — .gitignore, .git/info/exclude or the global
+    excludes file: notes, .env, a repository cloned inside (a wholly ignored directory is one "<dir>/" entry) —
+    leaving out the nested target repos. A window is made from the commits and the untracked files; these stay
+    in the trunk mirror, so its line names them (release-candidate review 2, finding 9). Sorted."""
+    code, out, _ = _git(p, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+                        "--no-empty-directory", "-z")
+    nested = [k[len(key) + 1:] for k in keys if k.startswith(key + "/")]
+    found = []
+    for u in (out.split("\0") if code == 0 else []):
+        if not u or any(u.rstrip("/") == n or u.startswith(n + "/") for n in nested):
+            continue
+        try:
+            if not u.endswith("/") and not os.path.islink(str(p / u)) and os.path.getsize(str(p / u)) == 0:
+                continue
+        except OSError:
+            continue
+        found.append(u)
+    return sorted(found)
+
+
+def _ignored_words(key: str, nn: str, ign: List[str]) -> str:
+    import leaselib as ll
+    return (" Ignored files stay in target/%s and are not in the window (%s) — if any of them is work, move it into "
+            "worktrees/%s/%s." % (key, ll.name_paths(ign), nn, key)) if ign else ""
 
 
 class _OutOfTime(Exception):
@@ -619,8 +666,9 @@ def _same(src: Path, dst: Path) -> bool:
 def _carry(root: Path, p: Path, key: str, nn: str, loose: List[str],
            deadline: Optional[float] = None) -> Tuple[List[str], List[str]]:
     """Untracked files of target/<key> into window <nn>'s worktree of it (critic finding 2): each is copied under a
-    temporary name beside where it goes, the copy checked against the original (bytes, or a symlink's target), put
-    in place with one rename, and only then is the original removed — so a run cut off at any point leaves the
+    temporary name in worktrees/<nn>/.upgrade-carry, the copy checked against the original (bytes, or a symlink's
+    target), put in place with one rename, checked again, and only then is the original removed — and only while
+    it is still an untracked file of target/<key> under that name — so a run cut off at any point leaves the
     original where it was and no part of a file under its real name in the window (release-candidate review,
     finding 2). A copy already in place (a run cut off before the original was removed) is checked and kept.
     Out of time between files or chunks it stops, saying it runs again; the next run finishes (_pending_carry).
@@ -632,22 +680,37 @@ def _carry(root: Path, p: Path, key: str, nn: str, loose: List[str],
     if not dest.is_dir():
         return [], list(loose)
     out_of_time = Stop(STOPPED_TIME % (version(root) or "this release", "moving in-flight work in target/ into windows"))
+    # Temporary copies live in a directory of their own beside the window's repos, never under a name an untracked
+    # file could have (release-candidate review 2, finding 10); one a cut-off run left is removed first.
+    tmpdir = root / "worktrees" / nn / ".upgrade-carry"
+    shutil.rmtree(str(tmpdir), ignore_errors=True)
+    # Still untracked, under the very name: a trunk reset on a filesystem that ignores case can have put a tracked
+    # file where Thing.txt was, which must never be moved out of the trunk mirror (review 2, finding 3).
+    code, out, _ = _git(p, "ls-files", "--others", "--exclude-standard", "-z")
+    still = set(out.split("\0")) if code == 0 else set()
+    try:
+        return _carry_each(p, dest, tmpdir, loose, still, deadline, out_of_time)
+    finally:
+        shutil.rmtree(str(tmpdir), ignore_errors=True)
+
+
+def _carry_each(p: Path, dest: Path, tmpdir: Path, loose: List[str], still: Set[str], deadline: Optional[float],
+                out_of_time: Stop) -> Tuple[List[str], List[str]]:
     carried, left = [], []
-    for u in loose:
+    for i, u in enumerate(loose):
         if _out_of_time(deadline):
             raise out_of_time
         src, dst = p / u, dest / u
-        if u.endswith("/") or not os.path.lexists(str(src)):
+        if u.endswith("/") or u not in still or not os.path.lexists(str(src)):
             left.append(u)
             continue
         if os.path.lexists(str(dst)):
             same = _same(src, dst)          # an earlier run's copy, put in place before it was cut off
         else:
-            tmp = dst.with_name(".%s.upgrade-carry" % dst.name)
+            tmp = tmpdir / str(i)
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                if os.path.lexists(str(tmp)):
-                    os.unlink(str(tmp))
+                tmpdir.mkdir(parents=True, exist_ok=True)
                 if src.is_symlink():
                     os.symlink(os.readlink(str(src)), str(tmp))
                 else:
@@ -669,7 +732,7 @@ def _carry(root: Path, p: Path, key: str, nn: str, loose: List[str],
                         os.unlink(str(tmp))
                 except OSError:
                     pass
-        if not same:
+        if not same or not _same(src, dst):
             left.append(u)
             continue
         try:
@@ -769,9 +832,16 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
     for key, p in repos:
         _half_done(p, key, ver)
     for key, p in repos:
+        t = trunks[key]
+        if _git(p, "rev-parse", "--verify", "-q", "refs/heads/origin/" + t)[0] == 0:
+            raise Stop(SHADOW % (ver, key, t, t, key, t))
+    for key, p in repos:
         code, dirt, _ = _git(p, "status", "--porcelain", "--untracked-files=no")
         if code != 0 or dirt.strip():
             raise Stop(DIRTY % (ver, key))
+        hidden = ll.hidden_edits(p)
+        if hidden:
+            raise Stop(HIDDEN % ((ver, key) + ll.hidden_words(key, hidden)))
     fetched = set() if dry else _fetch_all(repos, deadline)
     for key, p in repos:
         _, cur, _ = _git(p, "branch", "--show-current")
@@ -790,16 +860,29 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         else:
             stale = ""
         rel = key if key == ll.target_name(root) else key.split("/", 1)[1]
+        if not dry:
+            # a window an earlier, cut-off start adopted from here and never made a worktree for: made now, so its
+            # untracked files can go into it and its work is not adopted a second time (review 2, findings 12-13)
+            try:
+                finished = ll.finish_adopted(root, key, deadline)
+            except ll.Refused as e:
+                raise Stop("could not finish a window adopted from target/%s at an earlier start (%s)" % (key, e))
+            for nn, ok in finished:
+                if not ok:
+                    raise Stop(STOPPED_TIME % (ver, "moving in-flight work in target/ into windows"))
+                lines.append("%s: window %s, adopted from target/%s at an earlier start, now has its worktree "
+                             "(worktrees/%s/%s)." % (head, nn, key, nn, key))
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
         loose = _loose(p, key, list(trunks))      # carried into the window made from this checkout, if one is
+        ign = _ignored(p, key, list(trunks))      # named in that window's line: they stay (review 2, finding 9)
         carrier, carrier_nn = None, None      # the ref a window was (or would be) made from here, and its number
         tip = None if dry else _pending_carry(root).get(key)
         if tip:
             # a window made from this checkout by a run cut off before its untracked files had all moved: finish
             # moving them into that window, never into the trunk mirror's "no window has" line (review, finding 2)
             nn = _window_at(root, key, tip)
-            if nn and loose:
+            if nn and loose and (root / "worktrees" / nn / key).is_dir():
                 carried, left = _carry(root, p, key, nn, loose, deadline)
                 words = _loose_words(head, key, nn, carried, left)
                 lines.append("%s: target/%s's work became window %s at an earlier start%s"
@@ -809,7 +892,8 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
             _set_carry(root, key, None)
         if cur != trunk:
             headsha = ""
-            if cur == "" or LEASE_BRANCH.fullmatch(cur):
+            orphan = bool(LEASE_BRANCH.fullmatch(cur)) and ll.read_lease(root, cur[len("lease/"):]) is None
+            if cur == "" or (LEASE_BRANCH.fullmatch(cur) and not orphan):
                 if cur:
                     work = []   # a window's branch checked out here: it is already a window
                 else:
@@ -829,8 +913,19 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 lines.append("%s: would put target/%s back on %s (%s holds nothing that origin/%s lacks)%s."
                              % (head, key, trunk, cur or "its detached HEAD", trunk, stale))
             elif not work:
+                label = None
+                if not cur and not ll._held_elsewhere(p, headsha):
+                    # a detached HEAD whose change is on origin as a squash: its commits are named, never left
+                    # reachable from nothing (release-candidate review 2, finding 4)
+                    label = "daedalus/upgrade-%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), headsha[:7])
+                    code, _, err = _git(p, "branch", label, headsha)
+                    if code != 0:
+                        raise Stop("could not name target/%s's detached commits (%s)" % (key, _last(err)))
                 _back_on_trunk(p, key, trunk)
-                if cur and not LEASE_BRANCH.fullmatch(cur):
+                if label:
+                    lines.append("%s: %s; its change is already on origin/%s, and it is back on %s — its commits are "
+                                 "kept on branch %s, left as it was.%s" % (head, what, trunk, trunk, label, stale))
+                elif cur and not LEASE_BRANCH.fullmatch(cur):
                     lines.append("%s: target/%s was on %s, whose work is already on origin/%s; it is back on %s and "
                                  "%s is left as it was.%s" % (head, key, cur, trunk, trunk, cur, stale))
                 elif cur:
@@ -860,7 +955,8 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 if loose:
                     spoken.add(key)
                 loose = []
-                lines.append(_now_window(head, what, r, key, trunk, stale, _loose_words(head, key, r["nn"], carried, left)))
+                lines.append(_now_window(head, what, r, key, trunk, stale, _loose_words(head, key, r["nn"], carried, left)
+                                         + _ignored_words(key, r["nn"], ign)))
         # every other local branch with work origin/<trunk> lacks: a window each, named in one line each; the
         # checkout is not touched (critic finding 1). One a window already carries is left as it was.
         # (ref, what a line calls the window it became): in a dry run the ref it would be made from
@@ -871,6 +967,7 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 lines.append("%s: target/%s's branch %s (%s not on origin/%s: %s) %s.%s"
                              % (head, key, b, _plural(len(work), "commit"), trunk, _quoted(work),
                                 _elsewhere_words(key, b, path, _repo_flag(root, key)), stale))
+        gone = [b for b, _w in gone]
         if gone:
             lines.append((GONE_ONE % (head, key, gone[0], trunk, gone[0], _repo_flag(root, key), stale)) if len(gone) == 1
                          else GONE_MANY % (head, key, ll.name_paths(gone), trunk, _repo_flag(root, key), stale))
@@ -897,7 +994,7 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         ahead = _ahead(p, trunk)
         if not ahead:
             if not dry and cur == trunk:
-                _git(p, "merge", "--ff-only", "--quiet", "origin/" + trunk)
+                _git(p, "merge", "--ff-only", "--quiet", _origin(trunk))
             continue
         n = _plural(len(ahead), "commit")
         hit = next((lbl for c, lbl in carriers if _git(p, "merge-base", "--is-ancestor", trunk, c)[0] == 0), None)
@@ -906,7 +1003,7 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 lines.append("%s: would reset target/%s's %s (also %s ahead of origin/%s) to origin/%s — the window "
                              "made from %s carries those commits%s." % (head, key, trunk, n, trunk, trunk, hit, stale))
                 continue
-            code, _, err = _git(p, "reset", "--hard", "--quiet", "origin/" + trunk)
+            code, _, err = _git(p, "reset", "--hard", "--quiet", _origin(trunk))
             if code != 0:
                 raise Stop("could not reset target/%s's %s to origin/%s (%s)" % (key, trunk, trunk, _last(err)))
             lines.append("%s: target/%s's %s was also %s ahead of origin/%s; window %s carries those commits, so %s is "
@@ -919,7 +1016,7 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 lines.append("%s: would reset target/%s's %s (%s ahead of origin/%s) to origin/%s — window %s already "
                              "carries those commits%s." % (head, key, trunk, n, trunk, trunk, prior, stale))
                 continue
-            code, _, err = _git(p, "reset", "--hard", "--quiet", "origin/" + trunk)
+            code, _, err = _git(p, "reset", "--hard", "--quiet", _origin(trunk))
             if code != 0:
                 raise Stop("could not reset target/%s's %s to origin/%s (%s); window %s holds its commits"
                            % (key, trunk, trunk, _last(err), prior))
@@ -948,7 +1045,7 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         if cur == trunk:            # the window is made from what was checked out: its untracked files go too
             carried, left = _carry(root, p, key, r["nn"], loose, deadline)
             _set_carry(root, key, None)
-            extra = _loose_words(head, key, r["nn"], carried, left)
+            extra = _loose_words(head, key, r["nn"], carried, left) + _ignored_words(key, r["nn"], ign)
             if loose:
                 spoken.add(key)
             loose = []
@@ -1155,6 +1252,14 @@ def doctor(root: Path) -> int:
         except Exception:
             continue
         flag = _repo_flag(root, key)
+        if _git(p, "rev-parse", "--verify", "-q", "refs/heads/origin/" + trunk)[0] == 0:
+            print("NOTE     target/%s has a local branch named origin/%s, which git takes for origin's %s — rename it "
+                  "(git -C target/%s branch -m origin/%s <new name>)" % (key, trunk, trunk, key, trunk))
+        hidden = ll.hidden_edits(p)
+        if hidden:
+            marks, named, cmds = ll.hidden_words(key, hidden)
+            print("NOTE     target/%s has uncommitted changes git status does not show, in files marked %s (%s) — "
+                  "no window has them; clear the mark (%s) and commit them on a branch" % (key, marks, named, cmds))
         stash = _stash_entries(p)
         if stash:
             print("NOTE     target/%s holds %s (%s) — saved work no window shows; apply it in a window's worktree "
@@ -1163,9 +1268,9 @@ def doctor(root: Path) -> int:
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
         try:
-            parked, elsewhere, _gone = _branches(p, trunk, cur)
+            parked, elsewhere, gone = _branches(p, trunk, cur)
         except Stop:
-            parked, elsewhere = [], []
+            parked, elsewhere, gone = [], [], []
         loose = _loose(p, key, [k for k, _ in repos])
         if loose:                       # untracked files in a target checkout: work no window holds (critic finding 2)
             if cur == trunk:
@@ -1190,6 +1295,11 @@ def doctor(root: Path) -> int:
             if not _carried(p, b, mine):
                 print("NOTE     target/%s has branch %s, %s past origin/%s, in no window — it %s"
                       % (key, b, _plural(len(work), "commit"), trunk, _elsewhere_words(key, b, path, flag)))
+        for b, work in gone:            # named by the upgrade once, here every time (review 2, finding 8)
+            if not _carried(p, b, mine):
+                print("NOTE     target/%s has branch %s, %s past origin/%s, whose branch on origin was deleted — "
+                      "if it was not merged, run core/lease.sh adopt %s%s" % (key, b, _plural(len(work), "commit"),
+                                                                             trunk, b, flag))
         for b, work in parked:          # a branch beside the checkout, in no window (critic finding 1)
             if _carried(p, b, mine):
                 continue
@@ -1199,7 +1309,7 @@ def doctor(root: Path) -> int:
                      "adopt %s%s)" % (b, flag) if pend else "run core/lease.sh adopt %s%s to turn it into a window"
                      % (b, flag)))
         if cur == trunk:
-            _, out, _ = _git(p, "rev-list", "--count", "origin/%s..%s" % (trunk, trunk))
+            _, out, _ = _git(p, "rev-list", "--count", "%s..refs/heads/%s" % (_origin(trunk), trunk))
             n = int(out.strip() or 0)
             if n:
                 what = "the commit" if n == 1 else "the commits"

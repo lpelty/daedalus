@@ -66,16 +66,24 @@ window numbers itself. Each step acts once and says one line when it does:
    adopt command and left as it is. The checked-out work's untracked files go
    with it into its window's worktree (each copied under a temporary name,
    checked, and put in place before the original is removed; a run cut off
-   part-way finishes at the next session start); untracked files
+   part-way finishes at the next session start); its ignored files stay in
+   `target/<repo>`, named in its window's line; untracked files
    no window is made from stay where they are, named in one line, and
-   `core/doctor.sh` names them until they are moved or removed;
+   `core/doctor.sh` names them until they are moved or removed. A detached
+   checkout whose change is already on trunk keeps its commits on a branch it
+   names. A start cut off part-way through making a window is finished by the
+   next one, never made twice;
 7. writes `state/upgraded-to`, last.
 
 It will not move a target checkout that holds work it could lose, and stops
 there before anything in that checkout moves: one with uncommitted changes
-(commit them on their branch inside that checkout), or one with
-untracked files that putting it back on its trunk would overwrite (move them
-out of that checkout, or commit them on its branch), or one where a rebase,
+(commit them on their branch inside that checkout) — a change to a file marked
+skip-worktree or assume-unchanged counts, though `git status` hides it (clear
+the mark with the command the sentence names, then commit) — or one with
+untracked or ignored files that putting it back on its trunk would overwrite
+(move them out of that checkout, or commit them on its branch), or one with a
+local branch named `origin/<trunk>`, which git takes for origin's trunk
+(rename it), or one where a rebase,
 merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
 there, with the `git` command the sentence names). The board says which on
 every prompt, in one sentence, with what to do; the next session start

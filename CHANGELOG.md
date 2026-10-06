@@ -22,6 +22,7 @@ Every deployment takes this release, and the next, the same way: `git pull
   That is every branch with work its origin does not have yet, whether or not
   it was checked out, and the trunk if it was ahead.
 - Files a branch had not committed yet go with it into its window.
+  Files git ignores stay where they were, and the line names them.
 - Then the session says "You are window 01", or the next free number, and
   that it holds the pen.
 - Close and reopen any session that was open through the pull; it is still running the old hooks.
@@ -63,8 +64,13 @@ says why on every prompt, in one sentence, with what to do. Do that, then
 start a new session, and it finishes the upgrade.
 - A target checkout has uncommitted changes: commit them on their branch
   inside that checkout.
-- A target checkout has untracked files where putting it back on its trunk
-  would write: move them out of that checkout, or commit them on its branch.
+- A file marked skip-worktree or assume-unchanged holds a change `git status`
+  hides: clear the mark with the command the sentence names, then commit it.
+- A target checkout has untracked or ignored files where putting it back on
+  its trunk would write: move them out of that checkout, or commit them on its
+  branch.
+- A target checkout has a local branch named `origin/main` (its trunk's name):
+  rename it.
 - A rebase, merge or similar was left half done in a target checkout: the
   sentence names the `git` command that finishes or undoes it.
 
@@ -209,12 +215,25 @@ shows what is left.
   carries it, reset. The checked-out work's untracked, not-ignored files are
   copied into its window's worktree under a temporary name, checked, put in
   place, and only then removed from `target/` (a run cut off part-way, or out
-  of time, finishes the move at the next session start);
-  untracked files no window takes, and stash entries, are named in a line and
-  by doctor. It stops before anything in `target/` moves, repeated by the board
-  on every prompt, on uncommitted changes, an untracked file where the move
-  back to the trunk would write, or a rebase, merge, cherry-pick, revert or
-  bisect stopped part-way. Its write to `config.yaml` is recorded in
+  of time, finishes the move at the next session start), the temporary copies
+  in `worktrees/<NN>/.upgrade-carry/`, and an original removed only while it is
+  still untracked under that name; its ignored files stay and are named in the
+  window's line; untracked files no window takes, and stash entries, are named
+  in a line and by doctor. A detached checkout whose change is on origin as a
+  squash keeps its commits on a `daedalus/upgrade-…` branch, named in its line.
+  A start cut off while making a window — after `lease/<NN>` was made, before
+  its lease file, or before its worktrees — is finished by the next start into
+  that same window, never adopted twice. It stops before anything in `target/`
+  moves, repeated by the board on every prompt, on uncommitted changes (an edit
+  hidden by skip-worktree or assume-unchanged included), an untracked or
+  ignored file where the move back to the trunk, the trunk's reset or its
+  fast-forward would write (paths compared without case where git ignores
+  case), a local branch named `origin/<trunk>`, or a rebase, merge,
+  cherry-pick, revert or bisect stopped part-way. Doctor names such a hidden
+  edit, a branch named `origin/<trunk>`, a branch whose branch on origin was
+  deleted, and the uncommitted or untracked files of a swept window's
+  worktree; the board and doctor name a swept window's waiting commits in a
+  nested repo as they do the outer one's. Its write to `config.yaml` is recorded in
   `state/config-changes.json`, so a session open through the pull is told
   "Do not restore it" (once) instead of "restore it"; a tracked `config.yaml`
   changed by the pull's own commits reads the same way. A record counts only

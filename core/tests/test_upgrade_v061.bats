@@ -83,3 +83,18 @@ ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.s
   case "$output" in *"Upgrade to"*) echo "$output"; return 1 ;; esac
   [ "$(cd "$H" && find config.yaml vault/hot.md state/hindsight state/upgraded-to -type f | sort | xargs shasum)" = "$before" ]
 }
+
+@test "v0.6.1, pulled, with an uncommitted edit hidden from git status by skip-worktree on the in-flight checkout: the first new session stops the upgrade naming the file and how to clear the mark — no stamp, no window, the edit where it was; doctor names it (release-candidate review 2, finding 6)" {
+  printf 'MY UNCOMMITTED EDIT\n' > "$T/thing.txt"; git -C "$T" update-index --skip-worktree thing.txt
+  [ -z "$(git -C "$T" status --porcelain --untracked-files=no)" ]
+  pull_current
+  run start_session s1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(ctx_of "$output")"
+  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing has uncommitted changes git status does not show, in files marked skip-worktree (thing.txt) — clear the mark (git -C target/thing update-index --no-skip-worktree thing.txt), commit them on their branch inside that checkout, then start a session again"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  [ ! -e "$H/state/upgraded-to" ]; ! grep -qs adopted_from "$H"/state/leases/*.json
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(cat "$T/thing.txt")" = "MY UNCOMMITTED EDIT" ]
+  run bash "$H/core/doctor.sh"
+  case "$output" in *"target/thing has uncommitted changes git status does not show, in files marked skip-worktree (thing.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+}

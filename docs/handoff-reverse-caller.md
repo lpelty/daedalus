@@ -98,13 +98,16 @@ nothing.
 lose.** If yours had uncommitted changes, the upgrade stopped there and the
 board says on every prompt: "upgrade to 0.7.0 incomplete: target/<repo> has
 uncommitted changes — commit them on their branch inside that checkout, then
-start a session again." A stash in that checkout is not a way out: it stays
+start a session again." A change to a file marked skip-worktree or
+assume-unchanged counts, though `git status` hides it: the sentence names the
+file and the `git update-index` command that clears the mark. A stash in that checkout is not a way out: it stays
 in the trunk mirror, where no window shows it — the upgrade names any stash it
-finds in one line, and `core/doctor.sh` names it until it is applied or dropped. If it had untracked files where
+finds in one line, and `core/doctor.sh` names it until it is applied or dropped. If it had untracked or ignored files where
 putting it back on its trunk would write, the sentence names them: "… has
 untracked files that putting it back on <trunk> would overwrite (<files>) —
 move them out of that checkout, or commit them on its branch, then start a
-session again." If a rebase, merge, cherry-pick, revert or bisect had stopped
+session again." A local branch named `origin/<trunk>` stops it too, until it is
+renamed. If a rebase, merge, cherry-pick, revert or bisect had stopped
 part-way there, it stopped before anything moved, naming the operation and the
 `git -C target/<repo>` command that finishes or undoes it. Either way that work is yours to commit, in your own session;
 nobody else touches it, and the next session start finishes the upgrade.
