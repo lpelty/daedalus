@@ -197,7 +197,8 @@ by hand. At the next session start the upgrade (`core/upgrade.py`) runs by
 itself before the window numbers itself: it makes what the release needs,
 moves capture's settings into `config.yaml`, turns any work waiting in
 `target/` — every branch with work origin lacks, checked out or not — into a
-numbered window each, and says one line for each thing it did —
+numbered window each (the untracked files of the checked-out work go with
+it into the window's worktree; any that stay in `target/` are named), and says one line for each thing it did —
 repeat those lines to the operator. If it stops, the board says why in one
 sentence on every prompt. Two things it leaves to a person. One is a target
 checkout holding work the upgrade could lose: uncommitted changes (it stops

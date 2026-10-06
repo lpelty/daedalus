@@ -416,3 +416,40 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   run python3 "$UP" --doctor
   case "$output" in *"in no window"*) echo "$output"; return 1 ;; esac
 }
+
+@test "untracked files of a checkout that becomes a window go with it — copied into its worktree, checked, then removed from target/; ignored files and nested repos stay; untracked files in a checkout no window is made from are named in one line and by doctor (critic finding 2)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'new\n' > "$T/newfile.py"; mkdir -p "$T/notes/deep"; printf 'n\n' > "$T/notes/deep/a.md"; ln -s newfile.py "$T/link.py"
+  printf '*.log\n' >> "$T/.git/info/exclude"; printf 'ignored\n' > "$T/build.log"
+  printf 'stray\n' > "$T/sub/stray.txt"
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing has untracked files no window holds (link.py, newfile.py, notes/deep/a.md) — the upgrade takes them into the window it makes from feat/x at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"that work is now window 01 (branch lease/01), and target/thing is back on main."*"Its untracked files went with it into worktrees/01/thing: link.py, newfile.py, notes/deep/a.md."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Upgrade to 0.7.0: target/thing/sub holds untracked files no window has (stray.txt) — they stay there, and core/doctor.sh names them until they are moved into a window's worktree or removed."*) : ;; *) echo "$output"; return 1 ;; esac
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  [ "$(cat "$W/newfile.py")" = new ]; [ "$(cat "$W/notes/deep/a.md")" = n ]; [ "$(readlink "$W/link.py")" = newfile.py ]
+  [ ! -e "$T/newfile.py" ]; [ ! -e "$T/notes" ]; [ ! -L "$T/link.py" ]
+  [ "$(cat "$T/build.log")" = ignored ]; [ ! -e "$W/build.log" ]
+  [ "$(cat "$T/sub/stray.txt")" = stray ]
+  case "$output" in *build.log*|*"sub/"*) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" status --porcelain | sort | tr '\n' '|')" = "?? link.py|?? newfile.py|?? notes/|" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing/sub has untracked files no window holds (stray.txt) — target/thing/sub is the trunk mirror, which no session works in; move them into a window's worktree (worktrees/<NN>/thing/sub) or remove them"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing has untracked"*) echo "$output"; return 1 ;; esac
+}
+
+@test "an untracked file whose copy fails stays in target/ untouched, named in the window's line and by doctor — never removed before a checked copy exists (critic finding 2)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'keep\n' > "$T/newfile.py"
+  killed_run 'import shutil
+def bad(*a, **kw):
+    raise OSError("disk full")
+shutil.copy2 = bad'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"that work is now window 01"*"Untracked files that could not go with it stay in target/thing (newfile.py); core/doctor.sh names them until they are moved into worktrees/01/thing or removed."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/newfile.py")" = keep ]; [ ! -e "$DAEDALUS_HOME/worktrees/01/thing/newfile.py" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"NOTE     target/thing has untracked files no window holds (newfile.py)"*) : ;; *) echo "$output"; return 1 ;; esac
+}

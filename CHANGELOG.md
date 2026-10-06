@@ -43,7 +43,8 @@ on that line is written out plainly, or the key is read from a file; the old
 line keeps working and can be removed later); and turned any work waiting in
 `target/` — the branch checked out, every other branch with work origin
 lacks, a trunk ahead of origin, a detached checkout — into a numbered window
-each, named in one line each, that you can promote or release, putting the checkout back on its
+each, named in one line each, that you can promote or release (the checked-out
+work's untracked files go with it into its window), putting the checkout back on its
 trunk. Then the window numbers itself — window 01 if nothing was waiting, the
 next number otherwise — and takes the pen. If a target checkout has
 uncommitted changes, or an untracked file where putting it back on its trunk

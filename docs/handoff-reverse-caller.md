@@ -80,7 +80,9 @@ once; moved capture's settings from the hook line into `memory:` (the key into
 the file `memory.api_key_file` names, mode 600); fetched each target repo once
 and turned any work there that trunk lacks — the branch checked out, every
 other local branch, a trunk ahead of origin, a detached checkout — into a
-numbered window each, putting the checkout
+numbered window each (the checked-out work's untracked files went with it into
+the window's worktree; any left in `target/` were named, and doctor names them),
+putting the checkout
 back on its trunk; then wrote `state/upgraded-to`. It said one line for each
 thing it did. Check: `core/doctor.sh` prints
 `OK       upgrade: state/upgraded-to 0.7.0` and no MISSING line about
