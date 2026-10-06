@@ -910,6 +910,6 @@ PY
   for s in '## Promote' 'core/promote.sh 02 --confirm --operator-said' 'in a later turn' 'their whole reply' 'Promote window 02'"'"'s work without the review?' 'core/lease.sh rebase 02' "the operator's own write"; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
-  grep -qF 'v0.7.0 plans 1–4 of 5' "$R/CHANGELOG.md"; grep -qF 'core/promote.sh' "$R/CHANGELOG.md"
+  grep -q '^## v0.7.0 — ' "$R/CHANGELOG.md"; grep -qF 'core/promote.sh' "$R/CHANGELOG.md"
   ! grep -qi 'the operator merges' "$R/CLAUDE.md" "$R/README.md"
 }

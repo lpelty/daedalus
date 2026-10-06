@@ -334,7 +334,7 @@ _run_scan_in_fixture() {
   done
   run grep -q 'prime' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
   run grep -q 'core/vault-commit.sh' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
-  run grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -eq 0 ]
+  run grep -q '^## v0.7.0 — ' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -eq 0 ]
 }
 
 # Spec §4.7: the operator-facing summary of incremental capture (plan 2 of 5).
@@ -399,4 +399,16 @@ _run_scan_in_fixture() {
            'is not under the' 'V0' 'V6b' 'V11' 'Nothing from this handoff lands in the target'; do
     case "$flat" in *"$s"*) : ;; *) echo "the handoff lacks: $s"; return 1 ;; esac
   done
+}
+
+@test "CHANGELOG: v0.7.0 is the newest release — a one-line headline for the tag, then what changes for an operator on each kind of deployment, what the first session after the pull does, and how to tell; nothing left unreleased" {
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself" ]
+  flat="$(tr '\n' ' ' < "$DAEDALUS_HOME/CHANGELOG.md" | tr -s ' ')"
+  for s in '**What changes for an operator.**' '**On each kind of deployment.**' '**At the first session after the pull.**' '**How to tell you have it.**' \
+           'git pull --ff-only' 'core/upgrade.py --dry-run' 'uncommitted changes' 'promote.release_note' 'cat VERSION' \
+           'upgrade: state/upgraded-to 0.7.0' 'core/lease.sh adopt' 'docs/handoff-reverse-caller.md' 'core/tests/scenarios/two-clones.sh'; do
+    case "$flat" in *"$s"*) : ;; *) echo "CHANGELOG lacks: $s"; return 1 ;; esac
+  done
+  ! grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"
+  ! grep -qi 'not yet in this release' "$DAEDALUS_HOME/CHANGELOG.md"
 }

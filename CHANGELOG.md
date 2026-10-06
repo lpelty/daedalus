@@ -4,7 +4,65 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
-## Unreleased — numbered windows, lease worktrees, the board, the pen; incremental capture; direct calls; promote (v0.7.0 plans 1–4 of 5)
+## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself
+
+**What changes for an operator.** Several Daedalus sessions can now work one
+target at once. Each terminal you open in the Daedalus home numbers itself —
+"You are window 02" — and builds in its own copy of the target; you talk to
+windows by number ("promote window 2", "release window 3"), or by a name you
+give one. The first window up holds the pen: only it writes `hot.md`, commits
+the vault and promotes. Nothing reaches the target's trunk except
+`core/promote.sh`, which merges a window's work onto current trunk, runs the
+gates and a fresh reviewer on exactly that merge, shows you one plain-language
+block, and pushes only after your yes. Capture records each session every
+couple of minutes instead of only at its end. Daedalus can ask the target's
+own agent a read-only question, and an agent you allow can ask Daedalus one.
+
+**On each kind of deployment.**
+- *Where a promote is a release* — the target's users receive its trunk
+  through an update command — set `promote.release_note: true` and
+  `promote.update_command` in `config.yaml`: the block and the pushed line then
+  say "this is a release", because the next update ships it to everyone. Let
+  that deployment's `gates:` exercise what the update exercises.
+- *Where the target's harness runs from its live tree* — no update step between
+  the push and the harness that loads it — a promote is live at the harness's
+  next start. This release does not change that; a pinned checkout for such a
+  deployment is separate work.
+- *Every deployment* takes this release, and the next, the same way:
+  `git pull --ff-only` in the Daedalus home, then a new session.
+
+**At the first session after the pull.** Nobody runs a step by hand. The
+session's start runs the upgrade (`core/upgrade.py`) before the window numbers
+itself, and says one line for each thing it did: made the window directories;
+installed the pre-push hook in Daedalus's own checkout of each target repo;
+removed the old shared reminder files; renamed `hot.md`'s `session:` line to
+`leases:` (left for the prime's first vault commit); moved capture's settings
+from the hook line in `.claude/settings.local.json` into a `memory:` block in
+`config.yaml`, with the key in `state/hindsight/api-key` (only when every value
+on that line is written out plainly, or the key is read from a file; the old
+line keeps working and can be removed later); and turned any work waiting in
+`target/` — a branch, a trunk ahead of origin, a detached checkout — into a
+numbered window you can promote or release, putting the checkout back on its
+trunk. Then the window numbers itself — window 01 if nothing was waiting, the
+next number otherwise — and takes the pen. If a target checkout has
+uncommitted changes, or an untracked file where putting it back on its trunk
+would write, the upgrade stops before moving anything there and the board says
+so in one sentence on every prompt: commit or stash them (or move the file),
+and the next session finishes it. If a target checkout already has another
+tool's `pre-push` hook, or sets `core.hooksPath`, the upgrade finishes but says
+so with the remedy, and promote refuses until the hooks are merged or
+`core.hooksPath` is unset and `core/setup.sh` has run. Close and reopen any
+session that was open through the pull — once a new session has upgraded the
+home, the old session's next Stop asks for exactly that. `python3
+core/upgrade.py --dry-run` shows what it would do; `core/doctor.sh` shows what
+is left. Session logs are named by window and date from now on; earlier logs
+keep their names.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.0`; `git describe
+--tags --abbrev=0` prints `v0.7.0`; `core/doctor.sh` prints `OK       version:
+0.7.0` and `OK       upgrade: state/upgraded-to 0.7.0`.
+
+### In detail
 
 - **Every interactive window numbers itself** at SessionStart and builds in
   its own git worktree of the target (`worktrees/<NN>/<repo>`, branch
@@ -112,9 +170,30 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
   and in promote (`core/distcheck.py`); `capture-tick.sh --dry-run`.
 - Doctor reports the confirm mode, each repo's trunk and pre-push hook, and a
   promotion prepared but never confirmed.
-- Not yet in this release: `lease.sh adopt`, the self-upgrade that moves an
-  old capture line into `memory:`, `recall-inject.py` on `memory_env`, and
-  `VERSION` (plan 5).
+- **The upgrade** (`core/upgrade.py`): run at SessionStart when `VERSION` and
+  `state/upgraded-to` differ (never in a direct-call session), inside the start's
+  time budget, one run at a time; every step idempotent and said once when it
+  acts; the stamp written last; a dirty target checkout the one stop, repeated
+  by the board on every prompt; `--dry-run`; `--setup` for setup's leases phase.
+- `core/lease.sh adopt <branch> [--repo <nested>] [--note "…"]`: an in-flight
+  branch in `target/` becomes a numbered window and the checkout goes back to
+  its trunk; `adopt <trunk>` moves a trunk that is ahead of origin into one; a
+  branch with nothing past trunk is refused.
+- `VERSION` and `lib.sh daedalus_version`; doctor reports the version, the
+  upgrade stamp, `state/promote/` and `state/direct-calls/`, a target checkout
+  off its trunk or ahead of origin, `hot.md`'s old field, and — from a session —
+  that session's registry entry. `setup.sh` has a leases phase;
+  `sync-target.sh` refuses a target checkout that is not on its trunk.
+- `recall-inject.py` reads the `memory:` block (a hook-line prefix still wins).
+- The guard allows exactly `git pull --ff-only` in Daedalus's own checkout —
+  the release pull, while it reads from the address the checkout itself
+  records; every other git command there but reading ones is refused.
+- `CLAUDE.md`: what the operator says to a window and what it runs, what is
+  repeated word for word, and how windows message each other.
+- `core/tests/scenarios/two-clones.sh`: the two-window scenario on a scratch
+  deployment — interactive for an operator, `--rehearse` in the suite.
+- `docs/handoff-reverse-caller.md`: for a Daedalus that the target's agent
+  calls — what it exposes, what this release changed, and how to check each.
 
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
