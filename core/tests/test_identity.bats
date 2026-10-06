@@ -385,3 +385,18 @@ _run_scan_in_fixture() {
     case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
   done
 }
+
+# Companion handoff §2-§5, plan 5 Task 12 (Decision 19): the reverse-caller handoff ships for the callee, generic —
+# the wide scan above reads docs/, so no deployment, agent or person is named in it.
+@test "docs/handoff-reverse-caller.md ships for the callee: the version predicate, what it exposes with a check each, what the pull changes and how the upgrade runs, the two states that need a person, what the calling agent builds, the callers list, the checks before the pull, the predicates V0-V11, and the rule" {
+  D="$DAEDALUS_HOME/docs/handoff-reverse-caller.md"
+  [ -f "$D" ]
+  flat="$(tr '\n' ' ' < "$D" | tr -s ' ')"
+  for s in 'cat <daedalus-home>/VERSION' 'git -C <daedalus-home> describe --tags --abbrev=0' '--callee self --caller' \
+           'direct_call.callers' 'DIRECT_CALL_ID' 'CAPTURE_DEFER_TO_CALLER=1' 'The launcher is the only sanctioned entry' \
+           'core/upgrade.py' 'uncommitted changes' 'untracked files' 'core.hooksPath' 'never changes another tool' \
+           'promote.release_note' 'Check the exit code and a non-empty answer' \
+           'is not under the' 'V0' 'V6b' 'V11' 'Nothing from this handoff lands in the target'; do
+    case "$flat" in *"$s"*) : ;; *) echo "the handoff lacks: $s"; return 1 ;; esac
+  done
+}
