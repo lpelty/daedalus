@@ -58,6 +58,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -1509,17 +1510,21 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
 # shape did not converge. So before its first change to anything under target/, the upgrade copies everything there
 # to state/upgrade-snapshot/<stamp>/ and checks the copy: for every repository (outer, nested, submodule — found by
 # walking target/ and asking git, never from config alone) (a) a git bundle of every ref, every worktree's HEAD,
-# every stash entry and every commit a reflog reached in the last REFLOG_DAYS days, under refs/upgrade-snapshot/*
-# in the bundle only, never in the repository; (b) a tar of every file a working tree holds that git does not
+# every stash entry, every commit a reflog reached in the last REFLOG_DAYS days (all read through git, so a reftable
+# repository's are seen) and each worktree's staged content as a commit, under refs/upgrade-snapshot/* in the bundle
+# only, never in the repository; (b) a tar of every file a working tree holds that git does not
 # track (untracked and ignored) or that differs from its last commit, for the checkout and every linked worktree;
 # (c) git's in-progress files (index, rebase, merge, cherry-pick, revert, bisect); (d) manifest.json with every
 # ref's sha and every file's sha256. Each bundle is checked with git bundle verify and its list of heads; the
 # tar is read back and every file hashed again. A copy that cannot be written or checked, or would be over
-# upgrade.snapshot_max_mb, stops the upgrade before anything changes. Nothing deletes a copy but
-# --forget-snapshot, and only when everything in it is still there. The per-shape fixes stay: they make the copy
+# upgrade.snapshot_max_mb, stops the upgrade before anything changes. A later run copies only what no kept copy
+# holds (its bundle builds on their commits); it skips the copy only when the kept copies really hold everything —
+# never on a record of how a run left target/, which another session may have changed after the copy was checked.
+# Nothing deletes a copy but --forget-snapshot, and only when everything in it is still reachable from a ref, not
+# merely from a reflog that will expire. The per-shape fixes stay: they make the copy
 # needed less often.
 SNAPS = Path("state") / "upgrade-snapshot"
-SNAP_RECORD = Path("state") / "upgrade-snapshot.json"     # the newest copy, and target/'s state before and after
+SNAP_RECORD = Path("state") / "upgrade-snapshot.json"     # the newest copy, and target/'s state the copies hold
 BACKGROUND = Path("state") / "upgrade-background.json"    # a detached run: its pid while running, then how it ended
 UPGRADE_LOG = Path("state") / "upgrade.log"
 RESTORE = Path("state") / "upgrade-restore"
@@ -1546,7 +1551,8 @@ SNAP_BG_GONE = ("upgrade to %s incomplete: the run in the background ended befor
                 "says how far it got); it runs again at the next session start")
 SNAP_LINE = ("A safety copy of everything in target/ from before the upgrade is in state/upgrade-snapshot/%s; nothing "
              "was lost, but if anything looks missing, core/upgrade.py --restore-help lists it")
-SNAP_BG_DONE = "The upgrade to %s finished in the background (what it did is in state/upgrade.log)."
+SNAP_BG_COPIED = ("The upgrade to %s took its safety copy of target/ in the background; it finishes at the next "
+                  "session start in this home")
 FILE_WORDS = {"untracked": "untracked file", "ignored": "ignored file", "changed": "uncommitted change to file",
               "unlisted": "file"}
 SNAP_NOTHING = ("every branch, tag, stash entry, recent commit and file it holds is still in target/ or in a window")
@@ -1560,10 +1566,11 @@ class _Background(Exception):
     """The copy will not fit in this session start's budget: a detached run takes it."""
 
 
-def _gb(args: List[str], inp: Optional[bytes] = None, deadline: Optional[float] = None) -> Tuple[int, bytes, str]:
+def _gb(args: List[str], inp: Optional[bytes] = None, deadline: Optional[float] = None,
+        env_extra: Optional[Dict[str, str]] = None) -> Tuple[int, bytes, str]:
     """git <args>, bytes out. Never takes an optional lock (no index refresh): the copy changes nothing it copies.
     Under a deadline, a call that outlives it is out of time."""
-    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", **(env_extra or {}))
     timeout = 3600.0
     if deadline is not None:
         timeout = deadline - time.time()
@@ -1671,8 +1678,48 @@ def _worktree_list(g: List[str]) -> List[Dict[str, str]]:
     return wts
 
 
-def _reflogs(common: str) -> List[Tuple[str, str, int, str]]:
-    """(ref, sha, unix time, message) for every reflog entry in <common>, the per-worktree HEAD logs included."""
+def _ref_format(g: List[str]) -> str:
+    """files or reftable (git rev-parse --show-ref-format; a git too old to say has only files)."""
+    code, out, _ = _gb(g + ["rev-parse", "--show-ref-format"])
+    return os.fsdecode(out).strip() if code == 0 and out.strip() else "files"
+
+
+def _reflogs(g: List[str], deadline: Optional[float] = None) -> Optional[List[Tuple[str, str, int, str]]]:
+    """(ref, sha, unix time, message) for every reflog entry of the repository, every worktree's HEAD included, as
+    git reads them — a reftable repository has no logs/ directory to read. None when git cannot read them."""
+    code, out, _ = _gb(g + ["log", "-g", "--all", "--date=unix", "--format=%H%x01%gD%x01%gs"], deadline=deadline)
+    if code != 0:
+        return None
+    entries = []
+    for ln in os.fsdecode(out).split("\n"):
+        parts = ln.split("\x01", 2)
+        if len(parts) != 3:
+            continue
+        sha, sel, msg = parts
+        ref, _, ts = sel.rpartition("@{")
+        try:
+            t = int(ts.rstrip("}"))
+        except ValueError:
+            continue
+        wt = re.match(r"worktrees/([^/]+)/HEAD$", ref)
+        entries.append(("HEAD of worktree %s" % wt.group(1) if wt else ref, sha, t, msg))
+    return entries
+
+
+def _stash_list(g: List[str], deadline: Optional[float] = None) -> Optional[List[Tuple[int, str, str]]]:
+    """(n, sha, message) of every stash entry, stash@{n}, as git lists them (so a reftable repository's are seen
+    too). None when git cannot read them."""
+    if _gb(g + ["rev-parse", "-q", "--verify", "refs/stash"], deadline=deadline)[0] != 0:
+        return []
+    code, out, _ = _gb(g + ["log", "-g", "--format=%H%x01%gs", "refs/stash", "--"], deadline=deadline)
+    if code != 0:
+        return None
+    lines = [ln.split("\x01", 1) for ln in os.fsdecode(out).split("\n") if "\x01" in ln]
+    return [(i, sha, msg) for i, (sha, msg) in enumerate(lines)]
+
+
+def _reflogs_files(common: str) -> List[Tuple[str, str, int, str]]:
+    """_reflogs read from a files repository's logs/ directly — only when git itself could not read them."""
     out = []
     files = []
     base = Path(common) / "logs"
@@ -1702,8 +1749,8 @@ def _reflogs(common: str) -> List[Tuple[str, str, int, str]]:
     return out
 
 
-def _stash_list(common: str) -> List[Tuple[int, str, str]]:
-    """(n, sha, message) of every stash entry, stash@{n}, newest first as git numbers them."""
+def _stash_list_files(common: str) -> List[Tuple[int, str, str]]:
+    """_stash_list read from a files repository's logs/refs/stash — only when git itself could not read it."""
     try:
         lines = [ln for ln in (Path(common) / "logs" / "refs" / "stash").read_bytes().split(b"\n") if ln.strip()]
     except OSError:
@@ -1751,12 +1798,20 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
             for ln in (os.fsdecode(o2).splitlines() if c2 == 0 else []):
                 sha, typ, name = (ln.split(" ", 2) + ["", ""])[:3]
                 refs.append({"name": name, "sha": sha, "type": typ, "kind": "other", "worktree": path})
-    for n, sha, msg in _stash_list(common):
+    stashes = _stash_list(g, deadline)
+    logs = _reflogs(g, deadline)
+    if stashes is None or logs is None:
+        fmt = _ref_format(g)
+        if fmt != "files":      # nothing else to read: a copy without them would lose them unseen
+            raise _SnapFail("read", "git could not read the stash and reflogs of %s (a %s repository)" % (label, fmt))
+        stashes = _stash_list_files(common) if stashes is None else stashes
+        logs = _reflogs_files(common) if logs is None else logs
+    for n, sha, msg in stashes:
         refs.append({"name": "stash@{%d}" % n, "sha": sha, "type": "commit", "kind": "stash-entry", "message": msg})
     have = {r["sha"] for r in refs}
     cutoff = time.time() - REFLOG_DAYS * 86400
     tips: Dict[str, str] = {}
-    for ref, sha, ts, _ in _reflogs(common):
+    for ref, sha, ts, _ in logs:
         if ts >= cutoff and sha not in have and sha not in tips:
             tips[sha] = ref
     if tips:
@@ -1778,6 +1833,7 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
         r["subject"] = subjects.get(r["sha"], "")
     files: List[dict] = []
     state: List[dict] = []
+    scratch: Optional[str] = None
     for w in wts:
         if not w["exists"]:
             continue
@@ -1810,6 +1866,13 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
             gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
         if not gd or not os.path.isdir(gd):
             continue
+        if w["head"] or os.path.isfile(os.path.join(gd, "index")):
+            if scratch is None:
+                scratch = _scratch_repo(common, "collect")
+            ix = _index_commit(scratch, common, gd, wp, w["i"], deadline)
+            if ix:
+                refs.append(dict(ix, name="index of %s" % wp, type="commit", kind="index", worktree=wp,
+                                 subject="the staged changes of %s" % wp))
         names = [n for n in sorted(os.listdir(gd)) if n in GIT_STATE or n.startswith("BISECT_")]
         for n in names:
             full = os.path.join(gd, n)
@@ -1830,7 +1893,96 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
         k, _, val = ln.partition(": ")
         if k in ("size", "size-pack", "size-garbage") and val.strip().isdigit():
             kib += int(val)
-    return dict(repo, refs=refs, worktrees=wts, files=files, state=state, pack_bytes=kib * 1024)
+    return dict(repo, refs=refs, worktrees=wts, files=files, state=state, pack_bytes=kib * 1024, scratch=scratch)
+
+
+SNAP_IDENT = {"GIT_AUTHOR_NAME": "upgrade safety copy", "GIT_AUTHOR_EMAIL": "upgrade@localhost",
+              "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_NAME": "upgrade safety copy",
+              "GIT_COMMITTER_EMAIL": "upgrade@localhost", "GIT_COMMITTER_DATE": "@0 +0000"}
+
+
+def _scratch_repo(common: str, what: str) -> str:
+    """A bare repository in the system's temporary directory that borrows <common>'s objects (alternates): where
+    the copy writes its own trees and commits, never into the operator's repository. The caller removes it."""
+    d = tempfile.mkdtemp(prefix="upgrade-%s-" % what)
+    args = ["init", "--bare", "-q"]
+    code, out, _ = _gb(["--git-dir", common, "rev-parse", "--show-object-format"])
+    if code == 0 and out.strip() and out.strip() != b"sha1":
+        args.append("--object-format=%s" % os.fsdecode(out.strip()))
+    code, _, err = _gb(args + [d])
+    if code != 0:
+        shutil.rmtree(d, ignore_errors=True)
+        raise _SnapFail("written", "git init: %s" % _last(err))
+    (Path(d) / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (Path(d) / "objects" / "info" / "alternates").write_text(os.path.join(common, "objects") + "\n")
+    return d
+
+
+def _index_commit(scratch: str, common: str, gd: str, wp: str, n: int, deadline: Optional[float]) -> Optional[dict]:
+    """The content staged in the worktree at <wp> (its index is <gd>/index) that its HEAD does not hold, as a
+    commit made in <scratch> — the staged blobs are reachable from no ref, so without it a reset and a gc lose
+    them. A copy of the index is read, never the index itself. The commit is made with a fixed author and date,
+    so the same staged content always gives the same sha. None when nothing is staged that HEAD lacks.
+    {"sha", "tree", "blobs": [[path, blob sha], ...], "conflicted"}."""
+    idx = os.path.join(gd, "index")
+    if not os.path.isfile(idx):
+        return None
+    copy = os.path.join(scratch, "index-w%d" % n)
+    try:
+        shutil.copyfile(idx, copy)
+        for sh in Path(gd).glob("sharedindex.*"):        # a split index reads its shared part beside it
+            shutil.copyfile(str(sh), os.path.join(scratch, sh.name))
+    except OSError as e:
+        raise _SnapFail("read", "the index of %s: %s" % (wp, e.strerror or e))
+    env = {"GIT_INDEX_FILE": copy}
+    code, out, err = _gb(["--git-dir", scratch, "ls-files", "-s", "-z"], env_extra=env, deadline=deadline)
+    if code != 0:
+        raise _SnapFail("read", "git could not read the index of %s: %s" % (wp, _last(err)))
+    entries = []
+    for rec in _z(out):
+        meta, _, path = rec.partition("\t")
+        parts = meta.split(" ")
+        if len(parts) == 3:
+            entries.append((parts[0], parts[1], parts[2], path))
+    head: Dict[str, Tuple[str, str]] = {}
+    code, out, _ = _gb(["--git-dir", gd, "ls-tree", "-r", "-z", "--full-tree", "HEAD"], deadline=deadline)
+    for rec in (_z(out) if code == 0 else []):
+        meta, _, path = rec.partition("\t")
+        parts = meta.split(" ")
+        if len(parts) == 3:
+            head[path] = (parts[0], parts[2])
+    staged = [(mode, sha, stage, path) for mode, sha, stage, path in entries
+              if mode != "160000" and (stage != "0" or head.get(path) != (mode, sha))]
+    if not staged:
+        return None
+    conflicted = any(stage != "0" for _, _, stage, _ in staged)
+    gs = ["--git-dir", scratch]
+    tree = ""
+    if not conflicted:
+        code, out, _ = _gb(gs + ["write-tree"], env_extra=env, deadline=deadline)
+        tree = os.fsdecode(out).strip() if code == 0 else ""
+    if not tree:        # unmerged (or unreadable as a tree): every staged blob, under its number, in one tree
+        lines = "".join("100644 blob %s\t%06d-%s\n" % (sha, k, stage)
+                        for k, (_, sha, stage, _) in enumerate(staged))
+        code, out, err = _gb(gs + ["mktree"], inp=lines.encode(), deadline=deadline)
+        if code != 0:
+            raise _SnapFail("written", "the staged changes of %s: %s" % (wp, _last(err)))
+        tree = os.fsdecode(out).strip()
+    msg = "the staged changes of %s\n\n%s" % (wp, "".join(
+        "%06d stage %s: %s\n" % (k, stage, path) for k, (_, _, stage, path) in enumerate(staged)))
+    code, out, err = _gb(gs + ["commit-tree", tree, "-F", "-"], inp=msg.encode("utf-8", "surrogateescape"),
+                         env_extra=SNAP_IDENT, deadline=deadline)
+    if code != 0:
+        raise _SnapFail("written", "the staged changes of %s: %s" % (wp, _last(err)))
+    return {"sha": os.fsdecode(out).strip(), "tree": tree, "conflicted": conflicted,
+            "blobs": sorted({(path, sha) for _, sha, _, path in staged})}
+
+
+def _drop_scratch(coll: List[dict]) -> None:
+    for r in coll:
+        if r.get("scratch"):
+            shutil.rmtree(r["scratch"], ignore_errors=True)
+            r["scratch"] = None
 
 
 def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[str, str]]:
@@ -1858,9 +2010,14 @@ def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[s
     return kinds
 
 
+# git's files that change while no work does — the index (a read can rewrite it; its staged content is an index ref)
+# and ORIG_HEAD (rewritten at every reset; its commit a reflog holds): copied along, never a reason for a new copy
+SNAP_ALONG = ("index", "ORIG_HEAD")
+
+
 def _snap_fp(coll: List[dict]) -> str:
-    """target/'s state in one hash: refs, worktrees, stash, and every copied file's name, size and time — never
-    the index, which a read can rewrite. Equal hashes: nothing a copy holds has changed."""
+    """target/'s state in one hash: refs (staged content included), worktrees, stash, and every copied file's name,
+    size and time — never SNAP_ALONG. Equal hashes: nothing a copy holds has changed."""
     parts = []
     for r in coll:
         parts.append([r["common"],
@@ -1869,7 +2026,7 @@ def _snap_fp(coll: List[dict]) -> str:
                       sorted((r["worktrees"][f["w"]]["path"], f["path"], f["kind"], f["size"], f["mtime_ns"])
                              for f in r["files"]),
                       sorted((r["worktrees"][s["w"]]["path"], s["path"], s["size"], s["mtime_ns"])
-                             for s in r["state"] if s["path"] != "index")])
+                             for s in r["state"] if s["path"] not in SNAP_ALONG)])
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8", "surrogateescape")).hexdigest()
 
 
@@ -1879,9 +2036,109 @@ def _snap_estimate(coll: List[dict]) -> int:
     for r in coll:
         if r["common"] not in seen:
             seen.add(r["common"])
-            n += r["pack_bytes"]
+            n += r.get("new_bytes", r["pack_bytes"])
         n += sum(f["size"] for f in r["files"]) + sum(s["size"] for s in r["state"])
     return n
+
+
+def _kept(root: Path) -> Dict[str, dict]:
+    """What the kept copies hold together, by git directory: every ref's sha (and which are commits), every file by
+    name and content (and by name, size and time, which a carry keeps), every in-progress file by name and content."""
+    held: Dict[str, dict] = {}
+    for st in _snapshots(root):
+        m = _read_json(root / SNAPS / st / "manifest.json") or {}
+        for r in m.get("repos", []):
+            h = held.setdefault(r.get("git_dir") or "", {"shas": set(), "commits": set(), "stat": set(),
+                                                         "files": set(), "state": set()})
+            for x in r.get("refs", []):
+                h["shas"].add(x["sha"])
+                if x.get("type") == "commit" and x.get("kind") != "index":
+                    h["commits"].add(x["sha"])
+            for f in r.get("files", []):
+                h["files"].add((f["path"], f["sha256"]))
+                if "mtime_ns" in f:
+                    h["stat"].add((f["path"], f["size"], f["mtime_ns"]))
+            for g in r.get("git_state", []):
+                h["state"].add((g["path"], g["sha256"]))
+    return held
+
+
+def _snap_plan(root: Path, coll: List[dict], deadline: Optional[float]) -> Tuple[str, List[dict]]:
+    """(target/'s fingerprint, what a new copy must hold). Nothing, when target/ is exactly as a kept copy found it,
+    or when the kept copies already hold everything in it: every ref's commit (a kept copy's refs reach it), every
+    file under its name with its content, every in-progress file. Otherwise, per repository, only what they do not
+    hold — with "basis", the kept commits still in the repository, which a new bundle builds on instead of copying
+    the history again. A change made after a copy was checked (another session at work while a run went on) is
+    never taken as covered: only what a copy really holds is."""
+    fp = _snap_fp(coll)
+    rec = _read_json(root / SNAP_RECORD) or {}
+    snaps = _snapshots(root)
+    if snaps and rec.get("stamp") in snaps and fp == rec.get("covered"):
+        return fp, []
+    held = _kept(root)
+    todo = []
+    for r in coll:
+        h = held.get(r["common"])
+        if h is None:
+            todo.append(dict(r, basis=[]))
+            continue
+        g = _g(r)
+        basis: List[str] = []
+        if h["commits"]:
+            code, out, _ = _gb(g + ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                               inp="".join(x + "\n" for x in sorted(h["commits"])).encode(), deadline=deadline)
+            basis = [ln.split(" ")[0] for ln in os.fsdecode(out).splitlines() if ln.endswith(" commit")] \
+                if code == 0 else []
+        fresh = sorted({x["sha"] for x in r["refs"]
+                        if x["type"] == "commit" and x["kind"] != "index" and x["sha"] not in h["shas"]})
+        new = set(fresh)
+        if fresh and basis:
+            code, out, _ = _gb(g + ["rev-list", "--stdin"], deadline=deadline, inp=(
+                "".join(x + "\n" for x in fresh) + "--not\n" + "".join(x + "\n" for x in basis)).encode())
+            if code == 0:
+                new &= set(os.fsdecode(out).split())
+        refs = [x for x in r["refs"] if x["sha"] not in h["shas"]
+                and (x["type"] != "commit" or x["kind"] == "index" or x["sha"] in new)]
+        files = []
+        for f in r["files"]:
+            if (f["path"], f["size"], f["mtime_ns"]) in h["stat"]:
+                continue
+            if _snap_late(deadline):
+                raise _OutOfTime()
+            if (f["path"], _sha256(os.path.join(r["worktrees"][f["w"]]["path"], f["path"]), f["link"])) in h["files"]:
+                continue
+            files.append(f)
+        state = [x for x in r["state"] if x["path"] not in SNAP_ALONG
+                 and (x["path"], _sha256(x["src"], False)) not in h["state"]]
+        if not (refs or files or state):
+            continue
+        state += [x for x in r["state"] if x["path"] in SNAP_ALONG]
+        nb = 0
+        news = sorted({x["sha"] for x in refs if x["kind"] != "index" and x["type"] == "commit"})
+        if news and basis:
+            code, out, _ = _gb(g + ["rev-list", "--objects", "--stdin"], deadline=deadline, inp=(
+                "".join(x + "\n" for x in news) + "--not\n" + "".join(x + "\n" for x in basis)).encode())
+            objs = "".join(ln.split(" ")[0] + "\n" for ln in os.fsdecode(out).splitlines() if ln) if code == 0 else ""
+            code, out, _ = _gb(g + ["cat-file", "--batch-check=%(objectsize:disk)"], inp=objs.encode(),
+                               deadline=deadline)
+            nb = sum(int(x) for x in os.fsdecode(out).split() if x.isdigit()) if code == 0 else r["pack_bytes"]
+        elif news:
+            nb = r["pack_bytes"]
+        todo.append(dict(r, refs=refs, files=files, state=state, basis=basis, new_bytes=nb))
+    if not todo:
+        _snap_record(root, fp)
+    return fp, todo
+
+
+def _snap_record(root: Path, fp: str, stamp: Optional[str] = None) -> None:
+    """target/'s fingerprint as the kept copies hold all of it (and the newest copy's stamp)."""
+    snaps = _snapshots(root)
+    if not snaps:
+        return
+    try:
+        _write(root / SNAP_RECORD, json.dumps({"stamp": stamp or snaps[-1], "covered": fp}, indent=2) + "\n")
+    except OSError:
+        pass
 
 
 def _mb(n: int) -> str:
@@ -1971,6 +2228,7 @@ def _snap_write(root: Path, coll: List[dict], ver: str, fp: str, cap: int, deadl
 def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
     name = _name(n, r["label"])
     entry = {"n": n, "label": r["label"], "path": r["work"], "git_dir": r["common"], "bundle": None,
+             "basis": list(r.get("basis") or []),
              "tar": name + ".tar", "worktrees": [{"i": w["i"], "path": w["path"], "head": w["head"],
                                                   "branch": w["branch"]} for w in r["worktrees"]],
              "refs": [], "files": [], "git_state": []}
@@ -1986,14 +2244,18 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
         if code != 0:
             raise _SnapFail("written", "git init: %s" % _last(err))
         (tmp / "objects" / "info").mkdir(parents=True, exist_ok=True)
-        (tmp / "objects" / "info" / "alternates").write_text(os.path.join(r["common"], "objects") + "\n")
+        (tmp / "objects" / "info" / "alternates").write_text(
+            "".join(d + "\n" for d in [os.path.join(r["common"], "objects")]
+                    + ([os.path.join(r["scratch"], "objects")] if r.get("scratch") else [])))
         if os.path.isfile(os.path.join(r["common"], "shallow")):
             shutil.copy2(os.path.join(r["common"], "shallow"), str(tmp / "shallow"))
         code, _, err = _gb(["-C", str(tmp), "update-ref", "--stdin"],
                            inp="".join("create %s %s\n" % (b, s) for s, b in by_sha.items()).encode())
         if code != 0:
             raise _SnapFail("written", "the refs of %s: %s" % (r["label"], _last(err)))
-        code, _, err = _gb(["-C", str(tmp), "bundle", "create", "-q", str(bundle), "--all"], deadline=deadline)
+        # building on kept copies: only what their commits do not reach (git bundle create --all ^<kept>...)
+        code, _, err = _gb(["-C", str(tmp), "bundle", "create", "-q", str(bundle), "--all", "--stdin"],
+                           inp="".join("^%s\n" % b for b in entry["basis"]).encode(), deadline=deadline)
         if code != 0:
             raise _SnapFail("written", "the bundle of %s: %s" % (r["label"], _last(err)))
         shutil.rmtree(str(tmp), ignore_errors=True)
@@ -2004,8 +2266,7 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
         for f in r["files"]:
             src = os.path.join(paths[f["w"]], f["path"])
             member = "w%d/%s" % (f["w"], f["path"])
-            entry["files"].append(dict([(k, x) for k, x in f.items() if k != "mtime_ns"],
-                                       member=member, sha256=_tar_add(tar, src, member, deadline)))
+            entry["files"].append(dict(f, member=member, sha256=_tar_add(tar, src, member, deadline)))
         for s in r["state"]:
             member = "git/w%d/%s" % (s["w"], s["path"])
             entry["git_state"].append({"w": s["w"], "path": s["path"], "size": s["size"], "member": member,
@@ -2039,10 +2300,20 @@ def _snap_verify(part: Path, manifest: dict) -> None:
         for r in manifest["repos"]:
             if r["bundle"]:
                 b = str(part / r["bundle"])
-                code, _, err = _gb(["-C", str(vt), "bundle", "verify", "-q", b])
+                where = vt
+                if r.get("basis"):
+                    where = part / (".verify-%d" % r["n"])
+                    code, _, err = _gb(["init", "--bare", "-q", str(where)])
+                    if code != 0:
+                        raise _SnapFail("checked", "git init: %s" % _last(err))
+                    (where / "objects" / "info").mkdir(parents=True, exist_ok=True)
+                    (where / "objects" / "info" / "alternates").write_text(os.path.join(r["git_dir"], "objects") + "\n")
+                code, _, err = _gb(["-C", str(where), "bundle", "verify", "-q", b])
                 if code != 0:
                     raise _SnapFail("checked", "git bundle verify %s: %s" % (r["bundle"], _last(err) or "failed"))
-                code, out, err = _gb(["-C", str(vt), "bundle", "list-heads", b])
+                code, out, err = _gb(["-C", str(where), "bundle", "list-heads", b])
+                if where != vt:
+                    shutil.rmtree(str(where), ignore_errors=True)
                 heads = {tuple(ln.split(" ", 1)[::-1]) for ln in os.fsdecode(out).splitlines() if " " in ln}
                 want = {(x["bundle_ref"], x["sha"]) for x in r["refs"]}
                 if code != 0 or heads != want:
@@ -2068,68 +2339,54 @@ def _snap_verify(part: Path, manifest: dict) -> None:
 
 
 def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: bool = False) -> Optional[str]:
-    """Before the upgrade's first change in target/: a checked copy of everything there, or a Stop. None when
-    target/ holds no repository, or is exactly as the newest copy found it or the last run left it (that copy
-    covers it). At a session start (a deadline), a copy that will not fit raises _Background."""
+    """Before the upgrade's first change in target/: a checked copy of everything there the kept copies do not
+    already hold, or a Stop. None when target/ holds no repository, or the kept copies hold all of it. At a session
+    start (a deadline), a copy that will not fit raises _Background."""
+    coll: List[dict] = []
     try:
-        repos = _snap_repos(root)
-        if not repos:
-            return None
-        coll = []
-        for r in repos:
-            if _snap_late(deadline) and not prefer_bg:
-                raise _OutOfTime()
-            coll.append(_snap_collect(root, r, deadline))
-    except _OutOfTime:
-        raise _Background()
-    except _SnapFail as e:
-        raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
-    fp = _snap_fp(coll)
-    rec = _read_json(root / SNAP_RECORD) or {}
-    if rec.get("stamp") in _snapshots(root) and fp in (rec.get("before"), rec.get("after")):
-        return None
-    est = _snap_estimate(coll)
-    cap = _snap_cap(root)
-    if est > cap * (1 << 20):
-        raise Stop(SNAP_BIG % (ver, _mb(est), cap))
-    try:
-        (root / "state").mkdir(parents=True, exist_ok=True)
-        free = shutil.disk_usage(str(root / "state")).free
-    except OSError:
-        free = None
-    if free is not None and free < est + (64 << 20):
-        raise Stop(SNAP_DISK % (ver, _mb(est), _mb(free)))
-    if deadline is not None and (prefer_bg or est > BG_BYTES):
-        raise _Background()
-    try:
-        stamp, size = _snap_write(root, coll, ver, fp, cap, deadline)
-    except _OutOfTime:
-        raise _Background()
-    except _SnapFail as e:
-        raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
-    try:
-        _write(root / SNAP_RECORD, json.dumps({"stamp": stamp, "before": fp, "after": None}, indent=2) + "\n")
-    except OSError:
-        pass
-    return "a safety copy of everything in target/ is in state/upgrade-snapshot/%s (%s), taken before anything " \
-           "there changed." % (stamp, _mb(size))
-
-
-def _snap_after(root: Path) -> None:
-    """Record target/'s state as this run leaves it, so the next run takes no second copy of the same state."""
-    rec = _read_json(root / SNAP_RECORD)
-    if not rec or rec.get("stamp") not in _snapshots(root):
-        return
-    try:
-        fp = _snap_fp([_snap_collect(root, r, None) for r in _snap_repos(root)])
-    except (_SnapFail, _OutOfTime, OSError):
-        return
-    if rec.get("after") != fp:
-        rec["after"] = fp
         try:
-            _write(root / SNAP_RECORD, json.dumps(rec, indent=2) + "\n")
+            repos = _snap_repos(root)
+            if not repos:
+                return None
+            for r in repos:
+                if _snap_late(deadline) and not prefer_bg:
+                    raise _OutOfTime()
+                coll.append(_snap_collect(root, r, deadline))
+            fp, todo = _snap_plan(root, coll, None if prefer_bg else deadline)
+        except _OutOfTime:
+            raise _Background()
+        except _SnapFail as e:
+            raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
+        if not todo:
+            return None
+        prev = _snapshots(root)
+        est = _snap_estimate(todo)
+        cap = _snap_cap(root)
+        if est > cap * (1 << 20):
+            raise Stop(SNAP_BIG % (ver, _mb(est), cap))
+        try:
+            (root / "state").mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(str(root / "state")).free
         except OSError:
-            pass
+            free = None
+        if free is not None and free < est + (64 << 20):
+            raise Stop(SNAP_DISK % (ver, _mb(est), _mb(free)))
+        if deadline is not None and (prefer_bg or est > BG_BYTES):
+            raise _Background()
+        try:
+            stamp, size = _snap_write(root, todo, ver, fp, cap, deadline)
+        except _OutOfTime:
+            raise _Background()
+        except _SnapFail as e:
+            raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
+        _snap_record(root, fp, stamp)
+        if prev:
+            return ("a safety copy of what is new in target/ since the copy in state/upgrade-snapshot/%s is in "
+                    "state/upgrade-snapshot/%s (%s), taken before anything there changed." % (prev[-1], stamp, _mb(size)))
+        return "a safety copy of everything in target/ is in state/upgrade-snapshot/%s (%s), taken before anything " \
+               "there changed." % (stamp, _mb(size))
+    finally:
+        _drop_scratch(coll)
 
 
 # --- the run in the background --------------------------------------------------------------------------------
@@ -2149,14 +2406,15 @@ def _bg_running(root: Path) -> bool:
 
 def _go_background(root: Path, ver: str) -> str:
     """Start `core/upgrade.py --background` detached (its own session, no pipe to this hook, logged to
-    state/upgrade.log) and record it; the sentence the board repeats until it is done."""
+    state/upgrade.log) and record it; the sentence the board repeats until it is done. The detached run only takes
+    the copy, which changes nothing in target/: sessions bound meanwhile work there while it reads."""
     try:
         log = open(str(root / UPGRADE_LOG), "ab")
     except OSError as e:
         return _stopped(root, ver, 2, SNAP_BG_FAIL % (ver, e.strerror or e))
     try:
         with log:
-            log.write(("--- %s: the upgrade to %s, started in the background by a session start\n"
+            log.write(("--- %s: the safety copy for the upgrade to %s, started in the background by a session start\n"
                        % (time.strftime("%Y-%m-%dT%H:%M:%S"), ver)).encode())
             log.flush()
             pr = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--background"],
@@ -2174,35 +2432,34 @@ def _go_background(root: Path, ver: str) -> str:
 
 
 def background_main(root: Path) -> int:
+    """The detached run: the copy, checked, and nothing else. The upgrade's changes in target/ are made by the next
+    session start, inside its hook, before that session's agent has control — never while sessions work there."""
     ver = version(root)
     _write(root / BACKGROUND, json.dumps({"pid": os.getpid(), "version": ver, "running": True,
                                           "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
-    finished = False
+    copied = False
     try:
-        lines, stop = run(root, background=True)
-        for ln in lines:
-            print(ln)
-        if stop:
-            print(stop)
-        finished = stop is None and stamped(root) == ver
-        return 0 if finished else 1
+        fd = _lock(root, None)
+        try:
+            said = ensure_snapshot(root, ver or "", None)
+            print("Upgrade to %s: %s" % (ver, said or "the kept safety copies already hold everything in target/."))
+            copied = True
+        except Stop as e:
+            print(_stopped(root, ver, 2, str(e)))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        return 0 if copied else 1
     finally:
         sys.stdout.flush()
-        _write(root / BACKGROUND, json.dumps({"pid": None, "version": ver, "running": False, "finished": finished,
+        _write(root / BACKGROUND, json.dumps({"pid": None, "version": ver, "running": False, "copied": copied,
                                               "at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
 
 
 def snapshot_line(root: Path) -> Optional[str]:
-    """The board's line while a copy is kept (and, once, that a background run finished the upgrade)."""
+    """The board's line while a copy is kept."""
     snaps = _snapshots(root)
-    if not snaps:
-        return None
-    line = SNAP_LINE % snaps[-1]
-    bg = _read_json(root / BACKGROUND)
-    ver = version(root)
-    if bg and bg.get("finished") and bg.get("version") == ver and stamped(root) == ver:
-        line = SNAP_BG_DONE % ver + " " + line
-    return line
+    return SNAP_LINE % snaps[-1] if snaps else None
 
 
 # --- --restore-help and --forget-snapshot ---------------------------------------------------------------------
@@ -2259,39 +2516,68 @@ def _sha256(path: str, link: bool) -> Optional[str]:
         return None
 
 
+def _lines_set(out: bytes) -> Set[str]:
+    return {ln.split(" ")[0] for ln in os.fsdecode(out).splitlines() if ln}
+
+
 def _snap_missing(root: Path, stamp: str) -> Tuple[dict, List[Tuple[dict, str, object]]]:
-    """(manifest, [(repo entry, "commit"|"file", what)]) — what the copy holds that target/ no longer has. A ref's
-    commit is there while any ref, reflog or stash still reaches it (a window's branch counts: the upgrade moves
-    work there); origin's branches as last fetched are origin's, not counted. A file is there while any worktree
-    of its repository — a window's included — holds it at the same path with the same content."""
+    """(manifest, [(repo entry, "commit"|"file", what)]) — what the copy holds that target/ no longer has. A commit is
+    there only while a ref reaches it — a branch, a tag, any worktree's HEAD, a stash entry (a window's branch
+    counts: the upgrade moves work there) — never because only a reflog does, which expires, nor because the
+    object is still on disk, which gc removes. What the copy held only through a reflog is there while a reflog or a
+    ref still reaches it. Staged content is there while every staged blob is reachable from a ref or held by an
+    index. Origin's branches as last fetched are origin's, not counted. A file is there while any worktree of its
+    repository — a window's included — holds it at the same path with the same content. Whatever git cannot read
+    counts as missing."""
     m = _read_json(root / SNAPS / stamp / "manifest.json")
     if not m:
         raise Stop("the safety copy in %s/%s has no readable manifest.json" % (SNAPS, stamp))
     out: List[Tuple[dict, str, object]] = []
     for r in m.get("repos", []):
         g = _repo_now(r)
+        refs = r.get("refs", [])
+        kinds = {x["kind"] for x in refs}
         reach: Optional[Set[str]] = None
+        logged: Optional[Set[str]] = None
+        objs: Optional[Set[str]] = None
         targets: Set[str] = set()
+        staged: Set[str] = set()
         wts: List[str] = []
         if g is not None:
-            code, o, _ = _gb(g + ["rev-list", "--all", "--reflog"])
-            reach = set(os.fsdecode(o).split()) if code == 0 else None
+            stashes = _stash_list(g) or []
+            ins = "".join(sha + "\n" for _, sha, _ in stashes).encode()
+            code, o, _ = _gb(g + ["rev-list", "--all", "--stdin"], inp=ins)
+            reach = _lines_set(o) if code == 0 else None
             code, o, _ = _gb(g + ["for-each-ref", "--format=%(objectname)"])
-            targets = set(os.fsdecode(o).split())
-            targets |= {s for _, s, _ in _stash_list(r["git_dir"])}
+            targets = _lines_set(o) if code == 0 else set()
+            if "reflog" in kinds:
+                code, o, _ = _gb(g + ["rev-list", "--all", "--reflog", "--stdin"], inp=ins)
+                logged = _lines_set(o) if code == 0 else None
             wts = [w.get("worktree", "") for w in _worktree_list(g) if "bare" not in w]
             if r.get("path") and g[0] == "-C":
                 wts = [r["path"]] + wts[1:]     # a submodule's main worktree is listed as its git directory
+            if "index" in kinds:
+                code, o, _ = _gb(g + ["rev-list", "--objects", "--all", "--stdin"], inp=ins)
+                objs = _lines_set(o) if code == 0 else None
+                for wp in wts:
+                    code, o, _ = _gb(["-C", wp, "ls-files", "-s", "-z"])
+                    for rec in (_z(o) if code == 0 else []):
+                        parts = rec.partition("\t")[0].split(" ")
+                        if len(parts) == 3:
+                            staged.add(parts[1])
         lost: Dict[str, List[dict]] = {}
-        for x in r.get("refs", []):
-            if x["kind"] == "remote":
+        for x in refs:
+            k, sha = x["kind"], x["sha"]
+            if k == "remote":
                 continue
-            sha = x["sha"]
-            if g is not None and (sha in targets or (reach is not None and sha in reach)):
-                continue
-            if g is not None and reach is None and _gb(g + ["cat-file", "-e", sha])[0] == 0:
-                continue
-            lost.setdefault(sha, []).append(x)
+            if k == "index":
+                there = objs is not None and all(b in objs or b in staged for _, b in x.get("blobs", []))
+            elif x.get("type") != "commit":
+                there = sha in targets
+            else:
+                there = (reach is not None and sha in reach) or (k == "reflog" and logged is not None and sha in logged)
+            if not there:
+                lost.setdefault(sha, []).append(x)
         for sha, xs in lost.items():
             out.append((r, "commit", xs))
         for f in r.get("files", []):
@@ -2324,6 +2610,13 @@ def _ref_words(x: dict, wt0: str) -> str:
         return "the commit checked out in %s" % _escaped(x.get("worktree") or wt0)
     if k == "reflog":
         return "a commit from the last %d days of %s's history" % (REFLOG_DAYS, x["name"])
+    if k == "index":
+        paths = sorted({_escaped(p) for p, _ in x.get("blobs", [])})
+        more = " and %d more" % (len(paths) - 5) if len(paths) > 5 else ""
+        return "the staged, uncommitted content of %s%s in %s%s" % (
+            ", ".join(paths[:5]), more, _escaped(x.get("worktree") or wt0),
+            " (a merge with conflicts: each staged version is a numbered file, listed in the commit's message)"
+            if x.get("conflicted") else "")
     return "ref %s" % x["name"]
 
 
@@ -2334,6 +2627,8 @@ def _restore_name(xs: List[dict], sha: str) -> str:
     for x in xs:
         if x["kind"] == "tag":
             return "restored/tag-%s-%s" % (x["name"][len("refs/tags/"):], sha[:7])
+    if any(x["kind"] == "index" for x in xs):
+        return "restored/staged-%s" % sha[:7]
     return "restored/%s-%s" % ("detached" if any(x["kind"] == "head" for x in xs) else "commit", sha[:7])
 
 
@@ -2395,8 +2690,9 @@ def _snap_report(root: Path, stamp: str) -> Tuple[List[str], int]:
         stamp, str(m.get("taken_at", "")).replace("T", " "), m.get("version", "?"))
     if not missing:
         return [head + ": nothing in it is missing — " + SNAP_NOTHING + "."], 0
-    lines = [head + " holds %s target/ no longer has. Each command can be run from anywhere; none overwrites "
-             "anything — a branch comes back under restored/, a file under state/upgrade-restore/:"
+    lines = [head + " holds %s target/ no longer has. Each command can be run from anywhere (run them in the "
+             "order shown: a later copy's commits build on an earlier one's); none overwrites anything — a branch "
+             "comes back under restored/, a file under state/upgrade-restore/:"
              % _plural(len(missing), "thing")]
     return lines + _restore_lines(root, stamp, m, missing), len(missing)
 
@@ -2499,25 +2795,24 @@ def _lock(root: Path, deadline: Optional[float]) -> Optional[int]:
 
 
 def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
-        upto: int = 6, background: bool = False) -> Tuple[List[str], Optional[str]]:
+        upto: int = 6) -> Tuple[List[str], Optional[str]]:
     """Steps 1..upto in order, then (upto 6, not dry) the stamp. Returns (the lines of the steps that acted, the
     stop sentence or None). A stop is recorded in state/upgrade-stopped.json (not in a dry run) and the stamp is
     not written, so the next run starts again from the top. Before step 2, the first that can touch target/, a
     full run (upto 6, not dry) takes the safety copy of target/ or stops; at a session start (a deadline) a copy
-    that will not fit in it is taken, and the upgrade finished, by a detached run (`background`), and a start
-    while that run is going leaves it alone."""
+    that will not fit in it is taken by a detached run, and a start while that run is going leaves it alone; the
+    start after it finds the copy taken and makes the upgrade's changes itself."""
     ver = version(root)
     if ver is None and upto == 6:
         return [], None
     head = "Upgrade to %s" % ver if upto == 6 else "Setup"
-    if not dry and upto == 6 and not background and _bg_running(root):
+    if not dry and upto == 6 and _bg_running(root):
         return [], None              # a detached run holds the upgrade; the board says so
     fd = None
     if not dry:
         fd = _lock(root, deadline)
         if fd is None:
             return [], None
-    covered = False
     try:
         if fd is not None and upto == 6 and stamped(root) == ver:
             return [], None          # the run that held the lock finished it while this one waited
@@ -2529,14 +2824,15 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                 return lines, _stopped(root, ver, n, STOPPED_TIME % (ver, what))
             if n == 2 and upto == 6 and not dry:
                 rec = _read_json(root / STOPPED) or {}
+                # the last start handed a whole copy to a detached run that did not finish it: do not spend this
+                # start's time trying it here again
+                again = bool(rec.get("background")) and rec.get("version") == ver and not _snapshots(root)
                 try:
-                    said = ensure_snapshot(root, ver or "", deadline,
-                                           prefer_bg=bool(rec.get("background")) and rec.get("version") == ver)
+                    said = ensure_snapshot(root, ver or "", deadline, prefer_bg=again)
                 except _Background:
                     return lines, _go_background(root, ver or "")
                 except Stop as e:
                     return lines, _stopped(root, ver, n, str(e))
-                covered = True
                 if said:
                     lines.append("%s: %s" % (head, said))
             elif n == 2 and upto == 6 and dry:
@@ -2562,25 +2858,27 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                              "ask of you is in docs/handoff-reverse-caller.md." % (head, ver))
         return lines, None
     finally:
-        if covered and (deadline is None or time.time() < deadline):
-            _snap_after(root)
         if fd is not None:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
 
 def _dry_snapshot(root: Path, head: str) -> List[str]:
+    coll: List[dict] = []
     try:
         coll = [_snap_collect(root, r, None) for r in _snap_repos(root)]
+        if not coll:
+            return []
+        _, todo = _snap_plan(root, coll, None)
     except (_SnapFail, _OutOfTime):
         return []
-    if not coll:
+    finally:
+        _drop_scratch(coll)
+    if not todo:
         return []
-    rec = _read_json(root / SNAP_RECORD) or {}
-    if rec.get("stamp") in _snapshots(root) and _snap_fp(coll) in (rec.get("before"), rec.get("after")):
-        return []
-    return ["%s: would keep a safety copy of everything in target/ (about %s, in state/upgrade-snapshot/) before "
-            "changing anything there." % (head, _mb(_snap_estimate(coll)))]
+    return ["%s: would keep a safety copy of %s target/ (about %s, in state/upgrade-snapshot/) before changing "
+            "anything there." % (head, "what is new in" if _snapshots(root) else "everything in",
+                                 _mb(_snap_estimate(todo)))]
 
 
 def _stopped(root: Path, ver: Optional[str], step: int, sentence: str, background: bool = False) -> str:
@@ -2606,7 +2904,8 @@ def pending_line(root: Path) -> Optional[str]:
         rec = None
     if isinstance(rec, dict) and rec.get("version") == ver and isinstance(rec.get("sentence"), str):
         if rec.get("background") and not _bg_running(root):
-            return SNAP_BG_GONE % ver
+            bg = _read_json(root / BACKGROUND) or {}
+            return SNAP_BG_COPIED % ver if bg.get("copied") and bg.get("version") == ver else SNAP_BG_GONE % ver
         return rec["sentence"]
     return "upgrade to %s has not run yet — it runs at the next session start in this home" % ver
 
@@ -2846,8 +3145,8 @@ def main(argv: List[str]) -> int:
         print("Already upgraded to %s; nothing to do." % ver)
         return 0
     if upto == 6 and not dry and _bg_running(root):
-        print("The upgrade to %s is running in the background (state/upgrade.log); the board says when it is done."
-              % ver)
+        print("The upgrade to %s is taking its safety copy of target/ in the background (state/upgrade.log); the "
+              "board says when it is done." % ver)
         return 0
     lines, stop = run(root, dry=dry, upto=upto)
     for ln in lines:

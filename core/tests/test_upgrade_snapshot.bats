@@ -93,6 +93,37 @@ busy_target() {
   git -C "$T" checkout -q -b feat/x refs/remotes/origin/main; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
   printf 'MY NOTES\n' > "$T/notes.md"; printf 'MY SETTINGS\n' > "$T/my.local"
   git -C "$T/sub" checkout -q --detach; printf 'd\n' > "$T/sub/d.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m "detached work"
+  BT_MAIN="$(git -C "$T" rev-parse main)"; BT_PARK="$(git -C "$T" rev-parse park/y)"; BT_FEAT="$(git -C "$T" rev-parse feat/x)"
+  BT_S0="$(git -C "$T" rev-parse 'stash@{0}')"; BT_S1="$(git -C "$T" rev-parse 'stash@{1}')"; BT_SUB="$(git -C "$T/sub" rev-parse HEAD)"
+  export BT_MAIN BT_PARK BT_FEAT BT_S0 BT_S1 BT_SUB
+}
+
+# held <when> — the kept copies, together, hold everything busy_target made: notes.md and my.local by content, main's
+# unpushed commit, park/y, feat/x, both stash entries and sub's detached commit — each in the manifest and in the
+# bundle's own list of heads (a copy that was never taken, or holds less, fails here).
+held() {
+  python3 - "$DAEDALUS_HOME" "$1" <<'PY' || return 1
+import glob, hashlib, json, os, subprocess, sys
+home, when = sys.argv[1], sys.argv[2]
+e = os.environ
+refs, files, heads = set(), set(), set()
+for mf in sorted(glob.glob(home + "/state/upgrade-snapshot/*/manifest.json")):
+    m, d = json.load(open(mf)), os.path.dirname(mf)
+    for r in m["repos"]:
+        refs |= {(r["label"], x["kind"], x["name"], x["sha"]) for x in r["refs"]}
+        files |= {(r["label"], f["path"], f["sha256"]) for f in r["files"]}
+        if r["bundle"]:
+            out = subprocess.check_output(["git", "bundle", "list-heads", os.path.join(d, r["bundle"])], text=True)
+            heads |= {(r["label"], ln.split(" ")[0]) for ln in out.splitlines()}
+t, s = "target/thing", "target/thing/sub"
+sha = lambda b: hashlib.sha256(b).hexdigest()
+want_files = {(t, "notes.md", sha(b"MY NOTES\n")), (t, "my.local", sha(b"MY SETTINGS\n"))}
+want_refs = {(t, "branch", "refs/heads/main", e["BT_MAIN"]), (t, "branch", "refs/heads/park/y", e["BT_PARK"]),
+             (t, "branch", "refs/heads/feat/x", e["BT_FEAT"]), (t, "stash-entry", "stash@{0}", e["BT_S0"]),
+             (t, "stash-entry", "stash@{1}", e["BT_S1"]), (s, "head", "HEAD", e["BT_SUB"])}
+bad = sorted(want_files - files) + sorted(want_refs - refs) + sorted({(x[0], x[3]) for x in want_refs} - heads)
+assert not bad, "%s: the kept copies lack %s" % (when, bad)
+PY
 }
 
 @test "the safety copy is written and checked before the upgrade's first change in target/ — every repository's bundle verified, every file in the manifest with its sha256 — and the run says where it is" {
@@ -143,6 +174,9 @@ kill_each() {
     KILL_AT=$n PATH="$B/shim:$PATH" run python3 "$UP"
     [ -e "$B/killed" ] || { [ "$status" -eq 0 ] || { echo "run $n: $output"; return 1; }; break; }
     [ "$status" -eq 137 ] || { echo "kill $n: exit $status: $output"; return 1; }
+    grep -q " bundle verify " "$B/git.log" || { echo "kill $n came before the copy was checked"; return 1; }
+    [ "$(snaps | grep -c .)" -ge 1 ] || { echo "after kill $n: no safety copy was kept"; return 1; }
+    held "after kill $n" || return 1
     run python3 "$UP" --restore-help
     case "$output" in *"no longer has"*|*"Bring it back"*|*"bring it back"*) echo "after kill $n: $output"; return 1 ;; esac
     [ "$(printf '%s\n' "$output" | grep -c "$NOTHING")" = "$(snaps | grep -c .)" ] || { echo "after kill $n: $output"; return 1; }
@@ -154,6 +188,7 @@ kill_each() {
     run python3 "$UP" --restore-help
     [ "$(printf '%s\n' "$output" | grep -c "$NOTHING")" = "$(snaps | grep -c .)" ] || { echo "after kill $n and a full run: $output"; return 1; }
     [ "$(cat "$DAEDALUS_HOME"/worktrees/*/thing/notes.md 2>/dev/null)" = "MY NOTES" ] || { echo "after kill $n: notes.md is not in one window"; return 1; }
+    held "after kill $n and a full run" || return 1
     n=$((n+4))
   done
   CUTS=$((n-4))
@@ -332,25 +367,34 @@ kill_each() {
   case "$output" in *"safety copy"*) echo "$output"; return 1 ;; esac
 }
 
-@test "a copy too slow for the session start's budget: the start says the upgrade runs in the background, a detached run takes the copy and finishes the upgrade, and the board says it is done" {
+@test "a copy too slow for the session start's budget: the start says the upgrade runs in the background; the detached run only takes the copy and changes nothing in target/; the next start finishes the upgrade in the hook with no second copy" {
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  tip="$(git -C "$T" rev-parse HEAD)"
   P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
   run env UPGRADE_TEST_SNAPSHOT_SLOW=1 bash -c 'printf "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\",\"source\":\"startup\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/session-start.py"'
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"The upgrade to 0.7.0 needs a few minutes the first time; it runs in the background and the board will say when it is done"*) : ;; *) echo "$output"; return 1 ;; esac
-  for i in $(seq 1 150); do [ -e "$DAEDALUS_HOME/state/upgraded-to" ] && break; sleep 0.2; done
-  for i in $(seq 1 50); do grep -q '"running": false' "$DAEDALUS_HOME/state/upgrade-background.json" 2>/dev/null && break; sleep 0.2; done
-  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ] || { cat "$DAEDALUS_HOME/state/upgrade.log"; return 1; }
-  grep -q "Upgrade to 0.7.0: complete." "$DAEDALUS_HOME/state/upgrade.log"
+  for i in $(seq 1 150); do grep -q '"running": false' "$DAEDALUS_HOME/state/upgrade-background.json" 2>/dev/null && break; sleep 0.2; done
+  grep -q '"copied": true' "$DAEDALUS_HOME/state/upgrade-background.json" || { cat "$DAEDALUS_HOME/state/upgrade-background.json" "$DAEDALUS_HOME/state/upgrade.log"; return 1; }
   grep -q "a safety copy of everything in target/ is in state/upgrade-snapshot/" "$DAEDALUS_HOME/state/upgrade.log"
-  [ "$(git -C "$T" branch --show-current)" = main ]
-  [ -n "$(git -C "$T" for-each-ref --format="%(refname)" refs/heads/lease/)" ]
+  [ "$(snaps | grep -c .)" = 1 ]
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]                 # the detached run changed nothing in target/
+  [ "$(git -C "$T" branch --show-current)" = feat/x ]; [ "$(git -C "$T" rev-parse feat/x)" = "$tip" ]
   run bash -c 'printf "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"s1\",\"prompt\":\"hi\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/lease-board.py"'
-  case "$output" in *"The upgrade to 0.7.0 finished in the background (what it did is in state/upgrade.log). A safety copy of everything in target/ from before the upgrade is in state/upgrade-snapshot/"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"The upgrade to 0.7.0 took its safety copy of target/ in the background; it finishes at the next session start in this home"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"needs a few minutes"*) echo "$output"; return 1 ;; esac
+  run bash -c 'printf "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\",\"source\":\"startup\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/session-start.py"'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing was on feat/x"*"that work is now window"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"is in state/upgrade-snapshot/"*) echo "a second copy: $output"; return 1 ;; esac
+  [ "$(snaps | grep -c .)" = 1 ]; [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  run bash -c 'printf "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"s1\",\"prompt\":\"hi\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/lease-board.py"'
+  case "$output" in *"A safety copy of everything in target/ from before the upgrade is in state/upgrade-snapshot/"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"in the background"*) echo "$output"; return 1 ;; esac
 }
 
-@test "a run that finds target/ as the last run left it takes no second copy; a change since then does" {
+@test "a run that finds target/ as the last copy found it takes no second copy; a new file since then is copied by a second copy that holds only it" {
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
   printf 'mine\n' > "$T/x2.txt"; git -C "$T" checkout -q main; git -C "$T" checkout -q feat/x
   printf 'dirty\n' >> "$T/a.txt"
@@ -360,11 +404,105 @@ kill_each() {
   run python3 "$UP"
   [ "$status" -eq 1 ]; [ "$(snaps | grep -c .)" = 1 ]
   case "$output" in *"safety copy"*) echo "$output"; return 1 ;; esac
+  printf 'NEW SINCE\n' > "$T/new.md"
+  run python3 "$UP"           # a file no copy holds: a second copy holds it, and only it
+  [ "$status" -eq 1 ]; [ "$(snaps | grep -c .)" = 2 ] || { echo "$output"; snaps; return 1; }
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); got=[(r["label"], sorted(f["path"] for f in r["files"]), len(r["refs"])) for r in m["repos"]]; assert got == [("target/thing", ["new.md"], 0)], got' "$(newest)/manifest.json"
   git -C "$T" checkout -q -- a.txt
-  sleep 1
+  run python3 "$UP"           # nothing new: the discarded change, a copy holds; what is there, a copy holds too
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(snaps | grep -c .)" = 2 ] || { echo "$output"; snaps; return 1; }
+  run python3 "$UP" --restore-help
+  case "$output" in *"holds 1 thing target/ no longer has"*"target/thing: uncommitted change to file a.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(printf '%s\n' "$output" | grep -c "$NOTHING")" = 1 ] || { echo "$output"; return 1; }
+}
+
+@test "a change made in target/ while a run was going, after its copy was checked, is copied by the next run before that run changes anything" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  printf 'dirty\n' >> "$T/a.txt"
+  mkdir -p "$B/cgit"
+  cat > "$B/cgit/git" <<SH
+#!/bin/bash
+"$REAL_GIT" "\$@"; rc=\$?
+case " \$* " in
+  *" bundle verify "*) : > "$B/verified" ;;
+  *) [ -e "$B/verified" ] && [ ! -e "$T/concurrent.md" ] && printf 'WRITTEN DURING THE RUN\n' > "$T/concurrent.md" ;;
+esac
+exit \$rc
+SH
+  chmod +x "$B/cgit/git"
+  PATH="$B/cgit:$PATH" run python3 "$UP"
+  [ "$status" -eq 1 ]; case "$output" in *"has uncommitted changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -e "$T/concurrent.md" ]; [ "$(snaps | grep -c .)" = 1 ]
+  ! grep -q concurrent.md "$(newest)/manifest.json"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]; [ "$(snaps | grep -c .)" = 2 ] || { echo "$output"; snaps; return 1; }
+  grep -q '"path": "concurrent.md"' "$(newest)/manifest.json"
+  run python3 "$UP"
+  [ "$(snaps | grep -c .)" = 2 ] || { echo "$output"; snaps; return 1; }
+  rm "$T/concurrent.md"
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: untracked file concurrent.md"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a tag deleted after the upgrade, its commit left only in HEAD's reflog, is missing: --restore-help lists it, --forget-snapshot refuses, and the printed command brings it back" {
+  git -C "$T" checkout -q --detach; printf 'm\n' > "$T/m.txt"; git -C "$T" add -A; cmt "$T" -m "tagged work"
+  c="$(git -C "$T" rev-parse HEAD)"; git -C "$T" tag mine; git -C "$T" checkout -q main
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(snaps | grep -c .)" = 2 ]
+  grep -q '"name": "refs/tags/mine"' "$(newest)/manifest.json"
+  git -C "$T" tag -d mine >/dev/null
+  git -C "$T" cat-file -e "$c"           # still in the object store, but only HEAD's reflog reaches it
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: commit ${c:0:7} (\"tagged work\") — tag mine."*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP" --forget-snapshot
+  [ "$status" -eq 1 ]; case "$output" in *"tag mine"*"Nothing was removed"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -n "$(snaps)" ]
+  gone "$T"; ! git -C "$T" cat-file -e "$c" 2>/dev/null
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  [ "$(git -C "$T" rev-parse "refs/heads/restored/tag-mine-${c:0:7}")" = "$c" ]
+  run python3 "$UP" --restore-help
+  case "$output" in *"$NOTHING"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "staged content that matches neither HEAD nor the working copy is in the copy, and comes back after a reset and gc" {
+  printf 'STAGED ONLY\n' > "$T/a.txt"; git -C "$T" add a.txt; git -C "$T" show HEAD:a.txt > "$T/a.txt"
+  blob="$(git -C "$T" rev-parse :a.txt)"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]; case "$output" in *"has uncommitted changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  git init -q --bare "$B/empty"; git -C "$B/empty" fetch -q "$(newest)/1-thing.bundle" 'refs/*:refs/*'
+  git -C "$B/empty" cat-file -e "$blob" || { echo "the staged blob is not in the bundle"; return 1; }
+  git -C "$T" reset -q --hard; gone "$T"; ! git -C "$T" cat-file -e "$blob" 2>/dev/null
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: commit "*"the staged, uncommitted content of a.txt in $T"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  [ "$(git -C "$T" show "$(git -C "$T" for-each-ref --format='%(refname)' refs/heads/restored/ | head -1):a.txt")" = "STAGED ONLY" ]
+  run python3 "$UP" --restore-help
+  case "$output" in *"$NOTHING"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a reftable repository: every stash entry and every recent commit only a reflog holds are in the copy, and come back once cleared" {
+  git -C "$T" refs migrate --ref-format=reftable >/dev/null 2>&1 || skip "this git cannot make a reftable repository"
+  [ "$(git -C "$T" rev-parse --show-ref-format)" = reftable ]
+  printf 'first\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t stash push -q -m "first stash"
+  printf 'second\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t stash push -q -m "second stash"
+  git -C "$T" checkout -q -b tmp; printf 'r\n' > "$T/r.txt"; git -C "$T" add -A; cmt "$T" -m "reflog only"
+  r="$(git -C "$T" rev-parse HEAD)"; git -C "$T" checkout -q main; git -C "$T" branch -q -D tmp
+  s0="$(git -C "$T" rev-parse 'stash@{0}')"; s1="$(git -C "$T" rev-parse 'stash@{1}')"
+  run python3 "$UP"
+  [ -n "$(snaps)" ] || { echo "$output"; return 1; }
+  python3 - "$(newest)/manifest.json" "$s0" "$s1" "$r" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+refs = {(x["kind"], x["name"], x["sha"]) for x in m["repos"][0]["refs"]}
+want = {("stash-entry", "stash@{0}", sys.argv[2]), ("stash-entry", "stash@{1}", sys.argv[3])}
+assert want <= refs, sorted(refs)
+assert any(x[0] == "reflog" and x[2] == sys.argv[4] for x in refs), sorted(refs)
+PY
+  git -C "$T" stash clear; gone "$T"
+  run python3 "$UP" --restore-help
+  case "$output" in *"stash entry stash@{1}"*"first stash"*"stash entry stash@{0}"*"second stash"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"commit ${r:0:7} (\"reflog only\") — a commit from the last 30 days of HEAD's history."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "names are kept exactly: a file whose name holds a newline, and two whose names differ only in case (in two worktrees), come back byte for byte from the commands --restore-help prints" {

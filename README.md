@@ -87,13 +87,15 @@ window numbers itself. Each step acts once and says one line when it does:
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
 copy of everything there in `state/upgrade-snapshot/<stamp>` (every branch,
-stash and recent commit as a git bundle; every untracked, ignored or
-uncommitted file in a tar), stops instead if it cannot make one (no room, or
-over `upgrade.snapshot_max_mb`, 2048 by default), takes it in the background
-when it would not fit in a session start, and keeps it until `python3
-core/upgrade.py --forget-snapshot`, which refuses while anything in it is
-missing — `python3 core/upgrade.py --restore-help` lists what is, with the
-commands that bring each back.
+stash and recent commit as a git bundle, staged changes included; every
+untracked, ignored or uncommitted file in a tar), stops instead if it cannot
+make one (no room, or over `upgrade.snapshot_max_mb`, 2048 by default), and
+keeps it until `python3 core/upgrade.py --forget-snapshot`, which refuses while
+anything in it is missing — `python3 core/upgrade.py --restore-help` lists what
+is, with the commands that bring each back. A later run copies only what no
+kept copy holds yet. A copy that would not fit in a session start is taken in
+the background, and changes nothing; the next session start makes the
+upgrade's changes.
 
 It will not move a target checkout that holds work it could lose, and stops
 there before anything in that checkout moves: one with uncommitted changes
