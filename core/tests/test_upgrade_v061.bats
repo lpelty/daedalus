@@ -54,8 +54,8 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
   s="Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin). $TAIL"
-  case "$c" in *"$s"*"You are window 01 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"Upgrade to 0.7.0: complete."*|*"installed the pre-push hook"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"$s"*"This session has no window yet: windows open once the upgrade finishes"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*|*"installed the pre-push hook"*|*"You are window"*) echo "$c"; return 1 ;; esac
   [ ! -e "$H/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   [ "$(git -C "$T" rev-parse fix/in-flight)" = "$tip" ]
   run --separate-stderr prompt_s0
@@ -63,20 +63,20 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   # the operator says "pick it up"
   pick_it_up
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"Window 02 now holds fix/in-flight from target/thing (1 commit: \"the waiting fix\")"*"Everything unfinished in target/ is in windows now. Start a new session and the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Window 01 now holds fix/in-flight from target/thing (1 commit: \"the waiting fix\")"*"Everything unfinished in target/ is in windows now. Start a new session and the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
   # the next session finishes the upgrade
   run start_session s2
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 03"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
   # VERSION and the stamp
   [ "$(cat "$H/VERSION")" = 0.7.0 ]; [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]
-  # the in-flight branch is window 02; target/thing is the trunk mirror with no ahead
-  [ "$(lease_json 02 adopted_from)" = fix/in-flight ]
+  # the in-flight branch is window 01; target/thing is the trunk mirror with no ahead
+  [ "$(lease_json 01 adopted_from)" = fix/in-flight ]
   [ "$(git -C "$T" branch --show-current)" = main ]
   case "$(git -C "$T" status -sb | head -1)" in *ahead*) echo "still ahead"; return 1 ;; esac
   run bash "$H/core/lease.sh" list
-  case "$output" in *"- 02 "*"adopted from fix/in-flight"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"- 01 "*"adopted from fix/in-flight"*) : ;; *) echo "$output"; return 1 ;; esac
   # the hook in Daedalus's own checkout, outer and nested
   run python3 "$H/core/prepush.py" status "$T" "$T/sub"
   [ "$(printf '%s\n' "$output" | cut -f2 | sort -u)" = installed ] || { echo "$output"; return 1; }
@@ -109,6 +109,56 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   run start_session s3
   case "$output" in *"Upgrade to"*) echo "$output"; return 1 ;; esac
   [ "$(cd "$H" && find config.yaml vault/hot.md state/hindsight state/upgraded-to -type f | sort | xargs shasum)" = "$before" ]
+}
+
+target_bytes() {    # every file under target/, git's own included, by content (and every symlink by its target);
+  # FETCH_HEAD left out — the one file the upgrade's own fetch writes
+  (cd "$H/target" && find . \( -type f -o -type l \) ! -name FETCH_HEAD -print | LC_ALL=C sort | while IFS= read -r f; do
+     if [ -L "$f" ]; then printf 'L %s -> %s\n' "$f" "$(readlink "$f")"; else printf '%s  %s\n' "$(shasum < "$f" | cut -c1-40)" "$f"; fi
+   done)
+}
+
+@test "v0.6.1, pulled, with unfinished work — an unshipped branch and an untracked file, the checkout on a branch already on origin: the first new session stops the upgrade and numbers no window — every byte under target/, .git included, is as it was (FETCH_HEAD aside): no lease/01, no worktree record, no branch section, no pre-push hook; the board says the stop and that windows open once the upgrade finishes; lease.sh refuses to make a window with the same pointer, changing nothing; 'pick it up' still works and the next start completes and numbers itself (final verification, mode c)" {
+  ship_in_flight
+  git -C "$T" branch feat/unshipped; git -C "$T" checkout -q feat/unshipped
+  printf 'u\n' > "$T/u.txt"; git -C "$T" add -A; cmt "$T" -m "unshipped work"; git -C "$T" checkout -q fix/in-flight
+  printf 'my notes\n' > "$T/notes.txt"
+  pull_current
+  before="$(target_bytes)"
+  [ -n "$before" ] && printf '%s\n' "$before" | grep -q '/\.git/HEAD$'
+  run --separate-stderr start_session s1
+  [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
+  c="$(ctx_of "$output")"
+  s="Daedalus has unfinished work in target/thing: the branch feat/unshipped (1 commit not on origin), and 1 unsaved file. $TAIL"
+  case "$c" in *"$s"*"This session has no window yet: windows open once the upgrade finishes; a session started after that is numbered."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"You are window"*|*"you hold the pen"*|*"installed the pre-push hook"*|*"complete."*) echo "$c"; return 1 ;; esac
+  [ "$(target_bytes)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_bytes); return 1; }
+  [ ! -e "$H/state/upgraded-to" ]; [ -z "$(ls "$H/state/leases" 2>/dev/null)" ]
+  [ ! -e "$T/.git/refs/heads/lease/01" ] && [ ! -e "$T/.git/hooks/pre-push" ] && [ ! -d "$T/.git/worktrees" ]
+  ! grep -q 'branch "lease/' "$T/.git/config" "$T/sub/.git/config"
+  # the open session's next prompt: the stop, then that windows open once the upgrade finishes
+  run --separate-stderr prompt_s0
+  b="$(ctx_of "$output")"
+  [ "$(printf '%s\n' "$b" | sed -n 1p)" = "$s" ] || { echo "$b"; return 1; }
+  [ "$(printf '%s\n' "$b" | sed -n 2p)" = "No window opens until the upgrade finishes." ] || { echo "$b"; return 1; }
+  # a window made by hand is refused with the same pointer, and changes nothing either
+  for cmd in "create" "adopt feat/unshipped" "spawn task" "claim 01"; do
+    run --separate-stderr env DAEDALUS_SESSION_ID=s1 bash "$H/core/lease.sh" $cmd </dev/null
+    [ "$status" -eq 1 ] || { echo "$cmd: status $status: $output $stderr"; return 1; }
+    [ "$stderr" = "daedalus: no window opens until the upgrade to 0.7.0 finishes, so \`core/lease.sh ${cmd%% *}\` is refused. $s" ] \
+      || { echo "$cmd: $stderr"; return 1; }
+  done
+  [ "$(target_bytes)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_bytes); return 1; }
+  [ -z "$(ls "$H/state/leases" 2>/dev/null)" ]
+  # "pick it up" is the one way in, and the next start finishes the upgrade and numbers itself
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"now holds feat/unshipped from target/thing"*"Everything unfinished in target/ is in windows now. Start a new session and the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  run start_session s2
+  c="$(ctx_of "$output")"
+  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 0"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"windows open once the upgrade finishes"*) echo "$c"; return 1 ;; esac
+  [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]
 }
 
 @test "v0.6.1, pulled, with an uncommitted edit hidden from git status by skip-worktree on the in-flight checkout: the first new session stops the upgrade naming the file — no stamp, no window, the edit where it was; doctor names it with how to clear the mark (release-candidate review 2, finding 6)" {
@@ -300,8 +350,10 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   c="$(ctx_of "$output")"
   case "$c" in *"upgrade to 0.7.0 incomplete: target/thing holds lock files a git command left when it was cut off (target/thing/.git/packed-refs.lock, target/thing/.git/refs/heads/fix/in-flight.lock) — if no git command is running there, remove them"*) : ;; *) echo "$c"; return 1 ;; esac
   rm "$T/.git/packed-refs.lock" "$T/.git/refs/heads/fix/in-flight.lock"
-  # s1 and s2 are windows 01 and 02; a window branch's own lock file, left by a cut-off add, is cleared, not a stop
-  : > "$T/.git/refs/heads/lease/03.lock"; touch -t 202001010000 "$T/.git/refs/heads/lease/03.lock"
+  # s1 and s2 have no window (none opens until the upgrade finishes); a window branch's own lock file, left by a
+  # cut-off add, is cleared, not a stop
+  [ ! -d "$T/.git/refs/heads/lease" ]; mkdir -p "$T/.git/refs/heads/lease"
+  : > "$T/.git/refs/heads/lease/01.lock"; touch -t 202001010000 "$T/.git/refs/heads/lease/01.lock"
   run start_session s3
   c="$(ctx_of "$output")"
   case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin)."*) : ;; *) echo "$c"; return 1 ;; esac
@@ -825,6 +877,11 @@ not_complete() { case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return
   case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (2 commits not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$T/thing.txt/notes.md")" = "MY WORK INSIDE THE GITLINK DIR" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   tars_have "MY WORK INSIDE THE GITLINK DIR"
+  run bash "$H/core/lease.sh" adopt fix/in-flight          # no window opens while the upgrade is not stamped
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"no window opens until the upgrade to 0.7.0 finishes, so \`core/lease.sh adopt\` is refused. Daedalus has unfinished work in target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
+  # adopt's own refusal, in a home whose upgrade is stamped
+  printf '0.7.0\n' > "$H/state/upgraded-to"
   run bash "$H/core/lease.sh" adopt fix/in-flight
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   case "$output" in *"(thing.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac

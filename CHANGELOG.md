@@ -30,6 +30,9 @@ Every deployment takes this release, and the next, the same way: `git pull
   the branch fix-login (2 commits not on GitHub), and 3 unsaved files. Nothing
   was changed. Say 'pick it up' to move it into windows, or finish and ship it
   the usual way, then start a new session".
+- Until the upgrade finishes, no session gets a window, and `core/lease.sh`
+  makes none: the board says "No window opens until the upgrade finishes."
+  So nothing in `target/` changes, `.git` included, until you say so.
 - Say "pick it up", and each piece becomes a numbered window. Then start a
   new session; it finishes the upgrade. Or ship the work the usual way first.
 - With nothing unfinished, the upgrade finishes by itself. A checkout on a
@@ -238,7 +241,15 @@ shows what is left.
   "pick it up" (`core/lease.sh adopt --all-unfinished`) makes each piece a
   window — unsaved files saved first as one commit, each stash entry as a
   commit of what it saved — and names what it cannot move with what to do;
-  the next start finishes. With nothing unfinished, one bounded fetch, and a
+  the next start finishes. Until the stamp is written (the upgrade stopped,
+  runs in the background, or has not run) a session start numbers, binds and
+  makes no window, so it adds no `lease/<NN>`, worktree record, branch section
+  or pre-push hook to target/'s repositories after a stop that said "Nothing
+  was changed"; it says "This session has no window yet: windows open once
+  the upgrade finishes", the board says "No window opens until the upgrade
+  finishes." under the stop, and `lease.sh` create, claim, spawn, adopt and
+  split refuse with that pointer and the stop — all but `adopt
+  --all-unfinished`. With nothing unfinished, one bounded fetch, and a
   checkout on a branch already on origin goes back on its trunk, the branch
   left as it was. Ignored files and work inside a submodule are named in a
   line and by doctor and stay where they are.

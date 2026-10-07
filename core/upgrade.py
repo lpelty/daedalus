@@ -2967,6 +2967,29 @@ def copy_missing(root: Path) -> bool:
     return pending(root) and bool(_uncopied(root))
 
 
+# No window while the upgrade is not stamped — stopped, handed to a run in the background, or not run yet (final
+# verification, mode c): a session start that numbered one added lease/<NN>, a worktree record, a branch section and
+# the pre-push hook to target/'s repositories right after the stop said "Nothing was changed". The session start
+# says WINDOWS_WAIT, the board on every prompt WINDOWS_WAIT_BOARD under the stop, and lease.sh refuses what makes a
+# window with WINDOWS_WAIT_LEASE — all but "pick it up" (adopt --all-unfinished), the way in that the stop names.
+WINDOWS_WAIT = ("This session has no window yet: windows open once the upgrade finishes; a session started after that "
+                "is numbered")
+WINDOWS_WAIT_BOARD = "No window opens until the upgrade finishes."
+WINDOWS_WAIT_LEASE = "no window opens until the upgrade to %s finishes, so `core/lease.sh %s` is refused. %s"
+
+
+def windows_wait_lease(root: Path, cmd: str, args: List[str]) -> Optional[str]:
+    """lease.sh's refusal of a command that makes or binds a window while the upgrade is not stamped, or None: the
+    stop the board shows (or "has not run yet"), after the pointer. `adopt --all-unfinished` is never refused here."""
+    import leaselib as ll
+    if cmd not in ll.WINDOW_MAKERS or (cmd == "adopt" and args == ["--all-unfinished"]) or not pending(root):
+        return None
+    pend = pending_line(root) or ""
+    if pend and not pend.endswith("."):
+        pend += "."
+    return WINDOWS_WAIT_LEASE % (version(root), cmd, pend)
+
+
 def snapshot_line(root: Path) -> Optional[str]:
     """The board's line while a copy is kept."""
     snaps = _snapshots(root)

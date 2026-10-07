@@ -266,6 +266,11 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   [ "$(cat "$T/a.txt")" = "OPERATOR LOCAL SETTINGS" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
   printf 'f\n' > "$T/f.txt"; git -C "$T" add -A; cmt "$T" -m "more work"
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt fix/in-flight      # no window opens while the upgrade is not stamped
+  [ "$status" -ne 0 ]
+  case "$output" in *"no window opens until the upgrade to 0.7.0 finishes, so \`core/lease.sh adopt\` is refused. upgrade to 0.7.0 incomplete: target/thing has untracked files"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"            # adopt's own refusal, in a home upgraded earlier
   run bash "$DAEDALUS_HOME/core/lease.sh" adopt fix/in-flight
   [ "$status" -ne 0 ]
   case "$output" in *"target/thing has ignored files that putting it back on main at origin/main would overwrite (a.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -340,9 +345,14 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   run python3 "$UP" --doctor
   case "$output" in *"NOTE     target/thing has uncommitted changes git status does not show, in files marked skip-worktree (a.txt) — no window has them; clear the mark (git -C target/thing update-index --no-skip-worktree a.txt) and commit them on a branch"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"target/thing/sub has uncommitted"*) echo "$output"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt fix/in-flight      # no window opens while the upgrade is not stamped
+  [ "$status" -ne 0 ]
+  case "$output" in *"no window opens until the upgrade to 0.7.0 finishes, so \`core/lease.sh adopt\` is refused. Daedalus has unfinished work in target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"            # adopt's own refusal, in a home upgraded earlier
   run bash "$DAEDALUS_HOME/core/lease.sh" adopt fix/in-flight
   [ "$status" -ne 0 ]
   case "$output" in *"target/thing has uncommitted changes git status does not show, in files marked skip-worktree (a.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/state/upgraded-to"
   # assume-unchanged: the same stop
   git -C "$T" update-index --no-skip-worktree a.txt; git -C "$T" update-index --assume-unchanged a.txt
   run python3 "$UP"

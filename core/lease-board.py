@@ -67,7 +67,10 @@ def main() -> int:
     lead = []
     try:
         import upgrade as up
-        lead.append(up.pending_line(v.ROOT))
+        pend = up.pending_line(v.ROOT)
+        lead.append(pend)
+        if pend:            # no window is made until the stamp is written (session-start.py)
+            lead.append(up.WINDOWS_WAIT_BOARD)
         lead.append(up.snapshot_line(v.ROOT))
     except Exception:
         pass

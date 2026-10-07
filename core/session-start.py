@@ -181,7 +181,12 @@ def main() -> int:
             uncopied = False
         if uncopied and not visitor:
             bind_notes.append(up.COPY_FIRST + ".")
-        if upgrade_pending(root) and (uncopied or not (root / "state" / "leases").is_dir()):
+        # No window at all while the upgrade is not stamped — it stopped (on unfinished work, out of time, ...), a
+        # run in the background holds it, or it did not get to run: numbering one adds lease/<NN>, a worktree
+        # record, a branch section and the pre-push hook to target/'s repositories, right after a stop that said
+        # "Nothing was changed" (final verification, mode c). The board says the stop and that windows open once
+        # the upgrade finishes; "pick it up" (lease.sh adopt --all-unfinished) is the way in.
+        if upgrade_pending(root):
             skip_bind = True
             try:
                 import upgrade as up
@@ -190,6 +195,11 @@ def main() -> int:
                 pend = None
             if pend and pend not in bind_notes:
                 bind_notes.append(pend)
+            if not uncopied:
+                try:
+                    bind_notes.append(up.WINDOWS_WAIT + ".")
+                except Exception:
+                    pass
     lease_nn = None
     try:
         import leaselib as ll

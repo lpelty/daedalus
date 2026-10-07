@@ -71,7 +71,10 @@ window numbers itself. Each step acts once and says one line when it does:
    target/app: the branch fix-login (2 commits not on GitHub), and 3 unsaved
    files. Nothing was changed. Say 'pick it up' to move it into windows, or
    finish and ship it the usual way, then start a new session." The board
-   repeats it on every prompt, and `core/doctor.sh` shows it. "Pick it up" is
+   repeats it on every prompt, and `core/doctor.sh` shows it. Until the
+   upgrade finishes no session gets a window and `core/lease.sh` makes none
+   (the board says so), so nothing in `target/` changes, its `.git` included;
+   "pick it up" is the one exception. "Pick it up" is
    `core/lease.sh adopt --all-unfinished`. Each piece becomes a numbered
    window. Unsaved files are saved first, as one commit. Each stash entry
    becomes a commit of what it saved, and leaves the stash. What it cannot

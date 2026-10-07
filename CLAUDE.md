@@ -204,7 +204,10 @@ files, a stash, a git operation stopped part-way, a worktree made by hand —
 it stops before changing anything there and says one sentence naming what it
 found ("Daedalus has unfinished work in target/<repo>: ... Say 'pick it up'
 to move it into windows, ..."). Repeat that sentence to the operator word for
-word; the board repeats it on every prompt. When the operator then says
+word; the board repeats it on every prompt. Until the upgrade finishes this
+session has no window and `core/lease.sh` makes none (create, claim, spawn
+and adopt of a branch are refused, naming the stop); do not try to get one.
+When the operator then says
 "pick it up", run `core/lease.sh adopt --all-unfinished` and report what it
 printed: each window it made (number, repo, commits), and anything it could
 not move with what to do. Then tell the operator that the next session start

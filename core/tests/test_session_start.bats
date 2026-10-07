@@ -516,7 +516,7 @@ EOF
 
 # --- the upgrade at step 0 (spec §14; plan 5 Task 4) -------------------------------
 
-@test "step 0: a home that pulled 0.7.0 with an in-flight branch stops the upgrade at the first interactive start, changing nothing in target/ — this window numbers 01 and takes the pen; 'pick it up' makes the branch window 02; the next start completes the upgrade, the marker records the trunk base; the context says each step once" {
+@test "step 0: a home that pulled 0.7.0 with an in-flight branch stops the upgrade at the first interactive start, changing nothing in target/ — this window gets no number and is told windows open once the upgrade finishes; 'pick it up' makes the branch window 01; the next start completes the upgrade, numbers itself 02 and takes the pen, the marker records the trunk base; the context says each step once" {
   cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
@@ -525,19 +525,21 @@ EOF
   run start s1 startup
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
-  case "$c" in *"Daedalus has unfinished work in target/thing: the branch feat/x (1 commit not on origin). Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."*"You are window 01 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch feat/x (1 commit not on origin). Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."*"This session has no window yet: windows open once the upgrade finishes; a session started after that is numbered."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"You are window"*|*"hold the pen"*) echo "$c"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = feat/x ]
-  [ "$(lease_json 01 session_id)" = s1 ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  ! git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null; [ ! -e "$T/.git/hooks/pre-push" ]
   run bash "$DAEDALUS_HOME/core/lease.sh" adopt --all-unfinished </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"Window 02 now holds feat/x from target/thing (1 commit: \"in flight\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Window 01 now holds feat/x from target/thing (1 commit: \"in flight\")"*) : ;; *) echo "$output"; return 1 ;; esac
   P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
   run start s2 startup
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 03"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
-  [ "$(lease_json 02 adopted_from)" = feat/x ]; [ "$(lease_json 03 session_id)" = s2 ]
+  [ "$(lease_json 01 adopted_from)" = feat/x ]; [ "$(lease_json 02 session_id)" = s2 ]
   python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"] and not m["target_base_error"], m' "$DAEDALUS_HOME/state/session-s2.json"
   P3="$(live_pid)"; registry_entry "$P3" s3 interactive cli daedalus-xx
   run start s3 startup

@@ -3316,6 +3316,9 @@ VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "relea
                    "rebase", "split", "adopt")
 # what makes, moves or removes a window's worktree in target/'s repositories: refused while the upgrade's safety copy
 # of target/ is not taken (safety-copy review 3, finding 4)
+# what makes or binds a window: refused while the upgrade is not stamped (upgrade.windows_wait_lease), all but
+# `adopt --all-unfinished`
+WINDOW_MAKERS = ("create", "claim", "spawn", "adopt", "split")
 COPY_GATED = ("create", "claim", "spawn", "release", "done", "sweep", "rebase", "split", "adopt")
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
@@ -3722,6 +3725,17 @@ def main(argv: list) -> int:
         if gated:
             sys.stderr.write("daedalus: %s\n" % (up.COPY_FIRST_LEASE % cmd))
             return 1
+    wait = None
+    if cmd in WINDOW_MAKERS:        # upgrade.py is loaded only for these: `resolve` runs on every target_path
+        try:
+            import upgrade as up
+            wait = up.windows_wait_lease(root, cmd, args)
+        except Exception:
+            wait = None
+    if wait:
+        # while the upgrade is not stamped no window is made or bound: target/ stays as the stop left it
+        sys.stderr.write("daedalus: %s\n" % wait)
+        return 1
     if cmd == "validate-id":
         return 0 if args and valid_id(args[0]) else 1
     if cmd == "validate-alias":
