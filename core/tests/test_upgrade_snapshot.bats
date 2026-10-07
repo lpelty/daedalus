@@ -999,3 +999,40 @@ PY
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$cmd"; echo "$output"; return 1; }
 }
+
+# --- release-candidate red team 2 -----------------------------------------------------------------------------
+
+@test "a checkout under core.autocrlf true, nothing touched (every text file CRLF on disk, as a checkout writes it): the upgrade completes, and the copy holds none of them as a change (release-candidate red team 2, finding 5)" {
+  git -C "$T" checkout -q -b fix/in-flight
+  printf 'a\nb\n' > "$T/notes.txt"; printf 'r\n' > "$T/readme.md"; printf '*.md text\n' > "$T/.gitattributes"
+  git -C "$T" add -A; cmt "$T" -m notes
+  git -C "$T" config core.autocrlf true; git -C "$T" rm -q -r --cached .; git -C "$T" reset -q --hard
+  grep -q $'\r' "$T/notes.txt"; grep -q $'\r' "$T/readme.md"; [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  manifest_has "not any(f['path'] in ('notes.txt', 'readme.md') for f in r['files'])"
+}
+
+@test "the check of a checkout cut off part-way counts a file committed with CRLF under text=auto, as the checkout wrote it, as the commit's — and an edited one as neither (release-candidate red team 2, finding 6)" {
+  R="$B/crlf-repo"; git init -q -b main "$R"
+  printf '@echo off\r\necho hi\r\n' > "$R/run.bat"; printf 'x\n' > "$R/x.txt"; git -C "$R" add -A; cmt "$R" -m one
+  printf '* text=auto\n' > "$R/.gitattributes"; git -C "$R" add .gitattributes; cmt "$R" -m two
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import upgrade; from pathlib import Path; print(upgrade._neither(Path(sys.argv[2]), "HEAD~1", "HEAD", ["run.bat", "x.txt"]))' "$DAEDALUS_HOME/core" "$R"
+  [ "$output" = "[]" ] || { echo "$output"; return 1; }
+  printf '@echo off\r\necho bye\r\n' > "$R/run.bat"
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import upgrade; from pathlib import Path; print(upgrade._neither(Path(sys.argv[2]), "HEAD~1", "HEAD", ["run.bat", "x.txt"]))' "$DAEDALUS_HOME/core" "$R"
+  [ "$output" = "['run.bat']" ] || { echo "$output"; return 1; }
+}
+
+@test "with core.trustctime false, an edit of the same size with its mtime put back to a file committed with CRLF under text=auto is still found, and the untouched one beside it is not (release-candidate red team 2, finding 6)" {
+  git -C "$T" checkout -q -b fix/in-flight
+  printf '@echo off\r\necho hi\r\n' > "$T/run.bat"; printf '@echo off\r\necho hi\r\n' > "$T/two.bat"; git -C "$T" add -A; cmt "$T" -m bats
+  printf '* text=auto\n' > "$T/.gitattributes"; git -C "$T" add .gitattributes; cmt "$T" -m normalize
+  git -C "$T" config core.trustctime false
+  touch -t 202601010000 "$T/two.bat"; git -C "$T" update-index --refresh >/dev/null; sleep 1
+  cp -p "$T/two.bat" "$B/ref"; printf '@echo off\r\necho yo\r\n' > "$T/two.bat"; touch -r "$B/ref" "$T/two.bat"
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path; print(ll.stat_blind_edits(Path(sys.argv[2])))' "$DAEDALUS_HOME/core" "$T"
+  [ "$output" = "['two.bat']" ] || { echo "$output"; return 1; }
+}

@@ -454,3 +454,224 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   [ "$(cat "$H/worktrees/01/thing/notes.md")" = "MY NOTES" ]; [ "$(cat "$H/worktrees/01/thing/f.txt")" = f ]
   ! git -C "$T" rev-parse -q --verify refs/heads/fix/in-flight >/dev/null
 }
+
+# --- release-candidate red team 2 -----------------------------------------------------------------------------
+
+lib_origin() {      # origin's main gains a submodule lib; target/thing's checkout of it is initialized
+  sd="$B/seed-lib"; git init -q -b main "$sd"; printf 'lib\n' > "$sd/lib.txt"; git -C "$sd" add -A; cmt "$sd" -m lib
+  git init -q --bare -b main "$B/v061/lib.git"; git -C "$sd" push -q "$B/v061/lib.git" main
+  git clone -q "$B/v061/thing.git" "$B/mk"
+  git -C "$B/mk" -c protocol.file.allow=always submodule add -q "$B/v061/lib.git" lib >/dev/null 2>&1
+  cmt "$B/mk" -m "add lib"; git -C "$B/mk" push -q origin main
+  git -C "$T" fetch -q origin
+}
+lib_init() { git -C "$T" -c protocol.file.allow=always submodule update -q --init >/dev/null 2>&1; L="$T/lib"; }
+mk_moves() {        # one more commit on origin's main, made from the scratch clone
+  git -C "$B/mk" pull -q --ff-only origin main
+  printf 'moved\n' > "$B/mk/moved.txt"; git -C "$B/mk" add moved.txt; cmt "$B/mk" -m "moved on"; git -C "$B/mk" push -q origin main
+}
+
+@test "v0.6.1, pulled, with submodule.recurse set and an uncommitted edit in a submodule, main ahead of origin: the trunk's reset leaves the submodule's working tree alone — the edit is still there after 'complete' (release-candidate red team 2, finding 1)" {
+  lib_origin
+  git -C "$T" checkout -q main; git -C "$T" merge -q --ff-only refs/remotes/origin/main; lib_init
+  printf 'A\n' > "$T/ahead.txt"; git -C "$T" add ahead.txt; cmt "$T" -m "ahead on main"
+  mk_moves
+  git -C "$T" config submodule.recurse true
+  printf 'LIB UNCOMMITTED EDIT\n' > "$L/lib.txt"; printf 'u\n' > "$L/libu.txt"
+  [ -z "$(git -C "$T" status --porcelain --untracked-files=no --ignore-submodules=dirty)" ]
+  pull_current
+  s1_ctx
+  case "$c" in *"target/thing's main was 1 commit ahead of origin/main"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(cat "$L/lib.txt")" = "LIB UNCOMMITTED EDIT" ] || { echo "the edit in lib is gone: $(cat "$L/lib.txt")"; return 1; }
+  [ "$(cat "$L/libu.txt")" = u ]
+  [ "$(git -C "$T" rev-parse refs/heads/main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
+}
+
+@test "v0.6.1, pulled, with submodule.recurse set, on a branch whose commit moves the submodule, with an uncommitted edit in it: the checkout back to main leaves the submodule's working tree alone — the edit is still there after 'complete' (release-candidate red team 2, finding 1)" {
+  lib_origin
+  git -C "$T" checkout -q main; git -C "$T" merge -q --ff-only refs/remotes/origin/main; git -C "$T" branch -D -q fix/in-flight
+  lib_init; git -C "$T" checkout -q -b fix/in-flight
+  printf 'lib2\n' > "$L/lib2.txt"; git -C "$L" add lib2.txt; cmt "$L" -m "lib 2"; git -C "$L" push -q origin HEAD:main
+  git -C "$T" add lib; cmt "$T" -m "bump lib"
+  mk_moves
+  git -C "$T" config submodule.recurse true
+  printf 'LIB UNCOMMITTED EDIT\n' > "$L/lib.txt"; sum="$(shasum "$L/lib.txt")"
+  [ -z "$(git -C "$T" status --porcelain --untracked-files=no --ignore-submodules=dirty)" ]
+  pull_current
+  s1_ctx
+  case "$c" in *"target/thing was on fix/in-flight (1 commit not on origin/main: \"bump lib\")"*"that work is now window 01"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(shasum "$L/lib.txt")" = "$sum" ] || { echo "the edit in lib is gone: $(cat "$L/lib.txt")"; return 1; }
+  [ "$(git -C "$T" branch --show-current)" = main ]
+}
+
+@test "v0.6.1, pulled, with fetch.prune and fetch.pruneTags set and a tags refspec configured, and tags that are the only refs to a commit: the upgrade's fetch deletes no tag — on a run that stops on an untracked file in the way, on the run that completes, and in lease.sh adopt (release-candidate red team 2, finding 2)" {
+  git -C "$T" checkout -q --detach main
+  printf 'exp\n' > "$T/exp.txt"; git -C "$T" add exp.txt; cmt "$T" -m "tagged experiment"; exp="$(git -C "$T" rev-parse HEAD)"
+  git -C "$T" -c user.email=t@x -c user.name=t tag -a -m keep exp/keep; git -C "$T" tag exp/light
+  git -C "$T" checkout -q fix/in-flight
+  git -C "$T" config fetch.prune true; git -C "$T" config fetch.pruneTags true
+  git -C "$T" config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
+  git clone -q "$B/v061/thing.git" "$B/mk"; mk_moves
+  printf 'MINE\n' > "$T/moved.txt"
+  tags() { git -C "$T" tag -l | tr '\n' ' '; }
+  pull_current
+  s1_ctx
+  case "$c" in *"untracked files that putting it back on main would overwrite (moved.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(tags)" = "exp/keep exp/light " ] || { echo "tags after the stopped run: [$(tags)]"; return 1; }
+  rm "$T/moved.txt"
+  run --separate-stderr start_session s2
+  c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(tags)" = "exp/keep exp/light " ] || { echo "tags after the run that completed: [$(tags)]"; return 1; }
+  [ "$(git -C "$T" rev-parse exp/light)" = "$exp" ]
+  git -C "$T" branch side main; git -C "$T" checkout -q side
+  printf 's\n' > "$T/side.txt"; git -C "$T" add side.txt; cmt "$T" -m "side work"; git -C "$T" checkout -q main
+  run bash "$H/core/lease.sh" adopt side
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(tags)" = "exp/keep exp/light " ] || { echo "tags after lease.sh adopt: [$(tags)]"; return 1; }
+}
+
+@test "v0.6.1, pulled, on the in-flight branch: a start cut off after it made window 01, before the checkout back to main, then a commit more on the branch — the next start names the commit window 01 lacks and how to rename the branch, never 'now window 01' or 'complete'; lease.sh adopt says the same; renamed as printed, the next start makes it a window and completes (release-candidate red team 2, finding 3)" {
+  pull_current
+  real="$(command -v git)"; mkdir -p "$B/shim"
+  cat > "$B/shim/git" <<SH
+#!/bin/bash
+case " \$* " in *" -C $T checkout --quiet main "*)
+  if [ ! -e "$B/killed" ]; then
+    : > "$B/killed"; pid=\$PPID
+    while [ -n "\$pid" ] && [ "\$pid" -gt 1 ]; do
+      case "\$(ps -o command= -p "\$pid")" in *python*) kill -9 "\$pid"; break ;; esac
+      pid="\$(ps -o ppid= -p "\$pid" | tr -d ' ')"
+    done
+    exit 137
+  fi ;;
+esac
+exec "$real" "\$@"
+SH
+  chmod +x "$B/shim/git"
+  PATH="$B/shim:$PATH" run start_session s1
+  [ -e "$B/killed" ] || { echo "the start was never cut off: $output"; return 1; }
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ -f "$H/state/leases/01.json" ]
+  first="$(git -C "$T" rev-parse refs/heads/lease/01)"
+  printf 'more\n' > "$T/more.txt"; git -C "$T" add more.txt; cmt "$T" -m "more work after the cut-off start"
+  more="$(git -C "$T" rev-parse HEAD)"; printf 'NOTE 2\n' > "$T/note2.md"
+  run --separate-stderr start_session s2
+  c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
+  case "$c" in *"that work is now window 01"*|*"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing is on fix/in-flight, which has 1 commit that window 01"*"does not have (\"more work after the cut-off start\")"*"(git -C target/thing branch -m fix/in-flight fix/in-flight-2), then start a session again"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(cat "$H/state/upgraded-to" 2>/dev/null)" != 0.7.0 ]
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(git -C "$T" rev-parse refs/heads/lease/01)" = "$first" ]
+  run bash "$H/core/lease.sh" adopt fix/in-flight
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"fix/in-flight in target/thing has 1 commit that window 01"*"(git -C target/thing branch -m fix/in-flight fix/in-flight-2)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"already window 01"*) echo "$output"; return 1 ;; esac
+  (cd "$H" && git -C target/thing branch -m fix/in-flight fix/in-flight-2)
+  run --separate-stderr start_session s3
+  c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
+  case "$c" in *"target/thing was on fix/in-flight-2"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  n="$(git -C "$T" for-each-ref --contains "$more" --format='%(refname:lstrip=2)' refs/heads/lease/)"
+  [ -n "$n" ] && [ "$(cat "$H/worktrees/${n#lease/}/thing/note2.md")" = "NOTE 2" ] || { echo "[$n]"; return 1; }
+}
+
+@test "v0.6.1, pulled, on a branch with a hidden CRLF edit (status clean) in c.txt, sorted after files an eol=crlf rule, added after they were checked out, would change the size of: the upgrade stops naming c.txt — never 'complete' over it — and c.txt's bytes stay (release-candidate red team 2, finding 4)" {
+  printf 'x\n' > "$T/a.txt"; printf 'hello\nworld\n' > "$T/b.txt"; printf 'hello\nworld' > "$T/c.txt"
+  printf 'c.txt text eol=lf\n' > "$T/.gitattributes"; git -C "$T" add -A; cmt "$T" -m "notes"
+  printf 'a.txt text eol=crlf\nb.txt text eol=crlf\nc.txt text eol=lf\n' > "$T/.gitattributes"
+  git -C "$T" add .gitattributes; cmt "$T" -m "windows files"
+  printf 'hello\r\nworld' > "$T/c.txt"; cp "$T/c.txt" "$B/c-crlf"; git -C "$T" add c.txt 2>/dev/null
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  pull_current
+  s1_ctx
+  case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"target/thing has changes git status does not show, in files whose line endings or contents git changes when it saves them (c.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  cmp "$T/c.txt" "$B/c-crlf"; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+}
+
+@test "v0.6.1, pulled, on a branch with a hidden CRLF edit in c.txt beside an untouched a.dat whose smudge filter changes its size: the stop names c.txt alone (release-candidate red team 2, finding 4)" {
+  git -C "$T" config filter.grow.clean "sed 's/ grown\$//'"; git -C "$T" config filter.grow.smudge "sed 's/\$/ grown/'"
+  printf 'a.dat filter=grow\nc.txt text eol=lf\n' > "$T/.gitattributes"
+  printf 'one\ntwo\n' > "$T/a.dat"; printf 'hello\nworld\n' > "$T/c.txt"; git -C "$T" add -A; cmt "$T" -m "data"
+  rm "$T/a.dat"; git -C "$T" checkout -- a.dat; [ "$(head -1 "$T/a.dat")" = "one grown" ]
+  printf 'hello\r\nworld\r\n' > "$T/c.txt"; git -C "$T" add c.txt 2>/dev/null
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  pull_current
+  s1_ctx
+  case "$c" in *"git changes when it saves them (c.txt) —"*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "v0.6.1, pulled, with an untouched checkout of a file under '*.bat text eol=crlf' (status clean, the bytes a checkout writes): the upgrade completes (release-candidate red team 2, finding 5)" {
+  git clone -q "$B/v061/thing.git" "$B/mk"
+  printf '*.bat text eol=crlf\n' > "$B/mk/.gitattributes"; printf '@echo off\necho hi\n' > "$B/mk/run.bat"
+  git -C "$B/mk" add -A; cmt "$B/mk" -m "windows script"; git -C "$B/mk" push -q origin main
+  git -C "$T" fetch -q origin; git -C "$T" merge -q --no-edit refs/remotes/origin/main 2>/dev/null
+  [ -z "$(git -C "$T" status --porcelain)" ]; grep -q $'\r' "$T/run.bat"
+  pull_current
+  s1_ctx
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"git status does not show"*) echo "$c"; return 1 ;; esac
+}
+
+@test "v0.6.1, pulled, with core.trustctime false and an untouched file committed with CRLF before '* text=auto' (status clean): the upgrade completes, and lease.sh adopt does not refuse it (release-candidate red team 2, finding 6)" {
+  git clone -q "$B/v061/thing.git" "$B/mk"
+  printf '@echo off\r\necho hi\r\n' > "$B/mk/run.bat"; git -C "$B/mk" add run.bat; cmt "$B/mk" -m "windows script"
+  printf '* text=auto\n' > "$B/mk/.gitattributes"; git -C "$B/mk" add .gitattributes; cmt "$B/mk" -m "normalize from now on"
+  git -C "$B/mk" push -q origin main
+  git -C "$T" fetch -q origin; git -C "$T" merge -q --no-edit refs/remotes/origin/main 2>/dev/null
+  git -C "$T" config core.trustctime false
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  git -C "$T" branch side; git -C "$T" checkout -q side; printf 's\n' > "$T/side.txt"; git -C "$T" add side.txt
+  cmt "$T" -m "side work"; git -C "$T" checkout -q fix/in-flight
+  pull_current
+  s1_ctx
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"git status does not show"*) echo "$c"; return 1 ;; esac
+  git -C "$T" branch side2 refs/heads/main; git -C "$T" checkout -q side2
+  printf 's2\n' > "$T/side2.txt"; git -C "$T" add side2.txt; cmt "$T" -m "side 2"; git -C "$T" checkout -q main
+  run bash "$H/core/lease.sh" adopt side2
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "v0.6.1, pulled, with a required filter driver shaped like Git LFS (one asset never pulled, one pulled) and its server unreachable: the check runs no smudge program and the upgrade completes (release-candidate red team 2, finding 7)" {
+  mkdir -p "$B/lfs-server"
+  cat > "$B/smudge.sh" <<'SH'
+#!/bin/sh
+in=$(cat); id=$(printf '%s' "$in" | sed -n 's/^pointer //p')
+c="$(git rev-parse --git-common-dir)/lfs-cache"; mkdir -p "$c"
+echo "smudge $id by: $(ps -o command= -p $PPID)" >> "$LFSLOG"
+[ "${FAKE_SKIP:-}" = 1 ] && { printf '%s\n' "$in"; exit 0; }
+[ -f "$c/$id" ] && { cat "$c/$id"; exit 0; }
+[ -f "$LFSSERVER/$id" ] && { cp "$LFSSERVER/$id" "$c/$id"; echo "download $id" >> "$LFSLOG"; cat "$c/$id"; exit 0; }
+exit 1
+SH
+  cat > "$B/clean.sh" <<'SH'
+#!/bin/sh
+t=$(mktemp); cat > "$t"
+if head -c 8 "$t" | grep -q '^pointer '; then cat "$t"; exit 0; fi
+id=$(shasum "$t" | cut -c1-12); c="$(git rev-parse --git-common-dir)/lfs-cache"; mkdir -p "$c"
+cp "$t" "$c/$id"; cp "$t" "$LFSSERVER/$id"; printf 'pointer %s\n' "$id"
+SH
+  chmod +x "$B/smudge.sh" "$B/clean.sh"
+  export LFSLOG="$B/lfs.log" LFSSERVER="$B/lfs-server"
+  git clone -q "$B/v061/thing.git" "$B/mk"
+  for r in "$B/mk" "$T"; do
+    git -C "$r" config filter.asset.clean "$B/clean.sh"; git -C "$r" config filter.asset.smudge "$B/smudge.sh"
+    git -C "$r" config filter.asset.required true
+  done
+  printf '*.bin filter=asset\n' > "$B/mk/.gitattributes"; printf 'ASSET A\n' > "$B/mk/a.bin"; printf 'ASSET B\n' > "$B/mk/b.bin"
+  git -C "$B/mk" add -A; cmt "$B/mk" -m "assets"; git -C "$B/mk" push -q origin main
+  rm -rf "$B/mk/.git/lfs-cache"
+  git -C "$T" checkout -q main; git -C "$T" branch -D -q fix/in-flight
+  git -C "$T" fetch -q origin; FAKE_SKIP=1 git -C "$T" merge -q --ff-only refs/remotes/origin/main
+  rm "$T/b.bin"; git -C "$T" checkout -- b.bin
+  [ "$(cat "$T/b.bin")" = "ASSET B" ]; [ "$(cut -c1-8 "$T/a.bin")" = "pointer " ]
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  cache="$(ls "$T/.git/lfs-cache")"
+  pull_current
+  mv "$B/lfs-server" "$B/lfs-server.offline"; : > "$LFSLOG"
+  s1_ctx
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  # the session's own window is a checkout, which smudges as any checkout does; the check never runs one
+  ! grep -e cat-file -e checkout-index "$LFSLOG" || { echo "the check ran a smudge:"; cat "$LFSLOG"; return 1; }
+  [ "$(ls "$T/.git/lfs-cache")" = "$cache" ]
+}

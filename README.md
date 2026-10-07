@@ -76,13 +76,16 @@ window numbers itself. Each step acts once and says one line when it does:
    — under `worktrees/` too, wherever no window's lease file is. Work inside a
    target repo's submodule (files, a branch's commits, a stash) is named the
    same way and stays in `target/<repo>`: a window's worktree starts with its
-   submodules empty.
+   submodules empty. No checkout, reset or merge the upgrade or `lease.sh`
+   runs touches a submodule's files, even where `submodule.recurse` is set.
    A branch whose only unpushed content is a merge commit counts as work. A
    detached checkout whose change is already on trunk keeps its commits on a
    branch it names. Nothing is renamed: `lease/<NN>` is made at the work's tip,
    and the branch's own name is removed only once the window is whole. A start
    cut off part-way through making a window, or out of time before its
-   worktree was made, is finished by the next one, never made twice;
+   worktree was made, is finished by the next one, never made twice; if the
+   branch got more commits in between, the next start stops and names them,
+   with the `git branch -m` that lets the branch become a window of its own;
 7. writes `state/upgraded-to`, last — never while a window it made has no
    worktree (the board and doctor name such a window).
 
@@ -90,7 +93,10 @@ Before it changes anything in `target/`, the upgrade keeps a checked safety
 copy of everything there in `state/upgrade-snapshot/<stamp>` (every branch,
 stash and recent commit as a git bundle, staged changes included; every
 untracked, ignored or uncommitted file in a tar, an edit a clean filter or a
-line-ending conversion hides from `git status` included, and one git's stat
+line-ending conversion hides from `git status` included (except under a filter
+git marks required or runs as a long-running process, as Git LFS does: the
+upgrade never runs its programs, so such files are compared only the way `git
+status` compares them), and one git's stat
 check misses (`core.trustctime` false), and every file of a `.git` git cannot
 read; git's record of a merge, rebase or bisect in progress, of each worktree
 whether or not its directory is there now), stops instead if it cannot
@@ -108,6 +114,9 @@ makes or changes none, until it is done; the next session start makes the
 upgrade's changes. git's record of a worktree made by hand under `worktrees/`
 is never removed, even when its directory is gone (moved with `mv`, it still
 works through that record; `git worktree repair <new path>` points git at it).
+
+Its `git fetch` of `origin` changes only origin's remote-tracking branches: it
+fetches, moves and deletes no tag, whatever `fetch.pruneTags` says.
 
 It will not move a target checkout that holds work it could lose, and stops
 there before anything in that checkout moves: one with uncommitted changes

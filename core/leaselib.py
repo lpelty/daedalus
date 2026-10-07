@@ -615,8 +615,37 @@ def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: 
     raise Refused("no free window number: 01–99 are all held; run `core/lease.sh sweep`")
 
 
+# Every git command run here and by the upgrade in a target repository runs with submodule.recurse off. Set — in the
+# repository or globally, as git's documentation suggests — it makes a checkout, merge, reset or worktree add rewrite
+# each submodule's working tree too, over the uncommitted edits there that the dirty check leaves to the submodule on
+# purpose (release-candidate red team 2, finding 1).
+NO_RECURSE = ("-c", "submodule.recurse=false")
+
+
+def git_argv(repo: Path, *args: str) -> list:
+    return ["git"] + list(NO_RECURSE) + ["-C", str(repo)] + list(args)
+
+
+def fetch_args(repo: Path) -> list:
+    """`git fetch` of origin that changes nothing but origin's remote-tracking branches: never a tag. With the
+    operator's fetch.pruneTags (or remote.origin.pruneTags, or a configured refs/tags/* refspec beside fetch.prune)
+    a plain fetch deleted every local tag origin lacks — some the only ref to their commit — and a forced tag refspec
+    moved them (release-candidate red team 2, finding 2). The configured refspecs that write under refs/remotes/
+    are kept (a single-branch clone fetches its one branch), else git's default one."""
+    _, out, _ = _git(repo, "config", "--get-all", "remote.origin.fetch")
+    specs = [s.strip() for s in out.splitlines()
+             if s.strip().startswith("^") or s.strip().partition(":")[2].startswith("refs/remotes/")]
+    if not [s for s in specs if not s.startswith("^")]:
+        specs = ["+refs/heads/*:refs/remotes/origin/*"] + specs
+    return ["fetch", "--quiet", "--no-tags", "--no-prune-tags", "origin"] + specs
+
+
+def fetch_origin(repo: Path, timeout: int = 120) -> Tuple[int, str, str]:
+    return _git(repo, *fetch_args(repo), timeout=timeout)
+
+
 def _git(repo: Path, *args: str, timeout: int = 20) -> Tuple[int, str, str]:
-    return v.run(["git", "-C", str(repo)] + list(args), timeout=timeout)
+    return v.run(git_argv(repo, *args), timeout=timeout)
 
 
 def git_finish(repo: Path, *args: str, timeout: int = 600) -> Tuple[int, str, str]:
@@ -631,7 +660,7 @@ def git_finish(repo: Path, *args: str, timeout: int = 600) -> Tuple[int, str, st
         return 127, "", str(e)
     with err_f:
         try:
-            pr = subprocess.Popen(["git", "-C", str(repo)] + list(args), stdin=subprocess.DEVNULL,
+            pr = subprocess.Popen(git_argv(repo, *args), stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=err_f, start_new_session=True)
         except OSError as e:
             return 127, "", str(e)
@@ -744,7 +773,7 @@ def _git_budget(repo: Path, *args: str, timeout: int, deadline: Optional[float])
     left = _left(deadline, timeout)
     if left < 1:
         return None
-    return _run_bounded(["git", "-C", str(repo)] + list(args), left)
+    return _run_bounded(git_argv(repo, *args), left)
 
 
 def _registered(listed: str, dest: Path) -> bool:
@@ -1577,7 +1606,7 @@ def rebase(root: Path, token: str, sid: Optional[str]) -> str:
             raise Refused("Window %s has uncommitted changes in worktrees/%s/%s (%s). Commit them on lease/%s first; "
                           "rebase moves commits only." % (nn, nn, repo, ", ".join(files), nn))
     for repo in trunks:
-        code, _, err = _git(root / "target" / repo, "fetch", "--quiet", "origin", timeout=120)
+        code, _, err = fetch_origin(root / "target" / repo)
         if code != 0:
             last = err.strip().splitlines()[-1:] or ["no output"]
             raise Refused("could not fetch origin in target/%s (%s); window %s was not rebased" % (repo, last[0], nn))
@@ -1707,7 +1736,7 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
         raise Refused("There is no window %s." % nn)
     trunks, key = _split_checks(root, nn, lease, sid, nested)
     ntrunk, src = trunks[key], root / "target" / key
-    code, _, err = _git(src, "fetch", "--quiet", "origin", timeout=120)
+    code, _, err = fetch_origin(src)
     if code != 0:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("could not fetch origin in target/%s (%s); nothing was split" % (key, last[0]))
@@ -2014,18 +2043,11 @@ def hidden_edits(src: Path) -> Dict[str, str]:
 TRANSFORM_ATTRS = ("filter", "ident", "text", "eol", "working-tree-encoding", "crlf")
 
 
-def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[set] = None) -> list:
-    """Tracked files of the worktree at <src> whose bytes on disk are in no object: neither what a checkout of their
-    staged content writes nor that staged blob itself, among those git transforms on the way in or out (a clean or
-    smudge filter, ident, line-ending conversion, a working-tree encoding — or every file under core.autocrlf): an
-    edit git status never shows, because git compares such a file only after its clean filter ran (a filter that
-    strips local lines or a notebook's outputs, CRLF line ends under text=auto). A checkout or reset replaces the
-    file with the committed version and those bytes are gone. A file whose bytes are the staged blob's own — checked
-    out before a rule or a filter for it was added — holds nothing no commit has (release-candidate red team,
-    finding 3). Paths in <skip> are not read. Under <deadline>, raises subprocess.TimeoutExpired when it is out of
-    time."""
+def _checker(src: Path, deadline: Optional[float]):
+    """(left, run) for the content checks below: left() is the seconds to <deadline> (None without one) and raises
+    subprocess.TimeoutExpired once there are none; run(args, inp, env_extra) runs git in <src> in its own process
+    group — a filter program git starts is killed with it at the deadline — and returns (code, stdout bytes)."""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
-    skip = skip or set()
 
     def left() -> Optional[float]:
         if deadline is None:
@@ -2035,11 +2057,39 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
             raise subprocess.TimeoutExpired("git", 0)
         return t
 
-    def run(args: list, inp: Optional[bytes] = None) -> Tuple[int, bytes]:
-        r = subprocess.run(["git", "-C", str(src)] + args, input=inp, capture_output=True, env=env, timeout=left(),
-                           stdin=None if inp is not None else subprocess.DEVNULL)
-        return r.returncode, r.stdout
+    def run(args: list, inp: Optional[bytes] = None, env_extra: Optional[dict] = None) -> Tuple[int, bytes]:
+        p = subprocess.Popen(["git", "-C", str(src)] + args, stdin=subprocess.PIPE if inp is not None
+                             else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             env=dict(env, **(env_extra or {})), start_new_session=True)
+        try:
+            out, _ = p.communicate(input=inp, timeout=left())
+        except BaseException:
+            _kill_group(p)
+            raise
+        return p.returncode, out
 
+    return left, run
+
+
+def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[set] = None) -> list:
+    """Tracked files of the worktree at <src> whose bytes on disk are in no object: neither what a checkout of their
+    staged content writes nor that staged blob itself, among those git transforms on the way in or out (a clean or
+    smudge filter, ident, line-ending conversion, a working-tree encoding — or every file under core.autocrlf): an
+    edit git status never shows, because git compares such a file only after its clean filter ran (a filter that
+    strips local lines or a notebook's outputs, CRLF line ends under text=auto). A checkout or reset replaces the
+    file with the committed version and those bytes are gone. A file whose bytes are the staged blob's own — checked
+    out before a rule or a filter for it was added — holds nothing no commit has (release-candidate red team,
+    finding 3).
+    What a checkout writes is written whole, by git checkout-index into a scratch directory, and compared whole:
+    cat-file --batch --filters gives each file's size before its conversion, so a file whose conversion changes its
+    size threw the reading of every later file off — an untouched clone stopped for good, and a real hidden change
+    could read as none (release-candidate red team 2, findings 4-5). A filter driver git marks required or runs as a
+    long-running process (how Git LFS sets itself up) is never run here: its smudge can download, write into the
+    repository and fail offline (finding 7); its files are left to git status, which compares their clean side, and
+    to stat_blind_edits. Paths in <skip> are not read. Under <deadline>, raises subprocess.TimeoutExpired when it is
+    out of time."""
+    skip = skip or set()
+    left, run = _checker(src, deadline)
     code, out = run(["ls-files", "-s", "-z"])
     if code != 0:
         return []
@@ -2054,17 +2104,21 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
     if not blobs:
         return []
     code, out = run(["config", "--get", "core.autocrlf"])
-    if os.fsdecode(out).strip().lower() not in ("true", "input", "yes", "on", "1"):
-        code, out = run(["check-attr", "-z", "--stdin"] + list(TRANSFORM_ATTRS),
-                        b"".join(os.fsencode(p) + b"\0" for p in blobs))
-        toks = out.split(b"\0") if code == 0 else []
-        hit = set()
-        for i in range(0, len(toks) - 2, 3):
-            if toks[i + 2] not in (b"unspecified", b"unset"):
-                hit.add(os.fsdecode(toks[i]))
-        blobs = {p: b for p, b in blobs.items() if p in hit}
+    every = os.fsdecode(out).strip().lower() in ("true", "input", "yes", "on", "1")
+    code, out = run(["check-attr", "-z", "--stdin"] + list(TRANSFORM_ATTRS),
+                    b"".join(os.fsencode(p) + b"\0" for p in blobs))
+    toks = out.split(b"\0") if code == 0 else []
+    hit, driver = set(), {}
+    for i in range(0, len(toks) - 2, 3):
+        name, attr, val = os.fsdecode(toks[i]), toks[i + 1], toks[i + 2]
+        if val not in (b"unspecified", b"unset"):
+            hit.add(name)
+            if attr == b"filter" and val != b"set":
+                driver[name] = os.fsdecode(val)
     cands = []
     for p, b in sorted(blobs.items()):
+        if not every and p not in hit:
+            continue
         try:
             st = os.lstat(os.path.join(str(src), p))
         except OSError:
@@ -2073,31 +2127,81 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
             cands.append((p, b, st.st_size))
     if not cands:
         return []
-    # not what a checkout writes, and then not the blob's own bytes either
-    found = set(_unlike(src, cands, True, run, left, env))
-    if found:
-        found &= set(_unlike(src, [c for c in cands if c[0] in found], False, run, left, env))
-    return sorted(found)
+    # bytes on disk exactly the staged blob's: nothing no commit has (read with its true size: no conversion)
+    differ = set(_unlike(src, cands, run, left))
+    cands = [c for c in cands if c[0] in differ]
+    # a required or long-running filter driver is not run (finding 7)
+    unrun = set()
+    for d in sorted({driver[p] for p, _, _ in cands if p in driver}):
+        _, req = run(["config", "--bool", "--get", "filter.%s.required" % d])
+        _, proc = run(["config", "--get", "filter.%s.process" % d])
+        if req.strip() == b"true" or proc.strip():
+            unrun.add(d)
+    cands = [c for c in cands if driver.get(c[0]) not in unrun]
+    if not cands:
+        return []
+    return sorted(_unlike_checkout(src, cands, run, left))
 
 
-def _unlike(src: Path, cands: list, filters: bool, run, left, env: dict) -> list:
-    """The paths of <cands> ((path, blob, size on disk)) whose bytes on disk are not the blob's — as a checkout
-    writes it (<filters>: smudge, ident, line-ending conversion applied) or as stored. One cat-file --batch for
-    every name without a newline (cat-file's batch reads one name per line); one call each for the others. A path
-    whose bytes cannot be read or compared counts as unlike: say so rather than miss it."""
-    flag = ["--filters"] if filters else []
+def _unlike_checkout(src: Path, cands: list, run, left) -> list:
+    """The paths of <cands> ((path, blob, size on disk)) whose bytes on disk are not what a checkout of the staged
+    blob writes (smudge, ident, line-ending conversion, working-tree encoding applied): every one written whole by
+    one git checkout-index into a scratch directory, never into the worktree or its index; a path it did not write
+    (skip-worktree, a name it refuses) is written by cat-file --filters alone. One that cannot be written or read
+    counts as unlike: say so rather than miss it."""
+    found = []
+    scratch = tempfile.mkdtemp(prefix="daedalus-checkout-")
+    try:
+        run(["checkout-index", "-z", "--stdin", "--prefix=%s/" % scratch],
+            b"".join(os.fsencode(p) + b"\0" for p, _, _ in cands))
+        for p, b, size in cands:
+            mine = os.path.join(str(src), p)
+            out = os.path.join(scratch, p)
+            if os.path.isfile(out) and not os.path.islink(out):
+                if not _same_files(mine, out):
+                    found.append(p)
+                continue
+            code, data = run(["cat-file", "--filters", "--path=" + p, b])
+            if code != 0 or not _same_bytes(mine, data):
+                found.append(p)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return found
+
+
+def _same_files(a: str, b: str) -> bool:
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def _unlike(src: Path, cands: list, run, left) -> list:
+    """The paths of <cands> ((path, blob, size on disk)) whose bytes on disk are not the blob's as stored. One
+    cat-file --batch for every name without a newline (cat-file's batch reads one name per line; with no --filters
+    each header's size is the size of the bytes that follow); one call each for the others. A path whose bytes
+    cannot be read or compared counts as unlike: say so rather than miss it."""
     found = []
     lined = [c for c in cands if "\n" not in c[0]]
     for p, b, _ in cands:
         if "\n" in p:
-            code, out = run(["cat-file"] + (flag + ["--path=" + p, b] if filters else ["blob", b]))
+            code, out = run(["cat-file", "blob", b])
             if code != 0 or not _same_bytes(os.path.join(str(src), p), out):
                 found.append(p)
     if not lined:
         return found
-    proc = subprocess.Popen(["git", "-C", str(src), "cat-file", "--batch"] + flag, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
-    data = b"".join((b.encode() + b" " + os.fsencode(p) if filters else b.encode()) + b"\n" for p, b, _ in lined)
+    proc = subprocess.Popen(["git", "-C", str(src), "cat-file", "--batch"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0"))
+    data = b"".join(b.encode() + b"\n" for _, b, _ in lined)
 
     def feed() -> None:
         try:
@@ -2161,65 +2265,51 @@ def stat_blind_edits(src: Path, deadline: Optional[float] = None, skip: Optional
     """Tracked files of the worktree at <src> whose content is not their staged content although git's stat check
     passes them (stat_blind: an in-place edit of the same size with its mtime put back). git status and git add
     never read such a file again, and a checkout or reset writes the committed version over it, in no object.
-    Only where git is stat_blind; there every tracked file is hashed as git add would (git hash-object, filters
-    applied) and compared with the index. Paths in <skip> are not read. Under <deadline>, raises
+    Only where git is stat_blind; there every tracked file's content is compared by git itself, as git status
+    compares a file whose stat data changed: the staged entries are copied into a scratch index with no stat data,
+    which git refresh then has to read by content — through the index, so a blob that already holds CRLF is not
+    converted, as git add would not (hash-object, which reads no index, called such an untouched file changed for
+    good: release-candidate red team 2, finding 6). Paths in <skip> are not read. Under <deadline>, raises
     subprocess.TimeoutExpired when it is out of time."""
     if not stat_blind(src):
         return []
-    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     skip = skip or set()
-
-    def left() -> Optional[float]:
-        if deadline is None:
-            return None
-        t = deadline - time.time()
-        if t <= 0:
-            raise subprocess.TimeoutExpired("git", 0)
-        return t
-
-    def run(args: list, inp: Optional[bytes] = None) -> Tuple[int, bytes]:
-        r = subprocess.run(["git", "-C", str(src)] + args, input=inp, capture_output=True, env=env, timeout=left(),
-                           stdin=None if inp is not None else subprocess.DEVNULL)
-        return r.returncode, r.stdout
-
+    left, run = _checker(src, deadline)
     code, out = run(["ls-files", "-s", "-z"])
     if code != 0:
         return []
-    files, links = [], []
+    keep, recs = set(), []
     for rec in out.split(b"\0"):
         meta, _, path = rec.partition(b"\t")
         bits = meta.split(b" ")
         if len(bits) != 3 or bits[2] != b"0" or bits[0] == b"160000":
             continue
         p = os.fsdecode(path)
+        if p in skip:
+            continue
         try:
             st = os.lstat(os.path.join(str(src), p))
         except OSError:
             continue            # deleted: git status names it
-        if p in skip:
-            continue
-        if bits[0] == b"120000" and stat.S_ISLNK(st.st_mode):
-            links.append((p, bits[1].decode()))
-        elif bits[0] != b"120000" and stat.S_ISREG(st.st_mode):
-            files.append((p, bits[1].decode()))
-    found = []
-    lined = [(p, b) for p, b in files if "\n" not in p]
-    if lined:
-        code, out = run(["hash-object", "--stdin-paths"], b"".join(os.fsencode(p) + b"\n" for p, _ in lined))
-        shas = out.decode().split() if code == 0 else []
-        if len(shas) != len(lined):
-            found += [p for p, _ in lined]          # cannot tell: say so rather than miss it
-        else:
-            found += [p for (p, b), h in zip(lined, shas) if h != b]
-    for p, b in [(p, b) for p, b in files if "\n" in p]:
-        code, out = run(["hash-object", "--path=" + p, "--", p])
-        if code != 0 or out.decode().strip() != b:
-            found.append(p)
-    for p, b in links:
-        code, out = run(["hash-object", "--stdin", "--no-filters"], os.fsencode(os.readlink(os.path.join(str(src), p))))
-        if code != 0 or out.decode().strip() != b:
-            found.append(p)
-    return sorted(found)
+        if (stat.S_ISLNK(st.st_mode) if bits[0] == b"120000" else stat.S_ISREG(st.st_mode)):
+            keep.add(p)
+            recs.append(rec)
+    if not recs:
+        return []
+    scratch = tempfile.mkdtemp(prefix="daedalus-index-")
+    try:
+        ix = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+        code, _ = run(["update-index", "-z", "--index-info"], b"".join(r + b"\0" for r in recs), ix)
+        if code != 0:
+            return sorted(keep)         # cannot tell: say so rather than miss it
+        run(["-c", "core.fsmonitor=false", "-c", "core.splitIndex=false", "-c", "core.untrackedCache=false",
+             "update-index", "-q", "--refresh"], None, ix)
+        code, out = run(["diff-files", "--name-only", "-z", "--ignore-submodules"], None, ix)
+        if code != 0:
+            return sorted(keep)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return sorted({os.fsdecode(x) for x in out.split(b"\0") if x} & keep)
 
 
 def hidden_words(key: str, hidden: Dict[str, str]) -> Tuple[str, str, str]:
@@ -2275,6 +2365,40 @@ ADOPT_STAT_BLIND = ("target/%s has uncommitted changes git status does not show,
                     "was adopted.")
 
 
+class AdoptedPast(Refused):
+    """adopt <branch> where a window was adopted from a branch of that name and <branch> has commits since that the
+    window's lease/<NN> lacks: a start cut off after the window was made, then more commits on the branch
+    (release-candidate red team 2, finding 3). Answering "already window <NN>" hid them: .nn, .subjects (oldest
+    first), .rename (a free name for the branch)."""
+
+    def __init__(self, msg: str, nn: str, subjects: list, rename: str):
+        super().__init__(msg)
+        self.nn, self.subjects, self.rename = nn, subjects, rename
+
+
+ADOPT_PAST = ("%s in target/%s has %s that window %s, adopted from a branch of that name, does not have (%s) — adopting "
+              "it would only name window %s again: give the branch another name (git -C target/%s branch -m %s %s), "
+              "then run adopt again with that name%s; nothing was adopted.")
+
+
+def free_branch_name(src: Path, branch: str) -> str:
+    """<branch>-2, -3, ...: the first that is no branch in <src>."""
+    n = 2
+    while _git(src, "rev-parse", "--verify", "-q", "refs/heads/%s-%d" % (branch, n))[0] == 0:
+        n += 1
+    return "%s-%d" % (branch, n)
+
+
+def adopted_past(src: Path, branch: str, nn: str) -> Optional[Tuple[list, str]]:
+    """(subjects of <branch>'s commits lease/<NN> lacks, a free name for <branch>) when <branch> has any, else None —
+    also None when <branch> is gone (its adoption finished)."""
+    tip = ref_oid(src, "refs/heads/" + branch)
+    if not tip or _git(src, "merge-base", "--is-ancestor", tip, "refs/heads/lease/" + nn)[0] == 0:
+        return None
+    code, out, _ = _git(src, "log", "--reverse", "--format=%s", "refs/heads/lease/%s..%s" % (nn, tip))
+    return ([x for x in out.splitlines() if x.strip()] if code == 0 else []), free_branch_name(src, branch)
+
+
 ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branch has; adopting %s would put the "
                   "checkout on %s and leave them behind — give them a branch inside that checkout "
                   "(git -C target/%s branch <name>), then run adopt again.")
@@ -2290,8 +2414,8 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
     `adopt <trunk>` moves a trunk that is ahead of origin: lease/<NN> is made at the trunk's tip, the window is
     made, and only then is the trunk reset; adopted_from names it daedalus/upgrade-<stamp>-<short sha> (plan 5
     Decision 14 — a label, no such branch is left). Idempotent: a branch already adopted returns {"already":
-    True}; a trunk whose tip is a window's adopted_tip (a run cut off before the reset) is reset and returns
-    "already". A lease/<NN> already at the adopted commit — an earlier adoption cut off before its lease file or
+    True} while its window's lease/<NN> holds its tip, and is refused (AdoptedPast) once it has commits since;
+    a trunk whose tip is a window's adopted_tip (a run cut off before the reset) is reset and returns "already". A lease/<NN> already at the adopted commit — an earlier adoption cut off before its lease file or
     its worktrees (release-candidate review 2, findings 11-12) — is finished as window <NN>, never adopted a
     second time. Refused: a dirty target/<repo> (tracked changes, or a change hidden by skip-worktree or
     assume-unchanged), an ignored file where the trunk's checkout or fast-forward would write, a branch that does
@@ -2308,7 +2432,7 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
     key = repo_key(root, repo)
     src = root / "target" / key
     if fetch:
-        code, _, err = _git(src, "fetch", "--quiet", "origin", timeout=120)
+        code, _, err = fetch_origin(src)
         if code != 0:
             last = err.strip().splitlines()[-1:] or ["no output"]
             raise Refused("could not fetch origin in target/%s (%s); nothing was adopted" % (key, last[0]))
@@ -2320,6 +2444,16 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         leases = read_all(root)
         for nn, d in sorted(leases.items()):
             if nn != "prime" and d.get("adopted_from") == branch and d.get("adopted_repo") == key:
+                # "already" only while lease/<NN> holds the branch's tip: commits made on it since (after a start cut
+                # off between the window and the checkout back to the trunk) are no window's
+                past = adopted_past(src, branch, nn)
+                if past:
+                    subjects, rename = past
+                    raise AdoptedPast(ADOPT_PAST % (branch, key, "%d commit%s" % (len(subjects), "" if len(subjects) == 1
+                                                                                   else "s"),
+                                                    nn, ", ".join('"%s"' % x for x in subjects), nn, key, branch,
+                                                    rename, " --repo %s" % repo if repo else ""),
+                                      nn, subjects, rename)
                 return {"nn": nn, "repo": key, "branch": branch, "trunk": (d.get("trunks") or {}).get(key, ""),
                         "subjects": [], "already": True, "notes": []}
         if LEASE_BRANCH.fullmatch(branch) and branch[len("lease/"):] in leases:
@@ -2342,10 +2476,14 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         hidden = hidden_edits(src)
         if hidden:
             raise Refused(ADOPT_HIDDEN % ((key,) + hidden_words(key, hidden)))
-        filtered = filtered_edits(src)
+        try:
+            filtered = filtered_edits(src, deadline)
+            blind = [] if filtered else stat_blind_edits(src, deadline)
+        except subprocess.TimeoutExpired:
+            raise Refused("the time ran out while checking target/%s for changes git status does not show; nothing "
+                          "was adopted" % key)
         if filtered:
             raise Refused(ADOPT_FILTERED % (key, name_paths(filtered), put_back(key, filtered)))
-        blind = stat_blind_edits(src)
         if blind:
             raise Refused(ADOPT_STAT_BLIND % (key, name_paths(blind), key, shell_paths(blind)))
         _, cur, _ = _git(src, "branch", "--show-current")
@@ -2706,7 +2844,7 @@ def spawn(root: Path, task: str, note: Optional[str]) -> str:
     with the `done` instruction, so it is never hand-typed (§4.2)."""
     import subprocess
     target = root / "target" / target_name(root)
-    v.run(["git", "-C", str(target), "fetch", "--quiet", "origin"], timeout=60)
+    fetch_origin(target, timeout=60)
     nn, _ = allocate(root, None, note=note, spawned=True)
     full = ('%s\n\nWhen the work is done or you are stuck, run `core/lease.sh done %s --summary "<one paragraph: what changed, '
             'what is untested, what you need>"` as your final action.' % (task, nn))
@@ -3582,7 +3720,7 @@ def main(argv: list) -> int:
         crit = args[args.index("--criteria") + 1] if "--criteria" in args else None
         try:
             # a spawner/operator path: fetch first (no network only inside a hook — §4.2)
-            v.run(["git", "-C", str(root / "target" / target_name(root)), "fetch", "--quiet", "origin"], timeout=60)
+            fetch_origin(root / "target" / target_name(root), timeout=60)
             nn, data = allocate(root, None, note=note, criteria=crit, spawned="--spawned" in args)
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1

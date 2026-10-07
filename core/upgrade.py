@@ -132,6 +132,13 @@ BISECTING = ("upgrade to %s incomplete: target/%s is in the middle of a bisect �
              "reset, then start a session again")
 STOPPED_WHILE = ("upgrade to %s incomplete: stopped while %s — %s; it tries again at the next session start — if it "
                  "stops the same way again, ask this home's agent to look into the reason given")
+# A start cut off after it made a window of the checked-out branch, before the checkout back to the trunk, then more
+# commits on that branch: the window lacks them, so they are named, never "now window <NN>" (release-candidate red
+# team 2, finding 3).
+PAST = ("upgrade to %s incomplete: target/%s is on %s, which has %s that window %s — adopted from it at an earlier "
+        "session start that was cut off before putting target/%s back on %s — does not have (%s); nothing more was "
+        "moved: give the branch another name (git -C target/%s branch -m %s %s), then start a session again, and that "
+        "name becomes a window of its own")
 STOPPED_TIME = "upgrade to %s incomplete: stopped while %s — the session start ran out of time; it runs again at the next session start"
 # A git command cut off part-way leaves lock files git then refuses on, or a checkout on a branch that no longer exists
 # (a rename stopped between its two ref writes): stopped on, naming them, before anything moves — never "commit them",
@@ -198,7 +205,9 @@ def pending(root: Path) -> bool:
 
 
 def _git(repo: Path, *args: str) -> Tuple[int, str, str]:
-    return v.run(["git", "-C", str(repo)] + list(args))
+    # submodule.recurse off: set, a checkout, merge or reset here rewrote each submodule's working tree over its
+    # uncommitted edits (release-candidate red team 2, finding 1; leaselib.NO_RECURSE)
+    return v.run(["git", "-c", "submodule.recurse=false", "-C", str(repo)] + list(args))
 
 
 def _last(err: str) -> str:
@@ -444,8 +453,8 @@ def step_memory(root: Path, head: str, dry: bool, deadline: Optional[float]) -> 
 
 
 def _fetch_all(repos: List[Tuple[str, Path]], deadline: Optional[float]) -> Set[str]:
-    """`git fetch --quiet origin` in every target repo at once, all under one cap (plan 5 Decision 3):
-    FETCH_SECS, and never more than half of what is left of `deadline`, so adoption's worktree adds keep the
+    """`git fetch --quiet origin` in every target repo at once (leaselib.fetch_args: no tag is fetched or pruned),
+    all under one cap (plan 5 Decision 3): FETCH_SECS, and never more than half of what is left of `deadline`, so adoption's worktree adds keep the
     rest. Each fetch runs in its own process group, which is killed if it is still running at the cap or if
     this process is interrupted. GIT_TERMINAL_PROMPT=0: a remote that wants a password fails at once instead of
     waiting on a prompt nobody sees. Returns the keys of the repos whose fetch finished with exit 0."""
@@ -458,9 +467,12 @@ def _fetch_all(repos: List[Tuple[str, Path]], deadline: Optional[float]) -> Set[
     procs: Dict[str, subprocess.Popen] = {}
     done: Set[str] = set()
     try:
+        import leaselib as ll
         for key, p in repos:
             try:
-                procs[key] = subprocess.Popen(["git", "-C", str(p), "fetch", "--quiet", "origin"],
+                # only origin's remote-tracking branches change: never a tag, whatever fetch.pruneTags says
+                # (release-candidate red team 2, finding 2)
+                procs[key] = subprocess.Popen(ll.git_argv(p, *ll.fetch_args(p)),
                                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                               stderr=subprocess.DEVNULL, env=env, start_new_session=True)
             except OSError:
@@ -517,6 +529,10 @@ def _into_window(root: Path, key: str, rel: str, ref: str, ver: str, deadline: O
     try:
         r = ll.adopt(root, ref, repo=None if rel == key else rel, note=NOTE_ADOPTED % ver, fetch=False,
                      deadline=deadline)
+    except ll.AdoptedPast as e:
+        # a window was adopted from a branch of this name, and the branch has commits since that the window lacks:
+        # never "already" — the caller names it (release-candidate red team 2, finding 3)
+        return {"nn": e.nn, "already": True, "past": e, "notes": [], "ready": True}
     except ll.Refused as e:
         raise Stop("could not move target/%s's work into a window (%s)" % (key, e))
     r["ready"] = (ll.read_lease(root, r["nn"]) or {}).get("worktree_ready") is not False
@@ -1263,25 +1279,30 @@ def _blobs(p: Path, rev: str) -> Dict[str, str]:
 
 def _neither(p: Path, rev: str, to: str, paths: List[str]) -> List[str]:
     """Of <paths> in <p>'s working tree, those on disk whose content is neither <rev>'s nor <to>'s: not something a
-    checkout or reset from <rev> to <to> wrote. A path not on disk is one it had yet to write."""
+    checkout or reset from <rev> to <to> wrote. A path not on disk is one it had yet to write. A file is either's
+    when its bytes cleaned as git add would (a line-ending conversion undone) are that blob, or when its bytes as
+    they are are: a checkout writes a blob that already holds CRLF unconverted, which hash-object alone, reading no
+    index, would convert and call neither (release-candidate red team 2, finding 6)."""
     have, want = _blobs(p, rev), _blobs(p, to)
     files = [x for x in paths if os.path.isfile(str(p / x)) and not os.path.islink(str(p / x))]
-    ids: Dict[str, str] = {}
-    if files:
+    ids: Dict[str, Set[str]] = {}
+    for how in ([], ["--no-filters"]):
+        if not files:
+            break
         try:
-            r = subprocess.run(["git", "-C", str(p), "hash-object", "--stdin-paths"], input="\n".join(files) + "\n",
-                               capture_output=True, text=True, timeout=120)
+            r = subprocess.run(["git", "-C", str(p), "hash-object"] + how + ["--stdin-paths"],
+                               input="\n".join(files) + "\n", capture_output=True, text=True, timeout=120)
             got = r.stdout.split() if r.returncode == 0 else []
         except (OSError, subprocess.SubprocessError):
             got = []
         if len(got) == len(files):
-            ids = dict(zip(files, got))
+            for x, h in zip(files, got):
+                ids.setdefault(x, set()).add(h)
     odd = []
     for x in paths:
         if not os.path.lexists(str(p / x)):
             continue
-        h = ids.get(x)
-        if h is None or h not in (have.get(x), want.get(x)):
+        if not ids.get(x, set()) & {have.get(x), want.get(x)} - {None}:
             odd.append(x)
     return sorted(odd)
 
@@ -1417,13 +1438,15 @@ def _step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float], lin
         hidden = ll.hidden_edits(p)
         if hidden:
             raise Stop(HIDDEN % ((ver, key) + ll.hidden_words(key, hidden)))
+        # under the start's deadline: a slow filter program was unbounded, and running out of time is a stop, never
+        # a pass (release-candidate red team 2, finding 7)
         try:
-            filtered = ll.filtered_edits(p)
+            filtered = ll.filtered_edits(p, deadline)
+            blind = [] if filtered else ll.stat_blind_edits(p, deadline)
         except subprocess.TimeoutExpired:
-            filtered = []
+            raise Stop(STOPPED_TIME % (ver, "checking target/%s for changes git status does not show" % key))
         if filtered:
             raise Stop(FILTERED % (ver, key, ll.name_paths(filtered), ll.put_back(key, filtered)))
-        blind = ll.stat_blind_edits(p)
         if blind:
             raise Stop(STAT_BLIND % (ver, key, ll.name_paths(blind), key, ll.shell_paths(blind)))
     fetched = set() if dry else _fetch_all(repos, deadline)
@@ -1539,8 +1562,16 @@ def _step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float], lin
                 if loose:                    # so a run cut off before the carry is done finishes it (review, 2)
                     _set_carry(root, key, _git(p, "rev-parse", "HEAD")[1].strip())
                 r = _into_window(root, key, rel, adopt_ref, ver, deadline)
+                if r.get("past"):
+                    e = r["past"]
+                    raise Stop(PAST % (ver, key, cur or adopt_ref, _plural(len(e.subjects), "commit"), r["nn"], key,
+                                       trunk, _quoted(e.subjects), key, cur or adopt_ref, e.rename))
                 if not r["ready"]:
                     raise _unready(lines, head, what, r, adopt_ref, ver, stale, deadline, carry=bool(loose))
+                if r["already"] and _git(p, "branch", "--show-current")[1].strip() == cur:
+                    # its window holds the branch's tip, and a start cut off before the checkout back to the trunk
+                    # left target/<repo> on it: finished here, so "back on <trunk>" below is true
+                    _back_on_trunk(p, key, trunk)
                 carrier, carrier_nn = "lease/" + r["nn"], r["nn"]
                 carried, left = _carry(root, p, key, r["nn"], loose, deadline)
                 _set_carry(root, key, None)
@@ -1578,9 +1609,12 @@ def _step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float], lin
             r = _into_window(root, key, rel, b, ver, deadline)
             tail = " Note: %s." % "; ".join(r["notes"]) if r["notes"] else ""
             if r["already"]:
+                again = ("rename it (git -C target/%s branch -m %s %s), then run core/lease.sh adopt %s%s"
+                         % (key, b, r["past"].rename, r["past"].rename, _repo_flag(root, key)) if r.get("past")
+                         else "run core/lease.sh adopt after renaming it")
                 lines.append("%s: target/%s's branch %s (%s not on origin/%s: %s) has the name of the branch window %s "
-                             "was adopted from, so it was not adopted; run core/lease.sh adopt after renaming it.%s%s"
-                             % (head, key, b, n, trunk, _quoted(work), r["nn"], tail, stale))
+                             "was adopted from, so it was not adopted; %s.%s%s"
+                             % (head, key, b, n, trunk, _quoted(work), r["nn"], again, tail, stale))
                 continue
             if not r["ready"]:
                 raise _unready(lines, head, "target/%s's branch %s (%s not on origin/%s: %s)"
