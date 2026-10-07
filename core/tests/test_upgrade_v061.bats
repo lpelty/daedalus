@@ -472,6 +472,8 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   [ -e "$B/killed" ] || { echo "the reset was never cut off: $output"; return 1; }
   rm "$T/.git/hooks/reference-transaction"
   [ "$(git -C "$T" rev-parse refs/heads/main)" = "$sha" ]; [ -n "$(git -C "$T" status --porcelain --untracked-files=no)" ]
+  # the reset it began is marked, so the next run finishes it (review of option 1, finding 1)
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"thing": sys.argv[2]}' "$H/state/upgrade-trunk-reset.json" "$sha"
   run bash "$H/core/doctor.sh"
   case "$output" in *"target/thing main is 1 commit ahead of origin/main, but window"*"already holds it"*) : ;; *) echo "$output"; return 1 ;; esac
   run start_session s2
@@ -494,6 +496,7 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   [ "$(git -C "$T" rev-parse refs/heads/main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
   [ -z "$(git -C "$T" status --porcelain)" ] || { git -C "$T" status --porcelain; return 1; }
   [ "$(cat "$H/worktrees/$nn/thing/notes.md")" = "MY NOTES" ]; [ "$(cat "$H/worktrees/$nn/thing/trunk.txt")" = T ]
+  [ ! -e "$H/state/upgrade-trunk-reset.json" ]
 }
 
 @test "v0.6.1, pulled, on the in-flight branch with untracked files: 'pick it up' saves them on the branch; its checkout back to main, cut off part-way (git and pick-up killed), is finished by the next start — never 'commit them'; the window holds the branch's commit and the files (release-candidate review 4, finding 6)" {

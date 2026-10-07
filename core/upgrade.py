@@ -103,15 +103,6 @@ GITLINK = ("upgrade to %s incomplete: target/%s holds %s (%s), which %s would de
 # (release-candidate review 2, finding 5): stopped on before anything moves.
 SHADOW = ("upgrade to %s incomplete: target/%s has a local branch named origin/%s, which git takes for origin's %s — "
           "rename it (git -C target/%s branch -m origin/%s <new name>), then start a session again")
-# A branch whose branch on origin was deleted (on GitHub, what follows a merge) is not made a window: a squash merge
-# leaves its commits looking unmerged to git cherry (release-candidate review, finding 3). Named, so one that was not
-# merged can still be adopted.
-GONE_ONE = ("%s: target/%s's branch %s holds commits origin/%s has no copy of, but its branch on origin was deleted, "
-            "which usually means it was merged — it was left as it was; if it was not merged, run core/lease.sh adopt "
-            "%s%s.%s")
-GONE_MANY = ("%s: target/%s's branches %s hold commits origin/%s has no copy of, but their branches on origin were "
-             "deleted, which usually means they were merged — they were left as they were; for any that was not "
-             "merged, run core/lease.sh adopt <branch>%s.%s")
 STOPPED_WHILE = ("upgrade to %s incomplete: stopped while %s — %s; it tries again at the next session start — if it "
                  "stops the same way again, ask this home's agent to look into the reason given")
 STOPPED_TIME = ("upgrade to %s incomplete: stopped while %s — the session start ran out of time; it runs again at the next "
@@ -520,6 +511,54 @@ def _carried_by(root: Path, p: Path, key: str, trunk: str) -> Optional[str]:
     return None
 
 
+# The trunk's reset "pick it up" or step 6 runs when a window holds the trunk's commits: marked here, {repo: the commit
+# the trunk was on}, before git starts and cleared once it finishes, so that only a reset Daedalus really began is ever
+# finished as cut off — never an ordinary edit on a trunk a window holds (review of option 1, finding 1).
+TRUNK_RESET = Path("state") / "upgrade-trunk-reset.json"
+
+
+def _reset_marks(root: Path) -> Dict[str, str]:
+    try:
+        d = json.loads((root / TRUNK_RESET).read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in d.items()} if isinstance(d, dict) else {}
+
+
+def _reset_mark(root: Path, key: str, sha: Optional[str]) -> None:
+    """Record (sha) or clear (None) the trunk reset Daedalus began in target/<key>."""
+    marks = _reset_marks(root)
+    if sha:
+        marks[key] = sha
+    elif key in marks:
+        del marks[key]
+    else:
+        return
+    path = root / TRUNK_RESET
+    if marks:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write(path, json.dumps(marks, indent=1, sort_keys=True) + "\n")
+    else:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _reset_trunk(root: Path, p: Path, key: str, trunk: str) -> Tuple[int, str]:
+    """Put <trunk> at origin/<trunk> (a window holds its commits), marked while it runs: (git's exit code, its stderr).
+    The mark stays when git fails or is still running, so the next start or "pick it up" finishes it."""
+    import leaselib as ll
+    _, now, _ = _git(p, "branch", "--show-current")
+    now = now.strip()
+    if now == trunk:
+        _reset_mark(root, key, ll.ref_oid(p, "refs/heads/" + trunk))
+    code, _, err = ll.git_finish(p, *ll._trunk_reset(now, trunk))
+    if code == 0:
+        _reset_mark(root, key, None)
+    return code, err
+
+
 def _in_the_way(p: Path, key: str, trunk: str, cur: str, ver: str) -> None:
     """Stop, before anything in target/ moves, when an untracked file is where the move back to the trunk or the
     trunk's reset would write (review finding 3): git refuses the checkout over it on every run, and a reset
@@ -596,16 +635,38 @@ def _checked_out_elsewhere(p: Path) -> Dict[str, str]:
     return found
 
 
+SQUASH_LOOK = 50    # commits of origin/<trunk>, newest first, _squashed tries as the one a branch was squashed into
+
+
+def _merges_to_nothing(p: Path, at: str, b: str) -> bool:
+    """Would merging <b> into <at> change nothing — `git merge-tree --write-tree` (git 2.38+) giving <at>'s own tree?
+    No when the merge conflicts, or the git here cannot say."""
+    code, out, _ = _git(p, "merge-tree", "--write-tree", at, _q(b))
+    if code != 0 or not out.strip():
+        return False
+    _, tree, _ = _git(p, "rev-parse", "%s^{tree}" % at)
+    return out.split()[0] == tree.strip()
+
+
 def _squashed(p: Path, trunk: str, b: str) -> bool:
     """Is <b>'s change already on origin/<trunk> although git cherry finds no equal commit — a squash merge, the
     usual way a branch reaches a GitHub trunk (release-candidate review, finding 3)? Yes when merging <b> into
-    origin/<trunk> would change nothing: `git merge-tree --write-tree` (git 2.38+) gives origin/<trunk>'s own tree.
-    No when the merge conflicts, or the git here cannot say."""
-    code, out, _ = _git(p, "merge-tree", "--write-tree", _origin(trunk), _q(b))
-    if code != 0 or not out.strip():
+    origin/<trunk> would change nothing; or, once origin/<trunk> has changed the same lines since, when merging it
+    into the commit it was squashed into would: one of origin/<trunk>'s own commits since <b> left it (first parent,
+    the newest SQUASH_LOOK touching <b>'s files). A commit made on <b> after the squash is in none of them, so <b>
+    then holds work — whether or not its branch on origin was deleted (review of option 1, finding 2)."""
+    if _merges_to_nothing(p, _origin(trunk), b):
+        return True
+    code, base, _ = _git(p, "merge-base", _origin(trunk), _q(b))
+    if code != 0 or not base.strip():
         return False
-    _, tree, _ = _git(p, "rev-parse", "%s^{tree}" % _origin(trunk))
-    return out.split()[0] == tree.strip()
+    code, out, _ = _git(p, "diff", "--name-only", "-z", "--no-renames", base.strip(), _q(b))
+    paths = [x for x in out.split("\0") if x]
+    if code != 0 or not paths:
+        return False
+    code, out, _ = _git(p, "rev-list", "--first-parent", "--max-count=%d" % SQUASH_LOOK, _origin(trunk),
+                        "^" + base.strip(), "--", *[":(literal)" + x for x in paths])
+    return code == 0 and any(_merges_to_nothing(p, c, b) for c in out.split())
 
 
 def _work(p: Path, trunk: str, rev: str) -> List[str]:
@@ -616,28 +677,20 @@ def _work(p: Path, trunk: str, rev: str) -> List[str]:
     return [] if work and _squashed(p, trunk, rev) else work
 
 
-def _upstream_gone(p: Path, b: str) -> bool:
-    """Was <b> tracking a branch on origin that is gone now — deleted there, which on GitHub follows a merge?"""
-    code, out, _ = _git(p, "for-each-ref", "--format=%(upstream:track)", "refs/heads/" + b)
-    return code == 0 and out.strip() == "[gone]"
-
-
-def _branches(p: Path, trunk: str, skip: str) -> Tuple[List[Tuple[str, List[str]]], List[Tuple[str, str, List[str]]],
-                                                        List[str]]:
+def _branches(p: Path, trunk: str, skip: str) -> Tuple[List[Tuple[str, List[str]]], List[Tuple[str, str, List[str]]]]:
     """The local branches of <p> other than <trunk>, <skip> (the checked-out one) and a window's lease/<NN> that
-    hold commits origin/<trunk> has no equivalent of (critic finding 1), in three kinds:
-      parked: (branch, subjects) — each becomes a window. Most commits first, so a branch built on another is
-              adopted before it and the other is then found carried, never a second copy.
+    hold commits origin/<trunk> has no equivalent of (critic finding 1), in two kinds:
+      parked: (branch, subjects) — work to pick up, whether or not its branch on origin was deleted (review of
+              option 1, finding 2). Most commits first, so a branch built on another is adopted before it and the
+              other is then found carried, never a second copy.
       elsewhere: (branch, path, subjects) — checked out in another worktree; named, never adopted (finding 1 of
               the release-candidate review: adopting it fails every time).
-      gone: (branch, subjects) — its branch on origin was deleted, which usually follows a merge; named, left as
-              it was (by doctor too: release-candidate review 2, finding 8).
-    A branch whose change is already on origin/<trunk> (git cherry, or a squash merge) is none of them."""
+    A branch whose change is already on origin/<trunk> (git cherry, or a squash merge) is neither."""
     import leaselib as ll
     # lstrip=2, never refname:short: a branch a tag shares its name with is short "heads/<b>" (review 4, finding 2)
     _, out, _ = _git(p, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/")
     held = _checked_out_elsewhere(p)
-    parked, elsewhere, gone = [], [], []
+    parked, elsewhere = [], []
     for b in out.splitlines():
         if not b.strip() or b in (trunk, skip) or LEASE_BRANCH.fullmatch(b):
             continue
@@ -649,11 +702,9 @@ def _branches(p: Path, trunk: str, skip: str) -> Tuple[List[Tuple[str, List[str]
             continue
         if b in held:
             elsewhere.append((b, held[b], work))
-        elif _upstream_gone(p, b):
-            gone.append((b, work))
         else:
             parked.append((b, work))
-    return sorted(parked, key=lambda bw: (-len(bw[1]), bw[0])), elsewhere, gone
+    return sorted(parked, key=lambda bw: (-len(bw[1]), bw[0])), elsewhere
 
 
 def _elsewhere_words(key: str, b: str, path: str, flag: str) -> str:
@@ -956,13 +1007,18 @@ def _cut_off(root: Path, p: Path, key: str, trunk: str, ver: str, head: str, dry
                    "checkout -f %s" % trunk)
         if hit:
             break
-    if hit is None and cur == trunk and _ahead(p, trunk):
-        # the reset of a trunk whose commits a window holds ("pick it up" made the window from a branch built on
-        # it): finished the same way, the files that are neither the commit's nor origin's named, never thrown away
-        nn = _carrier(root, p, "refs/heads/" + trunk)
+    marked = _reset_marks(root).get(key)
+    if hit is None and cur == trunk and marked:
+        # the reset of a trunk whose commits a window holds, which "pick it up" or step 6 began (its mark says so, and
+        # the trunk is still on the commit it was reset from): finished the same way, the files that are neither the
+        # commit's nor origin's named, never thrown away. With no mark, a trunk a window holds and an edit there is
+        # plain unsaved work (review of option 1, finding 1).
+        nn = _carrier(root, p, "refs/heads/" + trunk) if marked == sha and _ahead(p, trunk) else None
         if nn is not None:
             hit = (nn, _origin(trunk), ("reset", "--hard", "--quiet", _origin(trunk)),
                    "resetting %s to origin/%s" % (trunk, trunk), "reset --hard origin/%s" % trunk)
+        elif not dry:
+            _reset_mark(root, key, None)        # it finished, or the trunk moved since: nothing of it is left
     if hit is None:
         return None
     nn, to, args, doing, cmd = hit
@@ -1002,6 +1058,8 @@ def _cut_off(root: Path, p: Path, key: str, trunk: str, ver: str, head: str, dry
     if code != 0:
         raise Stop("could not finish %s in target/%s, cut off at an earlier start (%s); window %s holds its commit %s"
                    % (doing, key, _last(err), nn, sha[:7]))
+    if args[0] == "reset":
+        _reset_mark(root, key, None)
     return ("%s: a git command Daedalus ran in target/%s (%s) was cut off part-way; it is finished now — window %s holds "
             "the commit %s." % (head, key, doing, nn, sha[:7]))
 
@@ -1075,8 +1133,8 @@ def unfinished(root: Path, key: str, p: Path, trunk: str, keys: List[str], deadl
     """The unfinished work in target/<key>, each {"kind", "words", ...}, in the order the stop names them (spec §14
     step 6, the operator's decision of 2026-10-07 — Appendix E): a git operation stopped part-way ("busy"); a local
     branch with commits origin/<trunk> has no equivalent of — git cherry, a merge carrying content, a squash merge
-    found by merge-tree — that no window already holds and whose branch on origin was not deleted ("branch"; the
-    checked-out one first); the trunk ahead of origin, unless a window holds those commits ("trunk"); a detached
+    found by merge-tree — that no window already holds, its branch on origin deleted or not ("branch"; the checked-out
+    one first); the trunk ahead of origin, unless a window holds those commits ("trunk"); a detached
     HEAD with commits no branch has ("detached"); uncommitted changes to tracked files and untracked files that
     are not ignored ("unsaved"), and changes git status does not show — skip-worktree or assume-unchanged, a
     clean filter or line-ending conversion, an edit git's stat check passes ("hidden"); a repository of its own
@@ -1101,7 +1159,7 @@ def unfinished(root: Path, key: str, p: Path, trunk: str, keys: List[str], deadl
             work = _work(p, trunk, b)
         except ll.Refused as e:
             raise Stop("could not tell whether target branch %s holds work origin/%s lacks (%s)" % (b, trunk, e))
-        if work and not _upstream_gone(p, b) and _carrier(root, p, b) is None:
+        if work and _carrier(root, p, b) is None:
             found.append((b, work))
     for b, work in sorted(found, key=lambda bw: (bw[0] != cur, -len(bw[1]), bw[0])):
         items.append({"kind": "branch", "branch": b, "n": len(work),
@@ -1243,11 +1301,11 @@ def step_trunk(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
 def _step_trunk(root: Path, head: str, dry: bool, deadline: Optional[float], lines: List[str]) -> List[str]:
     """Spec §14 step 6, after the gate found no unfinished work: per repo (outer first, then nested), a window
     `lease.sh adopt` made and was cut off before its worktree is finished (finish_adopted); a checkout on a branch
-    whose work is already on origin/<trunk> (merged, squash-merged, or its branch on origin deleted), on a window's
-    branch, or detached at commits a branch holds, goes back on its trunk, the branch left as it was; a trunk ahead
-    of origin whose commits a window holds is reset to origin/<trunk>; the trunk is fast-forwarded to origin. Then
-    a branch whose branch on origin was deleted, ignored files, and work in a submodule are each named in a line and
-    left where they are. Afterwards no target/<repo> is off its trunk or ahead of origin — §14's predicate."""
+    whose work is already on origin/<trunk> (merged or squash-merged), on a window's branch, or detached at commits a
+    branch holds, goes back on its trunk, the branch left as it was; a trunk ahead of origin whose commits a window
+    holds is reset to origin/<trunk>; the trunk is fast-forwarded to origin. Then ignored files and work in a
+    submodule are each named in a line and left where they are. Afterwards no target/<repo> is off its trunk or
+    ahead of origin — §14's predicate."""
     import leaselib as ll
     repos = target_repos(root)
     if not repos:
@@ -1279,8 +1337,6 @@ def _step_trunk(root: Path, head: str, dry: bool, deadline: Optional[float], lin
                              % (head, nn, key, nn, key))
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
-        _, _, gone = _branches(p, trunk, "")
-        gone_names = [b for b, _w in gone]
         if cur != trunk:
             if not cur:
                 what = ("target/%s was not on a branch; its commits are already on a branch or on origin/%s, and it is "
@@ -1291,10 +1347,6 @@ def _step_trunk(root: Path, head: str, dry: bool, deadline: Optional[float], lin
             elif _carrier(root, p, cur) is not None and _work(p, trunk, cur):
                 what = ("target/%s was on %s, whose commits window %s holds; it is back on %s"
                         % (key, cur, _carrier(root, p, cur), trunk))
-            elif cur in gone_names:
-                what = ("target/%s was on %s, whose branch on origin was deleted, which usually means it was merged; it "
-                        "is back on %s and %s is left as it was — if it was not merged, run core/lease.sh adopt %s%s"
-                        % (key, cur, trunk, cur, cur, _repo_flag(root, key)))
             else:
                 what = ("target/%s was on %s, whose work is already on origin/%s; it is back on %s and %s is left as it "
                         "was" % (key, cur, trunk, trunk, cur))
@@ -1315,8 +1367,7 @@ def _step_trunk(root: Path, head: str, dry: bool, deadline: Optional[float], lin
                 lines.append("%s: would reset target/%s's %s (%s ahead of origin/%s) to origin/%s — window %s holds "
                              "those commits%s." % (head, key, trunk, n, trunk, trunk, nn, stale))
             else:
-                code, _, err = ll.git_finish(p, *ll._trunk_reset(_git(p, "branch", "--show-current")[1].strip(),
-                                                                 trunk))
+                code, err = _reset_trunk(root, p, key, trunk)
                 if code != 0:
                     raise Stop("could not reset target/%s's %s to origin/%s (%s); window %s holds its commits"
                                % (key, trunk, trunk, _last(err), nn))
@@ -1324,11 +1375,6 @@ def _step_trunk(root: Path, head: str, dry: bool, deadline: Optional[float], lin
                              "%s is reset to origin/%s.%s" % (head, key, trunk, n, trunk, nn, trunk, trunk, stale))
         elif not dry and cur == trunk:
             _git(p, "merge", "--ff-only", "--quiet", _origin(trunk))
-        others = [b for b in gone_names if b != cur]
-        if others:
-            lines.append((GONE_ONE % (head, key, others[0], trunk, others[0], _repo_flag(root, key), stale))
-                         if len(others) == 1 else
-                         GONE_MANY % (head, key, ll.name_paths(others), trunk, _repo_flag(root, key), stale))
     # ignored files stay in the trunk mirror, which no session works in (review 3, finding 6); work in a submodule
     # too (a window's worktree starts with the submodule empty: review 4, finding 4) — each named once
     for key, p in repos:
@@ -1557,8 +1603,7 @@ def _pick_repo(root: Path, key: str, p: Path, trunk: str, items: List[dict], ver
             except ll.Refused as e:
                 left.append(str(e))
         else:
-            _, now, _ = _git(p, "branch", "--show-current")
-            code, _, err = ll.git_finish(p, *ll._trunk_reset(now.strip(), trunk))
+            code, err = _reset_trunk(root, p, key, trunk)
             if code != 0:
                 left.append("could not reset target/%s's %s to origin/%s (%s); window %s holds its commits"
                             % (key, trunk, trunk, _last(err), nn))
@@ -3645,9 +3690,9 @@ def doctor(root: Path) -> int:
         _, cur, _ = _git(p, "branch", "--show-current")
         cur = cur.strip()
         try:
-            parked, elsewhere, gone = _branches(p, trunk, cur)
+            parked, elsewhere = _branches(p, trunk, cur)
         except Stop:
-            parked, elsewhere, gone = [], [], []
+            parked, elsewhere = [], []
         loose = _loose(p, key, [k for k, _ in repos])
         if loose:                       # untracked files in a target checkout: work no window holds (critic finding 2)
             if pend:
@@ -3667,11 +3712,6 @@ def doctor(root: Path) -> int:
             if not _carried(p, b, mine):
                 print("NOTE     target/%s has branch %s, %s past origin/%s, in no window — it %s"
                       % (key, b, _plural(len(work), "commit"), trunk, _elsewhere_words(key, b, path, flag)))
-        for b, work in gone:            # named by the upgrade once, here every time (review 2, finding 8)
-            if not _carried(p, b, mine):
-                print("NOTE     target/%s has branch %s, %s past origin/%s, whose branch on origin was deleted — "
-                      "if it was not merged, run core/lease.sh adopt %s%s" % (key, b, _plural(len(work), "commit"),
-                                                                             trunk, b, flag))
         for b, work in parked:          # a branch beside the checkout, in no window (critic finding 1)
             if _carried(p, b, mine):
                 continue

@@ -212,33 +212,40 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-@test "a branch squash-merged on origin is not made a window — its change is already on origin/main; a branch whose branch on origin was deleted is left as it was and named in one line (release-candidate review, finding 3)" {
+@test "a branch squash-merged on origin is not made a window — its change is already on origin/main, even once origin/main has changed the same lines since and its branch on origin was deleted; a branch deleted on origin unmerged is unfinished work (release-candidate review, finding 3; review of option 1, finding 2)" {
   git -C "$T" checkout -q -b feat/sq; printf '1\n' > "$T/sq.txt"; git -C "$T" add -A; cmt "$T" -m sq1
   printf '2\n' >> "$T/sq.txt"; git -C "$T" add -A; cmt "$T" -m sq2
   git -C "$T" push -q origin feat/sq
+  git -C "$T" checkout -q -b feat/late main; printf 'one\n' > "$T/late.txt"; git -C "$T" add -A; cmt "$T" -m late1
+  printf 'two\n' > "$T/late2.txt"; git -C "$T" add -A; cmt "$T" -m late2
+  git -C "$T" push -q -u origin feat/late
   git -C "$T" checkout -q -b feat/gone main; printf 'g\n' > "$T/g.txt"; git -C "$T" add -A; cmt "$T" -m gone1
   git -C "$T" push -q -u origin feat/gone
   git -C "$T" checkout -q main
   git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
-  git -C "$BATS_TEST_TMPDIR/hand" merge -q --squash origin/feat/sq
-  git -C "$BATS_TEST_TMPDIR/hand" -c user.email=t@x -c user.name=t commit -q -m "feat/sq (squashed)"
-  git -C "$BATS_TEST_TMPDIR/hand" push -q origin main
-  git -C "$BATS_TEST_TMPDIR/hand" push -q origin --delete feat/gone
+  H="$BATS_TEST_TMPDIR/hand"
+  git -C "$H" merge -q --squash origin/feat/sq; cmt "$H" -m "feat/sq (squashed)"
+  git -C "$H" merge -q --squash origin/feat/late; cmt "$H" -m "feat/late (squashed)"
+  printf 'changed later\n' > "$H/late.txt"; git -C "$H" add -A; cmt "$H" -m "a later change to late.txt"
+  git -C "$H" push -q origin main
+  git -C "$H" push -q origin --delete feat/late feat/gone
   git -C "$T" fetch -q --prune origin
-  gone_note="NOTE     target/thing has branch feat/gone, 1 commit past origin/main, whose branch on origin was deleted — if it was not merged, run core/lease.sh adopt feat/gone"
+  # merging feat/late into origin/main now conflicts: only the commit it was squashed into shows its change landed
+  ! git -C "$T" merge-tree --write-tree refs/remotes/origin/main feat/late >/dev/null 2>&1
   run python3 "$UP" --doctor
-  case "$output" in *"feat/sq"*) echo "$output"; return 1 ;; esac
-  case "$output" in *"$gone_note"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"feat/sq"*|*"feat/late"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing has branch feat/gone, 1 commit past origin/main, in no window — the upgrade stops on it until it is picked up"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"Daedalus has unfinished work in target/thing: the branch feat/gone (1 commit not on origin). Nothing was changed."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"feat/sq"*|*"feat/late"*) echo "$output"; return 1 ;; esac
+  git -C "$T" branch -D -q feat/gone
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"window 01"*|*"could not be fast-forwarded"*|*"feat/sq"*) echo "$output"; return 1 ;; esac
-  case "$output" in *"Upgrade to 0.7.0: target/thing's branch feat/gone holds commits origin/main has no copy of, but its branch on origin was deleted, which usually means it was merged — it was left as it was; if it was not merged, run core/lease.sh adopt feat/gone."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 01"*|*"could not be fast-forwarded"*|*"feat/sq"*|*"feat/late"*) echo "$output"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
-  git -C "$T" rev-parse -q --verify refs/heads/feat/sq >/dev/null; git -C "$T" rev-parse -q --verify refs/heads/feat/gone >/dev/null
+  git -C "$T" rev-parse -q --verify refs/heads/feat/sq >/dev/null; git -C "$T" rev-parse -q --verify refs/heads/feat/late >/dev/null
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
-  # after the upgrade, when its one line has scrolled away, doctor still names it (review 2, finding 8)
-  run python3 "$UP" --doctor
-  case "$output" in *"$gone_note"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 # --- release-candidate review 2 -------------------------------------------------------------------------------

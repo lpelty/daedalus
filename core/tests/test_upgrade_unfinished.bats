@@ -33,6 +33,23 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   up_stops "Daedalus has unfinished work in target/thing: the branch main (1 commit not on origin). $TAIL"
 }
 
+@test "unfinished work: a branch whose branch on origin was deleted after it merged, with a follow-up commit made since — the follow-up counts; one deleted on origin unmerged counts too (review of option 1, finding 2)" {
+  git -C "$T" checkout -q -b fix-login; printf 'l\n' > "$T/l.txt"; git -C "$T" add -A; cmt "$T" -m one
+  git -C "$T" push -q -u origin fix-login
+  git clone -q "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/hand"
+  git -C "$BATS_TEST_TMPDIR/hand" -c user.email=t@x -c user.name=t merge -q --no-ff origin/fix-login -m "Merge fix-login"
+  git -C "$BATS_TEST_TMPDIR/hand" push -q origin main; git -C "$BATS_TEST_TMPDIR/hand" push -q origin --delete fix-login
+  git -C "$T" fetch -q --prune origin
+  printf 'MORE\n' > "$T/more.txt"; git -C "$T" add -A; cmt "$T" -m "the follow-up fix nobody pushed"
+  up_stops "Daedalus has unfinished work in target/thing: the branch fix-login (1 commit not on origin). $TAIL"
+  run python3 "$UP" --doctor
+  case "$output" in *"target/thing is on fix-login, 1 commit past origin/main — the upgrade stops on it until it is picked up"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" checkout -q -b wip main; printf 'w\n' > "$T/w.txt"; git -C "$T" add -A; cmt "$T" -m wip1
+  git -C "$T" push -q -u origin wip; git -C "$T" push -q origin --delete wip; git -C "$T" fetch -q --prune origin
+  git -C "$T" branch -D -q fix-login
+  up_stops "Daedalus has unfinished work in target/thing: the branch wip (1 commit not on origin). $TAIL"
+}
+
 @test "unfinished work: a detached HEAD holding commits no branch has — even when its change is already on origin as a squash" {
   git -C "$T/sub" checkout -q --detach; printf 'd\n' > "$T/sub/d.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m d1
   printf 'd2\n' >> "$T/sub/d.txt"; git -C "$T/sub" add -A; cmt "$T/sub" -m d2
@@ -262,6 +279,30 @@ sys.exit(u.pick_up(u.v.ROOT))' "$DAEDALUS_HOME/core" "$kill"
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(cat "$DAEDALUS_HOME/worktrees/03/thing/a.txt")" = "MY EDIT" ]
+}
+
+@test "the trunk ahead of origin, a window holding its commits, and an ordinary edit there: plain unsaved work, never a cut-off reset — 'pick it up' saves the edit into a window and resets the trunk; the upgrade completes (review of option 1, finding 1)" {
+  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'ahead\n' >> "$T/a.txt"; git -C "$T" add -A; cmt "$T" -m "trunk work"
+  git -C "$T" branch feat main; git -C "$T" checkout -q feat; printf 'f\n' > "$T/f.txt"; git -C "$T" add -A; cmt "$T" -m feat
+  git -C "$T" checkout -q main
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt feat </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" rev-parse main)" != "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
+  printf 'MY EDIT\n' >> "$T/a.txt"
+  rm "$DAEDALUS_HOME/state/upgraded-to"
+  up_stops "Daedalus has unfinished work in target/thing: 1 unsaved file. $TAIL"
+  pick_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"cut off"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"Window 02 now holds daedalus/unsaved-"*"Unsaved work in target/thing, picked up before the upgrade"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing's main was also 1 commit ahead of origin/main; window 01 holds those commits, so main is reset to origin/main."*"Everything unfinished in target/ is in windows now."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(tail -1 "$DAEDALUS_HOME/worktrees/02/thing/a.txt")" = "MY EDIT" ]
+  [ "$(git -C "$T" rev-parse main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]; [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"cut off"*) echo "$output"; return 1 ;; esac
 }
 
 @test "pick it up with nothing unfinished says so and changes nothing" {

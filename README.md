@@ -63,9 +63,10 @@ window numbers itself. Each step acts once and says one line when it does:
    changes, hidden ones too; untracked files that are not ignored; stash
    entries; a rebase, merge, cherry-pick, revert or bisect in progress; a
    worktree that is not a window's. Work already on `origin` does not count,
-   squash-merged or merged; nor does a branch a window holds, or one whose
-   branch on `origin` was deleted (that usually means it was merged; it is
-   named in a line). If it finds any, it stops and changes nothing there. It
+   squash-merged or merged, nor does a branch a window holds. A branch whose
+   branch on `origin` was deleted counts when it holds a commit `origin` has
+   no copy of, such as a fix made after its pull request merged. If it finds
+   any, it stops and changes nothing there. It
    says one sentence, for example: "Daedalus has unfinished work in
    target/app: the branch fix-login (2 commits not on GitHub), and 3 unsaved
    files. Nothing was changed. Say 'pick it up' to move it into windows, or

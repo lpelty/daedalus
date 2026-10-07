@@ -228,8 +228,9 @@ shows what is left.
   changes, unfinished work in any target repo (outer and nested) stops the
   upgrade in one sentence naming it — a branch with commits `git cherry`
   finds missing from `origin/<trunk>` (or a merge commit whose result adds
-  something, which `git cherry` passes over; a squash merge, a branch a window
-  holds, and one whose branch on origin was deleted do not count), the trunk
+  something, which `git cherry` passes over; a squash merge, found even after
+  origin changed the same lines, and a branch a window holds do not count; one
+  whose branch on origin was deleted counts when it holds such a commit), the trunk
   ahead of origin, a detached HEAD with commits no branch has, uncommitted
   changes (hidden ones too), untracked files that are not ignored, a stash
   entry, a rebase, merge, cherry-pick, revert or bisect in progress, a
@@ -254,7 +255,10 @@ shows what is left.
   is finished by the next start (git's own locks cleared, then the reset or a
   forced checkout of the trunk), never "commit them", which put the same
   commit in a second window; a file whose content is neither side's is named
-  instead, and doctor says the window already holds a trunk's commits.
+  instead, and doctor says the window already holds a trunk's commits. Only a
+  reset Daedalus began is finished this way: it is marked in
+  `state/upgrade-trunk-reset.json` while it runs, so an ordinary edit on a
+  trunk a window holds is unsaved work that "pick it up" saves.
   A window is made without renaming anything: `lease/<NN>` is made at the
   work's tip, and the branch's own name is removed only once the lease file and
   the worktrees exist, so a `git` killed at any point leaves the commits on a
