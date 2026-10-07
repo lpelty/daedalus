@@ -14,8 +14,8 @@ dest="$(target_path)"
 refuse_off_trunk() {
   local where="$1" cur="$2" trunk="$3" repo_arg="$4"
   if upgrade_pending; then
-    [ -n "$cur" ] || die "$where is not on a branch; the upgrade puts it back on $trunk at the next session start, moving any commit not on origin/$trunk into a window"
-    die "$where is on $cur; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt $cur$repo_arg)"
+    [ -n "$cur" ] || die "$where is not on a branch; the upgrade puts it back on $trunk at the next session start, or stops first while it holds commits no branch has, until they are picked up (core/lease.sh adopt --all-unfinished)"
+    die "$where is on $cur; the upgrade stops on it while it holds work origin/$trunk lacks, until it is picked up (core/lease.sh adopt --all-unfinished, or core/lease.sh adopt $cur$repo_arg), and otherwise puts it back on $trunk at the next session start"
   fi
   [ -n "$cur" ] || die "$where is not on a branch; give its commits a branch (git -C $where switch -c <name>) and run core/lease.sh adopt <name>$repo_arg, or check out $trunk if they are already on origin/$trunk"
   case "$cur" in

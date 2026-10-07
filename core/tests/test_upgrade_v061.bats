@@ -24,8 +24,19 @@ stop_s0() {         # ... and its Stop
     "$B" | python3 "$H/core/boundary-hook.py"
 }
 ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+pick_it_up() { run bash "$H/core/lease.sh" adopt --all-unfinished </dev/null; }   # the operator said "pick it up"
+win_of() {          # win_of <branch> — the number of the window adopted from <branch>
+  python3 -c 'import json,sys,glob
+for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
+    d = json.load(open(f))
+    if d.get("adopted_from") == sys.argv[2]: print(d["lease"])' "$H" "$1"
+}
+ship_in_flight() {  # fix/in-flight reached origin's main: target/ holds no work origin lacks (this laptop's real shape)
+  git -C "$T" push -q origin fix/in-flight:main; git -C "$T" fetch -q origin
+}
+TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."
 
-@test "v0.6.1, built and started by its own code, then pulled: the open session's next prompt says the upgrade has not run and its Stop passes, with no traceback; the first new session upgrades the home with nobody's hands on it — every §14 predicate holds; the old session's Stop then gives only the release's config.yaml reason (do not restore it; start a new session) and the promotion backstop; the second session changes nothing" {
+@test "v0.6.1, built and started by its own code, then pulled: the open session's next prompt says the upgrade has not run and its Stop passes, with no traceback; the first new session stops the upgrade on the in-flight branch, changing nothing in target/; 'pick it up' makes it a window; the next session upgrades the home with nobody else's hands on it — every §14 predicate holds; the old session's Stop then gives only the release's config.yaml reason (do not restore it; start a new session) and the promotion backstop; the session after changes nothing" {
   pull_current
   # the session that pulled keeps running: its board leads with the pending line; nothing is created by reading
   run --separate-stderr prompt_s0
@@ -37,19 +48,35 @@ ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.s
   [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
   case "$stderr" in *Traceback*) echo "$stderr"; return 1 ;; esac
   [ -z "$output" ] || { echo "the pulling session's Stop was blocked before any upgrade: $output"; return 1; }
-  # the first new session
+  # the first new session: the in-flight branch is unfinished work; the upgrade stops, target/thing untouched
+  tip="$(git -C "$T" rev-parse fix/in-flight)"
   run start_session s1
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  s="Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin). $TAIL"
+  case "$c" in *"$s"*"You are window 01 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*|*"installed the pre-push hook"*) echo "$c"; return 1 ;; esac
+  [ ! -e "$H/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  [ "$(git -C "$T" rev-parse fix/in-flight)" = "$tip" ]
+  run --separate-stderr prompt_s0
+  [ "$(ctx_of "$output" | head -1)" = "$s" ] || { echo "$output"; return 1; }
+  # the operator says "pick it up"
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 02 now holds fix/in-flight from target/thing (1 commit: \"the waiting fix\")"*"Everything unfinished in target/ is in windows now. Start a new session and the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  # the next session finishes the upgrade
+  run start_session s2
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(ctx_of "$output")"
+  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 03"*) : ;; *) echo "$c"; return 1 ;; esac
   # VERSION and the stamp
   [ "$(cat "$H/VERSION")" = 0.7.0 ]; [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]
-  # the in-flight branch is window 01; target/thing is the trunk mirror with no ahead
-  [ "$(lease_json 01 adopted_from)" = fix/in-flight ]
+  # the in-flight branch is window 02; target/thing is the trunk mirror with no ahead
+  [ "$(lease_json 02 adopted_from)" = fix/in-flight ]
   [ "$(git -C "$T" branch --show-current)" = main ]
   case "$(git -C "$T" status -sb | head -1)" in *ahead*) echo "still ahead"; return 1 ;; esac
   run bash "$H/core/lease.sh" list
-  case "$output" in *"- 01 "*"adopted from fix/in-flight"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"- 02 "*"adopted from fix/in-flight"*) : ;; *) echo "$output"; return 1 ;; esac
   # the hook in Daedalus's own checkout, outer and nested
   run python3 "$H/core/prepush.py" status "$T" "$T/sub"
   [ "$(printf '%s\n' "$output" | cut -f2 | sort -u)" = installed ] || { echo "$output"; return 1; }
@@ -67,39 +94,36 @@ ctx_of() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.s
   # the old session's Stop after the upgrade blocks (exit 2, reasons on stderr) with only the reasons the spec gives
   # a session left open through an upgrade: config.yaml changed under it (the memory: block; Decision 11 — the
   # sentence tells the operator to restart it), and the promotion backstop, which cannot tell an unnumbered
-  # session's tree now that two sessions are live. Never a traceback. (Measured on a scratch build of Tasks 2-5,
-  # 2026-09-29: exactly these two lines.)
+  # session's tree now that several sessions are live. Never a traceback.
   run --separate-stderr stop_s0
   case "$status" in 0|2) : ;; *) echo "status $status: $output $stderr"; return 1 ;; esac
   case "$stderr" in *Traceback*) echo "$stderr"; return 1 ;; esac
-  # Since the critic's finding 7 the config.yaml reason names the upgrade as the one that changed it and says not to
-  # restore it; it blocks once (test_boundary_hook.bats), and here the promotion backstop still blocks on its own.
   case "$stderr" in *"config.yaml changed under this session, by the upgrade to 0.7.0 — not by this session. Do not restore it"*"tell the operator to close it and start a new session."*) : ;; *) echo "$stderr"; return 1 ;; esac
   case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac
   [ -z "$(printf '%s\n' "$stderr" | grep -v -e '^$' -e '^config.yaml changed under this session, by the upgrade' -e '^Promotion check')" ] \
     || { echo "an unexpected Stop reason for the old session: $stderr"; return 1; }
   run --separate-stderr stop_s0
   case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac
-  # the second session: nothing upgrades again
+  # the session after: nothing upgrades again
   before="$(cd "$H" && find config.yaml vault/hot.md state/hindsight state/upgraded-to -type f | sort | xargs shasum)"
-  run start_session s2
+  run start_session s3
   case "$output" in *"Upgrade to"*) echo "$output"; return 1 ;; esac
   [ "$(cd "$H" && find config.yaml vault/hot.md state/hindsight state/upgraded-to -type f | sort | xargs shasum)" = "$before" ]
 }
 
-@test "v0.6.1, pulled, with an uncommitted edit hidden from git status by skip-worktree on the in-flight checkout: the first new session stops the upgrade naming the file and how to clear the mark — no stamp, no window, the edit where it was; doctor names it (release-candidate review 2, finding 6)" {
+@test "v0.6.1, pulled, with an uncommitted edit hidden from git status by skip-worktree on the in-flight checkout: the first new session stops the upgrade naming the file — no stamp, no window, the edit where it was; doctor names it with how to clear the mark (release-candidate review 2, finding 6)" {
   printf 'MY UNCOMMITTED EDIT\n' > "$T/thing.txt"; git -C "$T" update-index --skip-worktree thing.txt
   [ -z "$(git -C "$T" status --porcelain --untracked-files=no)" ]
   pull_current
   run start_session s1
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
-  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing has uncommitted changes git status does not show, in files marked skip-worktree (thing.txt) — clear the mark (git -C target/thing update-index --no-skip-worktree thing.txt), commit them on their branch inside that checkout, then start a session again"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin), and 1 changed file git status does not show (thing.txt). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
   [ ! -e "$H/state/upgraded-to" ]; ! grep -qs adopted_from "$H"/state/leases/*.json
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(cat "$T/thing.txt")" = "MY UNCOMMITTED EDIT" ]
   run bash "$H/core/doctor.sh"
-  case "$output" in *"target/thing has uncommitted changes git status does not show, in files marked skip-worktree (thing.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing has uncommitted changes git status does not show, in files marked skip-worktree (thing.txt) — no window has them; clear the mark (git -C target/thing update-index --no-skip-worktree thing.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 s1_ctx() {          # the first new session after the pull; its context in $c
@@ -113,19 +137,23 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   git -C "$T" fetch -q origin
 }
 
-@test "v0.6.1 with target.dir .upgrade-carry, pulled, the checkout on a branch with untracked files: the first new session carries them whole into window 01's worktree — the carry's temporary directory is never the window's checkout (release-candidate review 3, finding 1)" {
+@test "v0.6.1 with target.dir .upgrade-carry, pulled, the checkout on a branch with untracked files: 'pick it up' saves them with the branch into its window's worktree whole — a target named like a temporary directory is just a name (release-candidate review 3, finding 1)" {
   [ "$(basename "$T")" = .upgrade-carry ]
   printf 'MY NOTES\n' > "$T/notes.md"; mkdir -p "$T/draft"; printf 'A DRAFT\n' > "$T/draft/a.md"
   pull_current
   s1_ctx
-  case "$c" in *"Its untracked files went with it into worktrees/01/.upgrade-carry: draft/a.md, notes.md."*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  W="$H/worktrees/01/.upgrade-carry"
-  [ "$(git -C "$W" branch --show-current)" = lease/01 ]; [ "$(cat "$W/f.txt")" = f ]
-  [ "$(cat "$W/notes.md")" = "MY NOTES" ]; [ "$(cat "$W/draft/a.md")" = "A DRAFT" ]
-  [ ! -e "$T/notes.md" ]; [ ! -e "$T/draft" ]; [ ! -e "$H/state/upgrade-carry-tmp" ]
+  case "$c" in *"Daedalus has unfinished work in target/.upgrade-carry: the branch fix/in-flight (1 commit not on origin), and 2 unsaved files. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  W="$H/worktrees/$(win_of fix/in-flight)/.upgrade-carry"
+  [ "$(git -C "$W" branch --show-current)" = "lease/$(win_of fix/in-flight)" ]; [ "$(cat "$W/f.txt")" = f ]
+  [ "$(cat "$W/notes.md")" = "MY NOTES" ]; [ "$(cat "$W/draft/a.md")" = "A DRAFT" ]; [ -z "$(git -C "$W" status --porcelain)" ]
+  [ ! -e "$T/notes.md" ]; [ ! -e "$T/draft" ]
 }
 
-@test "v0.6.1, pulled, with worktrees made by hand on a volume not mounted at the first new session — one detached with a commit no branch has, one holding a staged change: both come back whole; the upgrade names the detached commit (release-candidate review 3, finding 2)" {
+@test "v0.6.1, pulled, with worktrees made by hand on a volume not mounted at the first new session — one detached with a commit no branch has, one holding a staged change: the upgrade stops naming both, and both come back whole (release-candidate review 3, finding 2)" {
   git -C "$T" worktree add -q --detach "$B/vol/exp" main
   printf 'e\n' > "$B/vol/exp/e.txt"; git -C "$B/vol/exp" add -A; cmt "$B/vol/exp" -m "exp-only"
   sha="$(git -C "$B/vol/exp" rev-parse HEAD)"
@@ -134,8 +162,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   pull_current
   mv "$B/vol" "$B/vol-unmounted"
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing has a worktree made by hand at $B/vol/exp, a detached HEAD with 1 commit no branch has (\"exp-only\") — its directory is not there now"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin), a worktree made by hand at $B/vol/exp (its directory is gone), and a worktree made by hand at $B/vol/st (its directory is gone). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   mv "$B/vol-unmounted" "$B/vol"
   [ "$(git -C "$B/vol/exp" rev-parse HEAD)" = "$sha" ] || { git -C "$B/vol/exp" status; return 1; }
   [ "$(git -C "$B/vol/st" show :s.txt)" = staged ]; [ "$(cat "$B/vol/st/s.txt")" = "on disk" ]
@@ -144,7 +171,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   case "$output" in *"NOTE     target/thing has a worktree made by hand at $B/vol/st, on branch exp/staged, uncommitted or untracked files (s.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "v0.6.1, pulled, with a parked branch whose only unpushed content is in a merge commit: git cherry passes it over, the upgrade does not — it becomes a window holding that content (release-candidate review 3, finding 3)" {
+@test "v0.6.1, pulled, with a parked branch whose only unpushed content is in a merge commit: git cherry passes it over, the upgrade does not — it stops naming the branch, and 'pick it up' makes it a window holding that content (release-candidate review 3, finding 3)" {
   origin_moves
   git -C "$T" branch spike/notes origin/main~1
   git -C "$T" worktree add -q "$B/tmpwt" spike/notes
@@ -157,12 +184,15 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   run python3 "$H/core/upgrade.py" --doctor
   case "$output" in *"NOTE     target/thing has branch spike/notes, 1 commit past origin/main, in no window"*) : ;; *) echo "$output"; return 1 ;; esac
   s1_ctx
-  case "$c" in *"target/thing's branch spike/notes (1 commit not on origin/main: \"Merge origin/main into spike/notes (with my notes)\") is now window 02"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(cat "$H/worktrees/02/thing/notes.md")" = "MY UNPUSHED DESIGN NOTES" ]
+  case "$c" in *"the branch spike/notes (1 commit not on origin)"*"$TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"now holds spike/notes from target/thing (1 commit: \"Merge origin/main into spike/notes (with my notes)\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$H/worktrees/$(win_of spike/notes)/thing/notes.md")" = "MY UNPUSHED DESIGN NOTES" ]
   ! git -C "$T" rev-parse -q --verify refs/heads/spike/notes >/dev/null
 }
 
-@test "v0.6.1, pulled, on a branch whose only unpushed commit is a merge carrying content: it becomes window 01, not 'already on origin/main'; a merge that adds nothing is still no work (release-candidate review 3, finding 3)" {
+@test "v0.6.1, pulled, on a branch whose only unpushed commit is a merge carrying content: the upgrade stops naming it, not 'already on origin/main'; a merge that adds nothing is still no work (release-candidate review 3, finding 3)" {
   origin_moves
   git -C "$T" checkout -q -b fix/merge-notes origin/main~1
   git -C "$T" merge -q --no-ff --no-commit origin/main >/dev/null 2>&1
@@ -174,13 +204,15 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   git -C "$T" worktree remove "$B/tmpwt"
   pull_current
   s1_ctx
-  case "$c" in *"target/thing was on fix/merge-notes (1 commit not on origin/main: \"Merge origin/main into fix/merge-notes (resolved; notes added)\"); that work is now window 01"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/merge-notes (1 commit not on origin), and the branch fix/in-flight (1 commit not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"whose work is already on origin/main"*|*"plain/merge"*) echo "$c"; return 1 ;; esac
-  [ "$(cat "$H/worktrees/01/thing/notes.md")" = "MY UNPUSHED DESIGN NOTES" ]
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$H/worktrees/$(win_of fix/merge-notes)/thing/notes.md")" = "MY UNPUSHED DESIGN NOTES" ]
   git -C "$T" rev-parse -q --verify refs/heads/plain/merge >/dev/null
 }
 
-@test "v0.6.1, pulled, with a branch named lease/00 holding a user branch's unpushed commit: neither hides — the work becomes a window, lease/00 is gone, and doctor names nothing left behind (release-candidate review 3, finding 4)" {
+@test "v0.6.1, pulled, with a branch named lease/00 holding a user branch's unpushed commit: neither hides — the upgrade names it, 'pick it up' makes the work a window, lease/00 is gone, and doctor names nothing left behind (release-candidate review 3, finding 4)" {
   git -C "$T" branch wip/report main
   git -C "$T" worktree add -q "$B/tmpwt" wip/report
   printf 'REPORT DRAFT\n' > "$B/tmpwt/report.md"; git -C "$B/tmpwt" add report.md; cmt "$B/tmpwt" -m "report draft"
@@ -190,22 +222,25 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   run python3 "$H/core/upgrade.py" --doctor
   case "$output" in *"branch lease/00, 1 commit past origin/main, in no window"*) : ;; *) echo "$output"; return 1 ;; esac
   s1_ctx
-  case "$c" in *"target/thing's branch lease/00 (1 commit not on origin/main: \"report draft\") is now window 02"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(cat "$H/worktrees/02/thing/report.md")" = "REPORT DRAFT" ]
+  case "$c" in *"the branch lease/00 (1 commit not on origin)"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  nn="$(win_of lease/00)"
+  [ "$(cat "$H/worktrees/$nn/thing/report.md")" = "REPORT DRAFT" ]
   ! git -C "$T" rev-parse -q --verify refs/heads/lease/00 >/dev/null
-  git -C "$T" merge-base --is-ancestor wip/report lease/02
+  git -C "$T" merge-base --is-ancestor wip/report "lease/$nn"
+  run python3 "$H/core/upgrade.py" --doctor
+  case "$output" in *"in no window"*) echo "$output"; return 1 ;; esac
 }
 
-@test "v0.6.1, pulled, with worktrees made by hand — one on a new branch with an uncommitted edit and an untracked file, one detached with a commit no branch has: the upgrade names each once and leaves them as they are; doctor names them (release-candidate review 3, finding 5)" {
+@test "v0.6.1, pulled, with worktrees made by hand — one on a new branch with an uncommitted edit and an untracked file, one detached with a commit no branch has: the upgrade stops naming each and leaves them as they are; doctor names their work (release-candidate review 3, finding 5)" {
   git -C "$T" worktree add -q -b exp/a "$B/hand-a" main
   printf 'edit\n' >> "$B/hand-a/thing.txt"; printf 'n\n' > "$B/hand-a/new.md"
   git -C "$T" worktree add -q --detach "$B/hand-b" main
   printf 'd\n' > "$B/hand-b/d.txt"; git -C "$B/hand-b" add -A; cmt "$B/hand-b" -m "detached work"
   pull_current
   s1_ctx
-  case "$c" in *"target/thing has a worktree made by hand at $B/hand-a, on branch exp/a, uncommitted or untracked files (new.md, thing.txt) — no window has that work; the upgrade leaves it as it is"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing has a worktree made by hand at $B/hand-b, a detached HEAD with 1 commit no branch has (\"detached work\")"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin), a worktree made by hand at $B/hand-a, and a worktree made by hand at $B/hand-b. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(git -C "$B/hand-a" status --porcelain | sort | tr '\n' '|')" = " M thing.txt|?? new.md|" ]
   [ "$(git -C "$B/hand-b" log -1 --format=%s)" = "detached work" ]
   run bash "$H/core/doctor.sh"
@@ -225,29 +260,33 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
 }
 
 @test "v0.6.1, pulled, with an empty lease file and an empty prime.json a cut-off reservation left: the first new session clears them, upgrades, numbers itself and renders the board; sweep works (release-candidate review 3, finding 7)" {
+  ship_in_flight
   pull_current
   mkdir -p "$H/state/leases"; : > "$H/state/leases/01.json"; : > "$H/state/leases/prime.json"
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 0"*"and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"could not be rendered"*|*"cannot be bound"*) echo "$c"; return 1 ;; esac
-  [ "$(lease_json 01 adopted_from)" = fix/in-flight ]
   run bash "$H/core/lease.sh" sweep
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-@test "v0.6.1, pulled, where an earlier start's worktree add for the in-flight branch was cut off — lease/01 at its tip, a record locked 'initializing' over a directory whose .git file was never written: the next start clears it and finishes window 01 (release-candidate review 3, finding 8)" {
+@test "v0.6.1, pulled, where an earlier adoption's worktree add for the in-flight branch was cut off — lease/01 at its tip, a record locked 'initializing' over a directory whose .git file was never written: 'pick it up' clears it and finishes window 01 (release-candidate review 3, finding 8)" {
   pull_current
   git -C "$T" branch lease/01 fix/in-flight
   mkdir -p "$H/worktrees/01"
   git -C "$T" worktree add -q --lock --reason initializing "$H/worktrees/01/thing" lease/01; : > "$H/worktrees/01/thing/.git"
-  printf 'n\n' > "$T/notes.txt"
   s1_ctx
-  case "$c" in *"target/thing was on fix/in-flight (1 commit not on origin/main: \"the waiting fix\"); that work is now window 01"*"worktrees/01/thing: notes.txt"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 01 now holds fix/in-flight from target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$H/worktrees/01/thing" branch --show-current)" = lease/01 ]; [ "$(cat "$H/worktrees/01/thing/f.txt")" = f ]
   ! git -C "$T" rev-parse -q --verify refs/heads/fix/in-flight >/dev/null
+  run start_session s2
+  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "v0.6.1, pulled, where a git command was cut off part-way — the checkout on a branch that no longer exists, or lock files left: the upgrade stops naming the branch's commit or the files, never 'commit them'; put right, the next start finishes (release-candidate review 3, finding 9)" {
+@test "v0.6.1, pulled, where a git command was cut off part-way — the checkout on a branch that no longer exists, or lock files left: the upgrade stops naming the branch's commit or the files, never 'commit them'; put right and picked up, the next start finishes (release-candidate review 3, finding 9)" {
   sha="$(git -C "$T" rev-parse fix/in-flight)"
   git -C "$T" update-ref -d refs/heads/fix/in-flight
   pull_current
@@ -265,31 +304,42 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   : > "$T/.git/refs/heads/lease/03.lock"; touch -t 202001010000 "$T/.git/refs/heads/lease/03.lock"
   run start_session s3
   c="$(ctx_of "$output")"
-  case "$c" in *"target/thing was on fix/in-flight (1 commit not on origin/main: \"the waiting fix\"); that work is now window 03"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(git -C "$T" rev-parse lease/03)" = "$sha" ]
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin)."*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s4
+  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" rev-parse "lease/$(win_of fix/in-flight)")" = "$sha" ]
 }
 
-@test "v0.6.1, pulled, with a worktree an earlier start's cut-off adoption left under worktrees/01 on the in-flight branch, no lease file: it is cleared and the branch is adopted — never named 'checked out in another worktree', never its number given to another window over it (release-candidate review 3, finding 10)" {
+@test "v0.6.1, pulled, with a worktree left under worktrees/01 on the in-flight branch and no lease file: the upgrade stops naming it as a worktree made by hand, never gives its number to a window over it; 'pick it up' names it with what to do and moves the work; removed, the upgrade completes (release-candidate review 3, finding 10)" {
   git -C "$T" checkout -q -b feature/b main; printf 'b\n' > "$T/b.txt"; git -C "$T" add -A; cmt "$T" -m "b work"
   git -C "$T" checkout -q main
   pull_current
   mkdir -p "$H/worktrees/01"; git -C "$T" worktree add -q "$H/worktrees/01/thing" fix/in-flight
   s1_ctx
-  case "$c" in *"checked out in another worktree"*) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing's branch fix/in-flight (1 commit not on origin/main: \"the waiting fix\") is now window"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing's branch feature/b (1 commit not on origin/main: \"b work\") is now window"*) : ;; *) echo "$c"; return 1 ;; esac
-  for n in 01 02; do
-    [ "$(git -C "$H/worktrees/$n/thing" branch --show-current)" = "lease/$n" ] || { git -C "$T" worktree list; return 1; }
-  done
-  [ "$(cat "$H/worktrees/$(python3 -c 'import json,sys,glob
-for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
-    d = json.load(open(f))
-    if d.get("adopted_from") == "fix/in-flight": print(d["lease"])' "$H")/thing/f.txt")" = f ]
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch feature/b (1 commit not on origin), the branch fix/in-flight (1 commit not on origin), and a worktree made by hand at $H/worktrees/01/thing. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"You are window 01"*) echo "$c"; return 1 ;; esac
+  [ "$(git -C "$H/worktrees/01/thing" branch --show-current)" = fix/in-flight ]
+  pick_it_up
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"now holds feature/b from target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
+  # its branch's commits become a window all the same; the branch's name stays while that worktree has it out
+  case "$output" in *"now holds fix/in-flight from target/thing"*"fix/in-flight, checked out in another worktree, was left as it was in target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing has a worktree made by hand at $H/worktrees/01/thing — commit its work on a branch there, then remove it (git -C target/thing worktree remove $H/worktrees/01/thing"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H/worktrees/01/thing" branch --show-current)" = fix/in-flight ]
+  git -C "$T" worktree remove "$H/worktrees/01/thing"
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Nothing unfinished in target/ to pick up."*) : ;; *) echo "$output"; return 1 ;; esac
+  run start_session s2
+  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$H/worktrees/$(win_of fix/in-flight)/thing/f.txt")" = f ]
   run bash "$H/core/doctor.sh"
   case "$output" in *"in no window"*) echo "$output"; return 1 ;; esac
 }
 
-@test "v0.6.1, pulled, where git does not tell case apart, with branch Wip (packed) and branch wip (a loose file) each holding a commit: the upgrade stops naming both and how to rename one — nothing moves, both commits stay on their branches; renamed, the next start makes a window of each (release-candidate review 4, finding 1)" {
+@test "v0.6.1, pulled, where git does not tell case apart, with branch Wip (packed) and branch wip (a loose file) each holding a commit: the upgrade stops naming both and how to rename one — nothing moves, both commits stay on their branches; renamed and picked up, each is a window and the next start completes (release-candidate review 4, finding 1)" {
   [ "$(git -C "$T" config --bool core.ignorecase)" = true ] || skip "git here tells branch names apart by case"
   git -C "$T" worktree add -q -b Wip "$B/tmpwt" main
   printf 'U\n' > "$B/tmpwt/upper.txt"; git -C "$B/tmpwt" add -A; cmt "$B/tmpwt" -m "UPPER WORK"
@@ -309,6 +359,8 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
   run bash "$H/core/doctor.sh"
   case "$output" in *"target/thing has branches whose names differ only in case (Wip, wip)"*) : ;; *) echo "$output"; return 1 ;; esac
   git -C "$T" pack-refs --all; git -C "$T" branch -m Wip upper-work
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
   c="$(ctx_of "$output")"
   case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
@@ -316,7 +368,7 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
   [ -n "$(git -C "$T" for-each-ref --contains "$c2" refs/heads/lease/)" ] || { git -C "$T" for-each-ref; return 1; }
 }
 
-@test "v0.6.1, pulled, with branch names a tag makes ambiguous — a branch feat/x holding work beside a tag feat/x at origin/main, and a tag main: the upgrade completes, feat/x's own commit becomes a window, the tags stay (release-candidate review 4, finding 2)" {
+@test "v0.6.1, pulled, with branch names a tag makes ambiguous — a branch feat/x holding work beside a tag feat/x at origin/main, and a tag main: the upgrade names the branch, never 'heads/'; picked up, feat/x's own commit becomes a window, the tags stay, and the next start completes (release-candidate review 4, finding 2)" {
   git -C "$T" branch feat/x main
   git -C "$T" worktree add -q "$B/tmpwt" feat/x
   printf 'X\n' > "$B/tmpwt/x-work.txt"; git -C "$B/tmpwt" add -A; cmt "$B/tmpwt" -m "X WORK"
@@ -324,14 +376,18 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
   git -C "$T" tag feat/x refs/remotes/origin/main; git -C "$T" tag main refs/remotes/origin/main
   pull_current
   s1_ctx
-  case "$c" in *"no branch heads/"*) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing's branch feat/x (1 commit not on origin/main: \"X WORK\") is now window"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(cat "$H/worktrees/02/thing/x-work.txt")" = X ]
+  case "$c" in *"heads/"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"the branch feat/x (1 commit not on origin)"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$H/worktrees/$(win_of feat/x)/thing/x-work.txt")" = X ]
   git -C "$T" rev-parse -q --verify refs/tags/feat/x >/dev/null; git -C "$T" rev-parse -q --verify refs/tags/main >/dev/null
   ! git -C "$T" rev-parse -q --verify refs/heads/feat/x >/dev/null
 }
 
-@test "v0.6.1, pulled, with worktrees made by hand under worktrees/ — worktrees/hotfix detached with a commit no branch has, an uncommitted edit and an untracked file; worktrees/scratch on a new branch with only an uncommitted edit and an untracked file: the upgrade and doctor name both, and leave them as they are (release-candidate review 4, finding 3)" {
+@test "v0.6.1, pulled, with worktrees made by hand under worktrees/ — worktrees/hotfix detached with a commit no branch has, an uncommitted edit and an untracked file; worktrees/scratch on a new branch with only an uncommitted edit and an untracked file: the upgrade stops naming both and leaves them as they are; doctor names their work (release-candidate review 4, finding 3)" {
   mkdir -p "$H/worktrees"
   W="$H/worktrees/hotfix"; git -C "$T" worktree add -q --detach "$W" main
   printf 'h\n' > "$W/h.txt"; git -C "$W" add h.txt; cmt "$W" -m "secret hotfix"
@@ -340,9 +396,7 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
   printf 'edit\n' >> "$S/thing.txt"; printf 'd\n' > "$S/draft.md"
   pull_current
   s1_ctx
-  case "$c" in *"target/thing has a worktree made by hand at $W, a detached HEAD with 1 commit no branch has (\"secret hotfix\") and uncommitted or untracked files (notes.md, thing.txt) — no window has that work"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing has a worktree made by hand at $S, on branch exp/scratch, uncommitted or untracked files (draft.md, thing.txt) — no window has that work"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"a worktree made by hand at $W, and a worktree made by hand at $S. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(git -C "$W" log -1 --format=%s)" = "secret hotfix" ]; [ "$(cat "$W/notes.md")" = n ]; [ "$(cat "$S/draft.md")" = d ]
   run bash "$H/core/doctor.sh"
   case "$output" in *"NOTE     target/thing has a worktree made by hand at $W, a detached HEAD with 1 commit no branch has (\"secret hotfix\")"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -350,7 +404,7 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
   case "$output" in *"made by hand at $H/worktrees/0"*) echo "$output"; return 1 ;; esac
 }
 
-@test "v0.6.1, pulled, with work inside a git submodule of the target — an untracked file, an uncommitted edit, a branch with a commit, a stash: the upgrade completes and names it once, the work stays where it was, doctor names it (release-candidate review 4, finding 4)" {
+@test "v0.6.1, pulled, with work inside a git submodule of the target — an untracked file, an uncommitted edit, a branch with a commit, a stash: it is not unfinished work — once the branch is picked up the upgrade completes and names it once, the work stays where it was, doctor names it (release-candidate review 4, finding 4)" {
   sd="$B/seed-lib"; git init -q -b main "$sd"; printf 'lib\n' > "$sd/lib.txt"; git -C "$sd" add -A; cmt "$sd" -m lib
   git init -q --bare -b main "$B/v061/lib.git"; git -C "$sd" push -q "$B/v061/lib.git" main
   git clone -q "$B/v061/thing.git" "$B/mk"
@@ -367,7 +421,12 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
   [ -z "$(git -C "$T" status --porcelain --untracked-files=no --ignore-submodules=dirty)" ]
   pull_current
   s1_ctx
-  case "$c" in *"target/thing was on fix/in-flight (1 commit not on origin/main: \"the waiting fix\"); that work is now window 01"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  c="$(ctx_of "$output")"
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"target/thing's submodule lib holds work no window has: uncommitted or untracked files (lib.txt, notes.md); branch wip/lib, 1 commit its origin lacks (\"lib wip commit\"); 1 stash entry (stash@{0}:"*"the upgrade leaves it there"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$L/notes.md")" = "MY LIB NOTES" ]; [ "$(git -C "$L" log -1 --format=%s wip/lib)" = "lib wip commit" ]
   [ -n "$(git -C "$L" stash list)" ]; grep -q edit "$L/lib.txt"
@@ -399,30 +458,36 @@ HOOK
 }
 old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
 
-@test "v0.6.1, pulled, with main ahead of origin: the upgrade's own reset of main, cut off part-way (git and the session start killed), is finished by the next start — never 'commit them'; one window holds the commit; the untracked files go into it; doctor says the window holds it (release-candidate review 4, finding 5)" {
+@test "v0.6.1, pulled, with main ahead of origin and untracked files: 'pick it up' saves them on a branch of their own and makes it a window; its reset of main, cut off part-way (git and pick-up killed), is finished by the next start — never 'commit them', never saved as work; one window holds the commit and the files (release-candidate review 4, finding 5)" {
   origin_moves
-  git -C "$T" checkout -q main
+  git -C "$T" checkout -q main; git -C "$T" branch -D -q fix/in-flight
   printf 'T\n' > "$T/trunk.txt"; git -C "$T" add trunk.txt; cmt "$T" -m "trunk work, unpushed"
   sha="$(git -C "$T" rev-parse main)"
   printf 'MY NOTES\n' > "$T/notes.md"
   pull_current
+  s1_ctx
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch main (1 commit not on origin), and 1 unsaved file. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   kill_at "refs/heads/main $(git -C "$T" rev-parse refs/remotes/origin/main)"
-  run start_session s1
+  pick_it_up
   [ -e "$B/killed" ] || { echo "the reset was never cut off: $output"; return 1; }
   rm "$T/.git/hooks/reference-transaction"
   [ "$(git -C "$T" rev-parse refs/heads/main)" = "$sha" ]; [ -n "$(git -C "$T" status --porcelain --untracked-files=no)" ]
   run bash "$H/core/doctor.sh"
-  case "$output" in *"moves the commit to a window at the next session start"*) echo "$output"; return 1 ;; esac
   case "$output" in *"target/thing main is 1 commit ahead of origin/main, but window"*"already holds it"*) : ;; *) echo "$output"; return 1 ;; esac
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"commit them"*|*"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
-  case "$c" in *"a git command the upgrade ran in target/thing (resetting main to origin/main) was cut off part-way, or is still running"*"do not commit anything there"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"commit them"*|*"Upgrade to 0.7.0: complete."*|*"unsaved file"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"a git command Daedalus ran in target/thing (resetting main to origin/main) was cut off part-way, or is still running"*"do not commit anything there"*) : ;; *) echo "$c"; return 1 ;; esac
+  # "pick it up" again: it finishes the cut-off reset — the half-reset tree is never saved as work
   old_locks
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"a git command Daedalus ran in target/thing (resetting main to origin/main) was cut off part-way; it is finished now"*"Nothing unfinished in target/ to pick up."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Window"*"now holds"*|*"Unsaved"*) echo "$output"; return 1 ;; esac
   run start_session s3
   c="$(ctx_of "$output")"
-  case "$c" in *"commit them"*) echo "$c"; return 1 ;; esac
-  case "$c" in *"a git command an earlier start ran in target/thing (resetting main to origin/main) was cut off part-way; it is finished now"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"commit them"*|*"unsaved file"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   n="$(git -C "$T" for-each-ref --contains "$sha" --format='%(refname)' refs/heads/lease/)"
   [ "$(printf '%s\n' "$n" | grep -c .)" = 1 ] || { echo "$n"; return 1; }
   nn="${n#refs/heads/lease/}"
@@ -431,27 +496,29 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   [ "$(cat "$H/worktrees/$nn/thing/notes.md")" = "MY NOTES" ]; [ "$(cat "$H/worktrees/$nn/thing/trunk.txt")" = T ]
 }
 
-@test "v0.6.1, pulled, on the in-flight branch with untracked files: the upgrade's own checkout back to main, cut off part-way (git and the session start killed), is finished by the next start — never 'commit them'; window 01 holds the branch's commit and its untracked files (release-candidate review 4, finding 6)" {
+@test "v0.6.1, pulled, on the in-flight branch with untracked files: 'pick it up' saves them on the branch; its checkout back to main, cut off part-way (git and pick-up killed), is finished by the next start — never 'commit them'; the window holds the branch's commit and the files (release-candidate review 4, finding 6)" {
   sha="$(git -C "$T" rev-parse fix/in-flight)"
   printf 'MY NOTES\n' > "$T/notes.md"
   pull_current
+  s1_ctx
   kill_at "HEAD ref:refs/heads/main"
-  run start_session s1
+  pick_it_up
   [ -e "$B/killed" ] || { echo "the checkout was never cut off: $output"; return 1; }
   rm "$T/.git/hooks/reference-transaction"
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   run start_session s2
   c="$(ctx_of "$output")"
   case "$c" in *"commit them"*|*"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
-  case "$c" in *"a git command the upgrade ran in target/thing (putting it back on main) was cut off part-way, or is still running"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"a git command Daedalus ran in target/thing (putting it back on main) was cut off part-way, or is still running"*) : ;; *) echo "$c"; return 1 ;; esac
   old_locks
   run start_session s3
   c="$(ctx_of "$output")"
   case "$c" in *"commit them"*|*"whose work is already on origin/main"*) echo "$c"; return 1 ;; esac
-  case "$c" in *"a git command an earlier start ran in target/thing (putting it back on main) was cut off part-way; it is finished now"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(git -C "$T" rev-parse lease/01)" = "$sha" ]; [ "$(git -C "$T" branch --show-current)" = main ]
+  case "$c" in *"a git command Daedalus ran in target/thing (putting it back on main) was cut off part-way; it is finished now"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  nn="$(win_of fix/in-flight)"
+  git -C "$T" merge-base --is-ancestor "$sha" "lease/$nn"; [ "$(git -C "$T" branch --show-current)" = main ]
   [ -z "$(git -C "$T" status --porcelain)" ] || { git -C "$T" status --porcelain; return 1; }
-  [ "$(cat "$H/worktrees/01/thing/notes.md")" = "MY NOTES" ]; [ "$(cat "$H/worktrees/01/thing/f.txt")" = f ]
+  [ "$(cat "$H/worktrees/$nn/thing/notes.md")" = "MY NOTES" ]; [ "$(cat "$H/worktrees/$nn/thing/f.txt")" = f ]
   ! git -C "$T" rev-parse -q --verify refs/heads/fix/in-flight >/dev/null
 }
 
@@ -471,7 +538,7 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   printf 'moved\n' > "$B/mk/moved.txt"; git -C "$B/mk" add moved.txt; cmt "$B/mk" -m "moved on"; git -C "$B/mk" push -q origin main
 }
 
-@test "v0.6.1, pulled, with submodule.recurse set and an uncommitted edit in a submodule, main ahead of origin: the trunk's reset leaves the submodule's working tree alone — the edit is still there after 'complete' (release-candidate red team 2, finding 1)" {
+@test "v0.6.1, pulled, with submodule.recurse set and an uncommitted edit in a submodule, main ahead of origin: picking it up resets the trunk and leaves the submodule's working tree alone — the edit is still there after 'complete' (release-candidate red team 2, finding 1)" {
   lib_origin
   git -C "$T" checkout -q main; git -C "$T" merge -q --ff-only refs/remotes/origin/main; lib_init
   printf 'A\n' > "$T/ahead.txt"; git -C "$T" add ahead.txt; cmt "$T" -m "ahead on main"
@@ -481,13 +548,18 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   [ -z "$(git -C "$T" status --porcelain --untracked-files=no --ignore-submodules=dirty)" ]
   pull_current
   s1_ctx
-  case "$c" in *"target/thing's main was 1 commit ahead of origin/main"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"the branch main (1 commit not on origin)"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  c="$(ctx_of "$output")"
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$L/lib.txt")" = "LIB UNCOMMITTED EDIT" ] || { echo "the edit in lib is gone: $(cat "$L/lib.txt")"; return 1; }
   [ "$(cat "$L/libu.txt")" = u ]
   [ "$(git -C "$T" rev-parse refs/heads/main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
 }
 
-@test "v0.6.1, pulled, with submodule.recurse set, on a branch whose commit moves the submodule, with an uncommitted edit in it: the checkout back to main leaves the submodule's working tree alone — the edit is still there after 'complete' (release-candidate red team 2, finding 1)" {
+@test "v0.6.1, pulled, with submodule.recurse set, on a branch whose commit moves the submodule, with an uncommitted edit in it: picking it up checks out main and leaves the submodule's working tree alone — the edit is still there after 'complete' (release-candidate red team 2, finding 1)" {
   lib_origin
   git -C "$T" checkout -q main; git -C "$T" merge -q --ff-only refs/remotes/origin/main; git -C "$T" branch -D -q fix/in-flight
   lib_init; git -C "$T" checkout -q -b fix/in-flight
@@ -499,16 +571,21 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   [ -z "$(git -C "$T" status --porcelain --untracked-files=no --ignore-submodules=dirty)" ]
   pull_current
   s1_ctx
-  case "$c" in *"target/thing was on fix/in-flight (1 commit not on origin/main: \"bump lib\")"*"that work is now window 01"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"the branch fix/in-flight (1 commit not on origin)"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  c="$(ctx_of "$output")"
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(shasum "$L/lib.txt")" = "$sum" ] || { echo "the edit in lib is gone: $(cat "$L/lib.txt")"; return 1; }
   [ "$(git -C "$T" branch --show-current)" = main ]
 }
 
-@test "v0.6.1, pulled, with fetch.prune and fetch.pruneTags set and a tags refspec configured, and tags that are the only refs to a commit: the upgrade's fetch deletes no tag — on a run that stops on an untracked file in the way, on the run that completes, and in lease.sh adopt (release-candidate red team 2, finding 2)" {
+@test "v0.6.1, pulled, with fetch.prune and fetch.pruneTags set and a tags refspec configured, and tags that are the only refs to a commit: the upgrade's fetch deletes no tag — on a run that stops on an untracked file, on the run that completes, and in lease.sh adopt (release-candidate red team 2, finding 2)" {
   git -C "$T" checkout -q --detach main
   printf 'exp\n' > "$T/exp.txt"; git -C "$T" add exp.txt; cmt "$T" -m "tagged experiment"; exp="$(git -C "$T" rev-parse HEAD)"
   git -C "$T" -c user.email=t@x -c user.name=t tag -a -m keep exp/keep; git -C "$T" tag exp/light
-  git -C "$T" checkout -q fix/in-flight
+  git -C "$T" checkout -q fix/in-flight; ship_in_flight
   git -C "$T" config fetch.prune true; git -C "$T" config fetch.pruneTags true
   git -C "$T" config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'
   git clone -q "$B/v061/thing.git" "$B/mk"; mk_moves
@@ -516,7 +593,7 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   tags() { git -C "$T" tag -l | tr '\n' ' '; }
   pull_current
   s1_ctx
-  case "$c" in *"untracked files that putting it back on main would overwrite (moved.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: 1 unsaved file. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(tags)" = "exp/keep exp/light " ] || { echo "tags after the stopped run: [$(tags)]"; return 1; }
   rm "$T/moved.txt"
   run --separate-stderr start_session s2
@@ -531,8 +608,9 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   [ "$(tags)" = "exp/keep exp/light " ] || { echo "tags after lease.sh adopt: [$(tags)]"; return 1; }
 }
 
-@test "v0.6.1, pulled, on the in-flight branch: a start cut off after it made window 01, before the checkout back to main, then a commit more on the branch — the next start names the commit window 01 lacks and how to rename the branch, never 'now window 01' or 'complete'; lease.sh adopt says the same; renamed as printed, the next start makes it a window and completes (release-candidate red team 2, finding 3)" {
+@test "v0.6.1, pulled, on the in-flight branch: 'pick it up' cut off after it made the window, before the checkout back to main, then a commit more on the branch — the next start names the branch again, never 'complete'; 'pick it up' names the commit the window lacks and how to rename the branch; renamed as printed, it becomes a window and the next start completes (release-candidate red team 2, finding 3)" {
   pull_current
+  s1_ctx
   real="$(command -v git)"; mkdir -p "$B/shim"
   cat > "$B/shim/git" <<SH
 #!/bin/bash
@@ -549,29 +627,30 @@ esac
 exec "$real" "\$@"
 SH
   chmod +x "$B/shim/git"
-  PATH="$B/shim:$PATH" run start_session s1
-  [ -e "$B/killed" ] || { echo "the start was never cut off: $output"; return 1; }
-  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ -f "$H/state/leases/01.json" ]
-  first="$(git -C "$T" rev-parse refs/heads/lease/01)"
+  PATH="$B/shim:$PATH" pick_it_up
+  [ -e "$B/killed" ] || { echo "pick it up was never cut off: $output"; return 1; }
+  nn="$(win_of fix/in-flight)"; [ -n "$nn" ]
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  first="$(git -C "$T" rev-parse "refs/heads/lease/$nn")"
   printf 'more\n' > "$T/more.txt"; git -C "$T" add more.txt; cmt "$T" -m "more work after the cut-off start"
-  more="$(git -C "$T" rev-parse HEAD)"; printf 'NOTE 2\n' > "$T/note2.md"
+  more="$(git -C "$T" rev-parse HEAD)"
   run --separate-stderr start_session s2
   c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
-  case "$c" in *"that work is now window 01"*|*"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
-  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing is on fix/in-flight, which has 1 commit that window 01"*"does not have (\"more work after the cut-off start\")"*"(git -C target/thing branch -m fix/in-flight fix/in-flight-2), then start a session again"*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(cat "$H/state/upgraded-to" 2>/dev/null)" != 0.7.0 ]
-  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(git -C "$T" rev-parse refs/heads/lease/01)" = "$first" ]
-  run bash "$H/core/lease.sh" adopt fix/in-flight
+  case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (2 commits not on origin)."*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(git -C "$T" rev-parse "refs/heads/lease/$nn")" = "$first" ]
+  pick_it_up
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"fix/in-flight in target/thing has 1 commit that window 01"*"(git -C target/thing branch -m fix/in-flight fix/in-flight-2)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *"already window 01"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"fix/in-flight in target/thing has 1 commit that window $nn"*"(git -C target/thing branch -m fix/in-flight fix/in-flight-2)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"already window $nn"*) echo "$output"; return 1 ;; esac
   (cd "$H" && git -C target/thing branch -m fix/in-flight fix/in-flight-2)
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run --separate-stderr start_session s3
   c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
-  case "$c" in *"target/thing was on fix/in-flight-2"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(git -C "$T" branch --show-current)" = main ]
-  n="$(git -C "$T" for-each-ref --contains "$more" --format='%(refname:lstrip=2)' refs/heads/lease/)"
-  [ -n "$n" ] && [ "$(cat "$H/worktrees/${n#lease/}/thing/note2.md")" = "NOTE 2" ] || { echo "[$n]"; return 1; }
+  [ -n "$(git -C "$T" for-each-ref --contains "$more" refs/heads/lease/)" ]
 }
 
 @test "v0.6.1, pulled, on a branch with a hidden CRLF edit (status clean) in c.txt, sorted after files an eol=crlf rule, added after they were checked out, would change the size of: the upgrade stops naming c.txt — never 'complete' over it — and c.txt's bytes stay (release-candidate red team 2, finding 4)" {
@@ -584,7 +663,7 @@ SH
   pull_current
   s1_ctx
   case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
-  case "$c" in *"target/thing has changes git status does not show, in files whose line endings or contents git changes when it saves them (c.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"1 changed file git status does not show (c.txt). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   cmp "$T/c.txt" "$B/c-crlf"; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
 }
 
@@ -597,10 +676,11 @@ SH
   [ -z "$(git -C "$T" status --porcelain)" ]
   pull_current
   s1_ctx
-  case "$c" in *"git changes when it saves them (c.txt) —"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"1 changed file git status does not show (c.txt). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
 }
 
 @test "v0.6.1, pulled, with an untouched checkout of a file under '*.bat text eol=crlf' (status clean, the bytes a checkout writes): the upgrade completes (release-candidate red team 2, finding 5)" {
+  ship_in_flight
   git clone -q "$B/v061/thing.git" "$B/mk"
   printf '*.bat text eol=crlf\n' > "$B/mk/.gitattributes"; printf '@echo off\necho hi\n' > "$B/mk/run.bat"
   git -C "$B/mk" add -A; cmt "$B/mk" -m "windows script"; git -C "$B/mk" push -q origin main
@@ -613,6 +693,7 @@ SH
 }
 
 @test "v0.6.1, pulled, with core.trustctime false and an untouched file committed with CRLF before '* text=auto' (status clean): the upgrade completes, and lease.sh adopt does not refuse it (release-candidate red team 2, finding 6)" {
+  ship_in_flight
   git clone -q "$B/v061/thing.git" "$B/mk"
   printf '@echo off\r\necho hi\r\n' > "$B/mk/run.bat"; git -C "$B/mk" add run.bat; cmt "$B/mk" -m "windows script"
   printf '* text=auto\n' > "$B/mk/.gitattributes"; git -C "$B/mk" add .gitattributes; cmt "$B/mk" -m "normalize from now on"
@@ -620,8 +701,6 @@ SH
   git -C "$T" fetch -q origin; git -C "$T" merge -q --no-edit refs/remotes/origin/main 2>/dev/null
   git -C "$T" config core.trustctime false
   [ -z "$(git -C "$T" status --porcelain)" ]
-  git -C "$T" branch side; git -C "$T" checkout -q side; printf 's\n' > "$T/side.txt"; git -C "$T" add side.txt
-  cmt "$T" -m "side work"; git -C "$T" checkout -q fix/in-flight
   pull_current
   s1_ctx
   case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
@@ -732,7 +811,7 @@ bundles_have() {    # bundles_have <commit> — the safety copy's bundles hold <
 }
 not_complete() { case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac; [ ! -e "$H/state/upgraded-to" ]; }
 
-@test "v0.6.1, pulled, on a branch where thing.txt became a gitlink with no .gitmodules whose directory holds plain files and no .git (a submodule vendored by removing its .git): the upgrade stops naming it, before the checkout back to main would delete the directory — no stamp, the file stays; the safety copy holds it; lease.sh adopt refuses too (release-candidate red team 3, finding 1)" {
+@test "v0.6.1, pulled, on a branch where thing.txt became a gitlink with no .gitmodules whose directory holds plain files and no .git (a submodule vendored by removing its .git): the upgrade stops on the branch before anything there moves, so the checkout back to main never deletes the directory — no stamp, the file stays; the safety copy holds it; lease.sh adopt refuses too (release-candidate red team 3, finding 1)" {
   git -C "$T" rm -q thing.txt
   git -C "$T" update-index --add --cacheinfo "160000,$(git -C "$T" rev-parse HEAD),thing.txt"; cmt "$T" -m "vendored"
   mkdir "$T/thing.txt"; printf 'MY WORK INSIDE THE GITLINK DIR\n' > "$T/thing.txt/notes.md"
@@ -740,7 +819,7 @@ not_complete() { case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return
   pull_current
   s1_ctx
   not_complete
-  case "$c" in *"target/thing holds a directory git records as a submodule"*"(thing.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (2 commits not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$T/thing.txt/notes.md")" = "MY WORK INSIDE THE GITLINK DIR" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   tars_have "MY WORK INSIDE THE GITLINK DIR"
   run bash "$H/core/lease.sh" adopt fix/in-flight
@@ -758,7 +837,7 @@ fsm_edit() {        # the hook trusted, then an edit of f.txt (the branch's comm
 }
 fsm_kept() {
   not_complete
-  case "$c" in *"target/thing has uncommitted changes"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"the branch fix/in-flight (1 commit not on origin), and 1 unsaved file. $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$T/f.txt")" = "MY UNCOMMITTED EDIT" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   tars_have "MY UNCOMMITTED EDIT"
 }
@@ -781,7 +860,7 @@ fsm_kept() {
   fsm_kept
 }
 
-@test "v0.6.1, pulled, on a branch where thing.txt is a repository of its own recorded as a gitlink (no .gitmodules), with a commit and an untracked file nowhere else, and main has a file there: the upgrade stops naming it — no stamp, the repository with its .git, commit and files intact (release-candidate red team 3, finding 3)" {
+@test "v0.6.1, pulled, on a branch where thing.txt is a repository of its own recorded as a gitlink (no .gitmodules), with a commit and an untracked file nowhere else, and main has a file there: the upgrade stops on the branch — no stamp, the repository with its .git, commit and files intact (release-candidate red team 3, finding 3)" {
   git -C "$T" rm -q thing.txt
   git init -q -b main "$T/thing.txt"; printf 'NESTED COMMITTED WORK\n' > "$T/thing.txt/lib.md"
   git -C "$T/thing.txt" add lib.md; cmt "$T/thing.txt" -m "nested-only commit"
@@ -791,7 +870,7 @@ fsm_kept() {
   pull_current
   s1_ctx
   not_complete
-  case "$c" in *"target/thing holds a repository"*"(thing.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (2 commits not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   [ -d "$T/thing.txt/.git" ]; [ "$(git -C "$T/thing.txt" log --format=%s)" = "nested-only commit" ]
   [ "$(cat "$T/thing.txt/scratch.md")" = "NESTED UNTRACKED WORK" ]
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
@@ -810,7 +889,11 @@ fsm_kept() {
   [ "$(git -C "$T" rev-parse 'feat/r@{1}')" = "$A" ]
   pull_current
   s1_ctx
-  case "$c" in *"feat/r"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"the branch feat/r (1 commit not on origin)"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   bundles_have "$A" || { echo "the copy lacks the old reflog commit"; return 1; }
   run python3 "$H/core/upgrade.py" --restore-help
   case "$output" in *"${A:0:7}"*"old experiment"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -826,12 +909,12 @@ fsm_kept() {
   pull_current
   s1_ctx
   not_complete
-  case "$c" in *"git changes when it saves them (nb.ipynb)"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"1 changed file git status does not show (nb.ipynb). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   grep -q OUTPUT-SECRET "$T/nb.ipynb"
   tars_have "OUTPUT-SECRET"
 }
 
-@test "v0.6.1, pulled, on a branch with '*.c ident' and a.c edited and committed after an earlier checkout expanded \$Id\$ (the only difference on disk a stale \$Id: <sha> \$): no stop — the upgrade completes; lease.sh adopt of such a branch does not refuse (release-candidate red team 3, finding 8)" {
+@test "v0.6.1, pulled, on a branch with '*.c ident' and a.c edited and committed after an earlier checkout expanded \$Id\$ (the only difference on disk a stale \$Id: <sha> \$): no hidden-change stop — picked up, the upgrade completes; lease.sh adopt of such a branch does not refuse (release-candidate red team 3, finding 8)" {
   printf '*.c ident\n' > "$T/.gitattributes"; printf '/* $Id$ */\nint a;\n' > "$T/a.c"
   git -C "$T" add -A; cmt "$T" -m "a.c"
   rm "$T/a.c"; git -C "$T" checkout -- a.c; grep -q '[$]Id: [0-9a-f]* [$]' "$T/a.c"
@@ -841,6 +924,11 @@ fsm_kept() {
   cmt "$T" -m "side work"; git -C "$T" checkout -q fix/in-flight
   pull_current
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"git status does not show"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (3 commits not on origin), and the branch side (4 commits not on origin). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
+  pick_it_up
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run start_session s2
+  c="$(ctx_of "$output")"
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
 }

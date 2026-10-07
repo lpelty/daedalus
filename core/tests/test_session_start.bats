@@ -516,7 +516,7 @@ EOF
 
 # --- the upgrade at step 0 (spec §14; plan 5 Task 4) -------------------------------
 
-@test "step 0: a home that pulled 0.7.0 with an in-flight branch upgrades at the first interactive start — adopted as window 01, this window numbers 02 and takes the pen, the marker records the trunk base; the context says each step once" {
+@test "step 0: a home that pulled 0.7.0 with an in-flight branch stops the upgrade at the first interactive start, changing nothing in target/ — this window numbers 01 and takes the pen; 'pick it up' makes the branch window 02; the next start completes the upgrade, the marker records the trunk base; the context says each step once" {
   cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
@@ -525,14 +525,23 @@ EOF
   run start s1 startup
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
-  case "$c" in *"Upgrade to 0.7.0: target/thing was on feat/x (1 commit not on origin/main: \"in flight\"); that work is now window 01"*"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
-  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
-  [ "$(lease_json 01 adopted_from)" = feat/x ]
-  [ "$(lease_json 02 session_id)" = s1 ]
-  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"] and not m["target_base_error"], m' "$DAEDALUS_HOME/state/session-s1.json"
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch feat/x (1 commit not on origin). Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."*"You are window 01 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = feat/x ]
+  [ "$(lease_json 01 session_id)" = s1 ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" adopt --all-unfinished </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 02 now holds feat/x from target/thing (1 commit: \"in flight\")"*) : ;; *) echo "$output"; return 1 ;; esac
   P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
   run start s2 startup
-  case "$output" in *"Upgrade to"*) echo "a second start said an upgrade line: $output"; return 1 ;; esac
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
+  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 03"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  [ "$(lease_json 02 adopted_from)" = feat/x ]; [ "$(lease_json 03 session_id)" = s2 ]
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["target_base"] and not m["target_base_error"], m' "$DAEDALUS_HOME/state/session-s2.json"
+  P3="$(live_pid)"; registry_entry "$P3" s3 interactive cli daedalus-xx
+  run start s3 startup
+  case "$output" in *"Upgrade to"*) echo "a later start said an upgrade line: $output"; return 1 ;; esac
 }
 
 @test "step 0: a home whose stamp equals VERSION never loads the upgrade (a stub that records its import stays silent); a home with no VERSION neither" {
@@ -558,7 +567,7 @@ EOF
   printf 'dirt\n' >> "$T/a.txt"
   P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
   run start s1 startup
-  case "$output" in *"upgrade to 0.7.0 incomplete: target/thing has uncommitted changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Daedalus has unfinished work in target/thing: 1 unsaved file."*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
 }
 
@@ -583,7 +592,8 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
-  git -C "$T" -c user.email=t@x -c user.name=t commit -q -m "in flight"
+  git -C "$T" -c user.email=t@x -c user.name=t commit -q -m "shipped"
+  git -C "$T" push -q origin feat/x:main            # its work is on origin as last fetched: nothing unfinished
   real="$(command -v git)"; mkdir -p "$BATS_TEST_TMPDIR/slowgit"
   printf '#!/bin/bash\ncase " $* " in *" fetch "*) sleep 60 ;; esac\nexec "%s" "$@"\n' "$real" > "$BATS_TEST_TMPDIR/slowgit/git"
   chmod +x "$BATS_TEST_TMPDIR/slowgit/git"
@@ -592,17 +602,10 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   run env LEASE_TEST_HOOK_BUDGET=20 PATH="$BATS_TEST_TMPDIR/slowgit:$PATH" bash -c "$(declare -f start); start s1 startup"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(( $(date +%s) - t0 ))" -le 12 ]
-  case "$output" in *"the fetch did not finish"*"You are window 02 and you hold the pen"*) : ;; *) echo "$output"; return 1 ;; esac
-  [ "$(lease_json 01 adopted_from)" = feat/x ]
-  # window 01, adopted with no time left for its worktree, holds the stamp back: the next start makes it
-  # (release-candidate red team, finding 1)
-  if [ "$(lease_json 01 worktree_ready)" = False ]; then
-    [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
-    case "$output" in *"that work is now window 01 (branch lease/01), whose worktree is not made yet"*"ran out of time; it runs again"*) : ;; *) echo "$output"; return 1 ;; esac
-  fi
-  [ "$(lease_json 02 session_id)" = s1 ]
-  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("worktree_ready", True) is not False, d' "$DAEDALUS_HOME/state/leases/02.json"
-  [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]
+  case "$output" in *"target/thing was on feat/x, whose work is already on origin/main; it is back on main and feat/x is left as it was. (judged against origin/main as last fetched"*"the fetch did not finish)"*"You are window 01 and you hold the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 01 session_id)" = s1 ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("worktree_ready", True) is not False, d' "$DAEDALUS_HOME/state/leases/01.json"
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
 }
 
 @test "step 0: the upgrade is given its own share of the start, never the whole worktree budget — 12 s of 20 at the default, so the bind always keeps at least 8 s; the share shrinks with the budget" {

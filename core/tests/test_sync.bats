@@ -273,7 +273,7 @@ EOF
   git -C "$D" checkout -q -b feat/x
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -ne 0 ]
-  case "$output" in *"target/upstream-harness is on feat/x; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt feat/x)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/upstream-harness is on feat/x; the upgrade stops on it while it holds work origin/main lacks, until it is picked up (core/lease.sh adopt --all-unfinished, or core/lease.sh adopt feat/x), and otherwise puts it back on main at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$D" branch --show-current)" = feat/x ]
   git -C "$D" checkout -q --detach
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
@@ -295,7 +295,7 @@ EOF
   git -C "$DAEDALUS_HOME/target/upstream-harness/sub" checkout -q -b feat/n
   run bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -ne 0 ]
-  case "$output" in *"target/upstream-harness/sub is on feat/n; the upgrade adopts it as a window at the next session start (or run core/lease.sh adopt feat/n --repo sub)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/upstream-harness/sub is on feat/n; the upgrade stops on it while it holds work origin/main lacks, until it is picked up (core/lease.sh adopt --all-unfinished, or core/lease.sh adopt feat/n --repo sub), and otherwise puts it back on main at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "sync-target on an upgraded home (the stamp matches VERSION) never promises a next-session adoption — the upgrade does not run again; it names lease.sh adopt, or for no branch how to name the commits first" {

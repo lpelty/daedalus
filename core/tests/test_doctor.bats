@@ -1122,13 +1122,13 @@ doctor_upgrade_fixture() {
   case "$output" in *"OK       upgrade: state/upgraded-to 0.7.0"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "doctor: target/ off its trunk — a branch with work is a NOTE naming the upgrade (or adopt once it has run); a trunk ahead of origin is MISSING and counted; work already on trunk says it goes back; hot.md's session: is a NOTE until the upgrade" {
+@test "doctor: target/ off its trunk — a branch with work is a NOTE naming the upgrade's stop and 'pick it up' (or adopt once it has run); a trunk ahead of origin is MISSING and counted; work already on trunk says it goes back; hot.md's session: is a NOTE until the upgrade" {
   doctor_upgrade_fixture
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
   mkdir -p "$DAEDALUS_HOME/vault"; printf -- '---\ntype: rolling-state\nsession: 011\n---\n' > "$DAEDALUS_HOME/vault/hot.md"
   git -C "$T" checkout -q -b feat/example; printf 'e\n' > "$T/e.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m example
   run bash "$DAEDALUS_HOME/core/doctor.sh"
-  case "$output" in *"NOTE     target/thing is on feat/example, 1 commit past origin/main — the upgrade adopts it as a numbered window at the next session start (or run core/lease.sh adopt feat/example)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     target/thing is on feat/example, 1 commit past origin/main — the upgrade stops on it until it is picked up (core/lease.sh adopt --all-unfinished, or core/lease.sh adopt feat/example)"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"NOTE     vault/hot.md still carries session: — the upgrade renames it to leases: at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
   printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
   run bash "$DAEDALUS_HOME/core/doctor.sh"
@@ -1139,7 +1139,7 @@ doctor_upgrade_fixture() {
   case "$output" in *"MISSING  target/thing main is 1 commit ahead of origin/main — trunk is reached only through promote; run core/lease.sh adopt main to move the commit to a window"*) : ;; *) echo "$output"; return 1 ;; esac
   rm "$DAEDALUS_HOME/state/upgraded-to"
   run bash "$DAEDALUS_HOME/core/doctor.sh"
-  case "$output" in *"MISSING  target/thing main is 1 commit ahead of origin/main — trunk is reached only through promote; the upgrade moves the commit to a window at the next session start"*) : ;; *) echo "pending: $output"; return 1 ;; esac
+  case "$output" in *"MISSING  target/thing main is 1 commit ahead of origin/main — trunk is reached only through promote; the upgrade stops on the commit until it is picked up (core/lease.sh adopt --all-unfinished)"*) : ;; *) echo "pending: $output"; return 1 ;; esac
   printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
   git -C "$T" push -q origin main
   run bash "$DAEDALUS_HOME/core/doctor.sh"

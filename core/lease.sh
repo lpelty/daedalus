@@ -8,6 +8,7 @@
 #   core/lease.sh release <NN> [--remove [--force]] | done <NN> --summary "..." | sweep [--force <NN>]
 #   core/lease.sh prime take [--reason "..."] | rebase <NN> | split <NN> --repo <nested>
 #   core/lease.sh adopt <branch> [--repo <nested>] [--note "..."]
+#   core/lease.sh adopt --all-unfinished     ("pick it up": all the unfinished work the upgrade stopped on)
 # A direct-call session (DIRECT_CALL_ID set — spec §4.8, a visitor) is refused
 # every command that changes state/leases/; list and status still work.
 set -euo pipefail

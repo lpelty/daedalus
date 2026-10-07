@@ -56,37 +56,35 @@ window numbers itself. Each step acts once and says one line when it does:
    `state/hindsight/api-key` (mode 600) — only when every value on the line is
    written out plainly (a key read by `$(cat <file>)` counts); the old line
    keeps working and can then be removed;
-6. fetches each target repo once, and turns any work in `target/<repo>` that
-   trunk lacks — the branch checked out, every other local branch, a trunk
-   ahead of `origin`, a detached checkout — into a numbered window each with
-   `core/lease.sh adopt`, one line per window, putting `target/<repo>` back on
-   its trunk; a branch whose work is already on trunk (squash-merged too) is
-   left as it is. A branch checked out in another worktree, or whose branch on
-   `origin` was deleted (usually after a merge), is named in a line with the
-   adopt command and left as it is. The checked-out work's untracked files go
-   with it into its window's worktree (each copied under a temporary name,
-   checked, and put in place before the original is removed; a run cut off
-   part-way finishes at the next session start); its ignored files stay in
-   `target/<repo>`, named in its window's line; untracked files
-   no window is made from stay where they are, named in one line, and
-   `core/doctor.sh` names them until they are moved or removed; ignored files
-   no window is made from are named once, in one line. Work in a worktree
-   someone made by hand from a target repo (uncommitted files, a detached commit
-   no branch has) is named in a line and by `core/doctor.sh`, and left as it is
-   — under `worktrees/` too, wherever no window's lease file is. Work inside a
-   target repo's submodule (files, a branch's commits, a stash) is named the
-   same way and stays in `target/<repo>`: a window's worktree starts with its
-   submodules empty. No checkout, reset or merge the upgrade or `lease.sh`
-   runs touches a submodule's files, even where `submodule.recurse` is set.
-   A branch whose only unpushed content is a merge commit counts as work. A
-   detached checkout whose change is already on trunk keeps its commits on a
-   branch it names. Nothing is renamed: `lease/<NN>` is made at the work's tip,
-   and the branch's own name is removed only once the window is whole. A start
-   cut off part-way through making a window, or out of time before its
-   worktree was made, is finished by the next one, never made twice; if the
-   branch got more commits in between, the next start stops and names them,
-   with the `git branch -m` that lets the branch become a window of its own;
-7. writes `state/upgraded-to`, last — never while a window it made has no
+6. checks every target repo (outer and nested) for unfinished work, after the
+   safety copy and before it changes anything in `target/`. Unfinished work
+   is: a local branch with commits `origin` lacks; the trunk ahead of
+   `origin`; a detached checkout with commits no branch has; uncommitted
+   changes, hidden ones too; untracked files that are not ignored; stash
+   entries; a rebase, merge, cherry-pick, revert or bisect in progress; a
+   worktree that is not a window's. Work already on `origin` does not count,
+   squash-merged or merged; nor does a branch a window holds, or one whose
+   branch on `origin` was deleted (that usually means it was merged; it is
+   named in a line). If it finds any, it stops and changes nothing there. It
+   says one sentence, for example: "Daedalus has unfinished work in
+   target/app: the branch fix-login (2 commits not on GitHub), and 3 unsaved
+   files. Nothing was changed. Say 'pick it up' to move it into windows, or
+   finish and ship it the usual way, then start a new session." The board
+   repeats it on every prompt, and `core/doctor.sh` shows it. "Pick it up" is
+   `core/lease.sh adopt --all-unfinished`. Each piece becomes a numbered
+   window. Unsaved files are saved first, as one commit. Each stash entry
+   becomes a commit of what it saved, and leaves the stash. What it cannot
+   move, it names with what to do: an operation in progress, a change `git
+   status` does not show, a repository inside the checkout, a worktree made by
+   hand. The next session start then finishes the upgrade. With nothing
+   unfinished, the upgrade goes on by itself: it fetches each target repo
+   once and puts `target/<repo>` back on its trunk, leaving a branch whose
+   work is already on `origin` as it is. Ignored files and work in a submodule
+   are named in a line and stay where they are. No checkout, reset or merge
+   the upgrade or `lease.sh` runs touches a submodule's files, even where
+   `submodule.recurse` is set. A checkout or reset "pick it up" began and was
+   cut off is finished by the next start, or by picking it up again;
+7. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
    worktree (the board and doctor name such a window).
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
@@ -126,16 +124,15 @@ works through that record; `git worktree repair <new path>` points git at it).
 Its `git fetch` of `origin` changes only origin's remote-tracking branches: it
 fetches, moves and deletes no tag, whatever `fetch.pruneTags` says.
 
-It will not move a target checkout that holds work it could lose, and stops
-there before anything in that checkout moves: one with uncommitted changes
-(commit them on their branch inside that checkout) — a change to a file marked
-skip-worktree or assume-unchanged counts, though `git status` hides it (clear
-the mark with the command the sentence names, then commit), and so does an
-edit git's stat check passes where `core.trustctime` is false (`touch` the file,
-then commit) — or one with
-untracked or ignored files that putting it back on its trunk would overwrite
-(move them out of that checkout, or commit them on its branch) — a directory
-holding only a `.git` git cannot read counts — or one where a directory git
+Unfinished work is the usual stop (step 6). A change `git status` does not
+show counts as unsaved: a file marked skip-worktree or assume-unchanged (clear
+the mark with the command "pick it up" names), an edit git's stat check passes
+where `core.trustctime` is false (`touch` the file), or bytes a filter or a
+line-ending conversion hides. A directory holding only a `.git` git cannot read
+counts as unfinished work too. It also stops, before anything in that checkout
+moves, on untracked files (ignored ones) that putting it back on its trunk
+would overwrite (move them out of that checkout, or commit them on its
+branch), or one where a directory git
 records as a submodule (with or without `.gitmodules`) holds a repository of
 its own or files with no `.git`, and its trunk has a file or a directory there,
 which the checkout would delete or write into (move that directory out), or one with a
@@ -148,7 +145,7 @@ gone (the sentence names the files to remove, or the `git branch` command that
 brings the branch back from HEAD's reflog), or one with two branches whose names
 differ only in case where git ignores case (rename one: `git pack-refs --all`,
 then `git branch -m`). A file whose bytes differ from a checkout only in a
-`$Id$`-style keyword git expanded at an earlier checkout is no change. A checkout or reset the upgrade itself began and was cut
+`$Id$`-style keyword git expanded at an earlier checkout is no change. A checkout or reset "pick it up" began and was cut
 off part-way is not a stop: the next session start finishes it — never commit
 in that checkout in between. The board says which on
 every prompt, in one sentence, with what to do; the next session start
@@ -163,8 +160,8 @@ MISSING.
 `cat VERSION` prints the release, and `git describe --tags --abbrev=0` its tag.
 `core/doctor.sh` reports the version, the stamp, and anything in `target/`
 still off its trunk. A stash in a target checkout is saved work no window
-shows, so it is never the remedy: the upgrade names any stash it finds there in
-one line, and `core/doctor.sh` names it until it is applied or dropped. An adopted window is promoted from the board ("promote
+shows, so it is never the remedy: the upgrade stops on it, and `core/doctor.sh`
+names it until it is picked up, applied or dropped. A picked-up window is promoted from the board ("promote
 window 01") or released, like any other; `core/lease.sh adopt <branch>
 [--repo <nested>]` does the same for any branch later.
 

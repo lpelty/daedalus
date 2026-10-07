@@ -21,11 +21,20 @@ Every deployment takes this release, and the next, the same way: `git pull
 - Before it changes anything in `target/`, it keeps a safety copy of all of
   it; `python3 core/upgrade.py --restore-help` lists anything missing, and
   `--forget-snapshot` removes the copy.
-- Work that was waiting in `target/` becomes numbered windows, one line each.
-  That is every branch with work its origin does not have yet, whether or not
-  it was checked out, and the trunk if it was ahead.
-- Files a branch had not committed yet go with it into its window.
-  Files git ignores stay where they were, and the line names them.
+- If `target/` holds unfinished work, the upgrade stops and changes nothing
+  there. That is a branch with commits its origin does not have yet, or the
+  trunk ahead of origin. It is also unsaved files, a stash, a git operation
+  left part-way, or a worktree made by hand.
+- It says what it found in one sentence, and the board repeats it until the
+  upgrade is done. For example: "Daedalus has unfinished work in target/app:
+  the branch fix-login (2 commits not on GitHub), and 3 unsaved files. Nothing
+  was changed. Say 'pick it up' to move it into windows, or finish and ship it
+  the usual way, then start a new session".
+- Say "pick it up", and each piece becomes a numbered window. Then start a
+  new session; it finishes the upgrade. Or ship the work the usual way first.
+- With nothing unfinished, the upgrade finishes by itself. A checkout on a
+  branch that is already merged goes back on the trunk.
+  Files git ignores stay where they were, and a line names them.
 - Then the session says "You are window 01", or the next free number, and
   that it holds the pen.
 - Close and reopen any session that was open through the pull; it is still running the old hooks.
@@ -65,13 +74,13 @@ decision. Nothing else is done by hand.
 **If the upgrade stops.** It stops only to keep work safe. The board then
 says why on every prompt, in one sentence, with what to do. Do that, then
 start a new session, and it finishes the upgrade.
-- A target checkout has uncommitted changes: commit them on their branch
-  inside that checkout.
+- Unfinished work in `target/`: say "pick it up". Or ship it the usual way:
+  commit them on their branch, push, and merge. Uncommitted changes count as
+  unfinished work.
 - A file marked skip-worktree or assume-unchanged holds a change `git status`
-  hides: clear the mark with the command the sentence names, then commit it.
-- A target checkout has untracked or ignored files where putting it back on
-  its trunk would write: move them out of that checkout, or commit them on its
-  branch.
+  hides: clear the mark with the command "pick it up" names.
+- A target checkout has ignored files where putting it back on its trunk
+  would write: move them out of that checkout, or commit them on its branch.
 - A target checkout has a local branch named `origin/main` (its trunk's name):
   rename it.
 - A rebase, merge or similar was left half done in a target checkout: the
@@ -81,12 +90,12 @@ start a new session, and it finishes the upgrade.
   files to remove, or the command that brings the branch back.
 - Two branches have names that differ only in capital letters, which this
   disk cannot keep apart. Rename one with the commands the sentence names.
-- If the upgrade's own `git` command was cut off, the next session start
+- If a `git` command "pick it up" ran was cut off, the next session start
   finishes it. Do not commit anything there in between.
 
 Never stash the changes to get past a stop. A stash is saved work that no
-window shows. If the upgrade finds one, it names it, and `core/doctor.sh`
-keeps naming it. One thing does not stop the upgrade: a target checkout with
+window shows. If the upgrade finds one, it stops on it, and `core/doctor.sh`
+names it. One thing does not stop the upgrade: a target checkout with
 another tool's `pre-push` hook, or a `core.hooksPath` setting. The upgrade
 says so with the remedy, and promote waits until that is fixed. `python3
 core/upgrade.py --dry-run` shows what the upgrade would do. `core/doctor.sh`
@@ -215,35 +224,23 @@ shows what is left.
   `.claude/settings.local.json` into a `memory:` block in `config.yaml`, the
   key into `state/hindsight/api-key` (only when every value on that line is
   written out plainly, or the key is read from a file; the old line keeps
-  working); then one bounded fetch, and every branch of each target repo
-  (outer and nested) with commits `git cherry` finds missing from
-  `origin/<trunk>` — or a merge commit whose result adds something
-  `origin/<trunk>` lacks, which `git cherry` passes over — adopted as its own
-  window (a branch named `lease/00` is the operator's own, like any other) —
-  the checked-out one first, a
-  branch another window already carries left alone, a merged one (a squash
-  merge too) left as it was, and one checked out in another worktree, or
-  whose branch on origin was deleted, named in a line with the adopt command
-  and left as it was — and a trunk ahead of origin adopted or, when a window
-  carries it, reset. The checked-out work's untracked, not-ignored files are
-  copied into its window's worktree under a temporary name, checked, put in
-  place, and only then removed from `target/` (a run cut off part-way, or out
-  of time, finishes the move at the next session start), the temporary copies
-  in `state/upgrade-carry-tmp/<NN>/` (never under `worktrees/`, where a target
-  named `.upgrade-carry` would be the window's own checkout), and an original
-  removed only while it is still untracked under that name; its ignored files
-  stay and are named in the window's line; untracked files no window takes, and
-  stash entries, are named in a line and by doctor; ignored files in a checkout
-  no window is made from are named once, in a line (doctor does not name ignored
-  files: build output and `.env` files live there too); work in a worktree
-  someone made by hand from a target repo — uncommitted or untracked files, a
-  detached HEAD with commits no branch has — is named in a line and by doctor,
-  and left as it is, under `worktrees/` too (`worktrees/hotfix`, or a number no
-  lease file has); work inside a target repo's submodule (uncommitted or
-  untracked files, a branch with commits its origin lacks, a detached HEAD past
-  the recorded commit, a stash) is named in a line and by doctor and stays in
-  the trunk mirror — a window's worktree starts with its submodules empty, and
-  a submodule's own edits no longer read as the checkout's uncommitted changes.
+  working); then, after the safety copy and before anything in `target/`
+  changes, unfinished work in any target repo (outer and nested) stops the
+  upgrade in one sentence naming it — a branch with commits `git cherry`
+  finds missing from `origin/<trunk>` (or a merge commit whose result adds
+  something, which `git cherry` passes over; a squash merge, a branch a window
+  holds, and one whose branch on origin was deleted do not count), the trunk
+  ahead of origin, a detached HEAD with commits no branch has, uncommitted
+  changes (hidden ones too), untracked files that are not ignored, a stash
+  entry, a rebase, merge, cherry-pick, revert or bisect in progress, a
+  worktree that is not a window's. Nothing is moved by the upgrade itself:
+  "pick it up" (`core/lease.sh adopt --all-unfinished`) makes each piece a
+  window — unsaved files saved first as one commit, each stash entry as a
+  commit of what it saved — and names what it cannot move with what to do;
+  the next start finishes. With nothing unfinished, one bounded fetch, and a
+  checkout on a branch already on origin goes back on its trunk, the branch
+  left as it was. Ignored files and work inside a submodule are named in a
+  line and by doctor and stay where they are.
   Branches are read by their exact names (`refs/heads/<b>`): a tag with a
   branch's name, or a tag named after the trunk, no longer makes a branch
   unreadable. Where git ignores case, two branches whose names differ only in
@@ -257,17 +254,13 @@ shows what is left.
   is finished by the next start (git's own locks cleared, then the reset or a
   forced checkout of the trunk), never "commit them", which put the same
   commit in a second window; a file whose content is neither side's is named
-  instead, and doctor says the window already holds a trunk's commits. A
-  detached checkout whose change is on origin as a
-  squash keeps its commits on a `daedalus/upgrade-…` branch, named in its line.
+  instead, and doctor says the window already holds a trunk's commits.
   A window is made without renaming anything: `lease/<NN>` is made at the
   work's tip, and the branch's own name is removed only once the lease file and
   the worktrees exist, so a `git` killed at any point leaves the commits on a
   branch. A start cut off while making a window — after `lease/<NN>` was made,
   before its lease file, or before its worktrees — is finished by the next start
-  into that same window, never adopted twice; a worktree an earlier build's
-  cut-off adoption left under `worktrees/` on the branch itself is cleared and
-  the branch adopted. A lease file is written to a temporary file and linked into
+  into that same window, never adopted twice. A lease file is written to a temporary file and linked into
   place, so a cut-off start never leaves an empty one (an empty one an earlier
   build left is cleared); a `git worktree add` cut off so early that git will
   not remove what it left (a record locked "initializing", a window branch's
@@ -275,13 +268,10 @@ shows what is left.
   release prune worktree records under `worktrees/` (and promote's scratch)
   only, never the operator's own worktrees: a plain `git worktree prune` dropped
   one on a volume not mounted at that moment, its index and its detached
-  commits with it. It stops before anything in `target/`
-  moves, repeated by the board on every prompt, on uncommitted changes (an edit
-  hidden by skip-worktree or assume-unchanged included), an untracked or
-  ignored file where the move back to the trunk, the trunk's reset or its
-  fast-forward would write (paths compared without case where git ignores
-  case), a local branch named `origin/<trunk>`, a rebase, merge,
-  cherry-pick, revert or bisect stopped part-way, lock files a cut-off `git`
+  commits with it. Besides unfinished work, it stops before anything in
+  `target/` moves, repeated by the board on every prompt, on an ignored file
+  where the move back to the trunk or its fast-forward would write (paths compared without case where git ignores
+  case), a local branch named `origin/<trunk>`, lock files a cut-off `git`
   left in its git directory, or a checkout on a branch that is gone (the
   sentence gives the branch's last commit from HEAD's reflog and the command
   that brings it back — never "commit them"). Doctor names such a hidden

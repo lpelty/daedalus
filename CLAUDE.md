@@ -94,7 +94,8 @@ it.
 | "Ask the reviewer why …" | the prime, or the reviewed window | `core/call-agent.sh --resume-review 02 "<their question>"`; repeat the answer word for word, signed "— the reviewer". It is advice, not a new verdict. |
 | "Promote it anyway, because …" | the prime | The skip-review procedure (below), with the reason in the operator's own words — and only with one. |
 | "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh release 02 --remove` first; it refuses and names what would be lost — the unpromoted commits and any uncommitted files. Repeat that refusal word for word, ask, and only after a yes run it again with `--force`. Never add `--force` without that refusal repeated first. |
-| "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested>` for a nested repo's branch); repeat what it printed — the number, the repo, the commits. The upgrade does this by itself at the first start after a release. |
+| "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested>` for a nested repo's branch); repeat what it printed — the number, the repo, the commits. |
+| "Pick it up" (after the upgrade said it found unfinished work) | the prime, or a shell | `core/lease.sh adopt --all-unfinished`; repeat each window it made and anything it could not move, with what to do; then say the next session start finishes the upgrade. |
 | (a background clone finished) | — | The board says "04 (spawned) — FINISHED …"; when the operator next asks what is open, repeat it and wait for "promote 4" or "release 4". |
 | "Hand the pen to window 3" | window 03 | `core/lease.sh prime take --reason "<their whole message>"`. Said to the prime instead: "Say that to window 03 — the pen is taken, never given." |
 | "Message window 2 that …" | any window | Send it (below) and repeat the reply word for word when it comes. |
@@ -195,30 +196,32 @@ it from anywhere but the address this checkout records for its branch; then
 say that sentence to the operator, who pulls in a shell. Nothing else is done
 by hand. At the next session start the upgrade (`core/upgrade.py`) runs by
 itself before the window numbers itself: it makes what the release needs,
-moves capture's settings into `config.yaml`, turns any work waiting in
-`target/` — every branch with work origin lacks, checked out or not, except
-one checked out in another worktree, which it names — into a
-numbered window each (the untracked files of the checked-out work go with
-it into the window's worktree; any that stay in `target/` are named), and says one line for each thing it did —
-repeat those lines to the operator. If it stops, the board says why in one
-sentence on every prompt. Two things it leaves to a person. One is a target
-checkout holding work the upgrade could lose: uncommitted changes, a file
-marked skip-worktree or assume-unchanged included (it stops
-there until they are committed on their branch — never stash them: a stash is
-saved work no window shows), or untracked or ignored files that putting
-it back on its trunk would overwrite (it stops there and tells the operator
-to move them out of that checkout, or commit them on its branch), or a local
-branch named `origin/<trunk>` (it stops until that is renamed), or a
-rebase, merge, cherry-pick, revert or bisect stopped part-way there (it stops
-and names the `git` command that finishes or undoes it), or lock files a
+moves capture's settings into `config.yaml`, puts each target checkout back
+on its trunk, and says one line for each thing it did — repeat those lines to
+the operator. It moves no work by itself. If `target/` holds unfinished work
+— a branch with commits origin lacks, the trunk ahead of origin, unsaved
+files, a stash, a git operation stopped part-way, a worktree made by hand —
+it stops before changing anything there and says one sentence naming what it
+found ("Daedalus has unfinished work in target/<repo>: ... Say 'pick it up'
+to move it into windows, ..."). Repeat that sentence to the operator word for
+word; the board repeats it on every prompt. When the operator then says
+"pick it up", run `core/lease.sh adopt --all-unfinished` and report what it
+printed: each window it made (number, repo, commits), and anything it could
+not move with what to do. Then tell the operator that the next session start
+finishes the upgrade. Never move that work any other way, and never stash
+it: a stash is saved work no window shows. Two things it leaves to a person.
+One is a target checkout the upgrade cannot read safely: untracked files
+(ignored ones) that putting it back on its trunk would overwrite (it stops there and
+tells the operator to move them out of that checkout, or commit them on its
+branch), or a local branch
+named `origin/<trunk>` (it stops until that is renamed), or lock files a
 cut-off `git` command left, or a checkout on a branch that is gone (it stops,
 naming the files to remove or the `git branch` command that brings the branch
 back — never commit in that checkout to get past it), or two branches whose
 names differ only in case (it stops, naming the rename). A checkout or reset
-the upgrade itself began and was cut off is finished by the next start; tell
-the operator not to commit there. Work in a submodule of a target repo, and in
-a worktree someone made by hand (under `worktrees/` too), is named in a line,
-never moved. The other
+that "pick it up" began and was cut off is finished by the next start; tell
+the operator not to commit there. Work in a submodule of a target repo is
+named in a line, never moved. The other
 is a target checkout whose pre-push hook Daedalus cannot install — another
 tool's `pre-push` hook, or a `core.hooksPath` a hook manager set.
 That one does not stop the upgrade; its line names the remedy, promote

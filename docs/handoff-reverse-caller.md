@@ -78,11 +78,7 @@ checkout on the machine); removed the old shared `state/pitfall-seen.json` /
 `state/code-context-seen.json`; renamed `hot.md`'s `session:` to `leases:`
 once; moved capture's settings from the hook line into `memory:` (the key into
 the file `memory.api_key_file` names, mode 600); fetched each target repo once
-and turned any work there that trunk lacks — the branch checked out, every
-other local branch, a trunk ahead of origin, a detached checkout — into a
-numbered window each (the checked-out work's untracked files went with it into
-the window's worktree; any left in `target/` were named, and doctor names them),
-putting the checkout
+and, when nothing there was unfinished, put the checkout
 back on its trunk; then wrote `state/upgraded-to`. It said one line for each
 thing it did. The session that ran the pull still runs the old hooks: it is
 closed and a new one started. If its Stop says "config.yaml changed under this
@@ -90,35 +86,35 @@ session, by the upgrade to 0.7.0 — not by this session", that is the release's
 own change: it is not restored. Check: `core/doctor.sh` prints
 `OK       upgrade: state/upgraded-to 0.7.0` and no MISSING line about
 leases, hooks or `VERSION`; `git -C target/<repo> status -sb` shows the trunk
-with no `ahead`; the board lists any adopted window with "adopted from".
+with no `ahead`; the board lists any picked-up window with "adopted from".
 `python3 core/upgrade.py --dry-run` says what it would still do, and changes
 nothing.
 
-**What it would not do: move a target checkout that holds work it could
-lose.** If yours had uncommitted changes, the upgrade stopped there and the
-board says on every prompt: "upgrade to 0.7.0 incomplete: target/<repo> has
-uncommitted changes — commit them on their branch inside that checkout, then
-start a session again." A change to a file marked skip-worktree or
-assume-unchanged counts, though `git status` hides it: the sentence names the
-file and the `git update-index` command that clears the mark. A stash in that checkout is not a way out: it stays
-in the trunk mirror, where no window shows it — the upgrade names any stash it
-finds in one line, and `core/doctor.sh` names it until it is applied or dropped. If it had untracked or ignored files where
-putting it back on its trunk would write, the sentence names them: "… has
-untracked files that putting it back on <trunk> would overwrite (<files>) —
-move them out of that checkout, or commit them on its branch, then start a
-session again." A local branch named `origin/<trunk>` stops it too, until it is
-renamed. If a rebase, merge, cherry-pick, revert or bisect had stopped
-part-way there, it stopped before anything moved, naming the operation and the
-`git -C target/<repo>` command that finishes or undoes it. If a `git` command
-had been cut off there, leaving lock files or the checkout on a branch that is
-gone, it stopped naming the files to remove, or the `git branch` command that
-brings the branch back from HEAD's reflog — never commit in that checkout to
-get past it. Two branches whose names differ only in case, where git ignores
-case, stop it too, until one is renamed (the sentence gives the commands). A
-checkout or reset the upgrade itself began and was cut off part-way is not
-yours to fix: the next session start finishes it, so do not commit there in
-between. Either way that work is yours to commit, in your own session;
-nobody else touches it, and the next session start finishes the upgrade.
+**What it would not do: move unfinished work.** If a target repo held a
+branch with commits origin lacks, the trunk ahead of origin, unsaved files
+(uncommitted changes, untracked files, and a change `git status` hides), a stash, a rebase, merge, cherry-pick,
+revert or bisect stopped part-way, or a worktree made by hand, the upgrade
+stopped before changing anything there, and the board says on every prompt:
+"Daedalus has unfinished work in target/<repo>: … Nothing was changed. Say
+'pick it up' to move it into windows, or finish and ship it the usual way,
+then start a new session." "Pick it up" runs `core/lease.sh adopt
+--all-unfinished`: each piece becomes a numbered window, and what it cannot
+move is named with what to do. A stash is never the remedy: it stays in the
+trunk mirror, where no window shows it. If it had ignored files where putting
+it back on its trunk would write, the sentence names them: "… has untracked
+files that putting it back on <trunk> would overwrite (<files>) — move them
+out of that checkout, or commit them on its branch, then start a session
+again." A local branch named `origin/<trunk>` stops it too, until it is
+renamed. If a `git` command had been cut off there, leaving lock files or the
+checkout on a branch that is gone, it stopped naming the files to remove, or
+the `git branch` command that brings the branch back from HEAD's reflog —
+never commit in that checkout to get past it. Two branches whose names differ
+only in case, where git ignores case, stop it too, until one is renamed (the
+sentence gives the commands). A checkout or reset "pick it up" began and was
+cut off part-way is not yours to fix: the next session start finishes it, so
+do not commit there in between. Either way that work is yours, in your own
+session; nobody else touches it, and the next session start finishes the
+upgrade.
 
 **The one other thing that needs a person** does not stop the upgrade: a
 target checkout that already has a `pre-push` hook Daedalus did not install,
@@ -129,7 +125,7 @@ move the other aside, or `git -C target/<repo> config --unset core.hooksPath`
 says MISSING for that repo's pre-push hook. Daedalus never changes another
 tool's hook or `core.hooksPath` itself: either may be the target's own checks.
 
-**Adopted work ships by "promote window NN"** to the prime. On a deployment
+**Picked-up work ships by "promote window NN"** to the prime. On a deployment
 whose trunk lives behind a forge with branch protection, the first promote is
 also the live check of whether that protection accepts the push for the
 operator's credentials; if it does not, record it as an exchange entry. A

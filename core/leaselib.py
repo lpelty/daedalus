@@ -2534,9 +2534,9 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
     second time. Refused: a dirty target/<repo> (tracked changes, or a change hidden by skip-worktree or
     assume-unchanged), an ignored file where the trunk's checkout or fast-forward would write, a branch that does
     not exist or is a live window's, nothing past trunk, a detached checkout holding commits no branch has. The fetch (a shell path, §4.2) runs
-    before the lock; the upgrade passes fetch=False — it fetched already — and its start deadline, and checked=True:
-    it read target/<repo> for changes git status does not show (filtered_edits, stat_blind_edits) before anything
-    moved, and reading it again for each branch it adopts ran a session start out of time (release-candidate red
+    before the lock; "pick it up" (upgrade.pick_up, `adopt --all-unfinished`) passes fetch=False — it fetched every
+    target repo already. checked=True skips the read of target/<repo> for changes git status does not show
+    (filtered_edits, stat_blind_edits), for a caller that read it before anything moved (release-candidate red
     team 3, finding 4).
 
     Order (plan 5 Task 2 review, finding 1): the first change is always making lease/<NN> at the work's tip — one
@@ -3856,8 +3856,13 @@ def main(argv: list) -> int:
             print("Window %s's worktree was not finished inside the budget; run `core/lease.sh claim %s` to finish it." % (nn, nn))
         return 0
     if cmd == "adopt":
+        if args == ["--all-unfinished"]:
+            # "pick it up": every piece of unfinished work in target/ the upgrade stopped on, a window each
+            import upgrade as up
+            return up.pick_up(root)
         if not args or args[0].startswith("--"):
-            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested>] [--note "..."]\n')
+            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested>] [--note "..."] | adopt '
+                             '--all-unfinished\n')
             return 2
 
         def _opt(flag: str) -> Optional[str]:

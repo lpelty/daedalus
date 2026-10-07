@@ -104,3 +104,38 @@ for rel in sys.stdin.read().split("\0"):
   git -C "$H" add -A; cmt "$H" -m "v0.7.0"
   [ "$(cat "$H/VERSION")" = 0.7.0 ]
 }
+
+# target_listing — everything under target/ a change there would show, for each target repo: every ref with its
+# commit (branches, tags, the stash, origin's), HEAD, the stash list, the worktree list, the index's entries and
+# their marks, git's own files (in-progress records, hooks) by name, the hooks by content, and every file of the
+# working tree with its sha (the nested repo left to its own listing). Two equal listings: nothing changed.
+target_listing() {
+  local r
+  for r in "$T" "$T/sub"; do
+    printf '== %s\n' "$r"
+    git -C "$r" for-each-ref --format='%(refname) %(objectname)'
+    git -C "$r" symbolic-ref -q HEAD || echo detached; git -C "$r" rev-parse HEAD
+    git -C "$r" stash list --format='%H %gs'
+    git -C "$r" worktree list --porcelain
+    git -C "$r" ls-files -s; git -C "$r" ls-files -v | cut -c1-2 | sort | uniq -c
+    (cd "$r/.git" && ls -1A | grep -vx -e FETCH_HEAD -e index; find hooks -type f -exec shasum {} + | sort)
+    (cd "$r" && find . -path ./.git -prune -o -path ./sub -prune -o \( -type f -o -type l \) -print | sort \
+       | while IFS= read -r f; do if [ -L "$f" ]; then printf '%s -> %s\n' "$f" "$(readlink "$f")"; else shasum "$f"; fi; done)
+  done
+}
+# up_stops <sentence> — the upgrade stops with exactly <sentence>, recorded as step 6 for the board and doctor, no
+# stamp, and nothing under target/ changed (target_listing before and after).
+up_stops() {
+  local before; before="$(target_listing)"
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "status $status"; echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | tail -1)" = "$1" ] || { echo "want: $1"; echo "$output"; return 1; }
+  [ "$(target_listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_listing); return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["sentence"] == sys.argv[2] and d["step"] == 6, d' \
+    "$DAEDALUS_HOME/state/upgrade-stopped.json" "$1"
+  case "$output" in *"installed the pre-push hook"*) echo "a hook was installed in target/"; return 1 ;; esac
+  [ -n "$(ls "$DAEDALUS_HOME/state/upgrade-snapshot" 2>/dev/null)" ] || { echo "no safety copy was kept"; return 1; }
+}
+# pick_up — the operator said "pick it up": the command the agent runs
+pick_up() { run bash "$DAEDALUS_HOME/core/lease.sh" adopt --all-unfinished </dev/null; }
