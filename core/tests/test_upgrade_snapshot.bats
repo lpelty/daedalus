@@ -514,7 +514,7 @@ lines.txt"; printf 'lower\n' > "$T/notes.md"; printf 'UPPER\n' > "$B/hand/Notes.
   rm "$T/two
 lines.txt" "$T/notes.md" "$B/hand/Notes.md"
   run python3 "$UP" --restore-help
-  [ "$(cmds "$output" | grep -c '^mkdir -p ')" = 3 ] || { echo "$output"; return 1; }
+  [ "$(cmds "$output" | grep -c '^python3 -c ')" = 3 ] || { echo "$output"; return 1; }
   case "$output" in *"\$'w0/two\\nlines.txt'"*) : ;; *) echo "$output"; return 1 ;; esac
   cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
   R="$(echo "$DAEDALUS_HOME"/state/upgrade-restore/*/1-thing)"
@@ -687,4 +687,151 @@ moved_off_today() {
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   copied "$a" || { cat "$(newest)/manifest.json"; return 1; }
+}
+
+@test "a commit only a parked branch's reflog holds, made after a copy was taken with every ref moved back: the next run copies it before adopt deletes that branch; --restore-help lists it, --forget-snapshot refuses, the printed command brings it back" {
+  git -C "$T" checkout -q -b park/y; printf 'y\n' > "$T/y.txt"; git -C "$T" add -A; cmt "$T" -m "parked work"
+  git -C "$T" checkout -q main
+  shim_git
+  KILL_AT=1 PATH="$B/shim:$PATH" run python3 "$UP"
+  [ "$status" -eq 137 ] || { echo "$output"; return 1; }
+  [ "$(snaps | grep -c .)" = 1 ]
+  git -C "$T" worktree add -q "$B/exp" park/y           # an experiment, undone: no ref moves, park/y's reflog holds D
+  printf 'D\n' > "$B/exp/d.txt"; git -C "$B/exp" add -A; cmt "$B/exp" -m "EXPERIMENT D"
+  d="$(git -C "$B/exp" rev-parse HEAD)"; git -C "$B/exp" reset -q --hard HEAD~1; git -C "$T" worktree remove "$B/exp"
+  git -C "$T" log -g --format=%H park/y | grep -q "^$d$"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(snaps | grep -c .)" = 2 ] || { echo "no second copy: $output"; return 1; }
+  copied "$d" || { cat "$(newest)/manifest.json"; return 1; }
+  ! git -C "$T" rev-parse -q --verify refs/heads/park/y >/dev/null      # adopted: its name and reflog are gone
+  gone "$T"; ! git -C "$T" cat-file -e "$d" 2>/dev/null
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: commit ${d:0:7} (\"EXPERIMENT D\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP" --forget-snapshot
+  [ "$status" -eq 1 ]; case "$output" in *"${d:0:7}"*"Nothing was removed"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  git -C "$T" cat-file -e "$d"
+}
+
+@test "git's record of a merge in progress in a hand-made worktree is checked by --restore-help: once it is gone it is listed with the command that brings it back, and --forget-snapshot refuses" {
+  git -C "$T" branch other; git -C "$T" worktree add -q -b mine "$B/hand" main
+  printf 'o\n' > "$B/o.txt"; git -C "$T" checkout -q other; cp "$B/o.txt" "$T/o.txt"; git -C "$T" add -A; cmt "$T" -m other
+  o="$(git -C "$T" rev-parse other)"; git -C "$T" checkout -q main
+  git -C "$B/hand" -c user.email=t@x -c user.name=t merge -q --no-commit --no-ff -s ours other
+  git -C "$B/hand" rev-parse -q --verify MERGE_HEAD >/dev/null
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '"path": "MERGE_HEAD"' "$(newest)/manifest.json"
+  run python3 "$UP" --restore-help
+  case "$output" in *"$NOTHING"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$B/hand" merge --abort
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: git's record of a merge in progress (MERGE_HEAD, in the worktree at $B/hand)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP" --forget-snapshot
+  [ "$status" -eq 1 ]; case "$output" in *"MERGE_HEAD"*"Nothing was removed"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP" --restore-help
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME"/state/upgrade-restore/*/1-thing/git/w1/MERGE_HEAD)" = "$o" ]
+}
+
+@test "a worktree left under worktrees/<NN> by a cut-off start, clean but in the middle of a bisect: the upgrade stops instead of removing it and naming the bisect" {
+  git -C "$T" checkout -q -b stray; printf 's\n' > "$T/s.txt"; git -C "$T" add -A; cmt "$T" -m "stray work"
+  git -C "$T" checkout -q main
+  mkdir -p "$DAEDALUS_HOME/worktrees/05"; git -C "$T" worktree add -q "$DAEDALUS_HOME/worktrees/05/thing" stray
+  git -C "$DAEDALUS_HOME/worktrees/05/thing" bisect start -q 2>/dev/null || git -C "$DAEDALUS_HOME/worktrees/05/thing" bisect start >/dev/null
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"worktrees/05/thing is a checkout of target/thing's branch stray"*"bisect"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/05/thing" ]
+}
+
+@test "a tracked file whose bytes a clean filter hides from git (status clean): in the copy, the upgrade stops before the checkout would replace it, and once replaced --restore-help brings its exact bytes back" {
+  git -C "$T" checkout -q -b fix/in-flight
+  printf 'notes.txt filter=strip\n' > "$T/.gitattributes"; printf 'v1\n' > "$T/notes.txt"
+  git -C "$T" config filter.strip.clean "sed '/^LOCAL/d'"; git -C "$T" config filter.strip.smudge cat
+  git -C "$T" add -A; cmt "$T" -m notes
+  printf 'v1\nLOCAL hours of output\n' > "$T/notes.txt"; git -C "$T" add notes.txt
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing has changes git status does not show"*"notes.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; grep -q '^LOCAL hours' "$T/notes.txt"
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); f=[f for f in m["repos"][0]["files"] if f["path"] == "notes.txt"]; assert f and f[0]["kind"] == "changed", m["repos"][0]["files"]' "$(newest)/manifest.json"
+  cp "$T/notes.txt" "$B/notes.aside"; rm "$T/notes.txt"; git -C "$T" checkout -q -- notes.txt
+  ! grep -q LOCAL "$T/notes.txt"
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: uncommitted change to file notes.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  cmp "$DAEDALUS_HOME"/state/upgrade-restore/*/1-thing/w0/notes.txt "$B/notes.aside"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "file names holding [ ] * ? or a backslash: the commands --restore-help prints bring back exactly that file, and only it" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  for n in 'a[1].txt' 'b*.txt' 'q?.txt' 'back\slash.txt' 'bX.txt'; do printf 'BYTES OF %s\n' "$n" > "$T/$n"; done
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  W="$DAEDALUS_HOME/worktrees/01/thing"; [ -f "$W/bX.txt" ] || { ls -la "$W"; return 1; }
+  for n in 'a[1].txt' 'b*.txt' 'q?.txt' 'back\slash.txt'; do rm "$W/$n"; done
+  run python3 "$UP" --restore-help
+  case "$output" in *"holds 4 things"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  d="$(echo "$DAEDALUS_HOME"/state/upgrade-restore/*/1-thing/w0)"
+  for n in 'a[1].txt' 'b*.txt' 'q?.txt' 'back\slash.txt'; do [ "$(cat "$d/$n")" = "BYTES OF $n" ] || { ls -la "$d"; return 1; }; done
+  [ ! -e "$d/bX.txt" ] || { echo "a glob pulled out bX.txt too"; return 1; }
+  [ "$(ls -1 "$d" | wc -l | tr -d ' ')" = 4 ]
+}
+
+@test "two copies (the second building on the first) and a repository that is gone: every printed command runs, in order, into one new repository that holds the commits of both" {
+  printf 'dirty\n' >> "$T/a.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]; case "$output" in *"has uncommitted changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(snaps | grep -c .)" = 1 ]
+  s1="$(git -C "$T/sub" rev-parse HEAD)"
+  git -C "$T" add -A; cmt "$T" -m "the edit"; git -C "$T/sub" -c user.email=t@x -c user.name=t commit -q --allow-empty -m "sub later"
+  s2="$(git -C "$T/sub" rev-parse HEAD)"
+  sleep 1
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(snaps | grep -c .)" = 2 ] || { echo "$output"; snaps; return 1; }
+  rm -rf "$T/sub"
+  run python3 "$UP" --restore-help
+  case "$output" in *"${s1:0:7}"*"${s2:0:7}"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"
+  set -e; while IFS= read -r line; do bash -c "$line" || { echo "failed: $line"; cat "$B/restore.sh"; return 1; }; done < "$B/restore.sh"
+  restored "$s1"; restored "$s2"
+  [ "$(ls -d "$DAEDALUS_HOME"/state/upgrade-restore/*/*sub*-repo | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "while the copy is taken in the background, the session start that handed it over numbers no window: nothing in target/ changes before the copy is checked, lease.sh create and claim refuse until then, and the next start numbers the window" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  mkdir -p "$DAEDALUS_HOME/state/leases"                  # an earlier start got as far as step 1
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  shim_git
+  mkdir -p "$B/hold"
+  cat > "$B/hold/git" <<SH
+#!/bin/bash
+case " \$* " in *" bundle create "*) while [ ! -e "$B/go" ]; do sleep 0.1; done ;; esac
+exec "$B/shim/git" "\$@"
+SH
+  chmod +x "$B/hold/git"
+  run env PATH="$B/hold:$PATH" UPGRADE_TEST_SNAPSHOT_SLOW=1 bash -c 'printf "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\",\"source\":\"startup\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/session-start.py"'
+  [ "$status" -eq 0 ] || { echo "$output"; : > "$B/go"; return 1; }
+  case "$output" in *"runs in the background"*) : ;; *) echo "$output"; : > "$B/go"; return 1 ;; esac
+  case "$output" in *"You are window"*) echo "$output"; : > "$B/go"; return 1 ;; esac
+  case "$output" in *"no window is made in target/ until the upgrade has its safety copy of it"*) : ;; *) echo "$output"; : > "$B/go"; return 1 ;; esac
+  ! cut -f2 "$B/git.log" | grep -q M || { cat "$B/git.log"; : > "$B/go"; return 1; }
+  run env DAEDALUS_SESSION_ID=s1 "$DAEDALUS_HOME/core/lease.sh" create
+  [ "$status" -ne 0 ]; case "$output" in *"safety copy"*) : ;; *) echo "$output"; : > "$B/go"; return 1 ;; esac
+  run env DAEDALUS_SESSION_ID=s1 "$DAEDALUS_HOME/core/lease.sh" claim 01
+  [ "$status" -ne 0 ]; case "$output" in *"lease.sh claim\` works once"*) : ;; *) echo "$output"; : > "$B/go"; return 1 ;; esac
+  : > "$B/go"
+  for i in $(seq 1 150); do grep -q '"running": false' "$DAEDALUS_HOME/state/upgrade-background.json" 2>/dev/null && break; sleep 0.2; done
+  grep -q '"copied": true' "$DAEDALUS_HOME/state/upgrade-background.json" || { cat "$DAEDALUS_HOME/state/upgrade.log"; return 1; }
+  ! cut -f2 "$B/git.log" | grep -q M || { cat "$B/git.log"; return 1; }
+  run bash -c 'printf "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\",\"source\":\"startup\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/session-start.py"'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: complete."*"You are window"*) : ;; *) echo "$output"; return 1 ;; esac
 }

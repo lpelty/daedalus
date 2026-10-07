@@ -102,6 +102,12 @@ SHADOW = ("upgrade to %s incomplete: target/%s has a local branch named origin/%
 # An edit to a tracked file marked skip-worktree or assume-unchanged is not in git status (review 2, finding 6).
 HIDDEN = ("upgrade to %s incomplete: target/%s has uncommitted changes git status does not show, in files marked %s "
           "(%s) — clear the mark (%s), commit them on their branch inside that checkout, then start a session again")
+# A tracked file a clean filter or a line-ending conversion hides an edit in (git compares it only after the filter
+# ran): a checkout or reset writes the committed version over bytes no commit holds (review 3 of the safety copy).
+FILTERED = ("upgrade to %s incomplete: target/%s has changes git status does not show, in files git filters or "
+            "converts on the way in (%s) — their bytes on disk are in no commit, and moving the checkout would replace "
+            "them with the committed version: copy those files out of that checkout, put the committed version back "
+            "(git -C target/%s checkout -- %s), then start a session again")
 # A branch whose branch on origin was deleted (on GitHub, what follows a merge) is not made a window: a squash merge
 # leaves its commits looking unmerged to git cherry (release-candidate review, finding 3). Named, so one that was not
 # merged can still be adopted.
@@ -977,7 +983,7 @@ def _worktrees(p: Path) -> List[Dict[str, str]]:
 
 def _debris_held(path: str, ours: Set[str]) -> Tuple[List[str], List[str]]:
     """(changes to commit, what git cannot commit there) in the worktree at <path>: the second is every ignored file,
-    every other repository inside it — a clone, a submodule's checkout (and its git directory under the worktree's
+    git's record of a merge, rebase, cherry-pick, revert or bisect in progress there, every other repository inside it — a clone, a submodule's checkout (and its git directory under the worktree's
     own modules/) — except a window's nested worktree of a target repository (<ours>: their common git
     directories) that holds nothing either, looked into the same way."""
     code, st, _ = _git(Path(path), "status", "--porcelain", "--untracked-files=all", "--ignored")
@@ -1001,6 +1007,13 @@ def _debris_held(path: str, ours: Set[str]) -> Tuple[List[str], List[str]]:
     gd = _git(Path(path), "rev-parse", "--absolute-git-dir")[1].strip()
     if gd and os.path.isdir(os.path.join(gd, "modules")) and os.listdir(os.path.join(gd, "modules")):
         kept.append("its submodules' git directories, in %s" % os.path.join(gd, "modules"))
+    try:
+        busy = sorted(n for n in os.listdir(gd) if (n in GIT_STATE or n.startswith("BISECT_"))
+                      and n not in SNAP_ALONG) if gd else []
+    except OSError:
+        busy = []
+    if busy:        # git status is clean through a bisect or a merge -s ours; removing the worktree deletes its record
+        kept.append("git's record of a %s in progress (%s)" % (_git_state_words(busy[0]), ", ".join(busy)))
     return changed, kept
 
 
@@ -1308,6 +1321,13 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         hidden = ll.hidden_edits(p)
         if hidden:
             raise Stop(HIDDEN % ((ver, key) + ll.hidden_words(key, hidden)))
+        try:
+            filtered = ll.filtered_edits(p)
+        except subprocess.TimeoutExpired:
+            filtered = []
+        if filtered:
+            raise Stop(FILTERED % (ver, key, ll.name_paths(filtered), key,
+                                   " ".join(shlex.quote(f) for f in filtered) if len(filtered) <= 5 else "<file>"))
     fetched = set() if dry else _fetch_all(repos, deadline)
     for key, p in repos:
         _, cur, _ = _git(p, "branch", "--show-current")
@@ -2147,7 +2167,8 @@ def _drop_scratch(coll: List[dict]) -> None:
 def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[str, str]]:
     """{path: untracked|ignored|changed} for the files of the worktree at <wp> that its last commit does not hold as
     they are: untracked and ignored ones, and tracked ones that differ from HEAD (a change hidden by skip-worktree
-    or assume-unchanged included). None when git cannot read <wp> as a worktree."""
+    or assume-unchanged included, and bytes a clean filter or line-ending conversion hides, which no checkout writes
+    back). None when git cannot read <wp> as a worktree."""
     lists = {}
     for key, args in (("untracked", ["ls-files", "-z", "--others", "--exclude-standard"]),
                       ("others", ["ls-files", "-z", "--others"]),
@@ -2166,6 +2187,13 @@ def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[s
         kinds[p] = "untracked" if p in untracked else "ignored"
     for p in changed:
         kinds.setdefault(p, "changed")
+    import leaselib as ll
+    try:
+        # bytes a clean filter or a line-ending conversion hides from git diff: what a checkout would not write back
+        for p in ll.filtered_edits(Path(wp), deadline, skip=set(kinds)):
+            kinds[p] = "changed"
+    except subprocess.TimeoutExpired:
+        raise _OutOfTime()
     return kinds
 
 
@@ -2175,13 +2203,15 @@ SNAP_ALONG = ("index", "ORIG_HEAD")
 
 
 def _snap_fp(coll: List[dict]) -> str:
-    """target/'s state in one hash: refs (staged content included), worktrees, stash, and every copied file's
-    worktree, name, size, times and inode — never SNAP_ALONG. Equal hashes: nothing a copy holds has changed (a
-    content change kept at the same size with its mtime set back still moves ctime, which no one can set)."""
+    """target/'s state in one hash: refs (staged content included), every commit a reflog from the last 30 days
+    holds, worktrees, stash, and every copied file's worktree, name, size, times and inode — never SNAP_ALONG. Equal
+    hashes: nothing a copy holds has changed (a content change kept at the same size with its mtime set back still
+    moves ctime, which no one can set). A commit only a reflog holds counts: one made and undone after a copy (a
+    branch moved there and back) moves no ref, and the upgrade's adoption deletes that branch's reflog."""
     parts = []
     for r in coll:
         parts.append([r["common"],
-                      sorted((x["name"], x.get("worktree", ""), x["sha"]) for x in r["refs"] if x["kind"] != "reflog"),
+                      sorted((x["name"], x.get("worktree", ""), x["sha"]) for x in r["refs"]),
                       [(w["path"], w["head"], w["branch"], w["exists"]) for w in r["worktrees"]],
                       sorted((r["worktrees"][f["w"]]["path"], f["path"], f["kind"], f["size"], f["mtime_ns"],
                               f.get("ctime_ns"), f.get("ino")) for f in r["files"]),
@@ -2646,6 +2676,20 @@ def _uncopied(root: Path) -> List[str]:
     return out
 
 
+COPY_FIRST = ("This session has no window yet: no window is made in target/ until the upgrade has its safety copy of "
+              "it; a session started after that is numbered")
+COPY_FIRST_LEASE = ("no window is made or changed in target/ until the upgrade has its safety copy of it, which it has "
+                    "not yet; `core/lease.sh %s` works once the board no longer says the copy is being taken")
+
+
+def copy_missing(root: Path) -> bool:
+    """While the upgrade is pending: a repository its steps act on that no checked copy holds — the copy not taken
+    yet (handed to a run in the background, or stopped before it). A session start then numbers no window, and
+    lease.sh refuses what makes or changes one: a window's worktree add (and its prune of records under worktrees/)
+    would change target/'s repositories before the copy read them."""
+    return pending(root) and bool(_uncopied(root))
+
+
 def snapshot_line(root: Path) -> Optional[str]:
     """The board's line while a copy is kept."""
     snaps = _snapshots(root)
@@ -2711,14 +2755,15 @@ def _lines_set(out: bytes) -> Set[str]:
 
 
 def _snap_missing(root: Path, stamp: str) -> Tuple[dict, List[Tuple[dict, str, object]]]:
-    """(manifest, [(repo entry, "commit"|"file", what)]) — what the copy holds that target/ no longer has. A commit is
+    """(manifest, [(repo entry, "commit"|"file"|"git-state", what)]) — what the copy holds that target/ no longer has. A commit is
     there only while a ref reaches it — a branch, a tag, any worktree's HEAD, a stash entry (a window's branch
     counts: the upgrade moves work there) — never because only a reflog does, which expires, nor because the
     object is still on disk, which gc removes. What the copy held only through a reflog is there while a reflog or a
     ref still reaches it. Staged content is there while every staged blob is reachable from a ref or held by an
     index. Origin's branches as last fetched are origin's, not counted. A file is there while any worktree of its
-    repository — a window's included — holds it at the same path with the same content. Whatever git cannot read
-    counts as missing."""
+    repository — a window's included — holds it at the same path with the same content. Each of git's in-progress
+    files (a merge's, rebase's, cherry-pick's, revert's or bisect's — never the index or ORIG_HEAD) is there while
+    its worktree's git directory holds it with the same content. Whatever git cannot read counts as missing."""
     m = _read_json(root / SNAPS / stamp / "manifest.json")
     if not m:
         raise Stop("the safety copy in %s/%s has no readable manifest.json" % (SNAPS, stamp))
@@ -2784,7 +2829,29 @@ def _snap_missing(root: Path, stamp: str) -> Tuple[dict, List[Tuple[dict, str, o
                         break
             if not there:
                 out.append((r, "file", f))
+        gds: Dict[int, Optional[str]] = {}
+        for x in r.get("git_state", []):
+            if x["path"] in SNAP_ALONG:
+                continue
+            if x["w"] not in gds:
+                gds[x["w"]] = _git_dir_now(r, x["w"])
+            gd = gds[x["w"]]
+            if gd is None or _sha256(os.path.join(gd, x["path"]), False) != x["sha256"]:
+                out.append((r, "git-state", x))
     return m, out
+
+
+def _git_dir_now(r: dict, w: int) -> Optional[str]:
+    """The git directory of worktree <w> of the copied repository <r> as it is now (the common one for the main
+    worktree), or None when that worktree or repository is gone."""
+    if w == 0:
+        return r["git_dir"] if r.get("git_dir") and os.path.isdir(r["git_dir"]) else None
+    wt = next((x.get("path") for x in r.get("worktrees", []) if x.get("i") == w), None)
+    if not wt or not os.path.isdir(wt):
+        return None
+    code, out, _ = _gb(["-C", wt, "rev-parse", "--absolute-git-dir"])
+    gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
+    return gd if gd and os.path.isdir(gd) else None
 
 
 def _ref_words(x: dict, wt0: str) -> str:
@@ -2822,6 +2889,22 @@ def _restore_name(xs: List[dict], sha: str) -> str:
     return "restored/%s-%s" % ("detached" if any(x["kind"] == "head" for x in xs) else "commit", sha[:7])
 
 
+def _restore_repo(root: Path, r: dict) -> Path:
+    """Where the commands bring back a repository that is gone: one place per repository (by its git directory),
+    whichever copy the commit is in."""
+    slug = _name(0, r["label"])[2:]
+    return root / RESTORE / "repositories" / ("%s-%s-repo" % (slug, hashlib.sha256(
+        os.fsencode(r.get("git_dir") or r["label"])).hexdigest()[:8]))
+
+
+def _extract(tar: str, dest: str, member: str) -> str:
+    """A command that takes exactly the member named <member> out of <tar> into <dest> — by its name, never as a
+    pattern (tar reads [ ] * ? and \\ in a name as a glob, and which tar is installed decides how)."""
+    code = ('import sys, tarfile; t = tarfile.open(sys.argv[1]); t.extract(t.getmember(sys.argv[3]), sys.argv[2], '
+            '**({"filter": "tar"} if hasattr(tarfile, "tar_filter") else {}))')
+    return "python3 -c %s %s %s %s" % (_sh(code), _sh(tar), _sh(dest), _sh(member))
+
+
 def _restore_lines(root: Path, stamp: str, m: dict, missing: List[Tuple[dict, str, object]]) -> List[str]:
     snapdir = root / SNAPS / stamp
     lines = []
@@ -2849,12 +2932,13 @@ def _restore_lines(root: Path, stamp: str, m: dict, missing: List[Tuple[dict, st
         pre = ""
         if _repo_now(r) is None:
             # the repository itself is gone: the commands bring it back into a new one under state/upgrade-restore/,
-            # shallow at the same commits when it was (its copy holds no history beyond them)
-            dest = root / RESTORE / stamp / (_name(r["n"], r["label"]) + "-repo")
+            # shallow at the same commits when it was (its copy holds no history beyond them) — one for every copy,
+            # so a later copy's bundle finds there the commits of the earlier one it builds on
+            dest = _restore_repo(root, r)
             g = "git -C %s" % _sh(str(dest))
             pre = "git init -q %s && %s" % (_sh(str(dest)), "printf '%%s\\n' %s > %s && " % (
                 " ".join(shallow), _sh(str(dest / ".git" / "shallow"))) if shallow else "")
-            lead += (" %s is not there now; this brings the commit back into a new repository at %s%s."
+            lead += (" %s is not there now; this brings the commit back into a repository of its own at %s%s."
                      % (_escaped(r.get("path") or r["git_dir"]), _escaped(_rel(root, str(dest))),
                         ", shallow at the same %s as the clone it was copied from" % _plural(len(shallow), "commit")
                         if shallow else ""))
@@ -2885,9 +2969,30 @@ def _restore_lines(root: Path, stamp: str, m: dict, missing: List[Tuple[dict, st
         lines += ["- %s: %s %s%s (%s) — bring it back; it lands in %s, from where you move it where you "
                   "want it:" % (r["label"], FILE_WORDS.get(f["kind"], "file"), _escaped(f["path"]), where,
                                 _plural(f["size"], "byte"), _escaped(_rel(root, str(dest / f["member"])))),
-                  "    mkdir -p %s && tar -xf %s -C %s %s" % (_sh(str(dest)), _sh(str(snapdir / r["tar"])),
-                                                              _sh(str(dest)), _sh(f["member"]))]
+                  "    " + _extract(str(snapdir / r["tar"]), str(dest), f["member"])]
+    for r, what, x in missing:
+        if what != "git-state":
+            continue
+        wt = next((w for w in r.get("worktrees", []) if w["i"] == x["w"]), {})
+        where = (_escaped(r.get("path") or r["git_dir"]) if x["w"] == 0
+                 else "the worktree at %s" % _escaped(wt.get("path", "?")))
+        dest = root / RESTORE / stamp / _name(r["n"], r["label"])
+        lines += ["- %s: git's record of a %s in progress (%s, in %s) — if that was finished or given up since, "
+                  "nothing is lost; otherwise bring it back; it lands in %s, from where you copy it into that "
+                  "worktree's git directory:" % (r["label"], _git_state_words(x["path"]), _escaped(x["path"]), where,
+                                                 _escaped(_rel(root, str(dest / x["member"])))),
+                  "    " + _extract(str(snapdir / r["tar"]), str(dest), x["member"])]
     return lines
+
+
+def _git_state_words(path: str) -> str:
+    top = path.split("/", 1)[0]
+    if top.startswith("rebase-"):
+        return "rebase"
+    if top.startswith("BISECT_"):
+        return "bisect"
+    return {"CHERRY_PICK_HEAD": "cherry-pick", "REVERT_HEAD": "revert",
+            "sequencer": "cherry-pick or revert"}.get(top, "merge")
 
 
 def _snap_report(root: Path, stamp: str) -> Tuple[List[str], int]:

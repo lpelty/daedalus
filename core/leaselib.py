@@ -23,6 +23,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1888,6 +1889,128 @@ def hidden_edits(src: Path) -> Dict[str, str]:
     return found
 
 
+# attributes under which git changes a file's bytes on the way into the repository or out of it
+TRANSFORM_ATTRS = ("filter", "ident", "text", "eol", "working-tree-encoding")
+
+
+def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[set] = None) -> list:
+    """Tracked files of the worktree at <src> whose bytes on disk are not what a checkout of their staged content
+    writes, among those git transforms on the way in or out (a clean or smudge filter, ident, line-ending
+    conversion, a working-tree encoding — or every file under core.autocrlf): an edit git status never shows,
+    because git compares such a file only after its clean filter ran (a filter that strips local lines or a
+    notebook's outputs, CRLF line ends under text=auto). A checkout or reset replaces the file with the committed
+    version and those bytes, in no object, are gone. Paths in <skip> are not read. Under <deadline>, raises
+    subprocess.TimeoutExpired when it is out of time."""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    skip = skip or set()
+
+    def left() -> Optional[float]:
+        if deadline is None:
+            return None
+        t = deadline - time.time()
+        if t <= 0:
+            raise subprocess.TimeoutExpired("git", 0)
+        return t
+
+    def run(args: list, inp: Optional[bytes] = None) -> Tuple[int, bytes]:
+        r = subprocess.run(["git", "-C", str(src)] + args, input=inp, capture_output=True, env=env, timeout=left(),
+                           stdin=None if inp is not None else subprocess.DEVNULL)
+        return r.returncode, r.stdout
+
+    code, out = run(["ls-files", "-s", "-z"])
+    if code != 0:
+        return []
+    blobs: Dict[str, str] = {}
+    for rec in out.split(b"\0"):
+        meta, _, path = rec.partition(b"\t")
+        bits = meta.split(b" ")
+        if len(bits) == 3 and bits[2] == b"0" and bits[0] not in (b"160000", b"120000"):
+            p = os.fsdecode(path)
+            if p not in skip:
+                blobs[p] = bits[1].decode()
+    if not blobs:
+        return []
+    code, out = run(["config", "--get", "core.autocrlf"])
+    if os.fsdecode(out).strip().lower() not in ("true", "input", "yes", "on", "1"):
+        code, out = run(["check-attr", "-z", "--stdin"] + list(TRANSFORM_ATTRS),
+                        b"".join(os.fsencode(p) + b"\0" for p in blobs))
+        toks = out.split(b"\0") if code == 0 else []
+        hit = set()
+        for i in range(0, len(toks) - 2, 3):
+            if toks[i + 2] not in (b"unspecified", b"unset"):
+                hit.add(os.fsdecode(toks[i]))
+        blobs = {p: b for p, b in blobs.items() if p in hit}
+    cands = []
+    for p, b in sorted(blobs.items()):
+        try:
+            st = os.lstat(os.path.join(str(src), p))
+        except OSError:
+            continue        # deleted: git status names it
+        if stat.S_ISREG(st.st_mode):
+            cands.append((p, b, st.st_size))
+    if not cands:
+        return []
+    found = []
+    lined = [c for c in cands if "\n" not in c[0]]
+    for p, b, _ in cands:
+        if "\n" in p:         # cat-file's batch reads one name per line: this one is asked on its own
+            code, out = run(["cat-file", "--filters", "--path=" + p, b])
+            if code != 0 or not _same_bytes(os.path.join(str(src), p), out):
+                found.append(p)
+    if lined:
+        proc = subprocess.Popen(["git", "-C", str(src), "cat-file", "--batch", "--filters"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+        data = b"".join(b.encode() + b" " + os.fsencode(p) + b"\n" for p, b, _ in lined)
+
+        def feed() -> None:
+            try:
+                proc.stdin.write(data)
+                proc.stdin.close()
+            except OSError:
+                pass
+        import threading
+        threading.Thread(target=feed, daemon=True).start()
+        try:
+            for p, b, size in lined:
+                left()
+                head = proc.stdout.readline().split()
+                if len(head) < 3 or not head[2].isdigit():
+                    found.append(p)
+                    continue
+                n = int(head[2])
+                same = n == size
+                try:
+                    fh = open(os.path.join(str(src), p), "rb") if same else None
+                except OSError:
+                    fh, same = None, False
+                while n > 0:
+                    chunk = proc.stdout.read(min(n, 1 << 20))
+                    if not chunk:
+                        raise OSError("git cat-file ended early")
+                    n -= len(chunk)
+                    if same and fh.read(len(chunk)) != chunk:
+                        same = False
+                if fh is not None:
+                    fh.close()
+                proc.stdout.read(1)
+                if not same:
+                    found.append(p)
+        except OSError:
+            found += [p for p, _, _ in lined if p not in found]     # cannot tell: say so rather than miss it
+        finally:
+            proc.kill()
+            proc.wait()
+    return sorted(found)
+
+
+def _same_bytes(path: str, data: bytes) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read() == data
+    except OSError:
+        return False
+
+
 def hidden_words(key: str, hidden: Dict[str, str]) -> Tuple[str, str, str]:
     """(the marks, the paths named, the commands that clear the marks) for a sentence about hidden_edits."""
     marks = sorted(set(hidden.values()))
@@ -1914,6 +2037,12 @@ ADOPT_IGNORED = ("target/%s has ignored files that putting it back on %s at orig
 
 ADOPT_HIDDEN = ("target/%s has uncommitted changes git status does not show, in files marked %s (%s) — clear the mark "
                 "(%s), commit them on their branch inside that checkout, then run adopt again; nothing was adopted.")
+
+
+ADOPT_FILTERED = ("target/%s has changes git status does not show, in files git filters or converts on the way in "
+                  "(%s) — their bytes on disk are in no commit, and adopting would replace them with the committed "
+                  "version: copy those files out of that checkout, put the committed version back (git -C target/%s "
+                  "checkout -- %s), then run adopt again; nothing was adopted.")
 
 
 ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branch has; adopting %s would put the "
@@ -1983,6 +2112,10 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         hidden = hidden_edits(src)
         if hidden:
             raise Refused(ADOPT_HIDDEN % ((key,) + hidden_words(key, hidden)))
+        filtered = filtered_edits(src)
+        if filtered:
+            raise Refused(ADOPT_FILTERED % (key, name_paths(filtered), key, " ".join(shlex.quote(f) for f in filtered)
+                                            if len(filtered) <= 5 else "<file>"))
         _, cur, _ = _git(src, "branch", "--show-current")
         cur = cur.strip()
         _, head, _ = _git(src, "rev-parse", "HEAD")
@@ -2684,6 +2817,9 @@ VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take
 # in minutes. list/status stay allowed (they read).
 VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime",
                    "rebase", "split", "adopt")
+# what makes, moves or removes a window's worktree in target/'s repositories: refused while the upgrade's safety copy
+# of target/ is not taken (safety-copy review 3, finding 4)
+COPY_GATED = ("create", "claim", "spawn", "release", "done", "sweep", "rebase", "split", "adopt")
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
@@ -3061,6 +3197,15 @@ def main(argv: list) -> int:
         # Before recompute_all_changed and every lock: a visitor writes nothing.
         sys.stderr.write("daedalus: %s\n" % (VISITOR_REFUSAL % cmd))
         return 1
+    if cmd in COPY_GATED:
+        try:
+            import upgrade as up
+            gated = up.copy_missing(root)
+        except Exception:
+            gated = False
+        if gated:
+            sys.stderr.write("daedalus: %s\n" % (up.COPY_FIRST_LEASE % cmd))
+            return 1
     if cmd == "validate-id":
         return 0 if args and valid_id(args[0]) else 1
     if cmd == "validate-alias":

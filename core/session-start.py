@@ -171,7 +171,17 @@ def main() -> int:
         # §14: no auto-numbering while state/leases/ does not exist — the upgrade did not get to its first step
         # (another start held its lock past this start's share, or it failed). The next start, or `claim`,
         # numbers this window; the pending line says why (plan 5 Decision 13).
-        if upgrade_pending(root) and not (root / "state" / "leases").is_dir():
+        # No window while the upgrade's safety copy of target/ is not taken (it runs in the background, or it
+        # stopped before it): numbering one adds a worktree in target/'s repositories, and prunes records under
+        # worktrees/, before the copy has read them (safety-copy review 3, finding 4).
+        try:
+            import upgrade as up
+            uncopied = upgrade_pending(root) and up.copy_missing(root)
+        except Exception:
+            uncopied = False
+        if uncopied and not visitor:
+            bind_notes.append(up.COPY_FIRST + ".")
+        if upgrade_pending(root) and (uncopied or not (root / "state" / "leases").is_dir()):
             skip_bind = True
             try:
                 import upgrade as up
