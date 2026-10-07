@@ -521,3 +521,170 @@ lines.txt" "$T/notes.md" "$B/hand/Notes.md"
   [ "$(cat "$R/w0/two
 lines.txt")" = LINE ]; [ "$(cat "$R/w0/notes.md")" = lower ]; [ "$(cat "$R/w1/Notes.md")" = UPPER ]
 }
+
+# copied <sha> — some kept copy's manifest names <sha>, and that copy's bundle lists it among its heads
+copied() {
+  python3 - "$DAEDALUS_HOME" "$1" <<'PY'
+import glob, json, os, subprocess, sys
+home, sha = sys.argv[1], sys.argv[2]
+for mf in glob.glob(home + "/state/upgrade-snapshot/*/manifest.json"):
+    m, d = json.load(open(mf)), os.path.dirname(mf)
+    for r in m["repos"]:
+        if r["bundle"] and any(x["sha"] == sha for x in r["refs"]):
+            out = subprocess.check_output(["git", "bundle", "list-heads", os.path.join(d, r["bundle"])], text=True)
+            if any(ln.split(" ")[0] == sha for ln in out.splitlines()):
+                sys.exit(0)
+sys.exit(1)
+PY
+}
+# restored <sha> — the commit is back in target/thing or in a repository the restore commands made
+restored() {
+  git -C "$T" cat-file -e "$1" 2>/dev/null && return 0
+  local d; for d in "$DAEDALUS_HOME"/state/upgrade-restore/*/*-repo; do git -C "$d" cat-file -e "$1" 2>/dev/null && return 0; done
+  return 1
+}
+
+@test "target/<repo> reached through a symlink: the copy is taken all the same and holds a commit only a branch's reflog had; after the upgrade adopts (and so deletes) that branch, --restore-help brings it back" {
+  mv "$T" "$B/real-thing"; ln -s "$B/real-thing" "$T"
+  git -C "$T" checkout -q -b side main; printf 's\n' > "$T/s.txt"; git -C "$T" add -A; cmt "$T" -m "side work"
+  b="$(git -C "$T" rev-parse HEAD)"; git -C "$T" checkout -q main
+  a="$(printf 'ONLY-IN-SIDE-REFLOG\n' | git -C "$T" -c user.email=t@x -c user.name=t commit-tree "$b^{tree}" -p "$b")"
+  git -C "$T" update-ref refs/heads/side "$a"; git -C "$T" update-ref refs/heads/side "$b"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -n "$(snaps)" ] || { echo "no safety copy was taken: $output"; return 1; }
+  copied "$a" || { cat "$(newest)/manifest.json"; return 1; }
+  ! git -C "$T" rev-parse -q --verify refs/heads/side >/dev/null     # adopted: its name and reflog are gone
+  gone "$T"; ! git -C "$T" cat-file -e "$a" 2>/dev/null
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: commit ${a:0:7} (\"ONLY-IN-SIDE-REFLOG\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  git -C "$T" cat-file -e "$a"
+}
+
+@test "a git repository cloned inside a hand-made worktree (one under worktrees/<NN> the upgrade would clear, one outside target/) is in the copy; the upgrade stops instead of deleting it, and once the operator deletes it --restore-help brings back its commit and its files" {
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  git -C "$T" worktree add -q -b hotfix "$W" main
+  git clone -q "$B/sub-origin.git" "$W/sub"       # ignored there: thing's .gitignore has sub/
+  printf 'P\n' > "$W/sub/precious.txt"; git -C "$W/sub" add -A; cmt "$W/sub" -m "PRECIOUS unpushed"
+  p="$(git -C "$W/sub" rev-parse HEAD)"; printf 'MY NESTED NOTES\n' > "$W/sub/untracked-notes.md"
+  git -C "$T" worktree add -q -b exp/out "$B/out" main
+  git clone -q "$B/sub-origin.git" "$B/out/sub"
+  printf 'Q\n' > "$B/out/sub/q.txt"; git -C "$B/out/sub" add -A; cmt "$B/out/sub" -m "OUTSIDE unpushed"
+  q="$(git -C "$B/out/sub" rev-parse HEAD)"
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"worktrees/01/thing is a checkout of target/thing's branch hotfix"*"sub/"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W/sub" cat-file -e "$p"; [ "$(cat "$W/sub/untracked-notes.md")" = "MY NESTED NOTES" ]
+  copied "$p" || { cat "$(newest)/manifest.json"; return 1; }
+  copied "$q" || { cat "$(newest)/manifest.json"; return 1; }
+  grep -q '"path": "untracked-notes.md"' "$(newest)/manifest.json"
+  rm -rf "$DAEDALUS_HOME/worktrees/01"; git -C "$T" worktree prune
+  run python3 "$UP" --restore-help
+  case "$output" in *"worktrees/01/thing/sub: commit ${p:0:7} (\"PRECIOUS unpushed\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"worktrees/01/thing/sub: untracked file untracked-notes.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  restored "$p" || { cat "$B/restore.sh"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME"/state/upgrade-restore/*/*-worktrees-01-thing-sub/w0/untracked-notes.md)" = "MY NESTED NOTES" ]
+}
+
+@test "a submodule initialized in a hand-made worktree under worktrees/<NN> (its git directory under .git/worktrees/<id>/modules): its commit is in the copy, the upgrade stops instead of deleting it, and once the worktree is gone --restore-help brings the commit back" {
+  W="$DAEDALUS_HOME/worktrees/05/thing"
+  git -C "$T" worktree add -q -b hotfix "$W" main
+  git -C "$W" -c protocol.file.allow=always submodule add -q "$B/sub-origin.git" mod >/dev/null 2>&1
+  cmt "$W" -m "add mod"
+  rec="$(git -C "$W" rev-parse HEAD:mod)"
+  [ -d "$(git -C "$T" rev-parse --path-format=absolute --git-common-dir)/worktrees/thing/modules/mod" ] || skip "this git keeps a worktree's submodules elsewhere"
+  git -C "$W/mod" checkout -q -b subwork; printf 'S\n' > "$W/mod/s.txt"; git -C "$W/mod" add -A; cmt "$W/mod" -m "SUBMODULE-ONLY-WORK"
+  s="$(git -C "$W/mod" rev-parse HEAD)"; git -C "$W/mod" checkout -q --detach "$rec"
+  [ -z "$(git -C "$W" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"worktrees/05/thing is a checkout of target/thing's branch hotfix"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W/mod" cat-file -e "$s"
+  copied "$s" || { cat "$(newest)/manifest.json"; return 1; }
+  rm -rf "$DAEDALUS_HOME/worktrees/05"; git -C "$T" worktree prune
+  run python3 "$UP" --restore-help
+  case "$output" in *"commit ${s:0:7} (\"SUBMODULE-ONLY-WORK\")"*"branch subwork"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  restored "$s" || { cat "$B/restore.sh"; return 1; }
+}
+
+@test "a shallow target: the copy records the shallow boundary and is checked against it, and once target/thing is gone --restore-help's commands bring its commits back into a new repository shallow at the same commits" {
+  git clone -q "$B/origin.git" "$B/mk"
+  for i in 2 3; do printf '%s\n' "$i" > "$B/mk/n$i.txt"; git -C "$B/mk" add -A; cmt "$B/mk" -m "origin $i"; done
+  git -C "$B/mk" push -q origin main
+  mv "$T/sub" "$B/sub-aside"; rm -rf "$T"; git clone -q --depth 1 "file://$B/origin.git" "$T"; mv "$B/sub-aside" "$T/sub"
+  git -C "$T" checkout -q -b fix/in-flight; printf 'f\n' > "$T/f.txt"; git -C "$T" add -A; cmt "$T" -m "the waiting fix"
+  f="$(git -C "$T" rev-parse HEAD)"; boundary="$(cat "$T/.git/shallow")"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  python3 - "$(newest)/manifest.json" "$boundary" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+r = next(r for r in m["repos"] if r["label"] == "target/thing")
+assert r.get("shallow") == sys.argv[2].split(), r.get("shallow")
+PY
+  rm -rf "$T"
+  run python3 "$UP" --restore-help
+  case "$output" in *"target/thing: commit ${f:0:7} (\"the waiting fix\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"shallow"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  restored "$f" || { cat "$B/restore.sh"; return 1; }
+}
+
+# moved_off_today — branch experiment: two commits B, A made 45 days ago (so are their reflog entries), then today
+# moved back to B without a checkout: A is held only as the old value of today's entry. Sets $a.
+moved_off_today() {
+  local wt="$B/exp" old="@$(( $(date +%s) - 45 * 86400 )) +0000"
+  git -C "$T" worktree add -q -b experiment "$wt" refs/remotes/origin/main
+  printf 'b\n' > "$wt/b.txt"; git -C "$wt" add -A; GIT_COMMITTER_DATE="$old" GIT_AUTHOR_DATE="$old" cmt "$wt" -m "B kept"
+  printf 'a\n' > "$wt/a2.txt"; git -C "$wt" add -A; GIT_COMMITTER_DATE="$old" GIT_AUTHOR_DATE="$old" cmt "$wt" -m "A dropped today"
+  a="$(git -C "$wt" rev-parse HEAD)"; git -C "$T" worktree remove "$wt"
+  git -C "$T" branch -f experiment experiment~1
+}
+
+@test "a commit a reflog entry from the last 30 days holds only as the value before it (the branch moved off it today, its own entry older): in the copy; after adopt deletes the branch and gc runs, --restore-help lists it, --forget-snapshot refuses, and the printed command brings it back" {
+  moved_off_today
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  copied "$a" || { cat "$(newest)/manifest.json"; return 1; }
+  gone "$T"; ! git -C "$T" cat-file -e "$a" 2>/dev/null
+  run python3 "$UP" --forget-snapshot
+  [ "$status" -eq 1 ]; case "$output" in *"commit ${a:0:7} (\"A dropped today\")"*"Nothing was removed"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  git -C "$T" cat-file -e "$a"
+  run python3 "$UP" --restore-help
+  case "$output" in *"${a:0:7}"*) echo "$output"; return 1 ;; esac
+}
+
+@test "a file with the same name, size and time as one a kept copy holds, but other content in another worktree, is copied again — never skipped as already held" {
+  printf '*.local\n' >> "$T/.git/info/exclude"; printf 'AAAA\n' > "$T/key.local"; printf 'edit\n' >> "$T/a.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]; case "$output" in *"has uncommitted changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(snaps | wc -l | tr -d ' ')" = 1 ]
+  git -C "$T" checkout -q a.txt
+  W="$DAEDALUS_HOME/worktrees/01/thing"; git -C "$T" worktree add -q -b hotfix "$W" main
+  printf 'BBBB\n' > "$W/key.local"; touch -r "$T/key.local" "$W/key.local"
+  run python3 "$UP"
+  found=0
+  for t in "$DAEDALUS_HOME"/state/upgrade-snapshot/*/*.tar; do tar -xOf "$t" 2>/dev/null | grep -q BBBB && found=1; done
+  [ "$found" = 1 ] || { echo "$output"; return 1; }
+  [ "$(cat "$W/key.local" 2>/dev/null)" = BBBB ] || { echo "the worktree's ignored file was deleted: $output"; return 1; }
+}
+
+@test "two hard-linked ignored files are each copied whole: the copy checks, the upgrade completes, and both come back with their content" {
+  printf '*.local\n' >> "$T/.git/info/exclude"; printf 'same\n' > "$T/a.local"; ln "$T/a.local" "$T/b.local"
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for f in a.local b.local; do [ "$(tar -xOf "$(newest)/1-thing.tar" "w0/$f")" = same ]; done
+}
+
+@test "a reftable repository: a commit held only as the value before a reflog entry from the last 30 days is in the copy (git is asked for it; there is no logs/ to read)" {
+  git -C "$T" refs migrate --ref-format=reftable >/dev/null 2>&1 || skip "this git cannot make a reftable repository"
+  moved_off_today
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  copied "$a" || { cat "$(newest)/manifest.json"; return 1; }
+}

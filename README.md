@@ -92,7 +92,11 @@ untracked, ignored or uncommitted file in a tar), stops instead if it cannot
 make one (no room, or over `upgrade.snapshot_max_mb`, 2048 by default), and
 keeps it until `python3 core/upgrade.py --forget-snapshot`, which refuses while
 anything in it is missing — `python3 core/upgrade.py --restore-help` lists what
-is, with the commands that bring each back. A later run copies only what no
+is, with the commands that bring each back (into a new repository under
+`state/upgrade-restore/` when the repository itself is gone). The copy covers
+every repository the upgrade can reach: those under `target/` (through a
+symlink too), every worktree of each wherever it is, and any repository cloned
+or checked out as a submodule inside one. A later run copies only what no
 kept copy holds yet. A copy that would not fit in a session start is taken in
 the background, and changes nothing; the next session start makes the
 upgrade's changes.

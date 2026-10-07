@@ -143,6 +143,10 @@ CUT_OTHER = ("upgrade to %s incomplete: a git command the upgrade ran in target/
              "already holds its commit %s. Files there match neither that commit nor %s (%s) — if any of them is work, "
              "copy it into worktrees/%s/%s; then run git -C target/%s %s and start a session again. Do not commit "
              "them there")
+DEBRIS_KEPT = ("upgrade to %s incomplete: worktrees/%s is a checkout of target/%s's branch %s left by a start that was "
+               "cut off, and it holds what git does not commit there and removing it would delete (%s) — move what "
+               "you need out of it, remove that worktree (git -C target/%s worktree remove --force %s, or delete the "
+               "directory and run git -C target/%s worktree prune), then start a session again")
 DEBRIS_DIRTY = ("upgrade to %s incomplete: worktrees/%s is a checkout of target/%s's branch %s left by a start that was "
                 "cut off, and it holds changes (%s) — commit them on %s there, remove that worktree (git -C target/%s "
                 "worktree remove %s), then start a session again")
@@ -971,15 +975,49 @@ def _worktrees(p: Path) -> List[Dict[str, str]]:
     return found
 
 
-def _clear_debris(root: Path, p: Path, key: str, ver: str) -> None:
+def _debris_held(path: str, ours: Set[str]) -> Tuple[List[str], List[str]]:
+    """(changes to commit, what git cannot commit there) in the worktree at <path>: the second is every ignored file,
+    every other repository inside it — a clone, a submodule's checkout (and its git directory under the worktree's
+    own modules/) — except a window's nested worktree of a target repository (<ours>: their common git
+    directories) that holds nothing either, looked into the same way."""
+    code, st, _ = _git(Path(path), "status", "--porcelain", "--untracked-files=all", "--ignored")
+    if code != 0:
+        return [], ["what git status could not read"]
+    changed, kept = [], []
+    for ln in st.splitlines():
+        if not ln.strip() or ln[:2] in (" D", "D "):
+            continue
+        name = ln[3:]
+        if name.endswith("/") or os.path.lexists(os.path.join(path, name, ".git")):
+            d = os.path.join(path, name.rstrip("/"))
+            at = _repo_at(d) if os.path.lexists(os.path.join(d, ".git")) else None
+            if at is not None and at[0] in ours and at[1] != at[0] and _debris_held(d, ours) == ([], []):
+                continue        # a window's own nested worktree, holding nothing
+            kept.append(name if at is None else name.rstrip("/") + "/ (a git repository)")
+        elif ln[:2] == "!!":
+            kept.append(name)
+        else:
+            changed.append(name)
+    gd = _git(Path(path), "rev-parse", "--absolute-git-dir")[1].strip()
+    if gd and os.path.isdir(os.path.join(gd, "modules")) and os.listdir(os.path.join(gd, "modules")):
+        kept.append("its submodules' git directories, in %s" % os.path.join(gd, "modules"))
+    return changed, kept
+
+
+def _clear_debris(root: Path, p: Path, key: str, ver: str) -> List[str]:
     """A worktree under worktrees/<NN>/ on a branch other than lease/<NN>, with no lease file for <NN>, is the debris
     of an adoption an earlier start of this upgrade began and was cut off in (a rename undone under its worktree;
     run only while no release was ever stamped here, when worktrees/ holds nothing else): it made the
     branch read as "checked out in another worktree", the upgrade completed with that work in no window, and its
     number went to another window over it (release-candidate review 3, finding 10). Removed, so the branch is
-    adopted — unless it holds changes, which stop the upgrade, named."""
+    adopted — unless it holds changes, which stop the upgrade, named; or anything git does not commit there (an
+    ignored file, a repository cloned inside it, a submodule's checkout), which removing it would delete: that
+    stops the upgrade too, named. Never deleted by hand: when git will not remove it, it is moved aside under
+    state/upgrade-debris/ and said."""
     import leaselib as ll
     base = os.path.realpath(str(root / "worktrees"))
+    ours: Optional[Set[str]] = None
+    said: List[str] = []
     for w in _worktrees(p):
         path = os.path.realpath(w.get("path", ""))
         if not path.startswith(base + os.sep):
@@ -988,14 +1026,24 @@ def _clear_debris(root: Path, p: Path, key: str, ver: str) -> None:
         branch = w.get("branch", "")[len("refs/heads/"):]
         if not ll.valid_id(nn) or not branch or branch == "lease/" + nn or ll.read_lease(root, nn) is not None:
             continue
-        code, st, _ = _git(Path(path), "status", "--porcelain", "--untracked-files=all")
-        changed = [ln[3:] for ln in st.splitlines() if ln.strip() and ln[:2] not in (" D", "D ")] if code == 0 else []
         rel = os.path.relpath(path, base)
-        if changed:
-            raise Stop(DEBRIS_DIRTY % (ver, rel, key, branch, ll.name_paths(changed), branch, key, path))
-        if _git(p, "worktree", "remove", "-f", "-f", path)[0] != 0:
-            shutil.rmtree(path, ignore_errors=True)
+        if os.path.isdir(path):
+            if ours is None:
+                ours = {c for c in (_common_dir(["-C", str(q)]) for _, q in target_repos(root)) if c}
+            changed, kept = _debris_held(path, ours)
+            if changed:
+                raise Stop(DEBRIS_DIRTY % (ver, rel, key, branch, ll.name_paths(changed), branch, key, path))
+            if kept:
+                raise Stop(DEBRIS_KEPT % (ver, rel, key, branch, ll.name_paths(kept), key, path, key))
+        if _git(p, "worktree", "remove", "-f", "-f", path)[0] != 0 and os.path.lexists(path):
+            aside = root / "state" / "upgrade-debris" / time.strftime("%Y%m%d-%H%M%S") / rel
+            aside.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(path, str(aside))
             ll.prune_under(p, root / "worktrees", force=Path(path))
+            said.append("worktrees/%s, a checkout of target/%s's branch %s left by a start that was cut off, could "
+                        "not be removed by git; it was moved to %s, where nothing in it was changed"
+                        % (rel, key, branch, _rel(root, str(aside))))
+    return said
 
 
 def _window_tree(root: Path, real: str, branch: str) -> bool:
@@ -1267,7 +1315,7 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
     if not dry and stamped(root) is None:
         # only on the way into windows: before it, worktrees/ held nothing but what this upgrade's own runs made there
         for key, p in repos:
-            _clear_debris(root, p, key, ver)
+            lines += ["%s: %s." % (head, x) for x in _clear_debris(root, p, key, ver)]
     spoken: Set[str] = set()      # repos whose untracked files a line already names
     ign_said: Set[str] = set()    # repos whose ignored files a window's line already names
     for key, p in repos:
@@ -1612,48 +1660,106 @@ def _rel(root: Path, path: str) -> str:
         return path
 
 
+def _repo_at(d: str) -> Optional[Tuple[str, str]]:
+    """(common git directory, git directory) of the repository whose checkout is exactly <d> — never the repository
+    above it, which git finds when <d>'s own .git is not usable. None when <d> is no checkout's root."""
+    code, out, _ = _gb(["-C", d, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir",
+                        "--absolute-git-dir"])
+    parts = os.fsdecode(out).split("\n") if code == 0 else []
+    if len(parts) < 3 or os.path.realpath(parts[0]) != os.path.realpath(d):
+        return None
+    return os.path.realpath(parts[1]), os.path.realpath(parts[2])
+
+
 def _snap_repos(root: Path) -> List[dict]:
-    """Every git repository under target/, once each (one entry per common git directory): every directory with a
-    .git found by walking target/ (nested repos, submodules, worktrees made by hand there), each one's submodules
-    by git submodule status --recursive, and the submodule git directories under .git/modules that have no
-    checkout now. {"label", "common", "work"}; work is None for a git directory with no checkout."""
+    """Every git repository the upgrade could reach, once each (one entry per common git directory), found from
+    what is there, never from config alone: every directory with a .git found by walking target/ (and through
+    each symlink directly in it — target/<repo> may be one; each real directory once), every repository the
+    upgrade's steps act on
+    (target_repos), and, until nothing new turns up, for each repository found: every one of its worktrees walked
+    the same way (a window's, or one made by hand anywhere, with a repository cloned inside it), the submodules
+    git submodule status --recursive names in each worktree, and the submodule git directories under .git/modules
+    and .git/worktrees/<id>/modules that have no checkout now. {"label", "common", "work"}; work is the main
+    checkout, or None for a git directory with none."""
     tgt = root / "target"
     if not tgt.is_dir():
         return []
-    cands: List[Path] = []
-    for dirpath, dirnames, filenames in os.walk(str(tgt)):
-        if ".git" in dirnames or ".git" in filenames:
-            cands.append(Path(dirpath))
-        if ".git" in dirnames:
-            dirnames.remove(".git")
-    seen = set(cands)
-    for c in list(cands):
-        if not (c / ".gitmodules").is_file():
-            continue
-        code, out, _ = _gb(["-C", str(c), "submodule", "status", "--recursive"])
-        for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
-            parts = ln[1:].split(" ", 1)
-            if len(parts) != 2:
+    walked: Set[str] = set()
+
+    def walk(top: str) -> List[str]:
+        found = []
+        for dirpath, dirnames, filenames in os.walk(top):
+            real = os.path.realpath(dirpath)
+            if real in walked:
+                dirnames[:] = []
                 continue
-            rel = parts[1]
-            if rel.endswith(")") and " (" in rel:
-                rel = rel.rsplit(" (", 1)[0]
-            sub = c / rel
-            if sub not in seen and (sub / ".git").exists():
-                seen.add(sub)
-                cands.append(sub)
+            walked.add(real)
+            if ".git" in dirnames or ".git" in filenames:
+                found.append(dirpath)
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+        return found
+
     repos: Dict[str, dict] = {}
-    for c in sorted(cands, key=lambda q: (len(q.parts), str(q))):
-        common = _common_dir(["-C", str(c)])
-        if common and common not in repos:
-            repos[common] = {"label": _rel(root, str(c)), "common": common, "work": str(c)}
-    for common in list(repos):
-        for dirpath, dirnames, filenames in os.walk(os.path.join(common, "modules")):
-            if "HEAD" in filenames and "objects" in dirnames and "refs" in dirnames:
-                cm = _common_dir(["--git-dir", dirpath])
-                if cm and cm not in repos:
-                    repos[cm] = {"label": _rel(root, cm), "common": cm, "work": None}
-                dirnames[:] = [d for d in dirnames if d == "modules"]
+    found = walk(str(tgt))
+    for name in sorted(os.listdir(str(tgt))):
+        if os.path.islink(str(tgt / name)) and os.path.isdir(str(tgt / name)):
+            found += walk(str(tgt / name))
+    cands: List[str] = sorted(found, key=lambda q: (len(Path(q).parts), q))
+    cands += [str(p) for _, p in target_repos(root)]
+    done = 0
+    while True:
+        while done < len(cands):
+            c = cands[done]
+            done += 1
+            at = _repo_at(c)
+            if at is None:
+                continue
+            common, gd = at
+            if common in repos:
+                continue
+            work: Optional[str] = c
+            if gd != common:         # a linked worktree: the repository's main checkout is its first worktree
+                first = (_worktree_list(["--git-dir", common]) or [{}])[0]
+                main = first.get("worktree", "")
+                work = main if main and "bare" not in first and (_repo_at(main) or ("",))[0] == common else None
+            repos[common] = {"label": _rel(root, work or c), "common": common, "work": work}
+            for w in _worktree_list(["--git-dir", common]):
+                wp = w.get("worktree", "")
+                if "bare" in w or not wp or not os.path.isdir(wp):
+                    continue
+                if wp == common:     # a submodule's main worktree is listed as its git directory
+                    if not work:
+                        continue
+                    wp = work
+                cands += walk(wp)
+                if os.path.isfile(os.path.join(wp, ".gitmodules")):
+                    code, out, _ = _gb(["-C", wp, "submodule", "status", "--recursive"])
+                    for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
+                        parts = ln[1:].split(" ", 1)
+                        if len(parts) != 2:
+                            continue
+                        rel = parts[1]
+                        if rel.endswith(")") and " (" in rel:
+                            rel = rel.rsplit(" (", 1)[0]
+                        if os.path.exists(os.path.join(wp, rel, ".git")):
+                            cands.append(os.path.join(wp, rel))
+        before = len(repos)
+        for common in list(repos):
+            tops = [os.path.join(common, "modules")] + sorted(str(x) for x in Path(common).glob("worktrees/*/modules"))
+            for top in tops:
+                for dirpath, dirnames, filenames in os.walk(top):
+                    if "HEAD" in filenames and "objects" in dirnames and "refs" in dirnames:
+                        cm = _common_dir(["--git-dir", dirpath])
+                        if cm and cm not in repos:
+                            repos[cm] = {"label": _rel(root, cm), "common": cm, "work": None}
+                            for w in _worktree_list(["--git-dir", cm]):
+                                wp = w.get("worktree", "")
+                                if "bare" not in w and wp and wp != cm and os.path.isdir(wp):
+                                    cands += walk(wp)
+                        dirnames[:] = [d for d in dirnames if d == "modules"]
+        if len(repos) == before and done == len(cands):
+            break
     return list(repos.values())
 
 
@@ -1684,25 +1790,50 @@ def _ref_format(g: List[str]) -> str:
     return os.fsdecode(out).strip() if code == 0 and out.strip() else "files"
 
 
-def _reflogs(g: List[str], deadline: Optional[float] = None) -> Optional[List[Tuple[str, str, int, str]]]:
+def _reflogs(g: List[str], deadline: Optional[float] = None,
+             since: Optional[float] = None) -> Optional[List[Tuple[str, str, int, str]]]:
     """(ref, sha, unix time, message) for every reflog entry of the repository, every worktree's HEAD included, as
-    git reads them — a reftable repository has no logs/ directory to read. None when git cannot read them."""
+    git reads them — a reftable repository has no logs/ directory to read. Each entry's value before it too, at that
+    entry's time: a commit a branch moved off today is kept by today's entry as its old value, however old its own
+    entry is. git log -g prints only new values, so the old one is the next older entry's new value, and the oldest
+    entry's is <ref>@{<count>}, which git resolves to it (asked only when that entry is <since> or newer). None
+    when git cannot read them."""
     code, out, _ = _gb(g + ["log", "-g", "--all", "--date=unix", "--format=%H%x01%gD%x01%gs"], deadline=deadline)
     if code != 0:
         return None
+    code2, out2, _ = _gb(g + ["log", "-g", "--all", "--format=%gD"], deadline=deadline)
+    dated = [ln for ln in os.fsdecode(out).split("\n") if ln.count("\x01") >= 2]
+    sels = [ln for ln in os.fsdecode(out2).split("\n") if ln] if code2 == 0 else []
     entries = []
-    for ln in os.fsdecode(out).split("\n"):
-        parts = ln.split("\x01", 2)
-        if len(parts) != 3:
-            continue
-        sha, sel, msg = parts
+    per_ref: Dict[str, List[Tuple[int, str, int, str]]] = {}     # raw ref: [(index, sha, time, label)]
+    for k, ln in enumerate(dated):
+        sha, sel, msg = ln.split("\x01", 2)
         ref, _, ts = sel.rpartition("@{")
         try:
             t = int(ts.rstrip("}"))
         except ValueError:
             continue
         wt = re.match(r"worktrees/([^/]+)/HEAD$", ref)
-        entries.append(("HEAD of worktree %s" % wt.group(1) if wt else ref, sha, t, msg))
+        label = "HEAD of worktree %s" % wt.group(1) if wt else ref
+        entries.append((label, sha, t, msg))
+        idx = None
+        if len(sels) == len(dated):
+            r2, _, n = sels[k].rpartition("@{")
+            if r2 == ref and n.rstrip("}").isdigit():
+                idx = int(n.rstrip("}"))
+        lst = per_ref.setdefault(ref, [])
+        lst.append((len(lst) if idx is None else idx, sha, t, label))
+    for ref, lst in per_ref.items():
+        lst.sort()
+        for i, (n, sha, t, label) in enumerate(lst):
+            if i + 1 < len(lst):
+                entries.append((label, lst[i + 1][1], t, "the value before: %s" % ref))
+            elif since is None or t >= since:
+                code, o, _ = _gb(g + ["rev-parse", "-q", "--verify", "%s@{%d}^{object}" % (ref, n + 1)],
+                                 deadline=deadline)
+                old = os.fsdecode(o).strip()
+                if code == 0 and old.strip("0"):
+                    entries.append((label, old, t, "the value before: %s" % ref))
     return entries
 
 
@@ -1764,9 +1895,28 @@ def _stash_list_files(common: str) -> List[Tuple[int, str, str]]:
     return out
 
 
-def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
+def _all_files(top: str) -> List[str]:
+    """Every file and symlink under <top> (a .git inside included), relative to it; links are not followed."""
+    out = []
+    for dp, dns, fns in os.walk(top):
+        for d in dns:
+            if os.path.islink(os.path.join(dp, d)):
+                fns.append(d)
+        for f in fns:
+            out.append(os.path.relpath(os.path.join(dp, f), top))
+    return out
+
+
+def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Optional[Set[str]] = None) -> dict:
     """What the copy of one repository holds, read without changing anything: refs, worktrees, the files to tar
-    (with lstat), git's in-progress files. Content is read only when written."""
+    (with lstat), git's in-progress files. Content is read only when written. <known>: the common git directories
+    of every repository being copied — a directory git lists as another repository is left to that one's own copy
+    only when it is among them; otherwise every file in it, its .git included, is in this one's tar."""
+    known = known or set()
+
+    def own_copy(d: str) -> bool:
+        at = _repo_at(d) if os.path.lexists(os.path.join(d, ".git")) else None
+        return at is not None and at[0] in known
     g = _g(repo)
     common = repo["common"]
     label = repo["label"]
@@ -1798,18 +1948,21 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
             for ln in (os.fsdecode(o2).splitlines() if c2 == 0 else []):
                 sha, typ, name = (ln.split(" ", 2) + ["", ""])[:3]
                 refs.append({"name": name, "sha": sha, "type": typ, "kind": "other", "worktree": path})
+    cutoff = time.time() - REFLOG_DAYS * 86400
     stashes = _stash_list(g, deadline)
-    logs = _reflogs(g, deadline)
+    fmt = _ref_format(g)
+    # a files repository's logs/ is read directly below; git is asked for the oldest entries' old values otherwise
+    logs = _reflogs(g, deadline, cutoff if fmt != "files" else float("inf"))
     if stashes is None or logs is None:
-        fmt = _ref_format(g)
         if fmt != "files":      # nothing else to read: a copy without them would lose them unseen
             raise _SnapFail("read", "git could not read the stash and reflogs of %s (a %s repository)" % (label, fmt))
         stashes = _stash_list_files(common) if stashes is None else stashes
         logs = _reflogs_files(common) if logs is None else logs
+    elif fmt == "files":
+        logs += _reflogs_files(common)      # every entry's old and new value exactly, as written
     for n, sha, msg in stashes:
         refs.append({"name": "stash@{%d}" % n, "sha": sha, "type": "commit", "kind": "stash-entry", "message": msg})
     have = {r["sha"] for r in refs}
-    cutoff = time.time() - REFLOG_DAYS * 86400
     tips: Dict[str, str] = {}
     for ref, sha, ts, _ in logs:
         if ts >= cutoff and sha not in have and sha not in tips:
@@ -1844,21 +1997,27 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float]) -> dict:
             # git cannot say what it tracks, so every file in it is copied
             kinds = {}
             for dp, dns, fns in os.walk(wp):
-                dns[:] = [d for d in dns if not os.path.exists(os.path.join(dp, d, ".git"))]
+                dns[:] = [d for d in dns if not own_copy(os.path.join(dp, d))]
+                for d in dns:
+                    if os.path.islink(os.path.join(dp, d)):
+                        fns.append(d)
                 for f in fns:
                     if not (dp == wp and f == ".git"):
                         kinds[os.path.relpath(os.path.join(dp, f), wp)] = "unlisted"
+        for p in [q for q in kinds if q.endswith("/")]:
+            kind = kinds.pop(p)
+            if not own_copy(os.path.join(wp, p.rstrip("/"))):     # a repository no copy holds: all of it, here
+                for f in _all_files(os.path.join(wp, p.rstrip("/"))):
+                    kinds.setdefault(os.path.join(p.rstrip("/"), f), kind)
         for p in sorted(kinds):
-            if p.endswith("/"):
-                continue        # a nested repository or worktree: copied as its own
             try:
                 st = os.lstat(os.path.join(wp, p))
             except OSError:
                 continue        # deleted: its content is in the commit
             if not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
                 continue
-            files.append({"w": w["i"], "path": p, "kind": kinds[p], "size": st.st_size,
-                          "mtime_ns": st.st_mtime_ns, "link": stat.S_ISLNK(st.st_mode)})
+            files.append({"w": w["i"], "path": p, "kind": kinds[p], "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                          "ctime_ns": st.st_ctime_ns, "ino": st.st_ino, "link": stat.S_ISLNK(st.st_mode)})
         if w["i"] == 0:
             gd = common
         else:
@@ -2016,15 +2175,16 @@ SNAP_ALONG = ("index", "ORIG_HEAD")
 
 
 def _snap_fp(coll: List[dict]) -> str:
-    """target/'s state in one hash: refs (staged content included), worktrees, stash, and every copied file's name,
-    size and time — never SNAP_ALONG. Equal hashes: nothing a copy holds has changed."""
+    """target/'s state in one hash: refs (staged content included), worktrees, stash, and every copied file's
+    worktree, name, size, times and inode — never SNAP_ALONG. Equal hashes: nothing a copy holds has changed (a
+    content change kept at the same size with its mtime set back still moves ctime, which no one can set)."""
     parts = []
     for r in coll:
         parts.append([r["common"],
                       sorted((x["name"], x.get("worktree", ""), x["sha"]) for x in r["refs"] if x["kind"] != "reflog"),
                       [(w["path"], w["head"], w["branch"], w["exists"]) for w in r["worktrees"]],
-                      sorted((r["worktrees"][f["w"]]["path"], f["path"], f["kind"], f["size"], f["mtime_ns"])
-                             for f in r["files"]),
+                      sorted((r["worktrees"][f["w"]]["path"], f["path"], f["kind"], f["size"], f["mtime_ns"],
+                              f.get("ctime_ns"), f.get("ino")) for f in r["files"]),
                       sorted((r["worktrees"][s["w"]]["path"], s["path"], s["size"], s["mtime_ns"])
                              for s in r["state"] if s["path"] not in SNAP_ALONG)])
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8", "surrogateescape")).hexdigest()
@@ -2043,7 +2203,8 @@ def _snap_estimate(coll: List[dict]) -> int:
 
 def _kept(root: Path) -> Dict[str, dict]:
     """What the kept copies hold together, by git directory: every ref's sha (and which are commits), every file by
-    name and content (and by name, size and time, which a carry keeps), every in-progress file by name and content."""
+    name and content (and by worktree, name, size, mtime, ctime and inode — the very file a copy read, unchanged,
+    which saves hashing it again), every in-progress file by name and content."""
     held: Dict[str, dict] = {}
     for st in _snapshots(root):
         m = _read_json(root / SNAPS / st / "manifest.json") or {}
@@ -2054,10 +2215,11 @@ def _kept(root: Path) -> Dict[str, dict]:
                 h["shas"].add(x["sha"])
                 if x.get("type") == "commit" and x.get("kind") != "index":
                     h["commits"].add(x["sha"])
+            wtp = {w.get("i"): w.get("path") for w in r.get("worktrees", [])}
             for f in r.get("files", []):
                 h["files"].add((f["path"], f["sha256"]))
-                if "mtime_ns" in f:
-                    h["stat"].add((f["path"], f["size"], f["mtime_ns"]))
+                if "ctime_ns" in f and "ino" in f:
+                    h["stat"].add((wtp.get(f["w"]), f["path"], f["size"], f["mtime_ns"], f["ctime_ns"], f["ino"]))
             for g in r.get("git_state", []):
                 h["state"].add((g["path"], g["sha256"]))
     return held
@@ -2101,7 +2263,8 @@ def _snap_plan(root: Path, coll: List[dict], deadline: Optional[float]) -> Tuple
                 and (x["type"] != "commit" or x["kind"] == "index" or x["sha"] in new)]
         files = []
         for f in r["files"]:
-            if (f["path"], f["size"], f["mtime_ns"]) in h["stat"]:
+            if (r["worktrees"][f["w"]]["path"], f["path"], f["size"], f["mtime_ns"], f["ctime_ns"], f["ino"]) \
+                    in h["stat"]:
                 continue
             if _snap_late(deadline):
                 raise _OutOfTime()
@@ -2249,6 +2412,9 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
                     + ([os.path.join(r["scratch"], "objects")] if r.get("scratch") else [])))
         if os.path.isfile(os.path.join(r["common"], "shallow")):
             shutil.copy2(os.path.join(r["common"], "shallow"), str(tmp / "shallow"))
+            # a shallow clone's history stops at these commits: its bundle restores only into a repository that
+            # says so too — recorded, checked so below, and written by the commands --restore-help prints
+            entry["shallow"] = (tmp / "shallow").read_text().split()
         code, _, err = _gb(["-C", str(tmp), "update-ref", "--stdin"],
                            inp="".join("create %s %s\n" % (b, s) for s, b in by_sha.items()).encode())
         if code != 0:
@@ -2277,6 +2443,7 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
 def _tar_add(tar: tarfile.TarFile, src: str, member: str, deadline: Optional[float]) -> str:
     if _snap_late(deadline):
         raise _OutOfTime()
+    tar.inodes = {}         # a file hard-linked to one already added is still a whole member, never a link to it
     info = tar.gettarinfo(name=src, arcname=member)
     if info is None:
         raise _SnapFail("written", "%s is neither a file nor a link" % src)
@@ -2291,7 +2458,10 @@ def _tar_add(tar: tarfile.TarFile, src: str, member: str, deadline: Optional[flo
 
 def _snap_verify(part: Path, manifest: dict) -> None:
     """Every bundle passes git bundle verify in an empty repository (so it needs nothing outside itself) and lists
-    exactly the refs the manifest gives it; every file read back from the tar hashes to the manifest's sha256."""
+    exactly the refs the manifest gives it; a shallow repository's bundle, which git bundle verify passes even
+    though it cannot stand alone, is fetched whole into an empty repository holding only the recorded shallow
+    boundary (and, building on kept copies, their objects); every file read back from the tar hashes to the
+    manifest's sha256."""
     vt = part / ".verify"
     code, _, err = _gb(["init", "--bare", "-q", str(vt)])
     if code != 0:
@@ -2301,16 +2471,25 @@ def _snap_verify(part: Path, manifest: dict) -> None:
             if r["bundle"]:
                 b = str(part / r["bundle"])
                 where = vt
-                if r.get("basis"):
+                if r.get("basis") or r.get("shallow"):
                     where = part / (".verify-%d" % r["n"])
                     code, _, err = _gb(["init", "--bare", "-q", str(where)])
                     if code != 0:
                         raise _SnapFail("checked", "git init: %s" % _last(err))
-                    (where / "objects" / "info").mkdir(parents=True, exist_ok=True)
-                    (where / "objects" / "info" / "alternates").write_text(os.path.join(r["git_dir"], "objects") + "\n")
+                    if r.get("basis"):
+                        (where / "objects" / "info").mkdir(parents=True, exist_ok=True)
+                        (where / "objects" / "info" / "alternates").write_text(
+                            os.path.join(r["git_dir"], "objects") + "\n")
+                    if r.get("shallow"):
+                        (where / "shallow").write_text("".join(x + "\n" for x in r["shallow"]))
                 code, _, err = _gb(["-C", str(where), "bundle", "verify", "-q", b])
                 if code != 0:
                     raise _SnapFail("checked", "git bundle verify %s: %s" % (r["bundle"], _last(err) or "failed"))
+                if r.get("shallow"):
+                    code, _, err = _gb(["-C", str(where), "fetch", "-q", b, SNAP_REF + "*:" + SNAP_REF + "*"])
+                    if code != 0:
+                        raise _SnapFail("checked", "%s does not restore into a repository shallow at the commits "
+                                                   "it records: %s" % (r["bundle"], _last(err) or "failed"))
                 code, out, err = _gb(["-C", str(where), "bundle", "list-heads", b])
                 if where != vt:
                     shutil.rmtree(str(where), ignore_errors=True)
@@ -2351,7 +2530,7 @@ def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: 
             for r in repos:
                 if _snap_late(deadline) and not prefer_bg:
                     raise _OutOfTime()
-                coll.append(_snap_collect(root, r, deadline))
+                coll.append(_snap_collect(root, r, deadline, {x["common"] for x in repos}))
             fp, todo = _snap_plan(root, coll, None if prefer_bg else deadline)
         except _OutOfTime:
             raise _Background()
@@ -2454,6 +2633,17 @@ def background_main(root: Path) -> int:
         sys.stdout.flush()
         _write(root / BACKGROUND, json.dumps({"pid": None, "version": ver, "running": False, "copied": copied,
                                               "at": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2) + "\n")
+
+
+def _uncopied(root: Path) -> List[str]:
+    """Each repository the upgrade's steps act on (target_repos) whose git directory no checked copy holds."""
+    held = _kept(root)
+    out = []
+    for key, p in target_repos(root):
+        c = _common_dir(["-C", str(p)])
+        if c is None or c not in held:
+            out.append("target/%s" % key)
+    return out
 
 
 def snapshot_line(root: Path) -> Optional[str]:
@@ -2655,6 +2845,22 @@ def _restore_lines(root: Path, stamp: str, m: dict, missing: List[Tuple[dict, st
         subj = next((x.get("subject") for x in xs if x.get("subject")), "")
         lead = "- %s: commit %s%s — %s." % (r["label"], sha[:7], ' ("%s")' % subj if subj else "", "; ".join(names))
         g = "git -C %s" % _sh(r["path"]) if r.get("path") else "git --git-dir=%s" % _sh(r["git_dir"])
+        shallow = r.get("shallow") or []
+        pre = ""
+        if _repo_now(r) is None:
+            # the repository itself is gone: the commands bring it back into a new one under state/upgrade-restore/,
+            # shallow at the same commits when it was (its copy holds no history beyond them)
+            dest = root / RESTORE / stamp / (_name(r["n"], r["label"]) + "-repo")
+            g = "git -C %s" % _sh(str(dest))
+            pre = "git init -q %s && %s" % (_sh(str(dest)), "printf '%%s\\n' %s > %s && " % (
+                " ".join(shallow), _sh(str(dest / ".git" / "shallow"))) if shallow else "")
+            lead += (" %s is not there now; this brings the commit back into a new repository at %s%s."
+                     % (_escaped(r.get("path") or r["git_dir"]), _escaped(_rel(root, str(dest))),
+                        ", shallow at the same %s as the clone it was copied from" % _plural(len(shallow), "commit")
+                        if shallow else ""))
+        elif shallow:
+            lead += (" (%s is a shallow clone: its copy holds no history past %s, so it comes back only into this "
+                     "repository or another shallow at the same commits)" % (r["label"], _plural(len(shallow), "commit")))
         bundle = _sh(str(snapdir / r["bundle"])) if r.get("bundle") else None
         bref = xs[0]["bundle_ref"]
         stash = next((x for x in xs if x["kind"] == "stash-entry"), None)
@@ -2662,14 +2868,14 @@ def _restore_lines(root: Path, stamp: str, m: dict, missing: List[Tuple[dict, st
             lines += [lead + " The copy has no bundle for this repository."]
         elif stash is not None and r.get("path"):
             lines += [lead + " Bring it back into the stash:",
-                      "    %s fetch -q %s %s && %s stash store -m %s %s" % (g, bundle, bref, g,
+                      "    %s%s fetch -q %s %s && %s stash store -m %s %s" % (pre, g, bundle, bref, g,
                                                                          _sh(stash.get("message") or "restored"), sha)]
         else:
             typ = xs[0].get("type")
             name = _restore_name(xs, sha)
             dest = ("refs/tags/" if typ == "tag" else "refs/heads/") + name
             lines += [lead + " Bring it back as %s %s:" % ("tag" if typ == "tag" else "branch", name),
-                      "    %s fetch -q %s %s:%s" % (g, bundle, bref, dest)]
+                      "    %s%s fetch -q %s %s:%s" % (pre, g, bundle, bref, dest)]
     for r, what, f in missing:
         if what != "file":
             continue
@@ -2833,6 +3039,10 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                     return lines, _go_background(root, ver or "")
                 except Stop as e:
                     return lines, _stopped(root, ver, n, str(e))
+                bare = _uncopied(root)
+                if bare:        # however it was found or missed, no repository is changed without a checked copy
+                    return lines, _stopped(root, ver, n, SNAP_FAIL % (ver, "checked", "it holds no copy of %s"
+                                                                      % ", ".join(bare)))
                 if said:
                     lines.append("%s: %s" % (head, said))
             elif n == 2 and upto == 6 and dry:
@@ -2866,7 +3076,8 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
 def _dry_snapshot(root: Path, head: str) -> List[str]:
     coll: List[dict] = []
     try:
-        coll = [_snap_collect(root, r, None) for r in _snap_repos(root)]
+        repos = _snap_repos(root)
+        coll = [_snap_collect(root, r, None, {x["common"] for x in repos}) for r in repos]
         if not coll:
             return []
         _, todo = _snap_plan(root, coll, None)
