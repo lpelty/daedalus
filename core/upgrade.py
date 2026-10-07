@@ -95,6 +95,11 @@ STASHED = ("%s: target/%s holds %s (%s) — saved work no window shows; the upgr
            "names it until it is applied or dropped.")
 UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s would overwrite (%s) — move them out "
              "of that checkout, or commit them on its branch, then start a session again")
+# A gitlink whose directory holds a repository of its own, or files with no .git (a submodule vendored by removing its
+# .git), where the trunk has a file: git looks into neither, and the checkout back to the trunk deleted the directory
+# with everything in it (release-candidate red team 3, findings 1 and 3).
+GITLINK = ("upgrade to %s incomplete: target/%s holds %s (%s), which %s would delete with everything in it — move %s out "
+           "of that checkout, then start a session again")
 # An in-place edit of the same size with its mtime put back, where git does not look at ctime (core.trustctime false,
 # core.checkStat minimal): git status and git add pass the file on its stat data, and the checkout back to the trunk
 # wrote the committed version over it (safety-copy review 4, finding 2).
@@ -139,7 +144,9 @@ PAST = ("upgrade to %s incomplete: target/%s is on %s, which has %s that window 
         "session start that was cut off before putting target/%s back on %s — does not have (%s); nothing more was "
         "moved: give the branch another name (git -C target/%s branch -m %s %s), then start a session again, and that "
         "name becomes a window of its own")
-STOPPED_TIME = "upgrade to %s incomplete: stopped while %s — the session start ran out of time; it runs again at the next session start"
+STOPPED_TIME = ("upgrade to %s incomplete: stopped while %s — the session start ran out of time; it runs again at the next "
+                "session start — if it stops this way at every start, run python3 core/upgrade.py once from a terminal "
+                "in this home, which has no time limit")
 # A git command cut off part-way leaves lock files git then refuses on, or a checkout on a branch that no longer exists
 # (a rename stopped between its two ref writes): stopped on, naming them, before anything moves — never "commit them",
 # which would commit the whole tree as a new root (release-candidate review 3, finding 9).
@@ -206,8 +213,10 @@ def pending(root: Path) -> bool:
 
 def _git(repo: Path, *args: str) -> Tuple[int, str, str]:
     # submodule.recurse off: set, a checkout, merge or reset here rewrote each submodule's working tree over its
-    # uncommitted edits (release-candidate red team 2, finding 1; leaselib.NO_RECURSE)
-    return v.run(["git", "-c", "submodule.recurse=false", "-C", str(repo)] + list(args))
+    # uncommitted edits (release-candidate red team 2, finding 1); core.fsmonitor off: a monitor hook that reports no
+    # change hid an edit from every check here (red team 3, finding 2) — leaselib.NO_RECURSE
+    import leaselib as ll
+    return v.run(ll.git_argv(repo, *args))
 
 
 def _last(err: str) -> str:
@@ -527,8 +536,10 @@ def _into_window(root: Path, key: str, rel: str, ref: str, ver: str, deadline: O
     team, finding 1)."""
     import leaselib as ll
     try:
+        # checked: step 6 read this checkout for changes git status does not show at its start, before anything
+        # moved; reading it again per branch ran the start out of time (release-candidate red team 3, finding 4)
         r = ll.adopt(root, ref, repo=None if rel == key else rel, note=NOTE_ADOPTED % ver, fetch=False,
-                     deadline=deadline)
+                     deadline=deadline, checked=True)
     except ll.AdoptedPast as e:
         # a window was adopted from a branch of this name, and the branch has commits since that the window lacks:
         # never "already" — the caller names it (release-candidate red team 2, finding 3)
@@ -606,6 +617,12 @@ def _in_the_way(p: Path, key: str, trunk: str, cur: str, ver: str) -> None:
         # the trunk's fast-forward refuses over an untracked file, which is then left as it was; it writes over
         # an ignored one (release-candidate review 2, finding 1)
         refs, doing, ignored_only = [_origin(trunk)], "fast-forwarding %s to origin/%s" % (trunk, trunk), True
+    # a directory recorded as a submodule, holding a repository or files git never looks into, where the trunk has a
+    # file: the checkout deletes it whole without a word (release-candidate red team 3, findings 1 and 3)
+    links = ll.gitlinks_in_way(p, refs)
+    if links:
+        what, names, it = ll.gitlink_words(links)
+        raise Stop(GITLINK % (ver, key, what, names, doing, it))
     hit = ll.untracked_in_way(p, refs, ignored_only=ignored_only)
     if hit:
         raise Stop(UNTRACKED % (ver, key, doing, ll.name_paths(hit)))
@@ -1283,6 +1300,7 @@ def _neither(p: Path, rev: str, to: str, paths: List[str]) -> List[str]:
     when its bytes cleaned as git add would (a line-ending conversion undone) are that blob, or when its bytes as
     they are are: a checkout writes a blob that already holds CRLF unconverted, which hash-object alone, reading no
     index, would convert and call neither (release-candidate red team 2, finding 6)."""
+    import leaselib as ll
     have, want = _blobs(p, rev), _blobs(p, to)
     files = [x for x in paths if os.path.isfile(str(p / x)) and not os.path.islink(str(p / x))]
     ids: Dict[str, Set[str]] = {}
@@ -1290,7 +1308,7 @@ def _neither(p: Path, rev: str, to: str, paths: List[str]) -> List[str]:
         if not files:
             break
         try:
-            r = subprocess.run(["git", "-C", str(p), "hash-object"] + how + ["--stdin-paths"],
+            r = subprocess.run(ll.git_argv(p, "hash-object", *how, "--stdin-paths"),
                                input="\n".join(files) + "\n", capture_output=True, text=True, timeout=120)
             got = r.stdout.split() if r.returncode == 0 else []
         except (OSError, subprocess.SubprocessError):
@@ -1719,10 +1737,11 @@ def _step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float], lin
 # shape did not converge. So before its first change to anything under target/, the upgrade copies everything there
 # to state/upgrade-snapshot/<stamp>/ and checks the copy: for every repository (outer, nested, submodule — found by
 # walking target/ and asking git, never from config alone) (a) a git bundle of every ref, every worktree's HEAD,
-# every stash entry, every commit a reflog reached in the last REFLOG_DAYS days (all read through git, so a reftable
-# repository's are seen) and each worktree's staged content as a commit, under refs/upgrade-snapshot/* in the bundle
-# only, never in the repository; (b) a tar of every file a working tree holds that git does not
-# track (untracked and ignored) or that differs from its last commit, for the checkout and every linked worktree;
+# every stash entry, every commit a reflog reached in the last REFLOG_DAYS days or a branch's reflog holds at all (all
+# read through git, so a reftable repository's are seen) and each worktree's staged content as a commit, under
+# refs/upgrade-snapshot/* in the bundle only, never in the repository; (b) a tar of every file a working tree holds
+# that git does not track (untracked and ignored) or that differs from its last commit, for the checkout and every
+# linked worktree;
 # (c) git's in-progress files (index, rebase, merge, cherry-pick, revert, bisect); (d) manifest.json with every
 # ref's sha and every file's sha256. Each bundle is checked with git bundle verify and its list of heads; the
 # tar is read back and every file hashed again. A copy that cannot be written or checked, or would be over
@@ -1756,6 +1775,10 @@ SNAP_BG = ("The upgrade to %s needs a few minutes the first time; it runs in the
 SNAP_BG_FAIL = ("upgrade to %s incomplete: the safety copy of target/ it keeps before changing anything takes longer "
                 "than a session start allows, and it could not be started in the background (%s) — run python3 "
                 "core/upgrade.py once from a terminal in this home")
+SNAP_SLOW = ("upgrade to %s incomplete: its safety copy of target/ is taken, but reading target/ to check it against "
+             "that copy takes longer than a session start allows, so a session start cannot finish the upgrade — run "
+             "python3 core/upgrade.py once from a terminal in this home, which has no time limit; nothing in target/ "
+             "was changed")
 SNAP_BG_GONE = ("upgrade to %s incomplete: the run in the background ended before it finished (state/upgrade.log "
                 "says how far it got); it runs again at the next session start")
 SNAP_LINE = ("A safety copy of everything in target/ from before the upgrade is in state/upgrade-snapshot/%s; nothing "
@@ -1772,13 +1795,20 @@ class _SnapFail(Exception):
 
 
 class _Background(Exception):
-    """The copy will not fit in this session start's budget: a detached run takes it."""
+    """The copy will not fit in this session start's budget: a detached run takes it. slow: the start ran out of time
+    reading target/ to compare it with the kept copies, before it knew of anything new to copy."""
+
+    def __init__(self, slow: bool = False) -> None:
+        super().__init__()
+        self.slow = slow
 
 
 def _gb(args: List[str], inp: Optional[bytes] = None, deadline: Optional[float] = None,
         env_extra: Optional[Dict[str, str]] = None) -> Tuple[int, bytes, str]:
     """git <args>, bytes out. Never takes an optional lock (no index refresh): the copy changes nothing it copies.
-    Under a deadline, a call that outlives it is out of time."""
+    Under a deadline, a call that outlives it is out of time. With core.fsmonitor off (leaselib.NO_RECURSE): a monitor
+    hook that reports no change kept an uncommitted edit out of the copy (release-candidate red team 3, finding 2)."""
+    import leaselib as ll
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", **(env_extra or {}))
     timeout = 3600.0
     if deadline is not None:
@@ -1786,8 +1816,8 @@ def _gb(args: List[str], inp: Optional[bytes] = None, deadline: Optional[float] 
         if timeout <= 0:
             raise _OutOfTime()
     try:
-        r = subprocess.run(["git"] + args, input=inp, capture_output=True, env=env, timeout=timeout,
-                           stdin=None if inp is not None else subprocess.DEVNULL)
+        r = subprocess.run(["git"] + list(ll.NO_RECURSE) + args, input=inp, capture_output=True, env=env,
+                           timeout=timeout, stdin=None if inp is not None else subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         raise _OutOfTime()
     except (OSError, subprocess.SubprocessError) as e:
@@ -1972,7 +2002,8 @@ def _reflogs(g: List[str], deadline: Optional[float] = None,
     git reads them — a reftable repository has no logs/ directory to read. Each entry's value before it too, at that
     entry's time: a commit a branch moved off today is kept by today's entry as its old value, however old its own
     entry is. git log -g prints only new values, so the old one is the next older entry's new value, and the oldest
-    entry's is <ref>@{<count>}, which git resolves to it (asked only when that entry is <since> or newer). None
+    entry's is <ref>@{<count>}, which git resolves to it (asked only when that entry is <since> or newer, or is a
+    branch's, whose every entry the copy keeps: _snap_collect). None
     when git cannot read them."""
     code, out, _ = _gb(g + ["log", "-g", "--all", "--date=unix", "--format=%H%x01%gD%x01%gs"], deadline=deadline)
     if code != 0:
@@ -2004,7 +2035,7 @@ def _reflogs(g: List[str], deadline: Optional[float] = None,
         for i, (n, sha, t, label) in enumerate(lst):
             if i + 1 < len(lst):
                 entries.append((label, lst[i + 1][1], t, "the value before: %s" % ref))
-            elif since is None or t >= since:
+            elif since is None or t >= since or ref.startswith("refs/heads/"):
                 code, o, _ = _gb(g + ["rev-parse", "-q", "--verify", "%s@{%d}^{object}" % (ref, n + 1)],
                                  deadline=deadline)
                 old = os.fsdecode(o).strip()
@@ -2218,17 +2249,21 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
     for n, sha, msg in stashes:
         refs.append({"name": "stash@{%d}" % n, "sha": sha, "type": "commit", "kind": "stash-entry", "message": msg})
     have = {r["sha"] for r in refs}
-    tips: Dict[str, str] = {}
+    # a branch's reflog whatever its age: adopting the branch deletes its reflog (update-ref -d), so a commit only an
+    # entry older than the window held was in neither the window nor the copy, even where gc.reflogExpireUnreachable
+    # is never (release-candidate red team 3, finding 5); HEAD's and the others' last REFLOG_DAYS days
+    tips: Dict[str, Tuple[str, bool]] = {}
     for ref, sha, ts, _ in logs:
-        if ts >= cutoff and sha not in have and sha not in tips:
-            tips[sha] = ref
+        if (ts >= cutoff or ref.startswith("refs/heads/")) and sha not in have and (sha not in tips or tips[sha][1]):
+            tips[sha] = (ref, ts < cutoff)
     if tips:
         code, out, _ = _gb(g + ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
                            inp="".join(s + "\n" for s in tips).encode(), deadline=deadline)
         types = dict(ln.split(" ", 1) for ln in os.fsdecode(out).splitlines() if " " in ln) if code == 0 else {}
-        for sha, ref in tips.items():
+        for sha, (ref, old) in tips.items():
             if types.get(sha) in ("commit", "tag"):
-                refs.append({"name": ref, "sha": sha, "type": types[sha], "kind": "reflog"})
+                refs.append(dict({"name": ref, "sha": sha, "type": types[sha], "kind": "reflog"},
+                                 **({"older": True} if old else {})))
     commits = sorted({r["sha"] for r in refs if r["type"] == "commit"})
     subjects: Dict[str, str] = {}
     if commits:
@@ -2418,6 +2453,7 @@ def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[s
     for key, args in (("untracked", ["ls-files", "-z", "--others", "--exclude-standard"]),
                       ("others", ["ls-files", "-z", "--others"]),
                       ("tags", ["ls-files", "-z", "-v"]),
+                      ("stage", ["ls-files", "-z", "-s"]),
                       ("changed", ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"] if head else
                        ["ls-files", "-z"])):
         code, out, _ = _gb(["-C", wp] + args, deadline=deadline)
@@ -2432,6 +2468,21 @@ def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[s
         kinds[p] = "untracked" if p in untracked else "ignored"
     for p in changed:
         kinds.setdefault(p, "changed")
+    # a gitlink whose directory holds files and no .git (a submodule vendored by removing its .git): git looks into it
+    # neither as this worktree's nor as a repository of its own, so every file in it is copied here (release-candidate
+    # red team 3, finding 1); one holding a .git is a repository, copied as one or by _git_entries
+    for ent in lists["stage"]:
+        meta, _, p = ent.partition("\t")
+        d = os.path.join(wp, p)
+        if meta.split()[:1] != ["160000"] or os.path.islink(d) or not os.path.isdir(d):
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        if not any(n.casefold() == ".git" for n in names):
+            for f in _all_files(d):
+                kinds.setdefault(os.path.join(p, f), "unlisted")
     import leaselib as ll
     try:
         # bytes a clean filter or a line-ending conversion hides from git diff: what a checkout would not write back
@@ -2452,8 +2503,8 @@ SNAP_ALONG = ("index", "ORIG_HEAD")
 
 def _snap_fp(coll: List[dict]) -> str:
     """target/'s state in one hash: refs (staged content included), every commit a reflog from the last 30 days
-    holds, worktrees, stash, and every copied file's worktree, name, size, times and inode — never SNAP_ALONG. Equal
-    hashes: nothing a copy holds has changed (a content change kept at the same size with its mtime set back still
+    holds (a branch's reflog whatever its age), worktrees, stash, and every copied file's worktree, name, size, times
+    and inode — never SNAP_ALONG. Equal hashes: nothing a copy holds has changed (a content change kept at the same size with its mtime set back still
     moves ctime, which no one can set). A commit only a reflog holds counts: one made and undone after a copy (a
     branch moved there and back) moves no ref, and the upgrade's adoption deletes that branch's reflog."""
     parts = []
@@ -2813,7 +2864,7 @@ def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: 
                 coll.append(_snap_collect(root, r, deadline, {x["common"] for x in repos}))
             fp, todo = _snap_plan(root, coll, None if prefer_bg else deadline)
         except _OutOfTime:
-            raise _Background()
+            raise _Background(slow=True)
         except _SnapFail as e:
             raise Stop(SNAP_FAIL % (ver, e.args[0], e.args[1]))
         if not todo:
@@ -2861,6 +2912,12 @@ def _bg_running(root: Path) -> bool:
         return False
     code, out, _ = v.run(["ps", "-o", "command=", "-p", str(pid)], timeout=5)
     return code == 0 and "upgrade.py" in out and "--background" in out
+
+
+def _bg_copied(root: Path, ver: Optional[str]) -> bool:
+    """Has a run in the background finished taking the copy for the upgrade to <ver>?"""
+    rec = _read_json(root / BACKGROUND) or {}
+    return bool(rec.get("copied")) and rec.get("version") == ver and not rec.get("running")
 
 
 def _go_background(root: Path, ver: str) -> str:
@@ -3148,6 +3205,8 @@ def _ref_words(x: dict, wt0: str) -> str:
                                      " (%s)" % x["message"] if x.get("message") else "")
     if k == "head":
         return "the commit checked out in %s" % _escaped(x.get("worktree") or wt0)
+    if k == "reflog" and x.get("older"):
+        return "a commit from %s's history, more than %d days old" % (x["name"], REFLOG_DAYS)
     if k == "reflog":
         return "a commit from the last %d days of %s's history" % (REFLOG_DAYS, x["name"])
     if k == "index":
@@ -3423,7 +3482,12 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                 again = bool(rec.get("background")) and rec.get("version") == ver and not _snapshots(root)
                 try:
                     said = ensure_snapshot(root, ver or "", deadline, prefer_bg=again)
-                except _Background:
+                except _Background as e:
+                    if e.slow and _bg_copied(root, ver):
+                        # a run in the background has taken the copy, and reading target/ against it still does not
+                        # fit a start: another handoff would find the copy whole and change nothing, at every start
+                        # (release-candidate red team 3, findings 4 and 7)
+                        return lines, _stopped(root, ver, n, SNAP_SLOW % ver)
                     return lines, _go_background(root, ver or "")
                 except Stop as e:
                     return lines, _stopped(root, ver, n, str(e))

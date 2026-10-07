@@ -618,8 +618,12 @@ def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: 
 # Every git command run here and by the upgrade in a target repository runs with submodule.recurse off. Set — in the
 # repository or globally, as git's documentation suggests — it makes a checkout, merge, reset or worktree add rewrite
 # each submodule's working tree too, over the uncommitted edits there that the dirty check leaves to the submodule on
-# purpose (release-candidate red team 2, finding 1).
-NO_RECURSE = ("-c", "submodule.recurse=false")
+# purpose (release-candidate red team 2, finding 1). And with core.fsmonitor off: a file-system monitor hook (set in the
+# repository or globally) that reports no change made git status, git diff and the safety copy's listing pass an
+# uncommitted edit, and the checkout back to the trunk trusted the index's "unchanged" marks and wrote the committed
+# version over it. Off, git checks every file itself, and the checkout refuses over the edit (release-candidate red
+# team 3, finding 2).
+NO_RECURSE = ("-c", "submodule.recurse=false", "-c", "core.fsmonitor=false")
 
 
 def git_argv(repo: Path, *args: str) -> list:
@@ -1997,6 +2001,63 @@ def untracked_in_way(src: Path, refs: list, ignored_only: bool = False) -> list:
     return sorted(hit)
 
 
+def gitlink_dirs(src: Path) -> Dict[str, str]:
+    """{path: "repository" | "files"} for each gitlink (a submodule's entry, .gitmodules or not) in the index of the
+    checkout at <src> whose directory on disk holds anything: a repository of its own ("repository": an entry named
+    .git, in any case, at its top — its commits, its untracked files), or plain files ("files": a submodule vendored
+    by removing its .git, the gitlink left in the index). git never looks into either from <src>: no status, diff or
+    listing of untracked files names what is in it. An empty directory (a submodule not checked out) is not listed."""
+    code, out, _ = _git(src, "ls-files", "-s", "-z")
+    found: Dict[str, str] = {}
+    for ent in (out.split("\0") if code == 0 else []):
+        meta, _, path = ent.partition("\t")
+        bits = meta.split()
+        if len(bits) != 3 or bits[0] != "160000" or not path:
+            continue
+        d = os.path.join(str(src), path)
+        if os.path.islink(d) or not os.path.isdir(d):
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        if names:
+            found[path] = "repository" if any(n.casefold() == ".git" for n in names) else "files"
+    return found
+
+
+def gitlinks_in_way(src: Path, refs: list) -> Dict[str, str]:
+    """gitlink_dirs of <src> where any of <refs> has something other than a gitlink — a file, a symlink or a
+    directory: checking out, fast-forwarding or hard-resetting to it deletes that directory with everything in it, a
+    repository's .git and its commits too, or writes files into it over what is there; git, which does not look
+    into it, neither refuses nor says so (release-candidate red team 3, findings 1 and 3). Where a ref has the
+    gitlink too (any commit), or nothing, git leaves the directory as it is. {} when there are none."""
+    dirs = gitlink_dirs(src)
+    if not dirs:
+        return {}
+    hit: Dict[str, str] = {}
+    for ref in refs:
+        code, out, _ = _git(src, "--literal-pathspecs", "ls-tree", "-z", ref, "--", *sorted(dirs))
+        for ent in (out.split("\0") if code == 0 else []):
+            meta, _, path = ent.partition("\t")
+            bits = meta.split()
+            if path in dirs and bits and bits[0] != "160000":
+                hit[path] = dirs[path]
+    return hit
+
+
+def gitlink_words(hit: Dict[str, str]) -> Tuple[str, str, str]:
+    """(what is there, the paths named, "it" or "them") for a sentence about gitlinks_in_way."""
+    one = len(hit) == 1
+    if all(k == "repository" for k in hit.values()):
+        what = ("a repository of its own, recorded there as a submodule" if one
+                else "repositories of their own, recorded there as submodules")
+    else:
+        what = ("a directory git records as a submodule, with files in it git never lists" if one
+                else "directories git records as submodules, with files in them git never lists")
+    return what, name_paths(sorted(hit)), "it" if one else "them"
+
+
 def hidden_edits(src: Path) -> Dict[str, str]:
     """{path: "skip-worktree" | "assume-unchanged"} for each tracked file of <src> carrying that mark whose file on
     disk differs from the index: an uncommitted change `git status` does not show (release-candidate review 2,
@@ -2058,7 +2119,7 @@ def _checker(src: Path, deadline: Optional[float]):
         return t
 
     def run(args: list, inp: Optional[bytes] = None, env_extra: Optional[dict] = None) -> Tuple[int, bytes]:
-        p = subprocess.Popen(["git", "-C", str(src)] + args, stdin=subprocess.PIPE if inp is not None
+        p = subprocess.Popen(git_argv(src, *args), stdin=subprocess.PIPE if inp is not None
                              else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              env=dict(env, **(env_extra or {})), start_new_session=True)
         try:
@@ -2083,10 +2144,14 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
     What a checkout writes is written whole, by git checkout-index into a scratch directory, and compared whole:
     cat-file --batch --filters gives each file's size before its conversion, so a file whose conversion changes its
     size threw the reading of every later file off — an untouched clone stopped for good, and a real hidden change
-    could read as none (release-candidate red team 2, findings 4-5). A filter driver git marks required or runs as a
-    long-running process (how Git LFS sets itself up) is never run here: its smudge can download, write into the
-    repository and fail offline (finding 7); its files are left to git status, which compares their clean side, and
-    to stat_blind_edits. Paths in <skip> are not read. Under <deadline>, raises subprocess.TimeoutExpired when it is
+    could read as none (release-candidate red team 2, findings 4-5). A filter driver git runs as a long-running
+    process (how Git LFS sets itself up) is never run here: its smudge can download, write into the repository and
+    fail offline (finding 7); its files are left to git status, which compares their clean side — for Git LFS a hash
+    of the whole content, so every edit shows — and to stat_blind_edits. A driver git merely marks required
+    (nbstripout, git-crypt) is run (red team 3, finding 6). A file whose bytes differ from a checkout's only inside
+    $Keyword: ...$ expansions (git's ident, a keyword-expanding filter), and whose clean side is its staged blob, is
+    no hidden change: a checkout writes the same with fresh expansions (red team 3, finding 8). Paths in <skip> are
+    not read. Under <deadline>, raises subprocess.TimeoutExpired when it is
     out of time."""
     skip = skip or set()
     left, run = _checker(src, deadline)
@@ -2130,12 +2195,13 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
     # bytes on disk exactly the staged blob's: nothing no commit has (read with its true size: no conversion)
     differ = set(_unlike(src, cands, run, left))
     cands = [c for c in cands if c[0] in differ]
-    # a required or long-running filter driver is not run (finding 7)
+    # a long-running filter driver (filter.<d>.process: how Git LFS sets itself up) is not run (finding 7). One git
+    # merely marks required is: nbstripout's own install marks its driver required, and skipping it let the
+    # notebook outputs its clean side strips — bytes in no commit — be deleted unseen (red team 3, finding 6)
     unrun = set()
     for d in sorted({driver[p] for p, _, _ in cands if p in driver}):
-        _, req = run(["config", "--bool", "--get", "filter.%s.required" % d])
         _, proc = run(["config", "--get", "filter.%s.process" % d])
-        if req.strip() == b"true" or proc.strip():
+        if proc.strip():
             unrun.add(d)
     cands = [c for c in cands if driver.get(c[0]) not in unrun]
     if not cands:
@@ -2148,8 +2214,10 @@ def _unlike_checkout(src: Path, cands: list, run, left) -> list:
     blob writes (smudge, ident, line-ending conversion, working-tree encoding applied): every one written whole by
     one git checkout-index into a scratch directory, never into the worktree or its index; a path it did not write
     (skip-worktree, a name it refuses) is written by cat-file --filters alone. One that cannot be written or read
-    counts as unlike: say so rather than miss it."""
+    counts as unlike: say so rather than miss it. One that differs only inside keyword expansions, its clean side its
+    staged blob, is not unlike (_keywords_only)."""
     found = []
+    written: Dict[str, object] = {}     # path -> what a checkout writes: the scratch file's name, or its bytes
     scratch = tempfile.mkdtemp(prefix="daedalus-checkout-")
     try:
         run(["checkout-index", "-z", "--stdin", "--prefix=%s/" % scratch],
@@ -2160,13 +2228,55 @@ def _unlike_checkout(src: Path, cands: list, run, left) -> list:
             if os.path.isfile(out) and not os.path.islink(out):
                 if not _same_files(mine, out):
                     found.append(p)
+                    written[p] = out
                 continue
             code, data = run(["cat-file", "--filters", "--path=" + p, b])
             if code != 0 or not _same_bytes(mine, data):
                 found.append(p)
+                if code == 0:
+                    written[p] = data
+        if found:
+            found = _keywords_only(src, [c for c in cands if c[0] in set(found)], written, run)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     return found
+
+
+# a keyword git's ident attribute, or a keyword-expanding filter, writes expanded: $Id: <blob id> $, $Date: ... $
+KEYWORD = re.compile(rb"\$([A-Za-z]+):[^$\n]*\$")
+KEYWORD_MAX = 64 << 20      # larger files are not compared keyword by keyword: they stay "unlike"
+
+
+def _keywords_only(src: Path, cands: list, written: Dict[str, object], run) -> list:
+    """The paths of <cands> ((path, blob, size on disk)), each unlike what a checkout writes (<written>), that hold
+    something a commit does not: all but those whose bytes on disk, cleaned as git add cleans them, are their staged
+    blob, and differ from what a checkout writes only inside $Keyword: ...$ expansions — a $Id: <old blob id> $ an
+    earlier checkout expanded, which git never rewrites after a commit (release-candidate red team 3, finding 8).
+    Bytes a filter's clean side drops (a notebook's outputs) differ outside any keyword and stay."""
+    maybe = [c for c in cands if c[0] in written and "\n" not in c[0] and c[2] <= KEYWORD_MAX]
+    keep = [c[0] for c in cands if c not in maybe]
+    if not maybe:
+        return sorted(keep)
+    code, out = run(["hash-object", "--stdin-paths"], b"".join(os.fsencode(p) + b"\n" for p, _, _ in maybe))
+    ids = out.split() if code == 0 else []
+    if len(ids) != len(maybe):
+        return sorted(keep + [p for p, _, _ in maybe])
+    for (p, b, _), h in zip(maybe, ids):
+        same = h.decode() == b
+        if same:
+            try:
+                with open(os.path.join(str(src), p), "rb") as fh:
+                    mine = fh.read()
+                w = written[p]
+                if isinstance(w, str):
+                    with open(w, "rb") as fh:
+                        w = fh.read()
+                same = KEYWORD.sub(rb"$\1$", mine) == KEYWORD.sub(rb"$\1$", w)
+            except OSError:
+                same = False
+        if not same:
+            keep.append(p)
+    return sorted(keep)
 
 
 def _same_files(a: str, b: str) -> bool:
@@ -2198,7 +2308,7 @@ def _unlike(src: Path, cands: list, run, left) -> list:
                 found.append(p)
     if not lined:
         return found
-    proc = subprocess.Popen(["git", "-C", str(src), "cat-file", "--batch"], stdin=subprocess.PIPE,
+    proc = subprocess.Popen(git_argv(src, "cat-file", "--batch"), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0"))
     data = b"".join(b.encode() + b"\n" for _, b, _ in lined)
@@ -2341,6 +2451,10 @@ ADOPT_IGNORED = ("target/%s has ignored files that putting it back on %s at orig
                  "of that checkout, then run adopt again; nothing was adopted.")
 
 
+ADOPT_GITLINK = ("target/%s holds %s (%s), which %s would delete with everything in it — move %s out of that "
+                 "checkout, then run adopt again; nothing was adopted.")
+
+
 ADOPT_HIDDEN = ("target/%s has uncommitted changes git status does not show, in files marked %s (%s) — clear the mark "
                 "(%s), commit them on their branch inside that checkout, then run adopt again; nothing was adopted.")
 
@@ -2405,7 +2519,7 @@ ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branc
 
 
 def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[str] = None,
-          fetch: bool = True, deadline: Optional[float] = None) -> dict:
+          fetch: bool = True, deadline: Optional[float] = None, checked: bool = False) -> dict:
     """`lease.sh adopt <branch> [--repo <nested>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
     that carries work trunk does not have becomes a numbered window with no session bound — the same allocation
     `create` and `split` use. target/<repo> goes back to its trunk at origin/<trunk>; lease/<NN> is made at the
@@ -2420,7 +2534,10 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
     second time. Refused: a dirty target/<repo> (tracked changes, or a change hidden by skip-worktree or
     assume-unchanged), an ignored file where the trunk's checkout or fast-forward would write, a branch that does
     not exist or is a live window's, nothing past trunk, a detached checkout holding commits no branch has. The fetch (a shell path, §4.2) runs
-    before the lock; the upgrade passes fetch=False — it fetched already — and its start deadline.
+    before the lock; the upgrade passes fetch=False — it fetched already — and its start deadline, and checked=True:
+    it read target/<repo> for changes git status does not show (filtered_edits, stat_blind_edits) before anything
+    moved, and reading it again for each branch it adopts ran a session start out of time (release-candidate red
+    team 3, finding 4).
 
     Order (plan 5 Task 2 review, finding 1): the first change is always making lease/<NN> at the work's tip — one
     new ref, the operator's branch (or the trunk) untouched — so a process killed at any later point leaves the
@@ -2477,8 +2594,8 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         if hidden:
             raise Refused(ADOPT_HIDDEN % ((key,) + hidden_words(key, hidden)))
         try:
-            filtered = filtered_edits(src, deadline)
-            blind = [] if filtered else stat_blind_edits(src, deadline)
+            filtered = [] if checked else filtered_edits(src, deadline)
+            blind = [] if filtered or checked else stat_blind_edits(src, deadline)
         except subprocess.TimeoutExpired:
             raise Refused("the time ran out while checking target/%s for changes git status does not show; nothing "
                           "was adopted" % key)
@@ -2497,6 +2614,16 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             raise Refused("target/%s's branch %s cannot be read by its exact name; nothing was adopted." % (key, branch))
         notes = []
         is_trunk = branch == trunk
+        # a directory recorded as a submodule, holding a repository or files git never looks into, where the trunk
+        # has a file: the checkout or reset deletes it whole (release-candidate red team 3, findings 1 and 3)
+        doing = ("resetting %s to origin/%s" % (trunk, trunk) if is_trunk and cur == trunk
+                 else "putting it back on %s at origin/%s" % (trunk, trunk))
+        moves = ([remote_ref(trunk)] if cur == trunk else [] if is_trunk
+                 else ["refs/heads/" + trunk, remote_ref(trunk)])
+        links = gitlinks_in_way(src, moves) if moves else {}
+        if links:
+            what, names, it = gitlink_words(links)
+            raise Refused(ADOPT_GITLINK % (key, what, names, doing, it))
         if is_trunk and cur == trunk:
             # the trunk's reset is a `reset --hard`, which deletes an untracked file in its way without a word
             in_way = untracked_in_way(src, [remote_ref(trunk)])

@@ -1036,3 +1036,27 @@ PY
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path; print(ll.stat_blind_edits(Path(sys.argv[2])))' "$DAEDALUS_HOME/core" "$T"
   [ "$output" = "['two.bat']" ] || { echo "$output"; return 1; }
 }
+
+@test "a session start whose check of target/ against the kept copy never fits its budget: once a run in the background has taken the copy, the next start does not hand off again or say 'the first time' — it stops naming python3 core/upgrade.py, which finishes the upgrade (release-candidate red team 3, findings 4 and 7)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  start='printf "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\",\"source\":\"startup\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/session-start.py"'
+  run env UPGRADE_TEST_SNAPSHOT_SLOW=1 bash -c "$start"
+  case "$output" in *"needs a few minutes the first time"*) : ;; *) echo "$output"; return 1 ;; esac
+  for i in $(seq 1 150); do grep -q '"running": false' "$DAEDALUS_HOME/state/upgrade-background.json" 2>/dev/null && break; sleep 0.2; done
+  grep -q '"copied": true' "$DAEDALUS_HOME/state/upgrade-background.json"
+  bg="$(cat "$DAEDALUS_HOME/state/upgrade-background.json")"
+  for n in 2 3; do
+    run env UPGRADE_TEST_SNAPSHOT_SLOW=1 bash -c "$start"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    case "$output" in *"needs a few minutes"*|*"Upgrade to 0.7.0: complete."*) echo "start $n: $output"; return 1 ;; esac
+    case "$output" in *"upgrade to 0.7.0 incomplete:"*"run python3 core/upgrade.py once from a terminal in this home"*) : ;; *) echo "start $n: $output"; return 1 ;; esac
+    [ "$(cat "$DAEDALUS_HOME/state/upgrade-background.json")" = "$bg" ] || { echo "start $n handed off again"; return 1; }
+  done
+  run bash -c 'printf "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"s1\",\"prompt\":\"hi\",\"transcript_path\":\"%s/s1.jsonl\"}" "$B" | python3 "$DAEDALUS_HOME/core/lease-board.py"'
+  case "$output" in *"run python3 core/upgrade.py once from a terminal in this home"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = feat/x ]; [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+}

@@ -91,14 +91,19 @@ window numbers itself. Each step acts once and says one line when it does:
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
 copy of everything there in `state/upgrade-snapshot/<stamp>` (every branch,
-stash and recent commit as a git bundle, staged changes included; every
+stash and recent commit as a git bundle — every commit a branch's reflog
+holds, whatever its age, since adopting the branch deletes that reflog —
+staged changes included; every
 untracked, ignored or uncommitted file in a tar, an edit a clean filter or a
-line-ending conversion hides from `git status` included (except under a filter
-git marks required or runs as a long-running process, as Git LFS does: the
-upgrade never runs its programs, so such files are compared only the way `git
-status` compares them), and one git's stat
-check misses (`core.trustctime` false), and every file of a `.git` git cannot
-read; git's record of a merge, rebase or bisect in progress, of each worktree
+line-ending conversion hides from `git status` included (a filter git marks
+required, as nbstripout's install does, is run like any other; one git runs
+as a long-running process, as Git LFS does, never is, so such files are
+compared only the way `git status` compares them, which for Git LFS sees every
+edit), and one git's stat
+check misses (`core.trustctime` false), an edit a `core.fsmonitor` hook does
+not report (every `git` the upgrade runs in `target/` has it off), every file
+of a `.git` git cannot read, and every file in a directory git records as a
+submodule that holds no `.git`; git's record of a merge, rebase or bisect in progress, of each worktree
 whether or not its directory is there now), stops instead if it cannot
 make one (no room, or over `upgrade.snapshot_max_mb`, 2048 by default), and
 keeps it until `python3 core/upgrade.py --forget-snapshot`, which refuses while
@@ -111,7 +116,10 @@ or checked out as a submodule inside one. A later run copies only what no
 kept copy holds yet. A copy that would not fit in a session start is taken in
 the background, and changes nothing; no window is numbered, and `lease.sh`
 makes or changes none, until it is done; the next session start makes the
-upgrade's changes. git's record of a worktree made by hand under `worktrees/`
+upgrade's changes. If reading `target/` to check it against that copy still
+does not fit in a session start, the board says so and asks for
+`python3 core/upgrade.py` once from a terminal in the home, which has no time
+limit. git's record of a worktree made by hand under `worktrees/`
 is never removed, even when its directory is gone (moved with `mv`, it still
 works through that record; `git worktree repair <new path>` points git at it).
 
@@ -127,7 +135,10 @@ edit git's stat check passes where `core.trustctime` is false (`touch` the file,
 then commit) — or one with
 untracked or ignored files that putting it back on its trunk would overwrite
 (move them out of that checkout, or commit them on its branch) — a directory
-holding only a `.git` git cannot read counts — or one with a
+holding only a `.git` git cannot read counts — or one where a directory git
+records as a submodule (with or without `.gitmodules`) holds a repository of
+its own or files with no `.git`, and its trunk has a file or a directory there,
+which the checkout would delete or write into (move that directory out), or one with a
 local branch named `origin/<trunk>`, which git takes for origin's trunk
 (rename it), or one where a rebase,
 merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
@@ -136,7 +147,8 @@ command was cut off and left lock files, or the checkout on a branch that is
 gone (the sentence names the files to remove, or the `git branch` command that
 brings the branch back from HEAD's reflog), or one with two branches whose names
 differ only in case where git ignores case (rename one: `git pack-refs --all`,
-then `git branch -m`). A checkout or reset the upgrade itself began and was cut
+then `git branch -m`). A file whose bytes differ from a checkout only in a
+`$Id$`-style keyword git expanded at an earlier checkout is no change. A checkout or reset the upgrade itself began and was cut
 off part-way is not a stop: the next session start finishes it — never commit
 in that checkout in between. The board says which on
 every prompt, in one sentence, with what to do; the next session start

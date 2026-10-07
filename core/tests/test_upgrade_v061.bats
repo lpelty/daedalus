@@ -632,13 +632,13 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-@test "v0.6.1, pulled, with a required filter driver shaped like Git LFS (one asset never pulled, one pulled) and its server unreachable: the check runs no smudge program and the upgrade completes (release-candidate red team 2, finding 7)" {
+@test "v0.6.1, pulled, with a filter driver shaped like Git LFS — required, run as a long-running process (one asset never pulled, one pulled) — and its server unreachable: the check runs no smudge program and the upgrade completes (release-candidate red team 2, finding 7)" {
   mkdir -p "$B/lfs-server"
   cat > "$B/smudge.sh" <<'SH'
 #!/bin/sh
 in=$(cat); id=$(printf '%s' "$in" | sed -n 's/^pointer //p')
 c="$(git rev-parse --git-common-dir)/lfs-cache"; mkdir -p "$c"
-echo "smudge $id by: $(ps -o command= -p $PPID)" >> "$LFSLOG"
+echo "smudge $id by: ${PARENT_CMD:-$(ps -o command= -p $PPID)}" >> "$LFSLOG"
 [ "${FAKE_SKIP:-}" = 1 ] && { printf '%s\n' "$in"; exit 0; }
 [ -f "$c/$id" ] && { cat "$c/$id"; exit 0; }
 [ -f "$LFSSERVER/$id" ] && { cp "$LFSSERVER/$id" "$c/$id"; echo "download $id" >> "$LFSLOG"; cat "$c/$id"; exit 0; }
@@ -651,12 +651,44 @@ if head -c 8 "$t" | grep -q '^pointer '; then cat "$t"; exit 0; fi
 id=$(shasum "$t" | cut -c1-12); c="$(git rev-parse --git-common-dir)/lfs-cache"; mkdir -p "$c"
 cp "$t" "$c/$id"; cp "$t" "$LFSSERVER/$id"; printf 'pointer %s\n' "$id"
 SH
+  # git-lfs install sets filter.lfs.process (git-lfs filter-process): git's long-running filter protocol, which this
+  # speaks, running the two programs above for each file (their parent named as the git command that started it)
+  cat > "$B/proc.py" <<'PY'
+import os, subprocess, sys
+i, o = sys.stdin.buffer, sys.stdout.buffer
+def pkts():
+    out = []
+    while True:
+        n = i.read(4)
+        if not n:
+            sys.exit(0)
+        if int(n, 16) == 0:
+            return out
+        out.append(i.read(int(n, 16) - 4))
+def put(*xs):
+    for x in xs:
+        for k in range(0, max(len(x), 1), 65516):
+            o.write(b"%04x" % (len(x[k:k + 65516]) + 4) + x[k:k + 65516])
+    o.write(b"0000"); o.flush()
+pkts(); put(b"git-filter-server\n", b"version=2\n")
+pkts(); put(b"capability=clean\n", b"capability=smudge\n")
+parent = subprocess.run(["ps", "-o", "command=", "-p", str(os.getppid())], capture_output=True, text=True).stdout.strip()
+while True:
+    head = dict(x.decode().strip().split("=", 1) for x in pkts())
+    data = b"".join(pkts())
+    prog = os.environ["SMUDGE_SH"] if head["command"] == "smudge" else os.environ["CLEAN_SH"]
+    r = subprocess.run([prog], input=data, capture_output=True, env=dict(os.environ, PARENT_CMD=parent))
+    if r.returncode != 0:
+        put(b"status=error\n")
+        continue
+    put(b"status=success\n"); put(*([r.stdout] if r.stdout else [])); put()
+PY
   chmod +x "$B/smudge.sh" "$B/clean.sh"
-  export LFSLOG="$B/lfs.log" LFSSERVER="$B/lfs-server"
+  export LFSLOG="$B/lfs.log" LFSSERVER="$B/lfs-server" SMUDGE_SH="$B/smudge.sh" CLEAN_SH="$B/clean.sh"
   git clone -q "$B/v061/thing.git" "$B/mk"
   for r in "$B/mk" "$T"; do
     git -C "$r" config filter.asset.clean "$B/clean.sh"; git -C "$r" config filter.asset.smudge "$B/smudge.sh"
-    git -C "$r" config filter.asset.required true
+    git -C "$r" config filter.asset.required true; git -C "$r" config filter.asset.process "python3 $B/proc.py"
   done
   printf '*.bin filter=asset\n' > "$B/mk/.gitattributes"; printf 'ASSET A\n' > "$B/mk/a.bin"; printf 'ASSET B\n' > "$B/mk/b.bin"
   git -C "$B/mk" add -A; cmt "$B/mk" -m "assets"; git -C "$B/mk" push -q origin main
@@ -674,4 +706,141 @@ SH
   # the session's own window is a checkout, which smudges as any checkout does; the check never runs one
   ! grep -e cat-file -e checkout-index "$LFSLOG" || { echo "the check ran a smudge:"; cat "$LFSLOG"; return 1; }
   [ "$(ls "$T/.git/lfs-cache")" = "$cache" ]
+}
+
+# --- release-candidate red team 3 --------------------------------------------------------------------------------
+tars_have() {       # tars_have <text> — some file in a tar of the safety copy holds <text>
+  python3 - "$H/state/upgrade-snapshot" "$1" <<'PY'
+import os, sys, tarfile
+top, want = sys.argv[1], sys.argv[2].encode()
+for dp, _, fs in os.walk(top):
+    for f in fs:
+        if f.endswith(".tar"):
+            with tarfile.open(os.path.join(dp, f)) as t:
+                for m in t.getmembers():
+                    if m.isfile() and want in t.extractfile(m).read():
+                        sys.exit(0)
+sys.exit(1)
+PY
+}
+bundles_have() {    # bundles_have <commit> — the safety copy's bundles hold <commit>
+  local r="$B/bundles-$RANDOM" b; git init -q --bare "$r"
+  for b in $(ls "$H"/state/upgrade-snapshot/*/*.bundle | sort); do
+    git -C "$r" fetch -q "$b" "refs/*:refs/from/$(basename "$b")/*" 2>/dev/null || true
+  done
+  git -C "$r" cat-file -e "$1^{commit}"
+}
+not_complete() { case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac; [ ! -e "$H/state/upgraded-to" ]; }
+
+@test "v0.6.1, pulled, on a branch where thing.txt became a gitlink with no .gitmodules whose directory holds plain files and no .git (a submodule vendored by removing its .git): the upgrade stops naming it, before the checkout back to main would delete the directory — no stamp, the file stays; the safety copy holds it; lease.sh adopt refuses too (release-candidate red team 3, finding 1)" {
+  git -C "$T" rm -q thing.txt
+  git -C "$T" update-index --add --cacheinfo "160000,$(git -C "$T" rev-parse HEAD),thing.txt"; cmt "$T" -m "vendored"
+  mkdir "$T/thing.txt"; printf 'MY WORK INSIDE THE GITLINK DIR\n' > "$T/thing.txt/notes.md"
+  [ -z "$(git -C "$T" status --porcelain)" ]; [ ! -e "$T/.gitmodules" ]
+  pull_current
+  s1_ctx
+  not_complete
+  case "$c" in *"target/thing holds a directory git records as a submodule"*"(thing.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(cat "$T/thing.txt/notes.md")" = "MY WORK INSIDE THE GITLINK DIR" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  tars_have "MY WORK INSIDE THE GITLINK DIR"
+  run bash "$H/core/lease.sh" adopt fix/in-flight
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"(thing.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/thing.txt/notes.md")" = "MY WORK INSIDE THE GITLINK DIR" ]
+}
+
+fsm_hook() { printf '#!/bin/sh\nprintf "tok\\0"\n' > "$B/fsm.sh"; chmod +x "$B/fsm.sh"; }
+fsm_edit() {        # the hook trusted, then an edit of f.txt (the branch's committed file) it never reports
+  git -C "$T" update-index --refresh >/dev/null 2>&1 || true; git -C "$T" status >/dev/null; sleep 1
+  printf 'MY UNCOMMITTED EDIT\n' > "$T/f.txt"
+  [ -z "$(git -C "$T" status --porcelain)" ]; [ -n "$(GIT_OPTIONAL_LOCKS=0 git -C "$T" -c core.fsmonitor=false status --porcelain)" ]
+  [ -z "$(git -C "$T" status --porcelain)" ]
+}
+fsm_kept() {
+  not_complete
+  case "$c" in *"target/thing has uncommitted changes"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ "$(cat "$T/f.txt")" = "MY UNCOMMITTED EDIT" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  tars_have "MY UNCOMMITTED EDIT"
+}
+
+@test "v0.6.1, pulled, with core.fsmonitor in the repository's config naming a hook that reports no changes, and an uncommitted edit it hides from git status: the upgrade stops on the edit — never 'complete' over it — the edit stays and the safety copy holds it (release-candidate red team 3, finding 2)" {
+  fsm_hook; git -C "$T" config core.fsmonitor "$B/fsm.sh"
+  fsm_edit
+  pull_current
+  s1_ctx
+  fsm_kept
+}
+
+@test "v0.6.1, pulled, with core.fsmonitor set only in the global config (GIT_CONFIG_GLOBAL) to a hook that reports no changes, and an uncommitted edit it hides: the upgrade stops on the edit, which stays and is in the safety copy (release-candidate red team 3, finding 2)" {
+  pull_current
+  fsm_hook
+  printf '[user]\n\tname = t\n\temail = t@x\n[core]\n\tfsmonitor = %s\n' "$B/fsm.sh" > "$B/global.gitconfig"
+  export GIT_CONFIG_GLOBAL="$B/global.gitconfig"
+  fsm_edit
+  s1_ctx
+  fsm_kept
+}
+
+@test "v0.6.1, pulled, on a branch where thing.txt is a repository of its own recorded as a gitlink (no .gitmodules), with a commit and an untracked file nowhere else, and main has a file there: the upgrade stops naming it — no stamp, the repository with its .git, commit and files intact (release-candidate red team 3, finding 3)" {
+  git -C "$T" rm -q thing.txt
+  git init -q -b main "$T/thing.txt"; printf 'NESTED COMMITTED WORK\n' > "$T/thing.txt/lib.md"
+  git -C "$T/thing.txt" add lib.md; cmt "$T/thing.txt" -m "nested-only commit"
+  printf 'NESTED UNTRACKED WORK\n' > "$T/thing.txt/scratch.md"
+  git -C "$T" add thing.txt 2>/dev/null; cmt "$T" -m "embed"
+  [ -z "$(git -C "$T" status --porcelain --untracked-files=no --ignore-submodules=dirty)" ]
+  pull_current
+  s1_ctx
+  not_complete
+  case "$c" in *"target/thing holds a repository"*"(thing.txt)"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ -d "$T/thing.txt/.git" ]; [ "$(git -C "$T/thing.txt" log --format=%s)" = "nested-only commit" ]
+  [ "$(cat "$T/thing.txt/scratch.md")" = "NESTED UNTRACKED WORK" ]
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+}
+
+@test "v0.6.1, pulled, with a parked branch whose reflog's older entry (45 days) holds a commit no ref has: adopting the branch deletes its reflog, so the safety copy holds that commit whatever its age, and --restore-help names it (release-candidate red team 3, finding 5)" {
+  d45="@$(( $(date +%s) - 45*86400 )) +0000"; d40="@$(( $(date +%s) - 40*86400 )) +0000"
+  GIT_COMMITTER_DATE="$d45" git -C "$T" worktree add -q -b feat/r "$B/wt-r" main
+  printf 'A\n' > "$B/wt-r/old.txt"; git -C "$B/wt-r" add old.txt
+  GIT_COMMITTER_DATE="$d45" GIT_AUTHOR_DATE="$d45" cmt "$B/wt-r" -m "old experiment"
+  A="$(git -C "$B/wt-r" rev-parse HEAD)"; git -C "$T" worktree remove --force "$B/wt-r"
+  git -C "$T" worktree add -q --detach "$B/wt-b" main
+  printf 'B\n' > "$B/wt-b/b.txt"; git -C "$B/wt-b" add b.txt; cmt "$B/wt-b" -m "the real work"
+  Bc="$(git -C "$B/wt-b" rev-parse HEAD)"; git -C "$T" worktree remove --force "$B/wt-b"
+  GIT_COMMITTER_DATE="$d40" git -C "$T" branch -f feat/r "$Bc"
+  [ "$(git -C "$T" rev-parse 'feat/r@{1}')" = "$A" ]
+  pull_current
+  s1_ctx
+  case "$c" in *"feat/r"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  bundles_have "$A" || { echo "the copy lacks the old reflog commit"; return 1; }
+  run python3 "$H/core/upgrade.py" --restore-help
+  case "$output" in *"${A:0:7}"*"old experiment"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "v0.6.1, pulled, with a notebook filter git marks required (nbstripout's install: filter.<d>.required true, smudge cat) and outputs staged that its clean side strips (git status clean): the upgrade stops naming the notebook — the outputs stay and the safety copy holds them (release-candidate red team 3, finding 6)" {
+  git -C "$T" config filter.nbs.clean "sed '/^OUTPUT/d'"; git -C "$T" config filter.nbs.smudge cat
+  git -C "$T" config filter.nbs.required true
+  printf '*.ipynb filter=nbs\n' > "$T/.gitattributes"; printf 'cell 1\ncell 2\n' > "$T/nb.ipynb"
+  git -C "$T" add -A; cmt "$T" -m "notebook"
+  printf 'cell 1\nOUTPUT-SECRET result 42\ncell 2\n' > "$T/nb.ipynb"; git -C "$T" add nb.ipynb
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  pull_current
+  s1_ctx
+  not_complete
+  case "$c" in *"git changes when it saves them (nb.ipynb)"*) : ;; *) echo "$c"; return 1 ;; esac
+  grep -q OUTPUT-SECRET "$T/nb.ipynb"
+  tars_have "OUTPUT-SECRET"
+}
+
+@test "v0.6.1, pulled, on a branch with '*.c ident' and a.c edited and committed after an earlier checkout expanded \$Id\$ (the only difference on disk a stale \$Id: <sha> \$): no stop — the upgrade completes; lease.sh adopt of such a branch does not refuse (release-candidate red team 3, finding 8)" {
+  printf '*.c ident\n' > "$T/.gitattributes"; printf '/* $Id$ */\nint a;\n' > "$T/a.c"
+  git -C "$T" add -A; cmt "$T" -m "a.c"
+  rm "$T/a.c"; git -C "$T" checkout -- a.c; grep -q '[$]Id: [0-9a-f]* [$]' "$T/a.c"
+  sed -i '' 's/int a;/int b;/' "$T/a.c"; git -C "$T" add a.c; cmt "$T" -m "edit a.c"
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  git -C "$T" branch side; git -C "$T" checkout -q side; printf 's\n' > "$T/side.txt"; git -C "$T" add side.txt
+  cmt "$T" -m "side work"; git -C "$T" checkout -q fix/in-flight
+  pull_current
+  s1_ctx
+  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"git status does not show"*) echo "$c"; return 1 ;; esac
 }
