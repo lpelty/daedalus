@@ -835,3 +835,115 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Upgrade to 0.7.0: complete."*"You are window"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# manifest_has <py expr over r (the repo entry for target/thing)> — a check on the newest copy's manifest
+manifest_has() {
+  python3 - "$(newest)/manifest.json" "$1" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+r = [x for x in m["repos"] if x["label"] == "target/thing"][0]
+assert eval(sys.argv[2]), json.dumps(r, indent=1)
+PY
+}
+
+@test "a worktree made by hand under worktrees/ and moved with mv in the middle of a rebase, with staged-only content and a ref of its own: the copy holds all three; the upgrade keeps git's record of it (the moved checkout still works, its branch is not adopted); once the record is gone --restore-help lists them and its commands bring them back" {
+  W="$DAEDALUS_HOME/worktrees/hotfix"
+  git -C "$T" worktree add -q -b hot "$W" main
+  for i in 1 2 3; do printf 'h%s\n' $i > "$W/h$i.txt"; git -C "$W" add -A; cmt "$W" -m "hot $i"; done
+  GIT_SEQUENCE_EDITOR="sed -i '' -e '2s/^pick/edit/'" git -C "$W" -c user.email=t@x -c user.name=t rebase -q -i HEAD~3 >/dev/null 2>&1
+  [ -d "$(git -C "$W" rev-parse --absolute-git-dir)/rebase-merge" ]
+  printf 'STAGED ONLY\n' > "$W/staged.txt"; git -C "$W" add staged.txt; printf 'later\n' > "$W/staged.txt"
+  stb="$(git -C "$W" rev-parse :staged.txt)"
+  keep="$(echo kept | git -C "$W" -c user.email=t@x -c user.name=t commit-tree 'HEAD^{tree}')"; git -C "$W" update-ref refs/worktree/keep "$keep"
+  mv "$W" "$B/hotfix-moved"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  manifest_has "any(x['kind'] == 'index' and any(b == '$stb' for _, b in x['blobs']) for x in r['refs'])"
+  manifest_has "any(x['name'] == 'refs/worktree/keep' and x['sha'] == '$keep' for x in r['refs'])"
+  manifest_has "any(g['path'].startswith('rebase-merge/') for g in r['git_state'] if g['w'] > 0)"
+  # git's record of it is kept: the moved checkout still works, mid-rebase, with its staged content
+  [ "$(git -C "$B/hotfix-moved" rev-parse :staged.txt)" = "$stb" ]
+  [ -d "$(git -C "$B/hotfix-moved" rev-parse --absolute-git-dir)/rebase-merge" ]
+  git -C "$T" rev-parse -q --verify refs/heads/hot >/dev/null        # not adopted while its rebase is in progress
+  run python3 "$UP" --restore-help
+  case "$output" in *"$NOTHING"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" worktree prune; gone "$T"
+  ! git -C "$T" cat-file -e "$keep" 2>/dev/null; ! git -C "$T" cat-file -e "$stb" 2>/dev/null
+  run python3 "$UP" --restore-help
+  case "$output" in *"the staged, uncommitted content of staged.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"git's record of a rebase in progress (rebase-merge/"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"${keep:0:7}"*"ref refs/worktree/keep"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP" --forget-snapshot
+  [ "$status" -eq 1 ]; case "$output" in *"Nothing was removed"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP" --restore-help
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  git -C "$T" cat-file -e "$keep"; git -C "$T" cat-file -e "$stb"
+  ls "$DAEDALUS_HOME"/state/upgrade-restore/*/1-thing/git/w*/rebase-merge/ >/dev/null
+}
+
+@test "a worktree made by hand under worktrees/<NN> whose directory a cut-off git worktree move took elsewhere, with staged content and a merge in progress: the copy holds both; the upgrade stops instead of removing its record, naming git worktree repair; once the record is gone --restore-help lists both" {
+  git -C "$T" branch side; git -C "$T" checkout -q side; printf 's\n' > "$T/s.txt"; git -C "$T" add -A; cmt "$T" -m side
+  git -C "$T" checkout -q main
+  mkdir -p "$DAEDALUS_HOME/worktrees/03"; W="$DAEDALUS_HOME/worktrees/03/thing"
+  git -C "$T" worktree add -q -b hotfix "$W" main
+  printf 'hot\n' > "$W/h.txt"; git -C "$W" add -A; cmt "$W" -m hot
+  git -C "$W" -c user.email=t@x -c user.name=t merge -q --no-commit --no-ff side
+  printf 'STAGED-ONLY\n' > "$W/a.txt"; git -C "$W" add a.txt; printf 'WORKING\n' > "$W/a.txt"
+  stb="$(git -C "$W" rev-parse :a.txt)"; adm="$(git -C "$W" rev-parse --absolute-git-dir)"; mh="$(cat "$adm/MERGE_HEAD")"
+  mkdir -p "$B/elsewhere"; mv "$W" "$B/elsewhere/thing"
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"worktrees/03/thing"*"not there now"*"worktree repair"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$adm/MERGE_HEAD" ]; [ "$(git -C "$B/elsewhere/thing" rev-parse :a.txt)" = "$stb" ]
+  manifest_has "any(x['kind'] == 'index' and any(b == '$stb' for _, b in x['blobs']) for x in r['refs'])"
+  manifest_has "any(g['path'] == 'MERGE_HEAD' and g['w'] > 0 for g in r['git_state'])"
+  git -C "$T" worktree prune; gone "$T"
+  [ ! -d "$adm" ]; ! git -C "$T" cat-file -e "$stb" 2>/dev/null
+  run python3 "$UP" --restore-help
+  case "$output" in *"the staged, uncommitted content of a.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"git's record of a merge in progress (MERGE_HEAD"*) : ;; *) echo "$output"; return 1 ;; esac
+  cmds "$output" > "$B/restore.sh"; bash "$B/restore.sh" || { cat "$B/restore.sh"; return 1; }
+  git -C "$T" cat-file -e "$stb"
+  [ "$(cat "$DAEDALUS_HOME"/state/upgrade-restore/*/1-thing/git/w*/MERGE_HEAD)" = "$mh" ]
+}
+
+@test "an edit git's stat check cannot see (core.trustctime false; same size, inode and mtime): in the copy as a change, and the upgrade stops before the checkout back to the trunk would replace it" {
+  git -C "$T" checkout -q -b fix/in-flight; printf 'f\n' > "$T/f.txt"; git -C "$T" add -A; cmt "$T" -m f
+  git -C "$T" config core.trustctime false
+  touch -t 202601010000 "$T/f.txt"; git -C "$T" update-index --refresh >/dev/null; sleep 1
+  cp -p "$T/f.txt" "$B/ref"; printf 'g\n' > "$T/f.txt"; touch -r "$B/ref" "$T/f.txt"
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing has uncommitted changes git status does not show"*"f.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$T/f.txt")" = g ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  manifest_has "any(f['path'] == 'f.txt' and f['kind'] == 'changed' for f in r['files'])"
+}
+
+@test "an untracked directory holding only a .git git cannot read, where origin now tracks a file: in the copy, and the upgrade stops instead of letting the checkout delete it" {
+  trunk_moves scratch "the trunk's own scratch file"
+  git -C "$T" checkout -q -b fix/in-flight; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  git init -q "$T/scratch"; printf 'mine\n' > "$T/scratch/m"; git -C "$T/scratch" add m; cmt "$T/scratch" -m "nested-only commit"
+  rm "$T/scratch/m"; printf 'garbage\n' > "$T/scratch/.git/HEAD"
+  [ -z "$(git -C "$T" status --porcelain --ignored | grep scratch)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"scratch"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$T/scratch/.git/objects" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  manifest_has "any(f['path'] == 'scratch/.git/HEAD' for f in r['files'])"
+  manifest_has "sum(1 for f in r['files'] if f['path'].startswith('scratch/.git/objects/')) >= 3"
+}
+
+@test "a pre-push hook carrying Daedalus's mark that the operator extended with checks of their own is kept beside the new one, named in the step's line; one that is only another home's copy of the shim is replaced" {
+  hp="$T/.git/hooks/pre-push"; mkdir -p "$T/.git/hooks"
+  printf '#!/bin/sh\n# daedalus pre-push hook (core/prepush.py)\n# MY OWN CHECKS\n./run-my-lint.sh || exit 1\n' > "$hp"; chmod +x "$hp"
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import prepush; from pathlib import Path; open(sys.argv[2], "w").write(prepush.shim(Path("/elsewhere/home")))' "$DAEDALUS_HOME/core" "$T/sub/.git/hooks/pre-push"
+  chmod +x "$T/sub/.git/hooks/pre-push"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"pre-push.before-daedalus"*) : ;; *) echo "$output"; return 1 ;; esac
+  grep -q "$DAEDALUS_HOME/core/prepush.py" "$hp"; ! grep -q "MY OWN CHECKS" "$hp"
+  grep -l "MY OWN CHECKS" "$T"/.git/hooks/pre-push.before-daedalus-* >/dev/null
+  grep -q "$DAEDALUS_HOME/core/prepush.py" "$T/sub/.git/hooks/pre-push"
+  [ -z "$(ls "$T/sub/.git/hooks/" | grep before-daedalus)" ]
+}

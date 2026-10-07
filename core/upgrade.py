@@ -95,6 +95,13 @@ STASHED = ("%s: target/%s holds %s (%s) — saved work no window shows; the upgr
            "names it until it is applied or dropped.")
 UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s would overwrite (%s) — move them out "
              "of that checkout, or commit them on its branch, then start a session again")
+# An in-place edit of the same size with its mtime put back, where git does not look at ctime (core.trustctime false,
+# core.checkStat minimal): git status and git add pass the file on its stat data, and the checkout back to the trunk
+# wrote the committed version over it (safety-copy review 4, finding 2).
+STAT_BLIND = ("upgrade to %s incomplete: target/%s has uncommitted changes git status does not show, in files whose "
+              "content changed while their size and times stayed as git last saw them (%s) — have git look at them "
+              "again ((cd target/%s && touch %s)), commit them on their branch inside that checkout, then start a "
+              "session again")
 # A local branch named origin/<trunk> shadows the remote-tracking ref in every bare "origin/<trunk>" git is given
 # (release-candidate review 2, finding 5): stopped on before anything moves.
 SHADOW = ("upgrade to %s incomplete: target/%s has a local branch named origin/%s, which git takes for origin's %s — "
@@ -153,6 +160,14 @@ DEBRIS_KEPT = ("upgrade to %s incomplete: worktrees/%s is a checkout of target/%
                "cut off, and it holds what git does not commit there and removing it would delete (%s) — move what "
                "you need out of it, remove that worktree (git -C target/%s worktree remove --force %s, or delete the "
                "directory and run git -C target/%s worktree prune), then start a session again")
+# A missing directory is no evidence that a worktree holds nothing: moved with mv, or by a `git worktree move` cut off
+# after its rename, it still works through git's record of it, which holds its staged content and any merge or rebase
+# in progress — and a removed record's name went to the next window, so the moved checkout read that window's
+# (safety-copy review 4, finding 4).
+DEBRIS_GONE = ("upgrade to %s incomplete: worktrees/%s, a checkout of target/%s's branch %s, is not there now, but git "
+               "still keeps its record (%s)%s — if you moved it, run git -C target/%s worktree repair <its new path>; "
+               "if you deleted it and need nothing from it, run git -C target/%s worktree remove --force %s; then "
+               "start a session again")
 DEBRIS_DIRTY = ("upgrade to %s incomplete: worktrees/%s is a checkout of target/%s's branch %s left by a start that was "
                 "cut off, and it holds changes (%s) — commit them on %s there, remove that worktree (git -C target/%s "
                 "worktree remove %s), then start a session again")
@@ -259,7 +274,7 @@ def target_repos(root: Path) -> List[Tuple[str, Path]]:
 
 def step_hooks(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
     import prepush
-    done, other = [], []
+    done, other, kept = [], [], []
     for key, p in target_repos(root):
         s, _ = prepush.state(p)
         if s == "installed":
@@ -276,10 +291,14 @@ def step_hooks(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
             s2, sentence = "failed", "the pre-push hook could not be installed in target/%s (%s)" % (key, e)
         if s2 == "installed":
             done.append("target/" + key)
+            if "is kept as" in sentence:        # a hook with lines of the operator's own, kept beside the new one
+                kept.append("target/%s's pre-push hook had lines of its own, which no longer run before a push; "
+                            "it is kept, unchanged, as %s" % (key, sentence.rsplit("is kept as ", 1)[1].rstrip(".")))
         elif s2 != "unchanged":
             other.append(sentence.rstrip("."))
     lines = ["%s: %s the pre-push hook in %s." % (head, "would install" if dry else "installed", ", ".join(done))] \
         if done else []
+    lines += ["%s: %s." % (head, k) for k in kept]
     return lines + ["%s: %s — promote refuses until it is fixed; core/doctor.sh names the remedy." % (head, o)
                     for o in other]
 
@@ -574,11 +593,15 @@ def _carried(p: Path, ref: str, extra: List[str]) -> bool:
 def _checked_out_elsewhere(p: Path) -> Dict[str, str]:
     """{branch: path} for each branch checked out in a worktree of <p> other than <p> itself — one someone made by
     hand with `git worktree add`, or a window's. Such a branch cannot be checked out in a window's worktree: git
-    refuses ("already used by worktree"), so adopting it fails on every run (release-candidate review, finding 1)."""
+    refuses ("already used by worktree"), so adopting it fails on every run (release-candidate review, finding 1).
+    A branch another worktree is rebasing or bisecting (its HEAD detached meanwhile) counts too, as git counts it:
+    adopting it moved the branch out from under the rebase (safety-copy review 4, finding 1)."""
+    import leaselib as ll
     code, out, _ = _git(p, "worktree", "list", "--porcelain")
     if code != 0:
         return {}
     here = os.path.realpath(str(p))
+    records = ll.worktree_records(p)
     found, path = {}, None
     for ln in out.splitlines() + [""]:
         if ln.startswith("worktree "):
@@ -586,6 +609,10 @@ def _checked_out_elsewhere(p: Path) -> Dict[str, str]:
         elif ln.startswith("branch refs/heads/") and path is not None:
             if os.path.realpath(path) != here:
                 found[ln[len("branch refs/heads/"):]] = path
+        elif ln == "detached" and path is not None and os.path.realpath(path) != here:
+            b = ll.branch_in_use(records[os.path.realpath(path)]) if os.path.realpath(path) in records else None
+            if b:
+                found.setdefault(b, path)
         elif not ln:
             path = None
     return found
@@ -1004,6 +1031,9 @@ def _debris_held(path: str, ours: Set[str]) -> Tuple[List[str], List[str]]:
             kept.append(name)
         else:
             changed.append(name)
+    import leaselib as ll
+    for d in ll.unreadable_gits(Path(path)):        # git lists none of it (safety-copy review 4, finding 3)
+        kept.append("%s/ (a .git git cannot read)" % d)
     gd = _git(Path(path), "rev-parse", "--absolute-git-dir")[1].strip()
     if gd and os.path.isdir(os.path.join(gd, "modules")) and os.listdir(os.path.join(gd, "modules")):
         kept.append("its submodules' git directories, in %s" % os.path.join(gd, "modules"))
@@ -1025,8 +1055,9 @@ def _clear_debris(root: Path, p: Path, key: str, ver: str) -> List[str]:
     number went to another window over it (release-candidate review 3, finding 10). Removed, so the branch is
     adopted — unless it holds changes, which stop the upgrade, named; or anything git does not commit there (an
     ignored file, a repository cloned inside it, a submodule's checkout), which removing it would delete: that
-    stops the upgrade too, named. Never deleted by hand: when git will not remove it, it is moved aside under
-    state/upgrade-debris/ and said."""
+    stops the upgrade too, named. One whose directory is not there stops the upgrade, named with git's record of it:
+    moved, it still works through that record (safety-copy review 4, finding 4). Never deleted by hand: when git
+    will not remove it, it is moved aside under state/upgrade-debris/ and said."""
     import leaselib as ll
     base = os.path.realpath(str(root / "worktrees"))
     ours: Optional[Set[str]] = None
@@ -1040,6 +1071,11 @@ def _clear_debris(root: Path, p: Path, key: str, ver: str) -> List[str]:
         if not ll.valid_id(nn) or not branch or branch == "lease/" + nn or ll.read_lease(root, nn) is not None:
             continue
         rel = os.path.relpath(path, base)
+        if not os.path.isdir(path):
+            admin = ll.worktree_records(p).get(path)
+            holds = ll.record_holds(admin) if admin is not None else []
+            raise Stop(DEBRIS_GONE % (ver, rel, key, branch, _rel(root, str(admin)) if admin else "?",
+                                      ", which holds %s" % "; ".join(holds) if holds else "", key, key, path))
         if os.path.isdir(path):
             if ours is None:
                 ours = {c for c in (_common_dir(["-C", str(q)]) for _, q in target_repos(root)) if c}
@@ -1095,7 +1131,14 @@ def _hand_worktrees(root: Path, p: Path) -> List[Tuple[str, str]]:
             if subs:
                 parts.append("a detached HEAD with %s no branch has (%s)" % (_plural(len(subs), "commit"), _quoted(subs)))
         missing = "prunable" in w or not os.path.isdir(path)
-        if not missing:
+        if missing:
+            # moved with mv, it still works through git's record of it, which the upgrade keeps (safety-copy
+            # review 4, findings 1 and 5): what that record holds is named
+            admin = ll.worktree_records(p).get(real)
+            holds = ll.record_holds(admin) if admin is not None else []
+            if holds:
+                parts.append("git's record of it holds %s" % "; ".join(holds))
+        else:
             code, st, _ = _git(Path(path), "status", "--porcelain", "--untracked-files=all")
             files = sorted(ln[3:] for ln in st.splitlines() if ln.strip()) if code == 0 else []
             if files:
@@ -1105,7 +1148,8 @@ def _hand_worktrees(root: Path, p: Path) -> List[Tuple[str, str]]:
             if "branch" in w:
                 what = "on branch %s, %s" % (w["branch"][len("refs/heads/"):], what)
             if missing:
-                what += " — its directory is not there now (a volume not mounted?); its record is kept"
+                what += (" — its directory is not there now (a volume not mounted, or moved: then run git -C %s "
+                         "worktree repair <its new path>); its record is kept" % _rel(root, str(p)))
             found.append((path, what))
     return found
 
@@ -1328,6 +1372,10 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         if filtered:
             raise Stop(FILTERED % (ver, key, ll.name_paths(filtered), key,
                                    " ".join(shlex.quote(f) for f in filtered) if len(filtered) <= 5 else "<file>"))
+        blind = ll.stat_blind_edits(p)
+        if blind:
+            raise Stop(STAT_BLIND % (ver, key, ll.name_paths(blind), key,
+                                     " ".join(shlex.quote(f) for f in blind) if len(blind) <= 5 else "<file>"))
     fetched = set() if dry else _fetch_all(repos, deadline)
     for key, p in repos:
         _, cur, _ = _git(p, "branch", "--show-current")
@@ -1714,10 +1762,10 @@ def _snap_repos(root: Path) -> List[dict]:
                 dirnames[:] = []
                 continue
             walked.add(real)
-            if ".git" in dirnames or ".git" in filenames:
+            # .GIT is .git where git ignores case (macOS's default)
+            if any(n.casefold() == ".git" for n in dirnames + filenames):
                 found.append(dirpath)
-            if ".git" in dirnames:
-                dirnames.remove(".git")
+            dirnames[:] = [d for d in dirnames if d.casefold() != ".git"]
         return found
 
     repos: Dict[str, dict] = {}
@@ -1725,8 +1773,13 @@ def _snap_repos(root: Path) -> List[dict]:
     for name in sorted(os.listdir(str(tgt))):
         if os.path.islink(str(tgt / name)) and os.path.isdir(str(tgt / name)):
             found += walk(str(tgt / name))
+    if (root / "worktrees").is_dir():
+        # a worktree someone made there by hand and then moved or renamed with mv: git's record still names the old
+        # path, and the checkout still works through its .git file (safety-copy review 4, findings 1 and 5)
+        found += walk(str(root / "worktrees"))
     cands: List[str] = sorted(found, key=lambda q: (len(Path(q).parts), q))
     cands += [str(p) for _, p in target_repos(root)]
+    moved: Dict[str, Dict[str, str]] = {}      # common git directory: {a worktree's git directory: where it is now}
     done = 0
     while True:
         while done < len(cands):
@@ -1736,6 +1789,13 @@ def _snap_repos(root: Path) -> List[dict]:
             if at is None:
                 continue
             common, gd = at
+            if gd != common:
+                try:
+                    rec = (Path(gd) / "gitdir").read_text().strip()
+                except OSError:
+                    rec = ""
+                if rec and os.path.realpath(os.path.dirname(rec)) != os.path.realpath(c):
+                    moved.setdefault(common, {})[gd] = c
             if common in repos:
                 continue
             work: Optional[str] = c
@@ -1780,6 +1840,9 @@ def _snap_repos(root: Path) -> List[dict]:
                         dirnames[:] = [d for d in dirnames if d == "modules"]
         if len(repos) == before and done == len(cands):
             break
+    for common, m in moved.items():
+        if common in repos:
+            repos[common]["moved"] = m
     return list(repos.values())
 
 
@@ -1915,6 +1978,47 @@ def _stash_list_files(common: str) -> List[Tuple[int, str, str]]:
     return out
 
 
+def _own_refs_files(g: List[str], admin: str, deadline: Optional[float]) -> bytes:
+    """A linked worktree's own refs read from the files under its record's refs/ — only when git cannot read that
+    record (its commondir or HEAD broken) — as for-each-ref prints them; one naming no object here is left out."""
+    found = []
+    for top in ("worktree", "bisect", "rewritten"):
+        for dp, _, fns in os.walk(os.path.join(admin, "refs", top)):
+            for f in fns:
+                try:
+                    sha = Path(dp, f).read_text().strip()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+                    found.append((sha, os.path.relpath(os.path.join(dp, f), admin)))
+    if not found:
+        return b""
+    code, out, _ = _gb(g + ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                       inp="".join(sha + "\n" for sha, _ in found).encode(), deadline=deadline)
+    types = dict(ln.split(" ", 1) for ln in os.fsdecode(out).splitlines() if " " in ln) if code == 0 else {}
+    return "".join("%s %s %s\n" % (sha, types[sha], name) for sha, name in found if sha in types).encode()
+
+
+def _wt_at(w: dict) -> str:
+    """Where a copied worktree's files are: where its checkout is now (moved with mv), else its recorded path."""
+    return w.get("at") or w["path"]
+
+
+def _git_entries(top: str, own_copy) -> List[str]:
+    """Every entry under the checkout at <top> whose name is .git in any case — never <top>'s own .git — below a
+    directory that is not a repository a copy holds (own_copy), relative to <top>. git lists none of them: it never
+    names an entry called .git, and where it ignores case not .GIT either."""
+    found = []
+    for dp, dns, fns in os.walk(top):
+        names = [n for n in dns + fns if n.casefold() == ".git" and not (dp == top and n == ".git")]
+        if dp != top and names and own_copy(dp):
+            dns[:] = []
+            continue
+        found += [os.path.relpath(os.path.join(dp, n), top) for n in names]
+        dns[:] = [d for d in dns if d.casefold() != ".git"]
+    return found
+
+
 def _all_files(top: str) -> List[str]:
     """Every file and symlink under <top> (a .git inside included), relative to it; links are not followed."""
     out = []
@@ -1949,23 +2053,61 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
         kind = ("branch" if name.startswith("refs/heads/") else "tag" if name.startswith("refs/tags/") else
                 "remote" if name.startswith("refs/remotes/") else "stash" if name == "refs/stash" else "other")
         refs.append({"name": name, "sha": sha, "type": typ, "kind": kind})
+    # git's record of each linked worktree (<common>/worktrees/<id>), by the path it records — read whether or not
+    # that path is there: a worktree moved with mv (or by a `git worktree move` cut off after its rename) keeps its
+    # staged content, its in-progress state and its own refs there, and the upgrade's prune of records under
+    # worktrees/ deleted them (safety-copy review 4, findings 1, 4 and 5)
+    records: Dict[str, str] = {}
+    try:
+        ids = sorted(os.listdir(os.path.join(common, "worktrees")))
+    except OSError:
+        ids = []
+    for wid in ids:
+        a = os.path.realpath(os.path.join(common, "worktrees", wid))
+        try:
+            rec = Path(a, "gitdir").read_text().strip()
+        except OSError:
+            rec = ""
+        if os.path.isdir(a):
+            records.setdefault(os.path.realpath(os.path.dirname(rec)) if rec else "\0" + a, a)
+    moved = repo.get("moved") or {}
+    listed = _worktree_list(g)
+    seen: Set[str] = set()
+    for i, w in enumerate(listed):
+        if i > 0 and w.get("worktree"):
+            seen.add(records.get(os.path.realpath(w["worktree"]), ""))
+    for key, a in records.items():         # a record git does not list (its gitdir file unreadable): copied all the same
+        if a not in seen:
+            code, o, _ = _gb(["--git-dir", a, "rev-parse", "-q", "--verify", "HEAD"], deadline=deadline)
+            listed.append({"worktree": "" if key.startswith("\0") else key, "HEAD": os.fsdecode(o).strip()
+                           if code == 0 else "", "admin": a})
     wts = []
-    for i, w in enumerate(_worktree_list(g)):
+    for i, w in enumerate(listed):
         path = w.get("worktree", "")
         if i == 0 and repo["work"] and "bare" not in w:
             path = repo["work"]      # a submodule's main worktree is listed as its git directory
         bare = "bare" in w
         exists = bool(path) and not bare and Path(path).is_dir()
         head = w.get("HEAD", "")
-        wts.append({"i": i, "path": path, "head": head if head.strip("0") else "", "branch": w.get("branch", ""),
-                    "exists": exists})
+        admin = w.get("admin") or (records.get(os.path.realpath(path), "") if i > 0 and path else "")
+        wt = {"i": i, "path": path or admin, "head": head if head.strip("0") else "", "branch": w.get("branch", ""),
+              "exists": exists}
+        if admin:
+            wt["admin"] = admin
+            if not exists and admin in moved and Path(moved[admin]).is_dir():
+                wt["at"] = moved[admin]      # where the checkout is now; its files are copied from there
+        wts.append(wt)
+        path = wt["path"]
         if head.strip("0"):
             refs.append({"name": "HEAD", "sha": head, "type": "commit", "kind": "head", "worktree": path,
                          "branch": w.get("branch", "")})
-        if exists and i > 0:     # a linked worktree's own refs (bisect, worktree-local) only it lists
-            c2, o2, _ = _gb(["-C", path, "for-each-ref", "--format=%(objectname) %(objecttype) %(refname)",
-                             "refs/bisect/", "refs/worktree/", "refs/rewritten/"], deadline=deadline)
-            for ln in (os.fsdecode(o2).splitlines() if c2 == 0 else []):
+        if i > 0 and (admin or exists):     # a linked worktree's own refs (bisect, worktree-local) only it lists
+            c2, o2, _ = _gb((["--git-dir", admin] if admin else ["-C", path]) + [
+                "for-each-ref", "--format=%(objectname) %(objecttype) %(refname)", "refs/bisect/", "refs/worktree/",
+                "refs/rewritten/"], deadline=deadline)
+            if c2 != 0 and admin:
+                o2 = _own_refs_files(g, admin, deadline)      # a record git cannot read: its ref files, read directly
+            for ln in (os.fsdecode(o2).splitlines() if c2 == 0 or admin else []):
                 sha, typ, name = (ln.split(" ", 2) + ["", ""])[:3]
                 refs.append({"name": name, "sha": sha, "type": typ, "kind": "other", "worktree": path})
     cutoff = time.time() - REFLOG_DAYS * 86400
@@ -2008,9 +2150,40 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
     state: List[dict] = []
     scratch: Optional[str] = None
     for w in wts:
-        if not w["exists"]:
+        if w["i"] == 0:
+            gd = common
+        elif w.get("admin"):
+            gd = w["admin"]
+        elif w["exists"]:
+            code, out, _ = _gb(["-C", w["path"], "rev-parse", "--absolute-git-dir"], deadline=deadline)
+            gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
+        else:
+            gd = ""
+        if gd and os.path.isdir(gd):
+            if w["head"] or os.path.isfile(os.path.join(gd, "index")):
+                if scratch is None:
+                    scratch = _scratch_repo(common, "collect")
+                ix = _index_commit(scratch, common, gd, w["path"], w["i"], deadline)
+                if ix:
+                    refs.append(dict(ix, name="index of %s" % w["path"], type="commit", kind="index",
+                                     worktree=w["path"], subject="the staged changes of %s" % w["path"]))
+            names = [n for n in sorted(os.listdir(gd)) if n in GIT_STATE or n.startswith("BISECT_")]
+            for n in names:
+                full = os.path.join(gd, n)
+                walk = [(full, n)] if not os.path.isdir(full) else [
+                    (os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), gd))
+                    for dp, _, fs in os.walk(full) for f in fs]
+                for fp, rel in walk:
+                    try:
+                        st = os.lstat(fp)
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(st.st_mode):
+                        state.append({"w": w["i"], "path": rel, "size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                                      "src": fp})
+        if not (w["exists"] or w.get("at")):
             continue
-        wp = w["path"]
+        wp = _wt_at(w)
         kinds = _wt_kinds(wp, bool(w["head"]), deadline)
         if kinds is None:
             # a directory git cannot read as a worktree (a cut-off worktree add left it without a usable .git file):
@@ -2029,6 +2202,13 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
             if not own_copy(os.path.join(wp, p.rstrip("/"))):     # a repository no copy holds: all of it, here
                 for f in _all_files(os.path.join(wp, p.rstrip("/"))):
                     kinds.setdefault(os.path.join(p.rstrip("/"), f), kind)
+        # a .git (any case) git never lists, below a directory that is no repository a copy holds — one git cannot
+        # read (its HEAD broken), or a .git file pointing nowhere: every file in it, its commits' objects included
+        # (safety-copy review 4, finding 3)
+        for e in _git_entries(wp, own_copy):
+            full = os.path.join(wp, e)
+            for f in (_all_files(full) if os.path.isdir(full) and not os.path.islink(full) else [""]):
+                kinds.setdefault(os.path.join(e, f) if f else e, "unlisted")
         for p in sorted(kinds):
             try:
                 st = os.lstat(os.path.join(wp, p))
@@ -2038,34 +2218,6 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
                 continue
             files.append({"w": w["i"], "path": p, "kind": kinds[p], "size": st.st_size, "mtime_ns": st.st_mtime_ns,
                           "ctime_ns": st.st_ctime_ns, "ino": st.st_ino, "link": stat.S_ISLNK(st.st_mode)})
-        if w["i"] == 0:
-            gd = common
-        else:
-            code, out, _ = _gb(["-C", wp, "rev-parse", "--absolute-git-dir"], deadline=deadline)
-            gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
-        if not gd or not os.path.isdir(gd):
-            continue
-        if w["head"] or os.path.isfile(os.path.join(gd, "index")):
-            if scratch is None:
-                scratch = _scratch_repo(common, "collect")
-            ix = _index_commit(scratch, common, gd, wp, w["i"], deadline)
-            if ix:
-                refs.append(dict(ix, name="index of %s" % wp, type="commit", kind="index", worktree=wp,
-                                 subject="the staged changes of %s" % wp))
-        names = [n for n in sorted(os.listdir(gd)) if n in GIT_STATE or n.startswith("BISECT_")]
-        for n in names:
-            full = os.path.join(gd, n)
-            walk = [(full, n)] if not os.path.isdir(full) else [
-                (os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), gd))
-                for dp, _, fs in os.walk(full) for f in fs]
-            for fp, rel in walk:
-                try:
-                    st = os.lstat(fp)
-                except OSError:
-                    continue
-                if stat.S_ISREG(st.st_mode):
-                    state.append({"w": w["i"], "path": rel, "size": st.st_size, "mtime_ns": st.st_mtime_ns,
-                                  "src": fp})
     code, out, _ = _gb(["--git-dir", common, "count-objects", "-v"], deadline=deadline)
     kib = 0
     for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
@@ -2192,6 +2344,9 @@ def _wt_kinds(wp: str, head: bool, deadline: Optional[float]) -> Optional[Dict[s
         # bytes a clean filter or a line-ending conversion hides from git diff: what a checkout would not write back
         for p in ll.filtered_edits(Path(wp), deadline, skip=set(kinds)):
             kinds[p] = "changed"
+        # an edit git's stat check passes (core.trustctime false: same size, inode and mtime) — read by content
+        for p in ll.stat_blind_edits(Path(wp), deadline, skip=set(kinds)):
+            kinds[p] = "changed"
     except subprocess.TimeoutExpired:
         raise _OutOfTime()
     return kinds
@@ -2212,8 +2367,8 @@ def _snap_fp(coll: List[dict]) -> str:
     for r in coll:
         parts.append([r["common"],
                       sorted((x["name"], x.get("worktree", ""), x["sha"]) for x in r["refs"]),
-                      [(w["path"], w["head"], w["branch"], w["exists"]) for w in r["worktrees"]],
-                      sorted((r["worktrees"][f["w"]]["path"], f["path"], f["kind"], f["size"], f["mtime_ns"],
+                      [(w["path"], w["head"], w["branch"], w["exists"], w.get("at", "")) for w in r["worktrees"]],
+                      sorted((_wt_at(r["worktrees"][f["w"]]), f["path"], f["kind"], f["size"], f["mtime_ns"],
                               f.get("ctime_ns"), f.get("ino")) for f in r["files"]),
                       sorted((r["worktrees"][s["w"]]["path"], s["path"], s["size"], s["mtime_ns"])
                              for s in r["state"] if s["path"] not in SNAP_ALONG)])
@@ -2245,7 +2400,7 @@ def _kept(root: Path) -> Dict[str, dict]:
                 h["shas"].add(x["sha"])
                 if x.get("type") == "commit" and x.get("kind") != "index":
                     h["commits"].add(x["sha"])
-            wtp = {w.get("i"): w.get("path") for w in r.get("worktrees", [])}
+            wtp = {w.get("i"): w.get("at") or w.get("path") for w in r.get("worktrees", [])}
             for f in r.get("files", []):
                 h["files"].add((f["path"], f["sha256"]))
                 if "ctime_ns" in f and "ino" in f:
@@ -2293,12 +2448,12 @@ def _snap_plan(root: Path, coll: List[dict], deadline: Optional[float]) -> Tuple
                 and (x["type"] != "commit" or x["kind"] == "index" or x["sha"] in new)]
         files = []
         for f in r["files"]:
-            if (r["worktrees"][f["w"]]["path"], f["path"], f["size"], f["mtime_ns"], f["ctime_ns"], f["ino"]) \
+            if (_wt_at(r["worktrees"][f["w"]]), f["path"], f["size"], f["mtime_ns"], f["ctime_ns"], f["ino"]) \
                     in h["stat"]:
                 continue
             if _snap_late(deadline):
                 raise _OutOfTime()
-            if (f["path"], _sha256(os.path.join(r["worktrees"][f["w"]]["path"], f["path"]), f["link"])) in h["files"]:
+            if (f["path"], _sha256(os.path.join(_wt_at(r["worktrees"][f["w"]]), f["path"]), f["link"])) in h["files"]:
                 continue
             files.append(f)
         state = [x for x in r["state"] if x["path"] not in SNAP_ALONG
@@ -2422,8 +2577,10 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
     name = _name(n, r["label"])
     entry = {"n": n, "label": r["label"], "path": r["work"], "git_dir": r["common"], "bundle": None,
              "basis": list(r.get("basis") or []),
-             "tar": name + ".tar", "worktrees": [{"i": w["i"], "path": w["path"], "head": w["head"],
-                                                  "branch": w["branch"]} for w in r["worktrees"]],
+             "tar": name + ".tar", "worktrees": [dict({"i": w["i"], "path": w["path"], "head": w["head"],
+                                                       "branch": w["branch"]},
+                                                      **{k: w[k] for k in ("admin", "at") if w.get(k)})
+                                                 for w in r["worktrees"]],
              "refs": [], "files": [], "git_state": []}
     by_sha: Dict[str, str] = {}
     for x in r["refs"]:
@@ -2456,7 +2613,7 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
             raise _SnapFail("written", "the bundle of %s: %s" % (r["label"], _last(err)))
         shutil.rmtree(str(tmp), ignore_errors=True)
         entry["bundle"] = bundle.name
-    paths = {w["i"]: w["path"] for w in r["worktrees"]}
+    paths = {w["i"]: _wt_at(w) for w in r["worktrees"]}
     with tarfile.open(str(part / entry["tar"]), "w", format=tarfile.PAX_FORMAT, encoding="utf-8",
                       errors="surrogateescape") as tar:
         for f in r["files"]:
@@ -2780,20 +2937,43 @@ def _snap_missing(root: Path, stamp: str) -> Tuple[dict, List[Tuple[dict, str, o
         wts: List[str] = []
         if g is not None:
             stashes = _stash_list(g) or []
-            ins = "".join(sha + "\n" for _, sha, _ in stashes).encode()
+            # each linked worktree's own refs (refs/worktree, refs/bisect, refs/rewritten), which --all from another
+            # worktree does not see, read through git's record of it whether or not its directory is there
+            admins = sorted(str(a) for a in Path(r["git_dir"]).glob("worktrees/*") if a.is_dir()) \
+                if r.get("git_dir") else []
+            own: Set[str] = set()
+            for a in admins:
+                code, o, _ = _gb(["--git-dir", a, "for-each-ref", "--format=%(objectname)", "refs/worktree/",
+                                  "refs/bisect/", "refs/rewritten/"])
+                own |= _lines_set(o) if code == 0 else set()
+            ins = "".join(sha + "\n" for sha in [x for _, x, _ in stashes] + sorted(own)).encode()
             code, o, _ = _gb(g + ["rev-list", "--all", "--stdin"], inp=ins)
             reach = _lines_set(o) if code == 0 else None
             code, o, _ = _gb(g + ["for-each-ref", "--format=%(objectname)"])
-            targets = _lines_set(o) if code == 0 else set()
+            targets = (_lines_set(o) if code == 0 else set()) | own
             if "reflog" in kinds:
                 code, o, _ = _gb(g + ["rev-list", "--all", "--reflog", "--stdin"], inp=ins)
                 logged = _lines_set(o) if code == 0 else None
             wts = [w.get("worktree", "") for w in _worktree_list(g) if "bare" not in w]
             if r.get("path") and g[0] == "-C":
                 wts = [r["path"]] + wts[1:]     # a submodule's main worktree is listed as its git directory
+            for w in r.get("worktrees", []):
+                # a checkout moved with mv, where the copy found it — while it is still one of this repository's
+                at = w.get("at")
+                if at and at not in wts and os.path.isdir(at) and _common_dir(["-C", at]) == r.get("git_dir"):
+                    wts.append(at)
             if "index" in kinds:
                 code, o, _ = _gb(g + ["rev-list", "--objects", "--all", "--stdin"], inp=ins)
                 objs = _lines_set(o) if code == 0 else None
+                # every index git keeps for this repository — a worktree's whose directory is gone included
+                for gd in ([r["git_dir"]] if r.get("git_dir") else []) + admins:
+                    if not os.path.isfile(os.path.join(gd, "index")):
+                        continue
+                    code, o, _ = _gb(["--git-dir", gd, "ls-files", "-s", "-z"])
+                    for rec in (_z(o) if code == 0 else []):
+                        parts = rec.partition("\t")[0].split(" ")
+                        if len(parts) == 3:
+                            staged.add(parts[1])
                 for wp in wts:
                     code, o, _ = _gb(["-C", wp, "ls-files", "-s", "-z"])
                     for rec in (_z(o) if code == 0 else []):
@@ -2846,12 +3026,22 @@ def _git_dir_now(r: dict, w: int) -> Optional[str]:
     worktree), or None when that worktree or repository is gone."""
     if w == 0:
         return r["git_dir"] if r.get("git_dir") and os.path.isdir(r["git_dir"]) else None
-    wt = next((x.get("path") for x in r.get("worktrees", []) if x.get("i") == w), None)
-    if not wt or not os.path.isdir(wt):
-        return None
-    code, out, _ = _gb(["-C", wt, "rev-parse", "--absolute-git-dir"])
-    gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
-    return gd if gd and os.path.isdir(gd) else None
+    x = next((x for x in r.get("worktrees", []) if x.get("i") == w), {})
+    for wt in (x.get("path"), x.get("at")):
+        if wt and os.path.isdir(wt):
+            code, out, _ = _gb(["-C", wt, "rev-parse", "--absolute-git-dir"])
+            gd = os.fsdecode(out.rstrip(b"\n")) if code == 0 else ""
+            if gd and os.path.isdir(gd):
+                return gd
+    # its directory gone (moved with mv, an unmounted volume): git's record of it, while it is still that worktree's
+    admin = x.get("admin")
+    try:
+        rec = Path(admin, "gitdir").read_text().strip() if admin else ""
+    except OSError:
+        rec = ""
+    if rec and os.path.realpath(os.path.dirname(rec)) in {os.path.realpath(q) for q in (x.get("path"), x.get("at")) if q}:
+        return admin
+    return None
 
 
 def _ref_words(x: dict, wt0: str) -> str:

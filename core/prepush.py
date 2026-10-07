@@ -31,8 +31,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple
 
@@ -102,11 +104,34 @@ def install(repo: Path) -> Tuple[str, str]:
                              "config --unset core.hooksPath) and run core/setup.sh" % (name, where, name))
     p = hook_path(repo)
     p.parent.mkdir(parents=True, exist_ok=True)
+    kept = None
+    if s in ("differs", "noexec") and not _only_a_shim(p.read_text(errors="replace")):
+        # it carries the mark but holds lines of its own (checks the operator added): kept beside the new one, never
+        # replaced unseen — no copy of the home holds it (safety-copy review 4, finding 6)
+        kept = p.with_name("pre-push.before-daedalus-%s" % time.strftime("%Y%m%d-%H%M%S"))
+        k = 1
+        while kept.exists():
+            k += 1
+            kept = p.with_name("pre-push.before-daedalus-%s-%d" % (time.strftime("%Y%m%d-%H%M%S"), k))
+        try:
+            os.link(str(p), str(kept))
+        except OSError:
+            shutil.copy2(str(p), str(kept))
     tmp = p.with_name("pre-push.daedalus-tmp")
     tmp.write_text(shim(HOME))
     os.chmod(str(tmp), 0o755)
     os.replace(str(tmp), str(p))
+    if kept is not None:
+        return "installed", ("pre-push hook: installed in %s; the hook that was there had lines of its own and is kept "
+                             "as %s" % (name, display(kept)))
     return "installed", "pre-push hook: installed in %s" % name
+
+
+def _only_a_shim(text: str) -> bool:
+    """Is <text> this release's shim for some home — another home's copy, or this one's before it moved — and
+    nothing else?"""
+    m = re.fullmatch(re.escape(shim(Path("\0"))).replace(re.escape("\0"), "(.+)"), text)
+    return m is not None and "\n" not in m.group(1)
 
 
 def trunk_names(repo: Path) -> set:

@@ -828,6 +828,91 @@ def _under(path: str, base: Path) -> bool:
     return os.path.realpath(path).startswith(b + os.sep)
 
 
+# git's files in a linked worktree's own git directory that say an operation stopped part-way there
+RECORD_BUSY = ("rebase-merge", "rebase-apply", "sequencer", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE",
+               "CHERRY_PICK_HEAD", "REVERT_HEAD")
+
+
+def _git_at(gd: Path, *args: str, timeout: int = 20) -> Tuple[int, str, str]:
+    """git with --git-dir on <gd> — a linked worktree's own git directory (<common>/worktrees/<id>) answers for that
+    worktree whether or not its directory is there."""
+    return v.run(["git", "--git-dir", str(gd)] + list(args), timeout=timeout)
+
+
+def worktree_records(src: Path) -> Dict[str, Path]:
+    """{real path git records for the worktree: its git directory} for each linked worktree of <src>'s repository,
+    read from each <common>/worktrees/<id>/gitdir — so a worktree whose directory is gone (moved with mv, an
+    unmounted volume) is found too."""
+    common = _common_dir(src)
+    found: Dict[str, Path] = {}
+    try:
+        entries = sorted((common / "worktrees").iterdir()) if common is not None else []
+    except OSError:
+        return found
+    for a in entries:
+        try:
+            gd = (a / "gitdir").read_text().strip()
+        except OSError:
+            continue
+        if not os.path.isabs(gd):
+            gd = os.path.normpath(os.path.join(str(a), gd))
+        found[os.path.realpath(os.path.dirname(gd))] = a
+    return found
+
+
+def record_holds(admin: Path) -> list:
+    """What git's record of a linked worktree (<common>/worktrees/<id>) holds that no branch does, in words: a
+    rebase, merge, cherry-pick, revert or bisect in progress, refs of its own (refs/worktree, refs/bisect,
+    refs/rewritten), staged content its HEAD lacks. Read through that record, so it answers when the worktree's
+    directory is gone; deleting the record deletes all of it. [] when it holds none."""
+    out = []
+    try:
+        names = sorted(os.listdir(str(admin)))
+    except OSError:
+        return out
+    busy = [n for n in names if n in RECORD_BUSY or n.startswith("BISECT_")]
+    if busy:
+        out.append("git's record of an operation in progress (%s)" % ", ".join(busy))
+    code, refs, _ = _git_at(admin, "for-each-ref", "--format=%(refname)", "refs/worktree/", "refs/bisect/",
+                            "refs/rewritten/")
+    if code != 0 or refs.strip():
+        out.append("refs of its own (%s)" % (name_paths(refs.split()) if code == 0 else "git could not list them"))
+    if (admin / "index").is_file():
+        code, _, _ = _git_at(admin, "diff-index", "--cached", "--quiet", "HEAD", "--")
+        if code != 0:
+            out.append("staged changes its last commit does not have")
+    return out
+
+
+def branch_in_use(admin: Path) -> Optional[str]:
+    """The branch a linked worktree is rebasing or bisecting (its HEAD detached meanwhile), read from its record:
+    git counts it as checked out there, and moving or deleting it under the rebase loses the rebase's place."""
+    for f in ("rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START"):
+        try:
+            name = (admin / f).read_text().strip()
+        except OSError:
+            continue
+        name = name[len("refs/heads/"):] if name.startswith("refs/heads/") else name
+        if name and name != "detached HEAD":
+            return name
+    return None
+
+
+def _window_record(base: Path, wt: str, admin: Path) -> bool:
+    """Is the worktree recorded at <wt> under worktrees/ (<base>) a window's: worktrees/<NN>/... with a lease file
+    for <NN>, or its HEAD on lease/<NN>?"""
+    rel = os.path.relpath(os.path.realpath(wt), os.path.realpath(str(base)))
+    nn = rel.split(os.sep, 1)[0]
+    if not valid_id(nn):
+        return False
+    if lease_path(base.parent, nn).exists():
+        return True
+    try:
+        return (admin / "HEAD").read_text().strip() == "ref: refs/heads/lease/" + nn
+    except OSError:
+        return False
+
+
 def prune_under(src: Path, base: Path, force: Optional[Path] = None) -> list:
     """`git worktree prune` for the worktrees under <base> only (worktrees/, or
     promote's scratch): the record of one whose directory is gone is removed,
@@ -837,8 +922,13 @@ def prune_under(src: Path, base: Path, force: Optional[Path] = None) -> list:
     detached HEAD held went with it — where git's own gc waits three months
     (release-candidate review 3, finding 2). A locked record is left, unless it
     is locked "initializing" by a `git worktree add` no longer running — an add
-    cut off (findings 8, 11). <force>: that worktree's record is removed
-    whatever its lock says; the caller has judged it (its directory is gone).
+    cut off (findings 8, 11). A record that holds what no branch does (staged
+    content, an operation in progress, refs of its own: record_holds) is left,
+    and so is every record under worktrees/ that is not a window's (one made
+    there by hand, then moved with mv): deleting it deleted that work, and cut
+    the moved checkout off from git (safety-copy review 4, findings 1 and 5).
+    <force>: that worktree's record is removed whatever its lock says; the
+    caller has judged it (its directory is gone).
     Returns the real paths of the cut-off adds' worktrees whose records it
     removed: what is left of such a directory is a half-written tree.
     Caller holds the lock."""
@@ -873,6 +963,8 @@ def prune_under(src: Path, base: Path, force: Optional[Path] = None) -> list:
                 continue
             if reason == "initializing":
                 dropped.append(os.path.realpath(wt))
+            elif (base.name == "worktrees" and not _window_record(base, wt, a)) or record_holds(a):
+                continue
         shutil.rmtree(str(a), ignore_errors=True)
     return dropped
 
@@ -1777,6 +1869,29 @@ def ignores_case(src: Path) -> bool:
     return code == 0 and out.strip() == "true"
 
 
+def unreadable_gits(src: Path) -> list:
+    """Directories below the checkout at <src> (relative to it) holding an entry named .git, in any case, that git
+    cannot read as a repository there — its HEAD broken, or a .git file pointing nowhere. git lists neither the
+    entry nor, when nothing else is in it, the directory: no status shows it, yet a checkout or reset that writes a
+    file where that directory is deletes it, the commits in that .git with it (safety-copy review 4, finding 3).
+    A readable repository inside is git's to list and is not looked into."""
+    found = []
+    top = str(src)
+    for dp, dns, fns in os.walk(top):
+        names = [n for n in dns + fns if n.casefold() == ".git" and not (dp == top and n == ".git")]
+        dns[:] = [d for d in dns if d.casefold() != ".git"]
+        if not names or dp == top:
+            if dp == top and names:
+                found.append(".")
+            continue
+        code, out, _ = _git(Path(dp), "rev-parse", "--show-toplevel")
+        if code == 0 and os.path.realpath(out.strip()) == os.path.realpath(dp):
+            dns[:] = []             # a repository git can read: its own files are its own
+            continue
+        found.append(os.path.relpath(dp, top))
+    return sorted(f for f in found if f != ".")
+
+
 def untracked_in_way(src: Path, refs: list, ignored_only: bool = False) -> list:
     """Untracked paths of <src>'s working tree — ignored ones too — that checking out, fast-forwarding or
     hard-resetting to any of <refs> would overwrite: a file the ref tracks, a directory where it has a file, or a
@@ -1793,6 +1908,10 @@ def untracked_in_way(src: Path, refs: list, ignored_only: bool = False) -> list:
     # --directory: a wholly ignored directory (node_modules/) is one entry, looked into below only where a ref tracks
     code, out, _ = _git(src, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
     ignored = [u for u in out.split("\0") if u] if code == 0 else []
+    # a directory holding a .git git cannot read is untracked work no listing names; a checkout writes over it
+    # whether git would refuse over an untracked file or not
+    hidden = unreadable_gits(src)
+    untracked += [h for h in hidden if h not in untracked]
     if not untracked and not ignored:
         return []
     fold = ignores_case(src)
@@ -2003,6 +2122,80 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
     return sorted(found)
 
 
+def stat_blind(src: Path) -> bool:
+    """Does git in <src> pass a file as unchanged on size, inode and mtime alone — core.trustctime false, or
+    core.checkStat minimal? Then an edit that keeps the size and puts the mtime back is never looked at: ctime,
+    which no one can set back, is the stat field that otherwise gives it away."""
+    _, trust, _ = _git(src, "config", "--bool", "core.trustctime")
+    _, check, _ = _git(src, "config", "core.checkStat")
+    return trust.strip() == "false" or check.strip().lower() == "minimal"
+
+
+def stat_blind_edits(src: Path, deadline: Optional[float] = None, skip: Optional[set] = None) -> list:
+    """Tracked files of the worktree at <src> whose content is not their staged content although git's stat check
+    passes them (stat_blind: an in-place edit of the same size with its mtime put back). git status and git add
+    never read such a file again, and a checkout or reset writes the committed version over it, in no object.
+    Only where git is stat_blind; there every tracked file is hashed as git add would (git hash-object, filters
+    applied) and compared with the index. Paths in <skip> are not read. Under <deadline>, raises
+    subprocess.TimeoutExpired when it is out of time."""
+    if not stat_blind(src):
+        return []
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    skip = skip or set()
+
+    def left() -> Optional[float]:
+        if deadline is None:
+            return None
+        t = deadline - time.time()
+        if t <= 0:
+            raise subprocess.TimeoutExpired("git", 0)
+        return t
+
+    def run(args: list, inp: Optional[bytes] = None) -> Tuple[int, bytes]:
+        r = subprocess.run(["git", "-C", str(src)] + args, input=inp, capture_output=True, env=env, timeout=left(),
+                           stdin=None if inp is not None else subprocess.DEVNULL)
+        return r.returncode, r.stdout
+
+    code, out = run(["ls-files", "-s", "-z"])
+    if code != 0:
+        return []
+    files, links = [], []
+    for rec in out.split(b"\0"):
+        meta, _, path = rec.partition(b"\t")
+        bits = meta.split(b" ")
+        if len(bits) != 3 or bits[2] != b"0" or bits[0] == b"160000":
+            continue
+        p = os.fsdecode(path)
+        try:
+            st = os.lstat(os.path.join(str(src), p))
+        except OSError:
+            continue            # deleted: git status names it
+        if p in skip:
+            continue
+        if bits[0] == b"120000" and stat.S_ISLNK(st.st_mode):
+            links.append((p, bits[1].decode()))
+        elif bits[0] != b"120000" and stat.S_ISREG(st.st_mode):
+            files.append((p, bits[1].decode()))
+    found = []
+    lined = [(p, b) for p, b in files if "\n" not in p]
+    if lined:
+        code, out = run(["hash-object", "--stdin-paths"], b"".join(os.fsencode(p) + b"\n" for p, _ in lined))
+        shas = out.decode().split() if code == 0 else []
+        if len(shas) != len(lined):
+            found += [p for p, _ in lined]          # cannot tell: say so rather than miss it
+        else:
+            found += [p for (p, b), h in zip(lined, shas) if h != b]
+    for p, b in [(p, b) for p, b in files if "\n" in p]:
+        code, out = run(["hash-object", "--path=" + p, "--", p])
+        if code != 0 or out.decode().strip() != b:
+            found.append(p)
+    for p, b in links:
+        code, out = run(["hash-object", "--stdin", "--no-filters"], os.fsencode(os.readlink(os.path.join(str(src), p))))
+        if code != 0 or out.decode().strip() != b:
+            found.append(p)
+    return sorted(found)
+
+
 def _same_bytes(path: str, data: bytes) -> bool:
     try:
         with open(path, "rb") as fh:
@@ -2043,6 +2236,12 @@ ADOPT_FILTERED = ("target/%s has changes git status does not show, in files git 
                   "(%s) — their bytes on disk are in no commit, and adopting would replace them with the committed "
                   "version: copy those files out of that checkout, put the committed version back (git -C target/%s "
                   "checkout -- %s), then run adopt again; nothing was adopted.")
+
+
+ADOPT_STAT_BLIND = ("target/%s has uncommitted changes git status does not show, in files whose content changed while "
+                    "their size and times stayed as git last saw them (%s) — have git look at them again ((cd target/%s "
+                    "&& touch %s)), commit them on their branch inside that checkout, then run adopt again; nothing "
+                    "was adopted.")
 
 
 ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branch has; adopting %s would put the "
@@ -2116,6 +2315,10 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
         if filtered:
             raise Refused(ADOPT_FILTERED % (key, name_paths(filtered), key, " ".join(shlex.quote(f) for f in filtered)
                                             if len(filtered) <= 5 else "<file>"))
+        blind = stat_blind_edits(src)
+        if blind:
+            raise Refused(ADOPT_STAT_BLIND % (key, name_paths(blind), key, " ".join(shlex.quote(f) for f in blind)
+                                              if len(blind) <= 5 else "<file>"))
         _, cur, _ = _git(src, "branch", "--show-current")
         cur = cur.strip()
         _, head, _ = _git(src, "rev-parse", "HEAD")

@@ -89,8 +89,10 @@ Before it changes anything in `target/`, the upgrade keeps a checked safety
 copy of everything there in `state/upgrade-snapshot/<stamp>` (every branch,
 stash and recent commit as a git bundle, staged changes included; every
 untracked, ignored or uncommitted file in a tar, an edit a clean filter or a
-line-ending conversion hides from `git status` included; git's record of a
-merge, rebase or bisect in progress), stops instead if it cannot
+line-ending conversion hides from `git status` included, and one git's stat
+check misses (`core.trustctime` false), and every file of a `.git` git cannot
+read; git's record of a merge, rebase or bisect in progress, of each worktree
+whether or not its directory is there now), stops instead if it cannot
 make one (no room, or over `upgrade.snapshot_max_mb`, 2048 by default), and
 keeps it until `python3 core/upgrade.py --forget-snapshot`, which refuses while
 anything in it is missing — `python3 core/upgrade.py --restore-help` lists what
@@ -102,15 +104,20 @@ or checked out as a submodule inside one. A later run copies only what no
 kept copy holds yet. A copy that would not fit in a session start is taken in
 the background, and changes nothing; no window is numbered, and `lease.sh`
 makes or changes none, until it is done; the next session start makes the
-upgrade's changes.
+upgrade's changes. git's record of a worktree made by hand under `worktrees/`
+is never removed, even when its directory is gone (moved with `mv`, it still
+works through that record; `git worktree repair <new path>` points git at it).
 
 It will not move a target checkout that holds work it could lose, and stops
 there before anything in that checkout moves: one with uncommitted changes
 (commit them on their branch inside that checkout) — a change to a file marked
 skip-worktree or assume-unchanged counts, though `git status` hides it (clear
-the mark with the command the sentence names, then commit) — or one with
+the mark with the command the sentence names, then commit), and so does an
+edit git's stat check passes where `core.trustctime` is false (`touch` the file,
+then commit) — or one with
 untracked or ignored files that putting it back on its trunk would overwrite
-(move them out of that checkout, or commit them on its branch), or one with a
+(move them out of that checkout, or commit them on its branch) — a directory
+holding only a `.git` git cannot read counts — or one with a
 local branch named `origin/<trunk>`, which git takes for origin's trunk
 (rename it), or one where a rebase,
 merge, cherry-pick, revert or bisect stopped part-way (finish it or undo it
@@ -125,7 +132,8 @@ in that checkout in between. The board says which on
 every prompt, in one sentence, with what to do; the next session start
 finishes the job. One other state needs a person but does not stop it: a
 target checkout that already has a `pre-push` hook Daedalus did not install,
-or sets `core.hooksPath` (as husky or lefthook do). The upgrade says so with the remedy — merge the two hooks or
+or sets `core.hooksPath` (as husky or lefthook do). (A Daedalus hook you added lines to is replaced, and kept
+beside it as `pre-push.before-daedalus-<stamp>`, named.) The upgrade says so with the remedy — merge the two hooks or
 move the other aside, or `git -C target/<repo> config --unset core.hooksPath`
 — then `core/setup.sh`; until then promote refuses and the doctor says
 MISSING.
