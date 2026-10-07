@@ -111,10 +111,10 @@ HIDDEN = ("upgrade to %s incomplete: target/%s has uncommitted changes git statu
           "(%s) — clear the mark (%s), commit them on their branch inside that checkout, then start a session again")
 # A tracked file a clean filter or a line-ending conversion hides an edit in (git compares it only after the filter
 # ran): a checkout or reset writes the committed version over bytes no commit holds (review 3 of the safety copy).
-FILTERED = ("upgrade to %s incomplete: target/%s has changes git status does not show, in files git filters or "
-            "converts on the way in (%s) — their bytes on disk are in no commit, and moving the checkout would replace "
-            "them with the committed version: copy those files out of that checkout, put the committed version back "
-            "(git -C target/%s checkout -- %s), then start a session again")
+FILTERED = ("upgrade to %s incomplete: target/%s has changes git status does not show, in files whose line endings or "
+            "contents git changes when it saves them (%s) — their bytes on disk are in no commit, and moving the "
+            "checkout would replace them with the committed version: copy those files out of that checkout, put the "
+            "committed version back (%s), then start a session again")
 # A branch whose branch on origin was deleted (on GitHub, what follows a merge) is not made a window: a squash merge
 # leaves its commits looking unmerged to git cherry (release-candidate review, finding 3). Named, so one that was not
 # merged can still be adopted.
@@ -510,12 +510,54 @@ def _back_on_trunk(p: Path, key: str, trunk: str) -> None:
 
 
 def _into_window(root: Path, key: str, rel: str, ref: str, ver: str, deadline: Optional[float]) -> dict:
+    """The adoption of <ref> as a window; r["ready"] is False when its worktree could not be made (the start's time
+    ran out, or a git call's) — the caller names the window and stops the step with _unready (release-candidate red
+    team, finding 1)."""
     import leaselib as ll
     try:
-        return ll.adopt(root, ref, repo=None if rel == key else rel, note=NOTE_ADOPTED % ver, fetch=False,
-                        deadline=deadline)
+        r = ll.adopt(root, ref, repo=None if rel == key else rel, note=NOTE_ADOPTED % ver, fetch=False,
+                     deadline=deadline)
     except ll.Refused as e:
         raise Stop("could not move target/%s's work into a window (%s)" % (key, e))
+    r["ready"] = (ll.read_lease(root, r["nn"]) or {}).get("worktree_ready") is not False
+    return r
+
+
+def _unready(lines: List[str], head: str, what: str, r: dict, ref: str, ver: str, stale: str,
+             deadline: Optional[float], carry: bool = False) -> Stop:
+    """Names window r["nn"], made from <what> without its worktree, in <lines>, and returns the stop that ends the
+    step: the stamp is not written, so the next start's finish_adopted makes the worktree (and the carry left
+    pending moves this checkout's untracked files into it). Never "complete" over a window no session can open, whose
+    work the board read as no commits (release-candidate red team, finding 1)."""
+    tail = " Note: %s." % "; ".join(r["notes"]) if r.get("notes") else ""
+    lines.append("%s: %s; that work is now window %s (branch lease/%s), whose worktree is not made yet — the next "
+                 "session start makes it%s.%s%s" % (head, what, r["nn"], r["nn"],
+                                                    ", and moves this checkout's untracked files into it" if carry else "",
+                                                    tail, stale))
+    if deadline is not None:
+        return Stop(STOPPED_TIME % (ver, "moving in-flight work in target/ into windows"))
+    return Stop(_NO_WORKTREE % (ver, r["nn"], ref))
+
+
+# A window adopted from target/ whose worktree is not made: the stamp waits for it, since only the upgrade finishes it
+# (release-candidate red team, finding 1).
+_NO_WORKTREE = STOPPED_WHILE % ("%s", "moving in-flight work in target/ into windows",
+                                "window %s (adopted from %s) has no worktree yet")
+
+
+def _unfinished_windows(root: Path) -> List[Tuple[str, str]]:
+    """(NN, what it was adopted from) for each window adopted from target/ with no session whose worktree was never
+    made, its lease/<NN> still there — what finish_adopted finishes at the next run."""
+    import leaselib as ll
+    out, keys = [], {key for key, _ in target_repos(root)}     # the repos step 6 runs finish_adopted on
+    for nn, d in sorted(ll.read_all(root).items()):
+        if (nn == "prime" or d.get("adopted_repo") not in keys or d.get("worktree_ready") is not False
+                or d.get("session_id")):
+            continue
+        src = root / "target" / str(d["adopted_repo"])
+        if _git(src, "rev-parse", "--verify", "-q", "refs/heads/lease/" + nn)[0] == 0:
+            out.append((nn, str(d.get("adopted_from") or "")))
+    return out
 
 
 def _carried_by(root: Path, p: Path, key: str, trunk: str) -> Optional[str]:
@@ -1318,6 +1360,17 @@ def _cut_off(root: Path, p: Path, key: str, trunk: str, ver: str, head: str, dry
 
 
 def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
+    """_step_adopt; a stop carries the lines of what the step did before it (e.lines), so a window made before a
+    stop is still named (release-candidate red team, finding 1)."""
+    lines: List[str] = []
+    try:
+        return _step_adopt(root, head, dry, deadline, lines)
+    except Stop as e:
+        e.lines = list(lines)
+        raise
+
+
+def _step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float], lines: List[str]) -> List[str]:
     """Spec §14 step 6. Every checkout is checked for a git operation stopped part-way, then for uncommitted
     changes, before anything in target/ moves; either stops the step (Decision 6; critic finding 3). Then one bounded fetch of all of them at once (Decision 3)
     and, per repo (outer first, then nested): the checked-out ref — a branch or a detached HEAD with work that
@@ -1337,7 +1390,6 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
     except ll.Refused as e:
         raise Stop("could not tell each target repo's trunk (%s)" % e)
     ver = version(root) or "this release"
-    lines = []
     for key, p in repos:
         cut = _cut_off(root, p, key, trunks[key], ver, head, dry)
         if cut:
@@ -1370,12 +1422,10 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
         except subprocess.TimeoutExpired:
             filtered = []
         if filtered:
-            raise Stop(FILTERED % (ver, key, ll.name_paths(filtered), key,
-                                   " ".join(shlex.quote(f) for f in filtered) if len(filtered) <= 5 else "<file>"))
+            raise Stop(FILTERED % (ver, key, ll.name_paths(filtered), ll.put_back(key, filtered)))
         blind = ll.stat_blind_edits(p)
         if blind:
-            raise Stop(STAT_BLIND % (ver, key, ll.name_paths(blind), key,
-                                     " ".join(shlex.quote(f) for f in blind) if len(blind) <= 5 else "<file>"))
+            raise Stop(STAT_BLIND % (ver, key, ll.name_paths(blind), key, ll.shell_paths(blind)))
     fetched = set() if dry else _fetch_all(repos, deadline)
     for key, p in repos:
         _, cur, _ = _git(p, "branch", "--show-current")
@@ -1489,6 +1539,8 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                 if loose:                    # so a run cut off before the carry is done finishes it (review, 2)
                     _set_carry(root, key, _git(p, "rev-parse", "HEAD")[1].strip())
                 r = _into_window(root, key, rel, adopt_ref, ver, deadline)
+                if not r["ready"]:
+                    raise _unready(lines, head, what, r, adopt_ref, ver, stale, deadline, carry=bool(loose))
                 carrier, carrier_nn = "lease/" + r["nn"], r["nn"]
                 carried, left = _carry(root, p, key, r["nn"], loose, deadline)
                 _set_carry(root, key, None)
@@ -1530,6 +1582,9 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
                              "was adopted from, so it was not adopted; run core/lease.sh adopt after renaming it.%s%s"
                              % (head, key, b, n, trunk, _quoted(work), r["nn"], tail, stale))
                 continue
+            if not r["ready"]:
+                raise _unready(lines, head, "target/%s's branch %s (%s not on origin/%s: %s)"
+                               % (key, b, n, trunk, _quoted(work)), r, b, ver, stale, deadline)
             carriers.append(("lease/" + r["nn"], r["nn"]))
             lines.append("%s: target/%s's branch %s (%s not on origin/%s: %s) is now window %s (branch lease/%s); "
                          "target/%s stays on %s. Promote it from the board (\"promote window %s\") or release it.%s%s"
@@ -1585,6 +1640,10 @@ def step_adopt(root: Path, head: str, dry: bool, deadline: Optional[float]) -> L
             lines.append("%s: target/%s's %s was %s ahead of origin/%s; window %s already carries those commits, and "
                          "%s is now reset to origin/%s.%s" % (head, key, trunk, n, trunk, r["nn"], trunk, trunk, stale))
             continue
+        if not r["ready"]:
+            raise _unready(lines, head, "target/%s's %s was %s ahead of origin/%s (%s)" % (key, trunk, n, trunk,
+                                                                                         _quoted(ahead)),
+                           r, trunk, ver, stale, deadline, carry=bool(loose) and cur == trunk)
         extra = ""
         if cur == trunk:            # the window is made from what was checked out: its untracked files go too
             carried, left = _carry(root, p, key, r["nn"], loose, deadline)
@@ -3345,6 +3404,7 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
             try:
                 lines += fn(root, head, dry, deadline)
             except Stop as e:
+                lines += getattr(e, "lines", [])
                 sentence = str(e) if str(e).startswith("upgrade to ") else STOPPED_WHILE % (ver, what, e)
                 return lines, (sentence if dry else _stopped(root, ver, n, sentence))
             except Exception as e:      # a step that crashed is a stop with its reason, never a silent pass
@@ -3354,6 +3414,9 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
             if dry:
                 lines.append("%s: would write state/upgraded-to last." % head)
             else:
+                unfinished = _unfinished_windows(root)
+                if unfinished:
+                    return lines, _stopped(root, ver, 6, _NO_WORKTREE % ((ver,) + unfinished[0]))
                 _write(root / STAMP, ver + "\n")
                 try:
                     (root / STOPPED).unlink()

@@ -2008,18 +2008,22 @@ def hidden_edits(src: Path) -> Dict[str, str]:
     return found
 
 
-# attributes under which git changes a file's bytes on the way into the repository or out of it
-TRANSFORM_ATTRS = ("filter", "ident", "text", "eol", "working-tree-encoding")
+# attributes under which git changes a file's bytes on the way into the repository or out of it — crlf too, git's older
+# name for text, which git still honours (set: text; input: text with eol=lf) and check-attr reports only under its
+# own name (release-candidate red team, finding 2). Unset, each means no change (-crlf is -text).
+TRANSFORM_ATTRS = ("filter", "ident", "text", "eol", "working-tree-encoding", "crlf")
 
 
 def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[set] = None) -> list:
-    """Tracked files of the worktree at <src> whose bytes on disk are not what a checkout of their staged content
-    writes, among those git transforms on the way in or out (a clean or smudge filter, ident, line-ending
-    conversion, a working-tree encoding — or every file under core.autocrlf): an edit git status never shows,
-    because git compares such a file only after its clean filter ran (a filter that strips local lines or a
-    notebook's outputs, CRLF line ends under text=auto). A checkout or reset replaces the file with the committed
-    version and those bytes, in no object, are gone. Paths in <skip> are not read. Under <deadline>, raises
-    subprocess.TimeoutExpired when it is out of time."""
+    """Tracked files of the worktree at <src> whose bytes on disk are in no object: neither what a checkout of their
+    staged content writes nor that staged blob itself, among those git transforms on the way in or out (a clean or
+    smudge filter, ident, line-ending conversion, a working-tree encoding — or every file under core.autocrlf): an
+    edit git status never shows, because git compares such a file only after its clean filter ran (a filter that
+    strips local lines or a notebook's outputs, CRLF line ends under text=auto). A checkout or reset replaces the
+    file with the committed version and those bytes are gone. A file whose bytes are the staged blob's own — checked
+    out before a rule or a filter for it was added — holds nothing no commit has (release-candidate red team,
+    finding 3). Paths in <skip> are not read. Under <deadline>, raises subprocess.TimeoutExpired when it is out of
+    time."""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     skip = skip or set()
 
@@ -2069,57 +2073,79 @@ def filtered_edits(src: Path, deadline: Optional[float] = None, skip: Optional[s
             cands.append((p, b, st.st_size))
     if not cands:
         return []
+    # not what a checkout writes, and then not the blob's own bytes either
+    found = set(_unlike(src, cands, True, run, left, env))
+    if found:
+        found &= set(_unlike(src, [c for c in cands if c[0] in found], False, run, left, env))
+    return sorted(found)
+
+
+def _unlike(src: Path, cands: list, filters: bool, run, left, env: dict) -> list:
+    """The paths of <cands> ((path, blob, size on disk)) whose bytes on disk are not the blob's — as a checkout
+    writes it (<filters>: smudge, ident, line-ending conversion applied) or as stored. One cat-file --batch for
+    every name without a newline (cat-file's batch reads one name per line); one call each for the others. A path
+    whose bytes cannot be read or compared counts as unlike: say so rather than miss it."""
+    flag = ["--filters"] if filters else []
     found = []
     lined = [c for c in cands if "\n" not in c[0]]
     for p, b, _ in cands:
-        if "\n" in p:         # cat-file's batch reads one name per line: this one is asked on its own
-            code, out = run(["cat-file", "--filters", "--path=" + p, b])
+        if "\n" in p:
+            code, out = run(["cat-file"] + (flag + ["--path=" + p, b] if filters else ["blob", b]))
             if code != 0 or not _same_bytes(os.path.join(str(src), p), out):
                 found.append(p)
-    if lined:
-        proc = subprocess.Popen(["git", "-C", str(src), "cat-file", "--batch", "--filters"], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
-        data = b"".join(b.encode() + b" " + os.fsencode(p) + b"\n" for p, b, _ in lined)
+    if not lined:
+        return found
+    proc = subprocess.Popen(["git", "-C", str(src), "cat-file", "--batch"] + flag, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    data = b"".join((b.encode() + b" " + os.fsencode(p) if filters else b.encode()) + b"\n" for p, b, _ in lined)
 
-        def feed() -> None:
-            try:
-                proc.stdin.write(data)
-                proc.stdin.close()
-            except OSError:
-                pass
-        import threading
-        threading.Thread(target=feed, daemon=True).start()
+    def feed() -> None:
         try:
-            for p, b, size in lined:
-                left()
-                head = proc.stdout.readline().split()
-                if len(head) < 3 or not head[2].isdigit():
-                    found.append(p)
-                    continue
-                n = int(head[2])
-                same = n == size
-                try:
-                    fh = open(os.path.join(str(src), p), "rb") if same else None
-                except OSError:
-                    fh, same = None, False
-                while n > 0:
-                    chunk = proc.stdout.read(min(n, 1 << 20))
-                    if not chunk:
-                        raise OSError("git cat-file ended early")
-                    n -= len(chunk)
-                    if same and fh.read(len(chunk)) != chunk:
-                        same = False
-                if fh is not None:
-                    fh.close()
-                proc.stdout.read(1)
-                if not same:
-                    found.append(p)
+            proc.stdin.write(data)
+            proc.stdin.close()
         except OSError:
-            found += [p for p, _, _ in lined if p not in found]     # cannot tell: say so rather than miss it
-        finally:
-            proc.kill()
-            proc.wait()
-    return sorted(found)
+            pass
+    import threading
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        for p, b, size in lined:
+            left()
+            head = proc.stdout.readline().split()
+            if len(head) < 3 or not head[2].isdigit():
+                found.append(p)
+                continue
+            n = int(head[2])
+            same = n == size
+            try:
+                fh = open(os.path.join(str(src), p), "rb") if same else None
+            except OSError:
+                fh, same = None, False
+            while n > 0:
+                chunk = proc.stdout.read(min(n, 1 << 20))
+                if not chunk:
+                    raise OSError("git cat-file ended early")
+                n -= len(chunk)
+                if same and fh.read(len(chunk)) != chunk:
+                    same = False
+            if fh is not None:
+                fh.close()
+            proc.stdout.read(1)
+            if not same:
+                found.append(p)
+    except OSError:
+        found += [p for p, _, _ in lined if p not in found]
+    finally:
+        proc.kill()
+        proc.wait()
+    return found
+
+
+def _same_bytes(path: str, data: bytes) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read() == data
+    except OSError:
+        return False
 
 
 def stat_blind(src: Path) -> bool:
@@ -2196,14 +2222,6 @@ def stat_blind_edits(src: Path, deadline: Optional[float] = None, skip: Optional
     return sorted(found)
 
 
-def _same_bytes(path: str, data: bytes) -> bool:
-    try:
-        with open(path, "rb") as fh:
-            return fh.read() == data
-    except OSError:
-        return False
-
-
 def hidden_words(key: str, hidden: Dict[str, str]) -> Tuple[str, str, str]:
     """(the marks, the paths named, the commands that clear the marks) for a sentence about hidden_edits."""
     marks = sorted(set(hidden.values()))
@@ -2211,13 +2229,18 @@ def hidden_words(key: str, hidden: Dict[str, str]) -> Tuple[str, str, str]:
     cmds = []
     for mark in marks:
         mine = [p for p in paths if hidden[p] == mark]
-        cmds.append("git -C target/%s update-index --no-%s %s"
-                    % (key, mark, " ".join(shlex.quote(p) for p in mine) if len(mine) <= 5 else "<file>"))
+        cmds.append("git -C target/%s update-index --no-%s %s" % (key, mark, shell_paths(mine)))
     return " or ".join(marks), name_paths(paths), ", and ".join(cmds)
 
 
 def name_paths(paths: list, most: int = 5) -> str:
     return ", ".join(paths[:most]) + (" and %d more" % (len(paths) - most) if len(paths) > most else "")
+
+
+def shell_paths(paths: list) -> str:
+    """Every one of <paths>, quoted for a shell, for a command a sentence prints to be run as it is: never a
+    placeholder, which a shell reads as a redirect (release-candidate red team, finding 4)."""
+    return " ".join(shlex.quote(p) for p in paths)
 
 
 ADOPT_UNTRACKED = ("target/%s has untracked files that resetting %s to origin/%s would overwrite (%s) — move them out "
@@ -2232,10 +2255,18 @@ ADOPT_HIDDEN = ("target/%s has uncommitted changes git status does not show, in 
                 "(%s), commit them on their branch inside that checkout, then run adopt again; nothing was adopted.")
 
 
-ADOPT_FILTERED = ("target/%s has changes git status does not show, in files git filters or converts on the way in "
-                  "(%s) — their bytes on disk are in no commit, and adopting would replace them with the committed "
-                  "version: copy those files out of that checkout, put the committed version back (git -C target/%s "
-                  "checkout -- %s), then run adopt again; nothing was adopted.")
+ADOPT_FILTERED = ("target/%s has changes git status does not show, in files whose line endings or contents git changes "
+                  "when it saves them (%s) — their bytes on disk are in no commit, and adopting would replace them with "
+                  "the committed version: copy those files out of that checkout, put the committed version back "
+                  "(%s), then run adopt again; nothing was adopted.")
+
+
+def put_back(key: str, paths: list) -> str:
+    """The command that writes the committed version over <paths> in target/<key>. A checkout alone leaves a file
+    git's stat check passes as it is — the very file a filtered edit is — so each is removed first (release-candidate
+    red team, finding 4)."""
+    q = shell_paths(paths)
+    return "(cd target/%s && rm -f -- %s && git checkout -- %s)" % (key, q, q)
 
 
 ADOPT_STAT_BLIND = ("target/%s has uncommitted changes git status does not show, in files whose content changed while "
@@ -2313,12 +2344,10 @@ def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[st
             raise Refused(ADOPT_HIDDEN % ((key,) + hidden_words(key, hidden)))
         filtered = filtered_edits(src)
         if filtered:
-            raise Refused(ADOPT_FILTERED % (key, name_paths(filtered), key, " ".join(shlex.quote(f) for f in filtered)
-                                            if len(filtered) <= 5 else "<file>"))
+            raise Refused(ADOPT_FILTERED % (key, name_paths(filtered), put_back(key, filtered)))
         blind = stat_blind_edits(src)
         if blind:
-            raise Refused(ADOPT_STAT_BLIND % (key, name_paths(blind), key, " ".join(shlex.quote(f) for f in blind)
-                                              if len(blind) <= 5 else "<file>"))
+            raise Refused(ADOPT_STAT_BLIND % (key, name_paths(blind), key, shell_paths(blind)))
         _, cur, _ = _git(src, "branch", "--show-current")
         cur = cur.strip()
         _, head, _ = _git(src, "rev-parse", "HEAD")
@@ -3042,12 +3071,19 @@ def _ago(ts: Optional[float], now: float) -> str:
 
 def last_commit_subject(root: Path, lease: dict, nn: str) -> str:
     """The subject of the newest commit on the lease branch that origin/<trunk>
-    does not contain — the outer repo first, then each nested one."""
+    does not contain — the outer repo first, then each nested one. A repo whose
+    worktree is not made yet is read at lease/<NN> in target/<repo>: an adopted
+    window holds its commits there before it has a worktree (release-candidate
+    red team, finding 1)."""
     base = root / str(lease.get("worktree") or ("worktrees/%s" % nn))
     for repo, trunk in (lease.get("trunks") or {}).items():
-        if not (base / repo).is_dir():
+        if (base / repo).is_dir():
+            where, tip = base / repo, "HEAD"
+        elif (root / "target" / repo).is_dir():
+            where, tip = root / "target" / repo, "refs/heads/lease/%s" % nn
+        else:
             continue
-        code, out, _ = _git(base / repo, "log", "-1", "--format=%s", "%s..HEAD" % remote_ref(trunk))
+        code, out, _ = _git(where, "log", "-1", "--format=%s", "%s..%s" % (remote_ref(trunk), tip))
         if code == 0 and out.strip():
             return out.strip().splitlines()[0]
     return ""
@@ -3148,6 +3184,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
                 parts.append("0 changed")
             subj = last_commit_subject(root, d, nn)
             parts.append('last commit "%s"' % subj if subj else "no commits yet")
+            if d.get("worktree_ready") is False:
+                parts.append(NO_WORKTREE_YET % (nn, nn))
             if d.get("note"):
                 parts.append("note: %s" % d["note"])
             if d.get("adopted_from"):
@@ -3331,6 +3369,11 @@ def _since(ts: Optional[float], now: float) -> str:
     return "no live session since " + time.strftime(fmt, time.localtime(ts))
 
 
+# a window whose worktree was never made: its work is on lease/<NN> in target/, where no session builds
+# (release-candidate red team, finding 1)
+NO_WORKTREE_YET = "its worktree is not made yet: say 'this is window %s' to a new window (core/lease.sh claim %s) to make it"
+
+
 def doctor_lines(root: Path) -> list:
     """The doctor's lease lines (spec §15), from ONE LOCK_SH read, with the
     same liveness call the board makes so doctor and the board never
@@ -3371,6 +3414,11 @@ def doctor_lines(root: Path) -> list:
                  for nn in finished]
         parts += ["%s released (swept at next sweep)" % nn for nn in released]
         lines.append("NOTE     leases: %s" % "; ".join(parts))
+    for nn, d in numbered.items():
+        if d.get("worktree_ready") is False and not d.get("released"):
+            lines.append("NOTE     leases: window %s%s has no worktree yet — say \"this is window %s\" to a new window "
+                         "(core/lease.sh claim %s) to make it"
+                         % (nn, " (adopted from %s)" % d["adopted_from"] if d.get("adopted_from") else "", nn, nn))
     try:
         waiting = waiting_numbers(root, leases)
     except Refused as e:

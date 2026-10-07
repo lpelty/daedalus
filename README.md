@@ -81,9 +81,10 @@ window numbers itself. Each step acts once and says one line when it does:
    detached checkout whose change is already on trunk keeps its commits on a
    branch it names. Nothing is renamed: `lease/<NN>` is made at the work's tip,
    and the branch's own name is removed only once the window is whole. A start
-   cut off part-way through making a window is finished by the next one, never
-   made twice;
-7. writes `state/upgraded-to`, last.
+   cut off part-way through making a window, or out of time before its
+   worktree was made, is finished by the next one, never made twice;
+7. writes `state/upgraded-to`, last — never while a window it made has no
+   worktree (the board and doctor name such a window).
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
 copy of everything there in `state/upgrade-snapshot/<stamp>` (every branch,

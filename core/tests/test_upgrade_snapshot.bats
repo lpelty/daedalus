@@ -947,3 +947,55 @@ PY
   grep -q "$DAEDALUS_HOME/core/prepush.py" "$T/sub/.git/hooks/pre-push"
   [ -z "$(ls "$T/sub/.git/hooks/" | grep before-daedalus)" ]
 }
+
+# --- release-candidate red team -------------------------------------------------------------------------------
+
+@test "a file converted through git's older crlf attribute, its CRLF bytes in no commit (status clean after git add): the upgrade stops before the checkout back to the trunk would replace it, and those bytes are in the copy (release-candidate red team, finding 2)" {
+  git -C "$T" checkout -q -b fix/in-flight
+  printf '*.txt crlf\n' > "$T/.gitattributes"; printf 'alpha\nbeta\ngamma from the branch\n' > "$T/notes.txt"
+  git -C "$T" add -A; cmt "$T" -m notes
+  printf 'alpha\r\nbeta\r\ngamma from the branch\r\n' > "$T/notes.txt"; cp "$T/notes.txt" "$B/crlf"
+  git -C "$T" add notes.txt 2>/dev/null
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing has changes git status does not show"*"(notes.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; cmp "$T/notes.txt" "$B/crlf"
+  sum="$(shasum -a 256 "$B/crlf" | cut -d' ' -f1)"
+  manifest_has "any(f['path'] == 'notes.txt' and f['kind'] == 'changed' and f['sha256'] == '$sum' for f in r['files'])"
+}
+
+@test "files whose bytes on disk are exactly their committed blob — checked out before origin added an eol=crlf rule for them, or before a filter was set up — are no hidden change: the upgrade does not stop on them and completes (release-candidate red team, finding 3)" {
+  printf '@echo off\nrun\n' > "$T/run.bat"
+  for i in 1 2 3 4 5 6 7; do printf 'data %s\n' "$i" > "$T/f$i.dat"; done
+  git -C "$T" add -A; cmt "$T" -m files
+  printf '*.bat text eol=crlf\n*.dat filter=big\n' > "$T/.gitattributes"; git -C "$T" add .gitattributes; cmt "$T" -m rules
+  git -C "$T" push -q origin main
+  git -C "$T" config filter.big.clean cat; git -C "$T" config filter.big.smudge 'tr a-z A-Z'
+  [ -z "$(git -C "$T" status --porcelain)" ]; [ "$(cat "$T/run.bat")" = "$(printf '@echo off\nrun')" ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"git status does not show"*) echo "$output"; return 1 ;; esac
+}
+
+@test "the stop on bytes a line-ending conversion hides prints a command that clears it: more than five files, every one named in it (no placeholder); run as printed, the next run goes through (release-candidate red team, finding 4)" {
+  git -C "$T" checkout -q -b fix/in-flight
+  printf '*.txt text\n' > "$T/.gitattributes"; mkdir -p "$T/d d"
+  for f in n1 n2 n3 n4 n5 "d d/n 6"; do printf 'a\nb\n' > "$T/$f.txt"; done
+  git -C "$T" add -A; cmt "$T" -m notes
+  for f in n1 n2 n3 n4 n5 "d d/n 6"; do printf 'a\r\nb\r\n' > "$T/$f.txt"; done
+  git -C "$T" add -A 2>/dev/null
+  [ -z "$(git -C "$T" status --porcelain)" ]
+  run python3 "$UP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"in files whose line endings or contents git changes when it saves them (d d/n 6.txt, n1.txt"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"<file>"*) echo "$output"; return 1 ;; esac
+  cmd="$(printf '%s\n' "$output" | sed -n 's/.*put the committed version back (\(.*\)), then start a session again.*/\1/p')"
+  [ -n "$cmd" ] || { echo "$output"; return 1; }
+  sh_="$(command -v zsh || command -v sh)"
+  (cd "$DAEDALUS_HOME" && "$sh_" -c "$cmd") || { echo "$cmd"; return 1; }
+  ! grep -q $'\r' "$T/n1.txt" "$T/d d/n 6.txt"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$cmd"; echo "$output"; return 1; }
+}

@@ -827,3 +827,47 @@ ll.write_lease = k'
   case "$output" in *"STALE"*) echo "$output"; return 1 ;; esac
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
 }
+
+@test "a session start that runs out of time making an adopted window's worktree writes no stamp: it stops saying it runs again and names the window it did make; the board shows the unfinished window's commits and how to finish it, doctor names it, and the next start finishes it (release-candidate red team, finding 1)" {
+  git -C "$T" checkout -q -b park/y; printf 'y\n' > "$T/y.txt"; git -C "$T" add -A; cmt "$T" -m "parked work"
+  git -C "$T" checkout -q -b feat/x main; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  # window 02's worktree add runs out of the start's time once (one slow checkout of a large repository)
+  killed_run 'o = ll.add_worktrees
+def k(root, nn, *a, **kw):
+    flag = os.path.join(os.environ["BATS_TEST_TMPDIR"], "slow-once")
+    if nn == "02" and not os.path.exists(flag):
+        open(flag, "w").close()
+        return False
+    return o(root, nn, *a, **kw)
+ll.add_worktrees = k
+lines, stop = u.run(u.v.ROOT, deadline=__import__("time").time() + 60)
+print("\n".join(lines)); print(stop); sys.exit(1)'
+  case "$output" in *"target/thing was on feat/x"*"is now window 01"*"target/thing's branch park/y (1 commit not on origin/main: \"parked work\"); that work is now window 02 (branch lease/02), whose worktree is not made yet — the next session start makes it."*"upgrade to 0.7.0 incomplete: stopped while moving in-flight work in target/ into windows — the session start ran out of time; it runs again at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"complete."*|*"promote window 02"*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ "$(lease_json 02 worktree_ready)" = False ]
+  [ ! -d "$DAEDALUS_HOME/worktrees/02/thing" ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" list
+  case "$output" in *'- 02 — '*'last commit "parked work"'*'core/lease.sh claim 02'*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *'- 02 — '*'no commits yet'*) echo "$output"; return 1 ;; esac
+  run python3 "$DAEDALUS_HOME/core/leaselib.py" doctor-lines
+  case "$output" in *"window 02 (adopted from park/y) has no worktree yet"*"core/lease.sh claim 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"window 02, adopted from target/thing at an earlier start, now has its worktree (worktrees/02/thing)."*"complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 03"*) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 02 worktree_ready)" = None ]; [ "$(cat "$DAEDALUS_HOME/worktrees/02/thing/y.txt")" = y ]
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  run python3 "$DAEDALUS_HOME/core/leaselib.py" doctor-lines
+  case "$output" in *"no worktree yet"*) echo "$output"; return 1 ;; esac
+}
+
+@test "the stamp is not written while a window adopted from target/ has no worktree: a run that finds one it cannot finish stops instead of saying complete (release-candidate red team, finding 1)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  # every worktree add fails, and the step's own check after each adoption is bypassed: only the stamp's is left
+  killed_run 'll.add_worktrees = lambda *a, **kw: False
+u._into_window = lambda root, key, rel, ref, ver, deadline: dict(ll.adopt(root, ref, fetch=False), ready=True)
+lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)'
+  case "$output" in *"upgrade to 0.7.0 incomplete: stopped while moving in-flight work in target/ into windows — window 01 (adopted from feat/x) has no worktree yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"complete."*) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ "$(lease_json 01 worktree_ready)" = False ]
+}

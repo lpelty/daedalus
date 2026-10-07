@@ -594,6 +594,12 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   [ "$(( $(date +%s) - t0 ))" -le 12 ]
   case "$output" in *"the fetch did not finish"*"You are window 02 and you hold the pen"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(lease_json 01 adopted_from)" = feat/x ]
+  # window 01, adopted with no time left for its worktree, holds the stamp back: the next start makes it
+  # (release-candidate red team, finding 1)
+  if [ "$(lease_json 01 worktree_ready)" = False ]; then
+    [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+    case "$output" in *"that work is now window 01 (branch lease/01), whose worktree is not made yet"*"ran out of time; it runs again"*) : ;; *) echo "$output"; return 1 ;; esac
+  fi
   [ "$(lease_json 02 session_id)" = s1 ]
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("worktree_ready", True) is not False, d' "$DAEDALUS_HOME/state/leases/02.json"
   [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]
