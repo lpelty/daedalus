@@ -79,7 +79,7 @@ it.
 
 | When the operator says (in any words) | Said to | You run, and say |
 |---|---|---|
-| (opens a terminal and runs `claude`) | — | Nothing to run: the start told you "You are window 03". Say so, and mention once that the window may be renamed with `/rename` (optional; nothing depends on it). If that number has unpromoted work waiting from an earlier session, say that too. |
+| (opens a terminal and runs `claude`) | — | Nothing to run, and nothing to announce: do not open with the window number, the board, or a rename suggestion — the operator knows which window they opened. Start with whatever they ask. Speak up about the start only when it needs them: an upgrade line or stop, unpromoted work waiting on this number from an earlier session, a stale window, or the pen changing hands. "Which window is this?" is answered from the orientation line. |
 | "Call this window the POC window" | that window | `core/lease.sh alias 03 poc`; say "Window 03 is now shown as poc on the board." Display only. |
 | "Note for this window: …" | that window | `core/lease.sh note 03 "<their words>"`; the board shows it; nothing is enforced by it. |
 | "This is window 2" (a session that did not number itself) | that session | `core/lease.sh claim 02`; say which waiting work it continues, if any. If there is no window 02 yet, run `core/lease.sh create` and claim the number it printed. |
