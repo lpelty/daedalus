@@ -41,6 +41,10 @@ board names the copy until --forget-snapshot removes it; nothing else ever does.
     python3 core/upgrade.py --restore-help     what a safety copy holds that target/ no longer has, and the
                                                commands that bring each back
     python3 core/upgrade.py --forget-snapshot  removes the safety copies, only when nothing in them is missing
+    python3 core/upgrade.py --rollback [--dry-run] [--force]
+                                               back to where v0.6.1 runs as before (refused while a session is
+                                               live, without --force); prints the git checkout that puts the code
+                                               back, which it never runs itself
 
 Python 3.9, standard library.
 """
@@ -3822,6 +3826,461 @@ def doctor(root: Path) -> int:
     return 0
 
 
+# --- going back to v0.6.1: --rollback ------------------------------------------------------------------------------
+# The operator's way back (asked 2026-10-08, "If there's an issue can I revert?"): an upgraded home is put where the
+# v0.6.1 code runs exactly as before, and the operator then switches the code with the one command it prints — this
+# script is part of that code, so it never switches it itself. Nothing is discarded: unsaved work in a window is a
+# commit on its lease/<NN>, ignored files are moved aside, every branch stays, a pre-push hook that is not only
+# Daedalus's shim stays. Running it again is safe; --dry-run says what it would do and changes nothing.
+
+ROLLBACK_TO = "v0.6.1"
+KEPT = Path("state") / "rollback-kept"
+SAVED_MSG = "Unsaved work in window %s, saved before going back to " + ROLLBACK_TO
+LIVE_REFUSED = ("Not going back to %s: %s live in this home — %s. Close them, then run this again from a terminal, or "
+                "add --force to go ahead while they run. Nothing was changed.")
+ROLLBACK_STOPPED = ("Stopped here: nothing after this step was changed. Once each of the above is dealt with, run "
+                    "python3 core/upgrade.py --rollback again; it picks up where it stopped.")
+
+
+def _both(words: List[str]) -> str:
+    return " and ".join(words) if len(words) < 3 else _and(words)
+
+
+def _live_sessions(root: Path) -> List[str]:
+    """The Daedalus sessions live in this home, in words: each window's and the pen's session (its registry entry,
+    or the process its lease recorded), then each session whose start record (state/session-<id>.json) has a live
+    registry entry; and a run of the upgrade in the background."""
+    import leaselib as ll
+    out: List[str] = []
+    seen: Set[str] = set()
+    try:
+        leases = ll.read_all(root)
+    except ll.Refused:
+        leases = {}
+    for nn in sorted(leases, key=lambda k: (k == "prime", k)):
+        d = leases[nn]
+        sid = str(d.get("session_id") or "")
+        if not sid or sid in seen:
+            continue
+        live = bool(ll.registry_live_entries(sid))
+        if not live and d.get("pid"):
+            live = ll.pid_is_recorded_process(d.get("pid"), d.get("proc_started"))
+        if live:
+            seen.add(sid)
+            out.append("the session holding the pen (session %s)" % sid if nn == "prime"
+                       else "window %s (session %s)" % (nn, sid))
+    for f in sorted((root / "state").glob("session-*.json")):
+        sid = str((_read_json(f) or {}).get("session_id") or "")
+        if sid and sid not in seen and ll.registry_live_entries(sid):
+            seen.add(sid)
+            out.append("session %s" % sid)
+    if _bg_running(root):
+        out.append("the upgrade's run in the background")
+    return out
+
+
+def _windows(root: Path) -> List[dict]:
+    """Every window's worktree: each linked worktree of a target repo that git records under worktrees/<NN>/, as
+    {key, src, path, rel, nn, branch, head, locked, admin}, deepest first (a nested repo's worktree lies inside its
+    outer repo's)."""
+    import leaselib as ll
+    base = os.path.realpath(str(root / "worktrees"))
+    found: List[dict] = []
+    for key, p in target_repos(root):
+        records = ll.worktree_records(p)
+        code, out, _ = _git(p, "worktree", "list", "--porcelain")
+        if code != 0:
+            continue
+        for block in out.strip().split("\n\n"):
+            f: Dict[str, str] = {}
+            for ln in block.splitlines():
+                k, _, val = ln.partition(" ")
+                f[k] = val
+            path = f.get("worktree", "")
+            real = os.path.realpath(path) if path else ""
+            if not real.startswith(base + os.sep):
+                continue
+            nn = os.path.relpath(real, base).split(os.sep, 1)[0]
+            if not ll.valid_id(nn):
+                continue
+            br = f.get("branch", "")
+            found.append({"key": key, "src": p, "path": path, "rel": _rel(root, real), "nn": nn,
+                          "branch": br[len("refs/heads/"):] if br.startswith("refs/heads/") else "",
+                          "head": f.get("HEAD", ""), "locked": "locked" in f, "admin": records.get(real)})
+    return sorted(found, key=lambda w: (-w["rel"].count("/"), w["rel"]))
+
+
+def _wt_spec(wp: Path, nested: List[str]) -> List[str]:
+    """The pathspec for everything in a window's worktree but its nested repos: an exclude for each one git does not
+    ignore already (git add refuses a pathspec naming an ignored path)."""
+    return ["."] + [":(exclude)" + n for n in nested
+                    if (wp / n).exists() and _git(wp, "check-ignore", "-q", "--no-index", n)[0] != 0]
+
+
+def _wt_status(w: dict, nested: List[str]) -> Tuple[int, int]:
+    """(changed tracked files, untracked files that are not ignored) in a window's worktree, its nested repos left
+    out."""
+    spec = _wt_spec(Path(w["path"]), nested)
+    code, out, err = _git(Path(w["path"]), "status", "--porcelain", "-z", "--untracked-files=all",
+                          "--ignore-submodules=all", "--no-renames", "--", *spec)
+    if code != 0:
+        raise Stop("could not read %s's status (%s)" % (w["rel"], _last(err)))
+    entries = [e for e in out.split("\0") if len(e) > 3]
+    return len([e for e in entries if not e.startswith("??")]), len([e for e in entries if e.startswith("??")])
+
+
+def _wt_problems(root: Path, w: dict, keys: List[str]) -> List[str]:
+    """Why a window's worktree cannot be saved and removed safely, each with what to do; [] when it can."""
+    import leaselib as ll
+    wp, rel, want = Path(w["path"]), w["rel"], "lease/" + w["nn"]
+    if not wp.is_dir():
+        return []
+    out = []
+    for what, cmd in _busy(wp):
+        out.append("%s is in the middle of a %s — finish it, or stop it (git -C %s %s --abort)"
+                   % (rel, what, _sh(rel), cmd))
+    if w["locked"]:
+        out.append("%s is locked against removal — if nothing is still checking it out, unlock it (git -C target/%s "
+                   "worktree unlock %s)" % (rel, w["key"], _sh(w["path"])))
+    if w["branch"] != want:
+        on = w["branch"] or "no branch (a detached checkout)"
+        out.append("%s is on %s, not on its window's branch %s — commit what is there, then put the window's branch "
+                   "on it (git -C %s checkout -B %s) once %s holds nothing else you need"
+                   % (rel, on, want, _sh(rel), want, want))
+    hidden = ll.hidden_edits(wp)
+    if hidden:
+        marks = sorted(set(hidden.values()))
+        out.append("%s has changes git status does not show, in files marked %s (%s) — clear the mark (%s)"
+                   % (rel, " or ".join(marks), ll.name_paths(sorted(hidden)),
+                      ", and ".join("git -C %s update-index --no-%s %s" % (_sh(rel), m, ll.shell_paths(
+                          sorted(x for x in hidden if hidden[x] == m))) for m in marks)))
+    try:
+        blind = ll.filtered_edits(wp) or ll.stat_blind_edits(wp)
+    except subprocess.TimeoutExpired:      # never a silent pass
+        blind = []
+        out.append("%s could not be checked for changes git does not see (a git command ran out of time) — run this "
+                   "again" % rel)
+    if blind:
+        out.append("%s has changes git does not see in %s — commit them on %s by hand there (touch them first, then "
+                   "git add and git commit)" % (rel, ll.name_paths(sorted(blind)), want))
+    nested = _nested_rels(w["key"], keys)
+    for u in _loose(wp, w["key"], keys):
+        if u.endswith("/"):
+            out.append("%s holds a repository of its own at %s — move it out of the worktree" % (rel, u))
+    for d in ll.unreadable_gits(wp):
+        if not any(d == n or d.startswith(n + "/") for n in nested):
+            out.append("%s holds a .git git cannot read at %s/ — move it out of the worktree" % (rel, d))
+    return out
+
+
+def _save_window(root: Path, w: dict, keys: List[str]) -> None:
+    """The unsaved work in a window's worktree — changes to tracked files and untracked files that are not ignored,
+    its nested repos left out — as one commit on its lease/<NN>, which the worktree has checked out; afterwards it
+    reads clean."""
+    wp, nested = Path(w["path"]), _nested_rels(w["key"], keys)
+    env = _pick_env(wp)
+    env.pop("GIT_LITERAL_PATHSPECS", None)
+    spec = _wt_spec(wp, nested)
+    code, _, err = _git_env(wp, env, "add", "-A", "--", *spec)
+    if code == 0:
+        code, tree, err = _git_env(wp, env, "write-tree")
+    if code == 0:
+        code, sha, err = _git_env(wp, env, "commit-tree", "--no-gpg-sign", tree.strip(), "-p", w["head"],
+                                  "-m", SAVED_MSG % w["nn"])
+    if code == 0:
+        code, _, err = _git(wp, "update-ref", "-m", "rollback: unsaved work", "refs/heads/lease/" + w["nn"],
+                            sha.strip(), w["head"])
+    if code != 0:
+        raise Stop("could not save %s's unsaved work on lease/%s (%s)" % (w["rel"], w["nn"], _last(err)))
+
+
+def _ignored_in(w: dict, keys: List[str]) -> List[str]:
+    """Every ignored entry of a window's worktree, empty or not (a wholly ignored directory is one "<dir>/"), its
+    nested repos left out: a worktree's removal deletes them."""
+    wp = Path(w["path"])
+    code, out, _ = _git(wp, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    return sorted(_beside_nested(wp, [u for u in (out.split("\0") if code == 0 else []) if u],
+                                 _nested_rels(w["key"], keys)))
+
+
+def _move_aside(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(str(src), str(dest))
+    except OSError:
+        shutil.move(str(src), str(dest))
+
+
+def _hot_was(root: Path) -> Optional[str]:
+    """vault/hot.md's `session:` line as the vault's history last had it before the upgrade renamed it."""
+    vault = root / "vault"
+    code, out, _ = _git(vault, "log", "-n", "200", "--format=%H", "--", "hot.md")
+    for sha in (out.split() if code == 0 else []):
+        code, text, _ = _git(vault, "show", "%s:hot.md" % sha)
+        if code != 0:
+            continue
+        lines = text.split("\n")
+        i = _hot_session_line(lines)
+        if i is not None:
+            return lines[i]
+    return None
+
+
+def _lease_branches(root: Path) -> List[str]:
+    """Each lease/<NN> branch in each target repo, with what it holds that origin's trunk does not have."""
+    import leaselib as ll
+    out = []
+    outer = v.target_branch(root)
+    for key, p in target_repos(root):
+        _, refs, _ = _git(p, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/lease/")
+        names = [b for b in refs.split() if LEASE_BRANCH.fullmatch(b)]
+        if not names:
+            continue
+        try:
+            trunk: Optional[str] = ll.trunk_of(root / "target", key, outer)
+        except Exception:
+            trunk = None
+        for b in names:
+            if trunk is None:
+                _, subj, _ = _git(p, "log", "-1", "--format=%s", "refs/heads/" + b)
+                out.append("%s in target/%s: its last commit is \"%s\"" % (b, key, subj.strip()))
+                continue
+            _, subj, _ = _git(p, "log", "--format=%s", "%s..refs/heads/%s" % (_origin(trunk), b))
+            subj = [s for s in subj.splitlines() if s.strip()]
+            if subj:
+                out.append("%s in target/%s: %s origin/%s does not have (\"%s\"%s)"
+                           % (b, key, _plural(len(subj), "commit"), trunk, subj[0],
+                              "" if len(subj) == 1 else ", the newest"))
+            else:
+                out.append("%s in target/%s: nothing origin/%s does not have" % (b, key, trunk))
+    return out
+
+
+def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
+    """python3 core/upgrade.py --rollback [--dry-run] [--force]: the steps, in order, as one numbered list."""
+    import leaselib as ll
+    import prepush
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"      # git status reads; it never rewrites an index here
+    live = _live_sessions(root)
+    if live and not force:
+        print(LIVE_REFUSED % (ROLLBACK_TO, _plural(len(live), "Daedalus session") + (" is" if len(live) == 1 else
+                                                                                     " are"), _both(live)))
+        return 1
+    fd = None
+    if not dry:
+        fd = _lock(root, time.time() + 10)
+        if fd is None:
+            print("Not going back to %s: the upgrade is running in this home right now. Try again in a minute. "
+                  "Nothing was changed." % ROLLBACK_TO)
+            return 1
+    would = (lambda now, then: then) if dry else (lambda now, then: now)
+    steps: List[List[str]] = []
+
+    def say(*lines: str) -> None:
+        steps.append(list(lines))
+
+    def show(stopped: bool = False) -> None:
+        print("Going back to %s%s:" % (ROLLBACK_TO, " (dry run: nothing is changed)" if dry else ""))
+        for i, lines in enumerate(steps, 1):
+            print("%d. %s" % (i, lines[0]))
+            for ln in lines[1:]:
+                print("   - " + ln)
+        if stopped:
+            print(ROLLBACK_STOPPED)
+
+    try:
+        say("No Daedalus session is live in this home." if not live else
+            "Going ahead with --force while %s %s live: %s." % (_plural(len(live), "session"),
+                                                                 "is" if len(live) == 1 else "are", _both(live)))
+        try:
+            keys = ll.repos_of(root)
+        except ll.Refused:
+            keys = []
+        wins = _windows(root)
+        problems: Dict[str, List[str]] = {}
+        for w in wins:
+            problems[w["path"]] = _wt_problems(root, w, keys)
+        # 2. unsaved work, each window's own commit on its lease/<NN>
+        saved = []
+        for w in sorted(wins, key=lambda w: w["rel"]):
+            if problems[w["path"]] or not os.path.isdir(w["path"]):
+                continue
+            changed, untracked = _wt_status(w, _nested_rels(w["key"], keys))
+            if not changed and not untracked:
+                continue
+            words = ", ".join(x for x in (_plural(changed, "changed file") if changed else "",
+                                          _plural(untracked, "untracked file") if untracked else "") if x)
+            if not dry:
+                _save_window(root, w, keys)
+            saved.append("%s window %s's unsaved work in %s (%s) as one commit on lease/%s"
+                         % (would("saved", "would save"), w["nn"], w["rel"], words, w["nn"]))
+        if saved:
+            say("Unsaved work in the windows, kept as commits:", *saved)
+        else:
+            say("No window has unsaved work to save.")
+        # 3. the worktrees, deepest first; ignored files moved aside first, never deleted
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        moved, removed, stuck = [], [], []
+        gone: Set[str] = set()
+        for w in wins:
+            rel, wp = w["rel"], Path(w["path"])
+            if problems[w["path"]]:
+                stuck += problems[w["path"]]
+                continue
+            if not wp.is_dir():
+                holds = ll.record_holds(w["admin"]) if w["admin"] is not None else []
+                if holds:
+                    stuck.append("%s is gone, but git's record of it holds %s — put the directory back where it was "
+                                 "(git -C target/%s worktree repair <its new place>)" % (rel, _and(holds), w["key"]))
+                    continue
+                if not dry:
+                    ll.prune_under(w["src"], root / "worktrees")
+                removed.append("%s (its directory was already gone; git's record of it %s)"
+                               % (rel, would("is removed", "would be removed")))
+                continue
+            inside = [x["rel"] for x in wins if x is not w and x["rel"].startswith(rel + "/")
+                      and os.path.isdir(x["path"]) and x["rel"] not in gone]
+            inside += ["%s/%s" % (rel, n) for n in _nested_rels(w["key"], keys) if (wp / n).exists()
+                       and "%s/%s" % (rel, n) not in inside and not dry]
+            if inside:
+                stuck.append("%s still holds %s, which was not removed" % (rel, _and(inside)))
+                continue
+            ign = _ignored_in(w, keys)
+            if ign:
+                dest = root / KEPT / stamp / w["nn"] / w["key"]
+                if not dry:
+                    for u in ign:
+                        _move_aside(wp / u.rstrip("/"), dest / u.rstrip("/"))
+                moved.append("%s window %s's ignored files in %s (%s) to %s/ — git ignores them, so no commit "
+                             "holds them" % (would("moved", "would move"), w["nn"], rel, ll.name_paths(ign),
+                                             _rel(root, str(dest))))
+            if not dry:
+                code, _, err = _git(w["src"], "worktree", "remove", w["path"])
+                if code != 0:
+                    stuck.append("git would not remove %s (%s) — deal with what it names, then run this again"
+                                 % (rel, _last(err)))
+                    continue
+            removed.append(rel)
+            gone.add(rel)
+        lines = moved + (["%s %s — their branches stay" % (would("removed", "would remove"), ", ".join(removed))]
+                         if removed else [])
+        if not stuck:
+            # forward again: a window's record must not say its worktree is there — on this release, the upgrade (a
+            # window picked up from target/) or core/lease.sh claim <NN> makes it again from its branch
+            nns = sorted({w["nn"] for w in wins})
+            marked = []
+            with ll.lock(root, shared=dry):
+                for nn in nns:
+                    d = ll.read_lease(root, nn)
+                    if d is None or d.get("worktree_ready") is False:
+                        continue
+                    if not dry:
+                        d["worktree_ready"] = False
+                        ll.write_lease(root, nn, d)
+                    marked.append(nn)
+            if marked:
+                lines.append("%s %s in state/leases/ as having no worktree, so on this release again the next session "
+                             "start or core/lease.sh claim <NN> makes it from its branch"
+                             % (would("marked", "would mark"), _both(["window " + nn for nn in marked])))
+        if stuck:
+            say("Window worktrees: %s could not be removed:" % _plural(len(stuck), "thing"), *(lines + stuck))
+            show(stopped=True)
+            return 1
+        say("Window worktrees removed with git worktree remove:" if lines and not dry else
+            "Window worktrees, removed with git worktree remove:" if lines else "No window worktree is left.", *lines)
+        # 4. every lease branch stays
+        branches = _lease_branches(root)
+        if branches:
+            say("Every window's branch is kept; v0.6.1 can check any of them out (git -C target/<repo> checkout "
+                "lease/<NN>):", *branches)
+        else:
+            say("There is no window branch to keep.")
+        # 5. the pre-push hook, only where it is Daedalus's own shim
+        hooks = []
+        for key, p in target_repos(root):
+            try:
+                hp = prepush.hook_path(p)
+            except ValueError:
+                continue
+            if hp.is_file() or hp.is_symlink():
+                try:
+                    text = hp.read_text(errors="replace")
+                except OSError:
+                    text = ""
+                if prepush._only_a_shim(text):
+                    if not dry:
+                        hp.unlink()
+                    hooks.append("%s the pre-push hook Daedalus installed in target/%s" % (would("removed",
+                                                                                          "would remove"), key))
+                else:
+                    hooks.append("target/%s's pre-push hook is not Daedalus's; it is left as it is" % key)
+            if not dry and hp.exists():
+                continue
+            for kept in sorted(hp.parent.glob("pre-push.before-daedalus-*")):
+                hooks.append("the hook target/%s had before the upgrade is kept as %s; to have it run again: mv %s %s"
+                             % (key, _rel(root, str(kept)), _sh(_rel(root, str(kept))), _sh(_rel(root, str(hp)))))
+        say("Pre-push hooks:", *hooks) if hooks else say("No target repo has a pre-push hook of Daedalus's.")
+        # 6. hot.md's session: line
+        hot = root / "vault" / "hot.md"
+        try:
+            hl = hot.read_text().split("\n")
+        except OSError:
+            hl = []
+        end = next((i for i in range(1, len(hl)) if hl and hl[0].strip() == "---" and hl[i].strip() == "---"), None)
+        at = next((i for i in range(1, end) if hl[i] == HOT_LEASES), None) if end else None
+        if at is not None and not any(ln.startswith("session:") for ln in hl[1:end]):
+            was = _hot_was(root)
+            line = was or "session: NNN"
+            if not dry:
+                hl[at] = line
+                _write(hot, "\n".join(hl))
+            say("%s vault/hot.md's session: line back (%s)%s." % (
+                would("Put", "Would put"), line, "" if was else " — the vault's history does not hold the number "
+                "it had; the next session log sets it"))
+        else:
+            say("vault/hot.md needs nothing: the upgrade did not rename its session: line, or it is back already.")
+        # 7. what stays, which v0.6.1 does not read
+        stays = ("Left as they are, because v0.6.1 does not read them: config.yaml's memory: block, %s, state/leases/ "
+                 "and the other directories the upgrade made." % KEY_FILE)
+        mem = any(ln.startswith("memory:") for ln in (root / "config.yaml").read_text().splitlines()) \
+            if (root / "config.yaml").is_file() else False
+        if mem and _hook_prefixes(root) is None:
+            stays += (" v0.6.1's capture reads its settings only from the hook line in .claude/settings.local.json, "
+                      "which is gone: put it back before you start a session on v0.6.1, or capture stops.")
+        elif mem:
+            stays += (" v0.6.1's capture keeps reading its settings from the hook line in .claude/settings.local.json, "
+                      "which the upgrade left in place.")
+        say(stays)
+        snaps = _snapshots(root)
+        say("The safety copy in state/upgrade-snapshot/ is kept (%s); v0.6.1 does not read it." % ", ".join(snaps)
+            if snaps else "There is no safety copy to keep.")
+        # 8. the stamp
+        if (root / STAMP).exists():
+            if not dry:
+                (root / STAMP).unlink()
+            say("%s state/upgraded-to." % would("Removed", "Would remove"))
+        else:
+            say("state/upgraded-to is gone already.")
+        show()
+        home = _sh(str(root))
+        print("Last step, yours to run: put the code back. This script is part of that code, so it does not switch it "
+              "itself. Start no session in this home until you have run it: a session started on this release "
+              "upgrades the home again.")
+        if _git(root, "rev-parse", "--verify", "-q", "refs/tags/%s^{commit}" % ROLLBACK_TO)[0] != 0:
+            print("  git -C %s fetch origin tag %s" % (home, ROLLBACK_TO))
+        print("  git -C %s checkout %s" % (home, ROLLBACK_TO))
+        return 0
+    except Stop as e:
+        show()
+        print("Stopped: %s. Nothing after that was changed; run python3 core/upgrade.py --rollback again once it is "
+              "dealt with." % e)
+        return 1
+    finally:
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
 def main(argv: List[str]) -> int:
     root = v.ROOT
     args = argv[1:]
@@ -3833,9 +4292,14 @@ def main(argv: List[str]) -> int:
         return forget_snapshot(root)
     if args == ["--background"]:
         return background_main(root)
+    if "--rollback" in args:
+        if [a for a in args if a not in ("--rollback", "--dry-run", "--force")]:
+            sys.stderr.write("usage: python3 core/upgrade.py --rollback [--dry-run] [--force]\n")
+            return 2
+        return rollback(root, dry="--dry-run" in args, force="--force" in args)
     if [a for a in args if a not in ("--dry-run", "--setup")]:
         sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] | --doctor | --restore-help | "
-                         "--forget-snapshot\n")
+                         "--forget-snapshot | --rollback [--dry-run] [--force]\n")
         return 2
     dry, upto = "--dry-run" in args, (3 if "--setup" in args else 6)
     ver = version(root)

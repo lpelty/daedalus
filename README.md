@@ -169,6 +169,25 @@ names it until it is picked up, applied or dropped. A picked-up window is promot
 window 01") or released, like any other; `core/lease.sh adopt <branch>
 [--repo <nested>]` does the same for any branch later.
 
+**Going back to v0.6.1.** Close every session in the home, then run
+`python3 core/upgrade.py --rollback` from a terminal there; `--dry-run` first
+prints the plan and changes nothing. It refuses while a Daedalus session is
+live, naming it (`--force` goes ahead anyway). It saves each window's
+uncommitted and untracked files as one commit on its `lease/<NN>` branch,
+moves its ignored files to `state/rollback-kept/`, and removes the window
+worktrees with `git worktree remove`; a window it cannot save safely (on
+another branch, in the middle of a rebase, locked) is named, and it stops
+there until that is dealt with. Every `lease/<NN>` branch stays, listed with
+what it holds, so v0.6.1 can check it out. It removes the pre-push hook only
+where it is Daedalus's own, puts `vault/hot.md`'s `session:` line back, and
+removes `state/upgraded-to`; the `memory:` block, the key file and the safety
+copy stay, unread by v0.6.1. Last it prints `git -C <home> checkout v0.6.1`,
+which you run yourself, since the script is part of that code; start no
+session before then. Running it twice is safe. To come forward again, check
+your branch out again (`git -C <home> checkout main`) and start a session:
+the upgrade runs again, and `core/lease.sh claim <NN>` brings a window's
+worktree back from its branch.
+
 **Rehearsing two windows.** `bash core/tests/scenarios/two-clones.sh` builds a
 scratch deployment from fixtures (its own small target and a local stand-in
 for origin — your deployment is never read or touched) and walks you through

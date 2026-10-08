@@ -15,6 +15,10 @@ is now saved every couple of minutes, not only when it ends.
 Every deployment takes this release, and the next, the same way: `git pull
 --ff-only` in the Daedalus home, then a new session.
 
+To go back, `python3 core/upgrade.py --rollback` puts the home where v0.6.1
+runs as before, keeps each window's work on its branch, and prints the
+command that puts the code back.
+
 **What you will see at the first session after the pull.**
 - The session upgrades the home before anything else. It says one line for
   each thing it did.
