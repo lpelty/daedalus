@@ -72,6 +72,28 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   [ "$(cat "$T/build.log")" = ignored ]
 }
 
+@test "ignored files: a configured nested repo is never named among them, nor anything under it, even where the outer repo ignores the directory holding it (agents/); what else that directory holds is named — in the upgrade's line and in doctor" {
+  mkdir -p "$T/agents"; mv "$T/sub" "$T/agents/one"
+  printf 'agents/\n' > "$T/.gitignore"; git -C "$T" add -A; cmt "$T" -m "ignore agents/"; git -C "$T" push -q origin main
+  sed -i '' 's|nested: sub=|nested: agents/one=|' "$DAEDALUS_HOME/config.yaml"
+  printf 'scratch\n' > "$T/agents/one/scratch.local"; printf 'scratch.local\n' >> "$T/agents/one/.git/info/exclude"
+  run python3 "$UP" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"target/thing holds ignored files"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing/agents/one holds ignored files no window has (scratch.local)"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'notes\n' > "$T/agents/notes.md"; mkdir -p "$T/agents/two/x"; printf 'y\n' > "$T/agents/two/x/y.txt"
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  ln="$(printf '%s\n' "$output" | grep 'target/thing holds ignored files')"
+  case "$ln" in *"target/thing holds ignored files no window has (agents/notes.md, agents/two/) — they stay there"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"(agents/)"*|*"(agents/,"*|*"agents/one/"*) echo "$output"; return 1 ;; esac
+  printf 'loose\n' > "$T/agents/one/loose.txt"
+  run python3 "$UP" --doctor
+  case "$output" in *"agents/one/"*|*"(agents/)"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"target/thing/agents/one has untracked files no window holds (loose.txt)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "unfinished work: an edit git status does not show — skip-worktree — is named with the file; a marked file with no edit is not work" {
   printf 'MY EDIT\n' > "$T/a.txt"; git -C "$T" update-index --skip-worktree a.txt
   git -C "$T/sub" update-index --assume-unchanged n.txt

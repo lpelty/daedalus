@@ -713,29 +713,57 @@ def _elsewhere_words(key: str, b: str, path: str, flag: str) -> str:
             % (path, key, path, b, flag))
 
 
+def _nested_rels(key: str, keys: List[str]) -> List[str]:
+    """The configured nested repos under target/<key>, as paths from its root."""
+    return [k[len(key) + 1:] for k in keys if k.startswith(key + "/")]
+
+
+def _beside_nested(p: Path, paths: List[str], nested: List[str]) -> List[str]:
+    """<paths> (from target/<key>'s root; a directory ends in "/") without every configured nested repo and anything
+    under it. A directory entry that holds one — git names a wholly ignored agents/ as one entry when the nested repo
+    is agents/<name> — is opened up to what else it holds, so the nested repo is never named as a file of the outer
+    one, and nothing beside it goes unnamed."""
+    out: List[str] = []
+    for u in paths:
+        d = u.rstrip("/")
+        if any(d == n or d.startswith(n + "/") for n in nested):
+            continue
+        if u.endswith("/") and any(n.startswith(d + "/") for n in nested):
+            try:
+                names = sorted(os.listdir(str(p / d)))
+            except OSError:
+                continue
+            kids = [d + "/" + x + ("/" if (p / d / x).is_dir() and not (p / d / x).is_symlink() else "")
+                    for x in names]
+            out += _beside_nested(p, kids, nested)
+            continue
+        out.append(u)
+    return out
+
+
 def _loose(p: Path, key: str, keys: List[str]) -> List[str]:
     """Untracked, not-ignored paths of target/<key>'s working tree (files and symlinks; a repository of its own
-    shows as "<dir>/"), leaving out the nested target repos under it, which are repos of their own. Sorted."""
+    shows as "<dir>/"), leaving out the configured nested repos under it, which are repos of their own. Sorted."""
     code, out, _ = _git(p, "ls-files", "--others", "--exclude-standard", "-z")
-    nested = [k[len(key) + 1:] for k in keys if k.startswith(key + "/")]
-    return sorted(u for u in (out.split("\0") if code == 0 else [])
-                  if u and not any(u.rstrip("/") == n or u.startswith(n + "/") for n in nested))
+    return sorted(_beside_nested(p, [u for u in (out.split("\0") if code == 0 else []) if u],
+                                 _nested_rels(key, keys)))
 
 
 def _ignored(p: Path, key: str, keys: List[str]) -> List[str]:
     """Ignored, non-empty entries of target/<key>'s working tree — .gitignore, .git/info/exclude or the global
     excludes file: notes, .env, a repository cloned inside (a wholly ignored directory is one "<dir>/" entry) —
-    leaving out the nested target repos. A window is made from the commits and the untracked files; these stay
-    in the trunk mirror, so its line names them (release-candidate review 2, finding 9). Sorted."""
+    leaving out the configured nested repos and anything under them, and opening up a directory that holds one
+    (agents/ holding agents/<name>). A window is made from the commits and the untracked files; these stay in the
+    trunk mirror, so its line names them (release-candidate review 2, finding 9). Sorted."""
     code, out, _ = _git(p, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
                         "--no-empty-directory", "-z")
-    nested = [k[len(key) + 1:] for k in keys if k.startswith(key + "/")]
     found = []
-    for u in (out.split("\0") if code == 0 else []):
-        if not u or any(u.rstrip("/") == n or u.startswith(n + "/") for n in nested):
-            continue
+    for u in _beside_nested(p, [u for u in (out.split("\0") if code == 0 else []) if u], _nested_rels(key, keys)):
         try:
-            if not u.endswith("/") and not os.path.islink(str(p / u)) and os.path.getsize(str(p / u)) == 0:
+            if u.endswith("/"):
+                if not os.listdir(str(p / u)):
+                    continue
+            elif not os.path.islink(str(p / u)) and os.path.getsize(str(p / u)) == 0:
                 continue
         except OSError:
             continue
@@ -3716,7 +3744,7 @@ def doctor(root: Path) -> int:
             parked, elsewhere = _branches(p, trunk, cur)
         except Stop:
             parked, elsewhere = [], []
-        loose = _loose(p, key, [k for k, _ in repos])
+        loose = _loose(p, key, ll.repos_of(root))     # every configured nested repo, cloned or not
         if loose:                       # untracked files in a target checkout: work no window holds (critic finding 2)
             if pend:
                 print("NOTE     target/%s has untracked files no window holds (%s) — the upgrade stops on them until "
