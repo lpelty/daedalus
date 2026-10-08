@@ -3828,13 +3828,18 @@ def doctor(root: Path) -> int:
 
 # --- going back to v0.6.1: --rollback ------------------------------------------------------------------------------
 # The operator's way back (asked 2026-10-08, "If there's an issue can I revert?"): an upgraded home is put where the
-# v0.6.1 code runs exactly as before, and the operator then switches the code with the one command it prints — this
-# script is part of that code, so it never switches it itself. Nothing is discarded: unsaved work in a window is a
-# commit on its lease/<NN>, ignored files are moved aside, every branch stays, a pre-push hook that is not only
-# Daedalus's shim stays. Running it again is safe; --dry-run says what it would do and changes nothing.
+# v0.6.1 code runs as before, and the operator then switches the code with the one command it prints — this script
+# is part of that code, so it never switches it itself. Nothing is discarded: unsaved work in a window is a commit on
+# its lease/<NN>, ignored files are moved aside, every branch stays, a branch the upgrade picked up gets its own name
+# back, target/<repo> goes back on the branch it was on, a pre-push hook that is not only Daedalus's shim stays.
+# Every window is checked before anything changes: one that cannot be saved or removed safely stops the rollback
+# with nothing changed. Running it again is safe; --dry-run says what it would do and changes nothing.
 
 ROLLBACK_TO = "v0.6.1"
 KEPT = Path("state") / "rollback-kept"
+# the newest safety copy when a rollback finished: the next rollback reads where target/ was before the upgrade from
+# the oldest copy after it (an upgrade after a rollback takes copies of its own)
+ROLLED_BACK = Path("state") / "rollback-done"
 SAVED_MSG = "Unsaved work in window %s, saved before going back to " + ROLLBACK_TO
 LIVE_REFUSED = ("Not going back to %s: %s live in this home — %s. Close them, then run this again from a terminal, or "
                 "add --force to go ahead while they run. Nothing was changed.")
@@ -3942,6 +3947,12 @@ def _wt_problems(root: Path, w: dict, keys: List[str]) -> List[str]:
     if w["locked"]:
         out.append("%s is locked against removal — if nothing is still checking it out, unlock it (git -C target/%s "
                    "worktree unlock %s)" % (rel, w["key"], _sh(w["path"])))
+    if w["admin"] is not None and (Path(w["admin"]) / "modules").exists():
+        out.append("%s has had a submodule checked out in it, and git will not remove such a worktree: the submodule's "
+                   "own repository is kept in git's record of it (%s), which the removal deletes — once what that "
+                   "submodule holds is pushed or kept elsewhere, and %s's own changes are committed on %s, remove it "
+                   "yourself (git -C target/%s worktree remove --force %s), then run this again"
+                   % (rel, _rel(root, str(Path(w["admin"]) / "modules")), rel, want, w["key"], _sh(w["path"])))
     if w["branch"] != want:
         on = w["branch"] or "no branch (a detached checkout)"
         out.append("%s is on %s, not on its window's branch %s — commit what is there, then put the window's branch "
@@ -4026,8 +4037,9 @@ def _hot_was(root: Path) -> Optional[str]:
     return None
 
 
-def _lease_branches(root: Path) -> List[str]:
-    """Each lease/<NN> branch in each target repo, with what it holds that origin's trunk does not have."""
+def _lease_branches(root: Path, notes: Optional[Dict[Tuple[str, str], str]] = None) -> List[str]:
+    """Each lease/<NN> branch in each target repo, with what it holds that origin's trunk does not have, and its note
+    in <notes> ({(repo, lease/<NN>): words}) when it has one."""
     import leaselib as ll
     out = []
     outer = v.target_branch(root)
@@ -4041,18 +4053,224 @@ def _lease_branches(root: Path) -> List[str]:
         except Exception:
             trunk = None
         for b in names:
+            note = (" — " + notes[(key, b)]) if notes and (key, b) in notes else ""
             if trunk is None:
                 _, subj, _ = _git(p, "log", "-1", "--format=%s", "refs/heads/" + b)
-                out.append("%s in target/%s: its last commit is \"%s\"" % (b, key, subj.strip()))
+                out.append("%s in target/%s: its last commit is \"%s\"%s" % (b, key, subj.strip(), note))
                 continue
             _, subj, _ = _git(p, "log", "--format=%s", "%s..refs/heads/%s" % (_origin(trunk), b))
             subj = [s for s in subj.splitlines() if s.strip()]
             if subj:
-                out.append("%s in target/%s: %s origin/%s does not have (\"%s\"%s)"
+                out.append("%s in target/%s: %s origin/%s does not have (\"%s\"%s)%s"
                            % (b, key, _plural(len(subj), "commit"), trunk, subj[0],
-                              "" if len(subj) == 1 else ", the newest"))
+                              "" if len(subj) == 1 else ", the newest", note))
             else:
-                out.append("%s in target/%s: nothing origin/%s does not have" % (b, key, trunk))
+                out.append("%s in target/%s: nothing origin/%s does not have%s" % (b, key, trunk, note))
+    return out
+
+
+def _rollback_stops(root: Path, wins: List[dict], keys: List[str]) -> List[str]:
+    """Everything that stops the rollback, found before it changes anything, so that a window it cannot save or
+    remove never leaves the others half done: each window's problems (_wt_problems), a window whose directory is
+    gone while git's record of it holds something, and a window's worktree holding a repository that is no window's
+    worktree (its removal would delete it)."""
+    import leaselib as ll
+    out: List[str] = []
+    rels = {w["rel"] for w in wins}
+    for w in wins:
+        rel, wp = w["rel"], Path(w["path"])
+        if not wp.is_dir():
+            holds = ll.record_holds(w["admin"]) if w["admin"] is not None else []
+            if w["admin"] is not None and (Path(w["admin"]) / "modules").exists():
+                holds.append("a submodule's own repository")
+            if holds:
+                out.append("%s is gone, but git's record of it holds %s — put the directory back where it was "
+                           "(git -C target/%s worktree repair <its new place>)" % (rel, _and(holds), w["key"]))
+            continue
+        out += _wt_problems(root, w, keys)
+        for n in _nested_rels(w["key"], keys):
+            if (wp / n).exists() and "%s/%s" % (rel, n) not in rels:
+                out.append("%s holds %s/%s, which is not a window's worktree — move it out of the worktree"
+                           % (rel, rel, n))
+    return out
+
+
+def _no_worktree(root: Path, nns: List[str], dry: bool) -> List[str]:
+    """Mark each window of <nns> worktree_ready false in state/leases/ — on this release again, the next session start
+    (a picked-up window) or core/lease.sh claim <NN> then makes its worktree from its branch. The ones it marked (or,
+    dry, would mark): not prime, a released window, or one marked already."""
+    import leaselib as ll
+    out = []
+    with ll.lock(root, shared=dry):
+        for nn in nns:
+            d = ll.read_lease(root, nn)
+            if nn == "prime" or d is None or d.get("released") or d.get("worktree_ready") is False:
+                continue
+            if not dry:
+                d["worktree_ready"] = False
+                ll.write_lease(root, nn, d)
+            out.append(nn)
+    return out
+
+
+def _worktrees_missing(root: Path) -> List[str]:
+    """Each window in state/leases/ whose record does not say it has no worktree while one of its worktrees
+    (worktrees/<NN>/<repo>) is not there — removed by an earlier run that stopped, or by hand."""
+    import leaselib as ll
+    try:
+        leases = ll.read_all(root)
+    except ll.Refused:
+        return []
+    out = []
+    for nn, d in sorted(leases.items()):
+        if nn == "prime" or d.get("released") or d.get("worktree_ready") is False:
+            continue
+        repos = list(d.get("trunks") or {}) or [str(r) for r in (d.get("repos") or [])]
+        if any(not (root / "worktrees" / nn / r).is_dir() for r in repos):
+            out.append(nn)
+    return out
+
+
+_LABELS = (("daedalus/upgrade-", "it holds the commits target/%s's %s had that origin/%s did not; %s was reset to "
+                                 "origin/%s (to have them on it again: git -C target/%s merge %s, on %s)"),
+           ("daedalus/unsaved-", "it holds the changes that were not committed in target/%s, as one commit"),
+           ("daedalus/detached-", "it holds target/%s's detached checkout"),
+           ("daedalus/stash-", "it holds a stash entry of target/%s, as a commit"))
+
+
+def _old_names(root: Path, dry: bool) -> Tuple[Dict[Tuple[str, str], str], Dict[Tuple[str, str], str]]:
+    """Each window picked up from a branch of target/<repo> (its lease's adopted_from and adopted_repo) gets that name
+    back at its lease/<NN>'s tip, made with a plain git branch where no branch has it, so it never moves one —
+    its upstream settings, which the upgrade's removal of the name left, come back with it; one that is there
+    already is left as it is. A name Daedalus made (daedalus/...) is said in words, never made. Returns
+    ({(repo, lease/<NN>): its note}, {(repo, name): the commit it is at, or would be}) — the second for the
+    checkout back to the branch target/<repo> was on."""
+    import leaselib as ll
+    notes: Dict[Tuple[str, str], str] = {}
+    at: Dict[Tuple[str, str], str] = {}
+    try:
+        leases = ll.read_all(root)
+    except ll.Refused:
+        return notes, at
+    for nn, d in sorted(leases.items()):
+        key, orig = str(d.get("adopted_repo") or ""), str(d.get("adopted_from") or "")
+        if nn == "prime" or not key or not orig:
+            continue
+        p, lease = root / "target" / key, "lease/" + nn
+        tip = ll.ref_oid(p, "refs/heads/" + lease) if p.is_dir() else None
+        if not tip:
+            continue
+        label = next((words for pre, words in _LABELS if orig.startswith(pre)), None)
+        if label is not None:
+            if orig.startswith("daedalus/upgrade-"):
+                trunk = str((d.get("trunks") or {}).get(key) or "its trunk")
+                notes[(key, lease)] = label % (key, trunk, trunk, trunk, trunk, key, lease, trunk)
+            else:
+                notes[(key, lease)] = label % key
+            continue
+        have = ll.ref_oid(p, "refs/heads/" + orig)
+        if have == tip:
+            notes[(key, lease)] = "it was %s before the upgrade, which is at the same commit" % orig
+            at[(key, orig)] = tip
+        elif have:
+            notes[(key, lease)] = ("it was %s before the upgrade; a branch of that name is there already, at another "
+                                   "commit, and is left as it is" % orig)
+            at[(key, orig)] = have
+        elif dry:
+            notes[(key, lease)] = "it was %s before the upgrade; would give it that name back" % orig
+            at[(key, orig)] = tip
+        else:
+            code, _, err = _git(p, "branch", "--no-track", orig, tip)
+            if code == 0:
+                notes[(key, lease)] = "it was %s before the upgrade; gave it that name back" % orig
+                at[(key, orig)] = tip
+            else:
+                notes[(key, lease)] = ("it was %s before the upgrade; could not give it that name back (%s) — "
+                                       "git -C target/%s branch %s %s" % (orig, _last(err), key, _sh(orig), lease))
+    return notes, at
+
+
+def _before_upgrade(root: Path) -> Dict[str, Tuple[str, str]]:
+    """{repo: (the branch target/<repo> was on before the upgrade, "" when detached; its commit)}, read from the oldest
+    safety copy taken since the last rollback finished; {} when there is none."""
+    try:
+        after = (root / ROLLED_BACK).read_text().strip()
+    except OSError:
+        after = ""
+    snaps = [x for x in _snapshots(root) if x > after]
+    if not snaps:
+        return {}
+    man = _read_json(root / SNAPS / snaps[0] / "manifest.json") or {}
+    keys = {os.path.realpath(str(p)): key for key, p in target_repos(root)}
+    out: Dict[str, Tuple[str, str]] = {}
+    for r in man.get("repos") or []:
+        key = keys.get(os.path.realpath(str(r.get("path") or ""))) if r.get("path") else None
+        main = next((w for w in r.get("worktrees") or [] if w.get("i") == 0), None)
+        if key is None or main is None:
+            continue
+        br = str(main.get("branch") or "")
+        out[key] = (br[len("refs/heads/"):] if br.startswith("refs/heads/") else "", str(main.get("head") or ""))
+    return out
+
+
+def _checkouts_back(root: Path, keys: List[str], at: Dict[Tuple[str, str], str], dry: bool) -> List[str]:
+    """Each target/<repo> the upgrade moved off the branch it was on is put back on it with git checkout — only while
+    it is still on its trunk where the upgrade left it, has no uncommitted change, untracked file or git operation
+    in progress, and nothing untracked or ignored is where that branch has a file; otherwise the line says what to
+    run. <at>: the names _old_names gives back (in a dry run, not made yet)."""
+    import leaselib as ll
+    outer = v.target_branch(root)
+    out = []
+    for key, (was, head) in sorted(_before_upgrade(root).items()):
+        p = root / "target" / key
+        if not p.is_dir():
+            continue
+        _, cur, _ = _git(p, "branch", "--show-current")
+        cur = cur.strip()
+        if not was:
+            if head and _git(p, "rev-parse", "HEAD")[1].strip() != head:
+                out.append("target/%s was on a detached checkout before the upgrade (%s); it is on %s now — to go back "
+                           "to it: git -C target/%s checkout --detach %s" % (key, head[:12], cur or "another commit",
+                                                                             key, head[:12]))
+            continue
+        if cur == was:
+            continue
+        sha = at.get((key, was)) or ll.ref_oid(p, "refs/heads/" + was)
+        if not sha:
+            out.append("target/%s was on %s before the upgrade, which is no branch now; it stays on %s"
+                       % (key, was, cur or "a detached checkout"))
+            continue
+        try:
+            trunk: Optional[str] = ll.trunk_of(root / "target", key, outer)
+        except Exception:
+            trunk = None
+        why = []
+        if cur != trunk:
+            why.append("it is on %s now, not on %s where the upgrade left it" % (cur or "a detached checkout",
+                                                                                 trunk or "its trunk"))
+        else:
+            code, st, _ = _git(p, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all")
+            if code != 0 or st.strip() or ll.hidden_edits(p):
+                why.append("it has uncommitted changes")
+            if _loose(p, key, keys):
+                why.append("it has untracked files")
+            if _busy(p):
+                why.append("a git operation is in progress there")
+            if not why and (ll.gitlinks_in_way(p, [sha]) or ll.untracked_in_way(p, [sha])):
+                why.append("files git does not track are where %s has files" % was)
+        if why:
+            out.append("target/%s was on %s before the upgrade and is left on %s, because %s — to go back: "
+                       "git -C target/%s checkout %s" % (key, was, cur or "a detached checkout", _and(why), key,
+                                                         _sh(was)))
+            continue
+        if not dry:
+            code, _, err = ll.git_finish(p, "checkout", "--quiet", was)
+            if code != 0:
+                out.append("could not put target/%s back on %s (%s) — git -C target/%s checkout %s"
+                           % (key, was, _last(err), key, _sh(was)))
+                continue
+        out.append("%s target/%s back on %s, the branch it was on before the upgrade"
+                   % ("would put" if dry else "put", key, was))
     return out
 
 
@@ -4097,13 +4315,17 @@ def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
         except ll.Refused:
             keys = []
         wins = _windows(root)
-        problems: Dict[str, List[str]] = {}
-        for w in wins:
-            problems[w["path"]] = _wt_problems(root, w, keys)
+        # every window checked before anything changes: one it cannot save or remove stops it with nothing changed
+        stops = _rollback_stops(root, wins, keys)
+        if stops:
+            say("Window worktrees: %s %s the rollback, so nothing was changed:"
+                % (_plural(len(stops), "thing"), "stops" if len(stops) == 1 else "stop"), *stops)
+            show(stopped=True)
+            return 1
         # 2. unsaved work, each window's own commit on its lease/<NN>
         saved = []
         for w in sorted(wins, key=lambda w: w["rel"]):
-            if problems[w["path"]] or not os.path.isdir(w["path"]):
+            if not os.path.isdir(w["path"]):
                 continue
             changed, untracked = _wt_status(w, _nested_rels(w["key"], keys))
             if not changed and not untracked:
@@ -4118,21 +4340,17 @@ def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
             say("Unsaved work in the windows, kept as commits:", *saved)
         else:
             say("No window has unsaved work to save.")
-        # 3. the worktrees, deepest first; ignored files moved aside first, never deleted
+        # 3. the worktrees, deepest first; ignored files moved aside first, never deleted. Each window is marked as
+        # having no worktree just before git removes one of its worktrees, so a run cut off or stopped part-way never
+        # leaves a record saying a removed worktree is there (forward again, claim <NN> would make none)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         moved, removed, stuck = [], [], []
+        marked: Set[str] = set()
         gone: Set[str] = set()
         for w in wins:
             rel, wp = w["rel"], Path(w["path"])
-            if problems[w["path"]]:
-                stuck += problems[w["path"]]
-                continue
             if not wp.is_dir():
-                holds = ll.record_holds(w["admin"]) if w["admin"] is not None else []
-                if holds:
-                    stuck.append("%s is gone, but git's record of it holds %s — put the directory back where it was "
-                                 "(git -C target/%s worktree repair <its new place>)" % (rel, _and(holds), w["key"]))
-                    continue
+                marked.update(_no_worktree(root, [w["nn"]], dry))
                 if not dry:
                     ll.prune_under(w["src"], root / "worktrees")
                 removed.append("%s (its directory was already gone; git's record of it %s)"
@@ -4154,6 +4372,7 @@ def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
                 moved.append("%s window %s's ignored files in %s (%s) to %s/ — git ignores them, so no commit "
                              "holds them" % (would("moved", "would move"), w["nn"], rel, ll.name_paths(ign),
                                              _rel(root, str(dest))))
+            marked.update(_no_worktree(root, [w["nn"]], dry))
             if not dry:
                 code, _, err = _git(w["src"], "worktree", "remove", w["path"])
                 if code != 0:
@@ -4164,37 +4383,31 @@ def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
             gone.add(rel)
         lines = moved + (["%s %s — their branches stay" % (would("removed", "would remove"), ", ".join(removed))]
                          if removed else [])
-        if not stuck:
-            # forward again: a window's record must not say its worktree is there — on this release, the upgrade (a
-            # window picked up from target/) or core/lease.sh claim <NN> makes it again from its branch
-            nns = sorted({w["nn"] for w in wins})
-            marked = []
-            with ll.lock(root, shared=dry):
-                for nn in nns:
-                    d = ll.read_lease(root, nn)
-                    if d is None or d.get("worktree_ready") is False:
-                        continue
-                    if not dry:
-                        d["worktree_ready"] = False
-                        ll.write_lease(root, nn, d)
-                    marked.append(nn)
-            if marked:
-                lines.append("%s %s in state/leases/ as having no worktree, so on this release again the next session "
-                             "start or core/lease.sh claim <NN> makes it from its branch"
-                             % (would("marked", "would mark"), _both(["window " + nn for nn in marked])))
+        # forward again: no window's record may say a worktree is there that is not — whatever removed it (an earlier
+        # run that stopped, or a hand), on this release the next start or core/lease.sh claim <NN> makes it again
+        marked.update(_no_worktree(root, _worktrees_missing(root), dry))
+        if marked:
+            lines.append("%s %s in state/leases/ as having no worktree, so on this release again the next session "
+                         "start or core/lease.sh claim <NN> makes it from its branch"
+                         % (would("marked", "would mark"), _both(["window " + nn for nn in sorted(marked)])))
         if stuck:
             say("Window worktrees: %s could not be removed:" % _plural(len(stuck), "thing"), *(lines + stuck))
             show(stopped=True)
             return 1
         say("Window worktrees removed with git worktree remove:" if lines and not dry else
             "Window worktrees, removed with git worktree remove:" if lines else "No window worktree is left.", *lines)
-        # 4. every lease branch stays
-        branches = _lease_branches(root)
+        # 4. every lease branch stays; a branch the upgrade picked up gets its own name back
+        notes, at = _old_names(root, dry)
+        branches = _lease_branches(root, notes)
         if branches:
             say("Every window's branch is kept; v0.6.1 can check any of them out (git -C target/<repo> checkout "
                 "lease/<NN>):", *branches)
         else:
             say("There is no window branch to keep.")
+        # 5. each target checkout back on the branch it was on before the upgrade
+        back = _checkouts_back(root, keys, at, dry)
+        if back:
+            say("Target checkouts:", *back)
         # 5. the pre-push hook, only where it is Daedalus's own shim
         hooks = []
         for key, p in target_repos(root):
@@ -4254,7 +4467,9 @@ def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
         snaps = _snapshots(root)
         say("The safety copy in state/upgrade-snapshot/ is kept (%s); v0.6.1 does not read it." % ", ".join(snaps)
             if snaps else "There is no safety copy to keep.")
-        # 8. the stamp
+        # 8. the stamp; the next rollback reads only the safety copies taken after this one
+        if not dry:
+            _write(root / ROLLED_BACK, (snaps[-1] if snaps else "") + "\n")
         if (root / STAMP).exists():
             if not dry:
                 (root / STAMP).unlink()

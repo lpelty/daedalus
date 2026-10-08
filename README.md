@@ -172,13 +172,21 @@ window 01") or released, like any other; `core/lease.sh adopt <branch>
 **Going back to v0.6.1.** Close every session in the home, then run
 `python3 core/upgrade.py --rollback` from a terminal there; `--dry-run` first
 prints the plan and changes nothing. It refuses while a Daedalus session is
-live, naming it (`--force` goes ahead anyway). It saves each window's
-uncommitted and untracked files as one commit on its `lease/<NN>` branch,
-moves its ignored files to `state/rollback-kept/`, and removes the window
-worktrees with `git worktree remove`; a window it cannot save safely (on
-another branch, in the middle of a rebase, locked) is named, and it stops
-there until that is dealt with. Every `lease/<NN>` branch stays, listed with
-what it holds, so v0.6.1 can check it out. It removes the pre-push hook only
+live, naming it (`--force` goes ahead anyway). It checks every window
+first: one it cannot save or remove safely (on another branch, in the middle
+of a rebase, locked, a submodule checked out in it) is named, and it changes
+nothing until each is dealt with. Then it saves each window's uncommitted and
+untracked files as one commit on its `lease/<NN>` branch, moves its ignored
+files to `state/rollback-kept/`, and removes the window worktrees with `git
+worktree remove`. Every `lease/<NN>` branch stays, listed with what it holds,
+so v0.6.1 can check it out. A branch the upgrade picked up gets its own name
+back at its window's latest commit (its upstream settings with it), unless a
+branch of that name is there already, and each `target/<repo>` goes back on
+the branch it was on before the upgrade, read from the safety copy — when it
+has changes or untracked files, it stays where it is and the command is
+printed instead. Uncommitted changes the upgrade picked up come back as a
+commit, and a trunk's commits that origin lacked stay on their window's
+branch, named in the list. It removes the pre-push hook only
 where it is Daedalus's own, puts `vault/hot.md`'s `session:` line back, and
 removes `state/upgraded-to`; the `memory:` block, the key file and the safety
 copy stay, unread by v0.6.1. Last it prints `git -C <home> checkout v0.6.1`,

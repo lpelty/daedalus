@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# python3 core/upgrade.py --rollback: an upgraded home taken back to where the v0.6.1 code runs exactly as before.
+# python3 core/upgrade.py --rollback: an upgraded home taken back to where the v0.6.1 code runs as before.
 # A v0.6.1 deployment built and started by its own code, pulled to the tree under test and upgraded by its own
 # session starts (two windows), then rolled back; then the operator's own step, git checkout v0.6.1, and v0.6.1's
 # session start, doctor and a push from target/<repo> all work as they did on v0.6.1.
@@ -52,8 +52,12 @@ upgraded() {
   export W
 }
 
-@test "--rollback: refused while a session is live, naming it; --dry-run prints the plan and changes nothing; the rollback saves each window's unsaved work on its lease/<NN>, removes the worktrees, keeps every lease branch, removes only Daedalus's pre-push hook, puts hot.md's session: line back, removes the stamp and prints the checkout; run twice it is safe; then git checkout v0.6.1 and v0.6.1's own session start, doctor and a push from target/ work as on v0.6.1" {
+@test "--rollback: refused while a session is live, naming it; --dry-run prints the plan and changes nothing; the rollback saves each window's unsaved work on its lease/<NN>, removes the worktrees, keeps every lease branch, gives a picked-up branch its own name back and puts target/<repo> back on the branch it was on, removes only Daedalus's pre-push hook, puts hot.md's session: line back, removes the stamp and prints the checkout; run twice it is safe; then git checkout v0.6.1 and v0.6.1's own session start, doctor and a push from target/ work as on v0.6.1" {
+  # before the upgrade, target/thing is on fix/in-flight, which has its own upstream settings
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  git -C "$T" config branch.fix/in-flight.remote origin; git -C "$T" config branch.fix/in-flight.merge refs/heads/fix/in-flight
   upgraded
+  [ "$(git -C "$T" branch --show-current)" = main ]; ! git -C "$T" rev-parse -q --verify refs/heads/fix/in-flight
   before="$(home_listing)"
   # live sessions: refused, named, nothing changed
   run python3 "$H/core/upgrade.py" --rollback
@@ -63,7 +67,7 @@ upgraded() {
   # the plan, with nothing changed
   run python3 "$H/core/upgrade.py" --rollback --dry-run --force
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in *"Going back to v0.6.1 (dry run: nothing is changed)"*"would save window 02's unsaved work in worktrees/02/thing (1 changed file, 2 untracked files) as one commit on lease/02"*"would remove worktrees/01/thing/sub, worktrees/02/thing/sub, worktrees/01/thing, worktrees/02/thing — their branches stay"*"would remove the pre-push hook Daedalus installed in target/thing"*"git -C $H checkout v0.6.1"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Going back to v0.6.1 (dry run: nothing is changed)"*"would save window 02's unsaved work in worktrees/02/thing (1 changed file, 2 untracked files) as one commit on lease/02"*"would remove worktrees/01/thing/sub, worktrees/02/thing/sub, worktrees/01/thing, worktrees/02/thing — their branches stay"*"lease/01 in target/thing: 1 commit origin/main does not have (\"the waiting fix\") — it was fix/in-flight before the upgrade; would give it that name back"*"would put target/thing back on fix/in-flight, the branch it was on before the upgrade"*"would remove the pre-push hook Daedalus installed in target/thing"*"git -C $H checkout v0.6.1"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(home_listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(home_listing); return 1; }
   # the sessions end; the rollback
   end_sessions
@@ -74,7 +78,15 @@ upgraded() {
   case "$output" in *"saved window 02's unsaved work in worktrees/02/thing (1 changed file, 2 untracked files) as one commit on lease/02"*"saved window 02's unsaved work in worktrees/02/thing/sub (1 untracked file) as one commit on lease/02"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"moved window 02's ignored files in worktrees/02/thing (env.local) to state/rollback-kept/"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"removed worktrees/01/thing/sub, worktrees/02/thing/sub, worktrees/01/thing, worktrees/02/thing"*"marked window 01 and window 02 in state/leases/ as having no worktree"*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *"lease/01 in target/thing: 1 commit origin/main does not have (\"the waiting fix\")"*"lease/02 in target/thing: 1 commit origin/main does not have (\"Unsaved work in window 02, saved before going back to v0.6.1\")"*"lease/01 in target/thing/sub: nothing origin/main does not have"*"lease/02 in target/thing/sub: 1 commit origin/main does not have"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lease/01 in target/thing: 1 commit origin/main does not have (\"the waiting fix\") — it was fix/in-flight before the upgrade; gave it that name back"*"lease/02 in target/thing: 1 commit origin/main does not have (\"Unsaved work in window 02, saved before going back to v0.6.1\")"*"lease/01 in target/thing/sub: nothing origin/main does not have"*"lease/02 in target/thing/sub: 1 commit origin/main does not have"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"put target/thing back on fix/in-flight, the branch it was on before the upgrade"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"put target/thing/sub back"*) echo "$output"; return 1 ;; esac
+  # fix/in-flight is back where it was, at the waiting fix, with its upstream settings, and checked out
+  [ "$(git -C "$T" rev-parse fix/in-flight)" = "$(git -C "$T" rev-parse lease/01)" ]
+  [ "$(git -C "$T" log -1 --format=%s fix/in-flight)" = "the waiting fix" ]
+  [ "$(git -C "$T" config branch.fix/in-flight.merge)" = refs/heads/fix/in-flight ]
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ -z "$(git -C "$T" status --porcelain)" ]
+  [ "$(git -C "$T/sub" branch --show-current)" = main ]
   case "$output" in *"removed the pre-push hook Daedalus installed in target/thing"*"target/thing/sub's pre-push hook is not Daedalus's; it is left as it is"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"Put vault/hot.md's session: line back (session: 011)."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"Left as they are, because v0.6.1 does not read them: config.yaml's memory: block, state/hindsight/api-key, state/leases/ and the other directories the upgrade made. v0.6.1's capture keeps reading its settings from the hook line in .claude/settings.local.json, which the upgrade left in place."*"The safety copy in state/upgrade-snapshot/ is kept"*"Removed state/upgraded-to."*) : ;; *) echo "$output"; return 1 ;; esac
@@ -124,25 +136,62 @@ upgraded() {
   case "$output" in *"the operator's own pre-push check"*) : ;; *) echo "$output"; return 1 ;; esac
   # the old code can check out each window's branch
   git -C "$T" checkout -q lease/02; [ "$(cat "$T/new.txt")" = new ]; git -C "$T" checkout -q lease/01; [ -f "$T/f.txt" ]
+  git -C "$T" checkout -q fix/in-flight; [ -f "$T/f.txt" ]
 }
 
-@test "--rollback: a window worktree it cannot save safely — not on its lease/<NN>, holding a commit no branch has — is named and left whole, and it stops before the hooks, hot.md and the stamp; once it is dealt with, the rollback finishes" {
+@test "--rollback: every window worktree it cannot save or remove safely — not on its lease/<NN>, holding a commit no branch has; one a submodule was checked out in — is named, and nothing is saved, moved or removed, nor the hooks, hot.md and the stamp; once they are dealt with, the rollback finishes, and forward again each window's worktree is made from its branch" {
   upgraded
   end_sessions
   W1="$H/worktrees/01/thing"
   git -C "$W1" checkout -q --detach; printf 'd\n' > "$W1/d.txt"; git -C "$W1" add -A; cmt "$W1" -m "detached work"
   tip="$(git -C "$W1" rev-parse HEAD)"
+  # a submodule once checked out in window 01's nested worktree: git keeps its repository in the worktree's record
+  mkdir -p "$(git -C "$W1/sub" rev-parse --absolute-git-dir)/modules/lib"
+  before="$(home_listing)"
   run python3 "$H/core/upgrade.py" --rollback
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"worktrees/01/thing/sub has had a submodule checked out in it"*"git -C target/thing/sub worktree remove --force $W1/sub"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"worktrees/01/thing is on no branch (a detached checkout), not on its window's branch lease/01"*"Stopped here: nothing after this step was changed."*"python3 core/upgrade.py --rollback"*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *"removed the pre-push hook"*|*"Removed state/upgraded-to"*|*"checkout v0.6.1"*) echo "$output"; return 1 ;; esac
-  [ "$(git -C "$W1" rev-parse HEAD)" = "$tip" ]; [ -f "$W1/d.txt" ]
+  case "$output" in *"saved window"*|*"removed worktrees"*|*"marked window"*|*"removed the pre-push hook"*|*"Removed state/upgraded-to"*|*"checkout v0.6.1"*) echo "$output"; return 1 ;; esac
+  [ "$(home_listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(home_listing); return 1; }
+  [ "$(git -C "$W1" rev-parse HEAD)" = "$tip" ]; [ -f "$W1/d.txt" ]; [ -f "$W/new.txt" ]; [ -d "$H/worktrees/02/thing/sub" ]
   [ -x "$T/.git/hooks/pre-push" ]; [ -f "$H/state/upgraded-to" ]
+  # dealt with: window 01 back on its branch; the submodule's work kept elsewhere, its worktree removed by hand
   git -C "$W1" checkout -q -B lease/01
+  git -C "$T/sub" worktree remove --force "$W1/sub"
   run python3 "$H/core/upgrade.py" --rollback
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"marked window 01 and window 02 in state/leases/ as having no worktree"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$T" rev-parse lease/01)" = "$tip" ]
   [ ! -e "$T/.git/hooks/pre-push" ]; [ ! -e "$H/state/upgraded-to" ]
+  # forward again: the upgrade completes, window 01's worktree is made again, claim 02 makes window 02's
+  run start_session s3
+  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$H/worktrees/01/thing/d.txt" ]; [ -d "$H/worktrees/01/thing/sub" ]
+  p="$(live_pid)"; registry_entry "$p" s4 interactive cli daedalus-xx
+  run env DAEDALUS_SESSION_ID=s4 bash "$H/core/lease.sh" claim 02 </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$H/worktrees/02/thing/new.txt")" = new ]; [ "$(cat "$H/worktrees/02/thing/sub/s.txt")" = "nested work" ]
+}
+
+@test "--rollback: a window whose worktrees are already gone (removed by hand, or by an earlier run that stopped) is still marked as having no worktree in state/leases/, so forward again claim <NN> makes it from its branch" {
+  upgraded
+  end_sessions
+  # window 02's work committed on lease/02 by hand, its worktrees removed by hand before the rollback
+  git -C "$W/sub" add -A; cmt "$W/sub" -m "nested by hand"
+  git -C "$W" add -A; cmt "$W" -m "by hand"
+  git -C "$T/sub" worktree remove "$W/sub"; git -C "$T" worktree remove --force "$W"
+  [ ! -e "$W" ]
+  run python3 "$H/core/upgrade.py" --rollback
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"marked window 01 and window 02 in state/leases/ as having no worktree"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("worktree_ready") is False else 1)' "$H/state/leases/02.json"
+  run start_session s3
+  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  p="$(live_pid)"; registry_entry "$p" s4 interactive cli daedalus-xx
+  run env DAEDALUS_SESSION_ID=s4 bash "$H/core/lease.sh" claim 02 </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$H/worktrees/02/thing/new.txt")" = new ]; [ "$(cat "$H/worktrees/02/thing/sub/s.txt")" = "nested work" ]
 }
 
 @test "--rollback, then forward again: a session started on this release after the rollback upgrades the home again — the hook back, hot.md renamed, the stamp written — and the saved work is still on lease/02, which a window can take again" {
@@ -155,8 +204,31 @@ upgraded() {
   [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]; [ -x "$T/.git/hooks/pre-push" ]; [ -f "$H/worktrees/01/thing/f.txt" ]
   [ "$(sed -n 3p "$H/vault/hot.md")" = "leases: (see the board; prime's copy at its last write)" ]
   [ "$(git -C "$T" show lease/02:new.txt)" = new ]
+  # the name given back is the window's again, as at the first upgrade: target/thing on main, fix/in-flight gone
+  [ "$(git -C "$T" branch --show-current)" = main ]; ! git -C "$T" rev-parse -q --verify refs/heads/fix/in-flight
   p="$(live_pid)"; registry_entry "$p" s4 interactive cli daedalus-xx
   run env DAEDALUS_SESSION_ID=s4 bash "$H/core/lease.sh" claim 02 </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(cat "$H/worktrees/02/thing/new.txt")" = new ]; [ "$(cat "$H/worktrees/02/thing/sub/s.txt")" = "nested work" ]
+}
+
+@test "--rollback a second time, after going forward again: target/<repo> goes back to the branch it was on before that second upgrade, read from the safety copy that upgrade took, never from the first" {
+  upgraded
+  end_sessions
+  run python3 "$H/core/upgrade.py" --rollback
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
+  # on the old code the operator works on main; then forward again, and back again
+  git -C "$T" checkout -q main
+  printf 'on main\n' > "$T/m.txt"; git -C "$T" add -A; cmt "$T" -m "on main"; git -C "$T" push -q origin main
+  run start_session s3
+  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  end_sessions || :     # the first sessions are gone already
+  run python3 "$H/core/upgrade.py" --rollback
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"put target/thing back"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"it was fix/in-flight before the upgrade; gave it that name back"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$T" branch --show-current)" = main ]
+  [ "$(git -C "$T" rev-parse fix/in-flight)" = "$(git -C "$T" rev-parse lease/01)" ]
 }
