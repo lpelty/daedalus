@@ -332,7 +332,7 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
 @test "an Edit or Write into the prime's checkout target/<repo> is denied for every window, the prime included; an unbindable session is denied (fail closed); a released lease's worktree is denied" {
   two_leases; live_holder 01; live_holder 02
   for s in sA sB; do run edit_as "$s" "$T/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"This is the prime's checkout (target/thing). Your work goes in worktrees/"*"If you meant to change trunk, that is what \`promote\` is for."*) : ;; *) echo "$s: $output"; return 1 ;; esac; done
-  run edit_as sZ "$T/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sZ "$T/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["released"]="2026-09-25T12:00:00"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
   run edit_as sB "$DAEDALUS_HOME/worktrees/02/thing/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"this window is released; its worktree is closed"*) : ;; *) echo "$output"; return 1 ;; esac
 }

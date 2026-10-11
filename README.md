@@ -232,7 +232,13 @@ window holds the pen — the board marks it `prime` — and only it writes
 `adopt <branch>` (an in-flight branch in `target/` becomes a window) and
 `prime take`. `leases.stale_after` in `config.yaml` (default `4h`) is
 how long a window may go without a prompt before the board calls it quiet;
-a window whose session is gone is stale and `sweep` removes it. Session logs
+a window whose session is gone is stale and `sweep` removes it. A stale
+window with nothing to lose — its recorded process gone, its worktree
+clean, nothing unpromoted — does not wait for a sweep: the next window to
+be numbered reclaims it first, so the terminal you open in the morning is
+window 01 again and takes the pen from yesterday's session. A stale window
+that still holds work keeps its number until you continue it or release
+it. Session logs
 are named by window number and date (`vault/sessions/YYYY/MM/YYYY-MM-DD-02.md`).
 `core/doctor.sh` reports the two lease directories, stale and released
 windows, swept numbers with work still waiting, and the session registry

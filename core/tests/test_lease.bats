@@ -63,7 +63,7 @@ teardown() { teardown_live; }
   run --separate-stderr env DAEDALUS_SESSION_ID=sZ python3 "$LL" resolve thing
   [ "$status" -eq 3 ]; [ -z "$output" ]
   run bash -c "DAEDALUS_SESSION_ID=sZ python3 '$LL' resolve thing 2>&1 >/dev/null"
-  case "$output" in *"Several sessions are live and I cannot tell which tree is mine"*"core/lease.sh create"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+  case "$output" in *"This session holds no window"*"core/lease.sh create"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
   run bash -c "DAEDALUS_SESSION_ID=sA DAEDALUS_LEASE=03 python3 '$LL' resolve thing 2>&1 >/dev/null"
   [ "$status" -eq 3 ]; case "$output" in *"DAEDALUS_LEASE=03"*"this session is window 02"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
   run bash -c "DAEDALUS_SESSION_ID=sZ DAEDALUS_LEASE=07 python3 '$LL' resolve thing 2>&1 >/dev/null"
@@ -182,7 +182,7 @@ teardown() { teardown_live; }
   case "$output" in *"$pid"*99999*|*99999*"$pid"*) : ;; *) echo "expected both pids: $output"; return 1 ;; esac
 }
 
-@test "liveness: a registry entry is 'live' only when its pid is still the process it recorded (startedAt within 2 s of ps lstart) — a left-behind sessions/<pid>.json whose pid was recycled by another process does not make a dead lease 'resumed'" {
+@test "liveness: a registry entry is 'live' only when its pid is still the process it recorded (startedAt written after that process started, within a minute) — a left-behind sessions/<pid>.json whose pid was recycled by another process does not make a dead lease 'resumed'" {
   # The lease's own pid check closes the pid-recycling hole (§4.5); the
   # registry-side check must close the same hole, or a crashed session's
   # stale registry file plus one long-lived process on that pid would keep
@@ -1603,4 +1603,58 @@ print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() 
   run LS create
   case "$output" in *"Window 01 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$V/exp" rev-parse HEAD)" = "$sha" ]
+}
+
+@test "liveness: the registry's startedAt is the moment the entry was written, not the process start — an entry written 3 s after its process started reads live (2.1.296 after the 2026-10-10 OS restart: 2.07 s and 3.0 s measured); procStart, when present, decides exactly" {
+  rm -f "$BATS_TEST_TMPDIR/sessions"/*.json
+  pid="$(live_pid)"; L="$(ps_ms "$pid")"
+  # The 2 s window called this live session dead: not a terminal window, so no number, no first-up, the pen stuck.
+  registry_entry "$pid" sA interactive cli daedalus-xx "$((L + 3000))"
+  run python3 "$LL" registry-live-pids sA; [ "$output" = "$pid" ] || { echo "3 s write lag read as dead: '$output'"; return 1; }
+  # A record written long after the process started is not this process's (a recycled pid, or a left-behind file).
+  registry_entry "$pid" sA interactive cli daedalus-xx "$((L + 120000))"
+  run python3 "$LL" registry-live-pids sA; [ -z "$output" ] || { echo "120 s lag read as live: '$output'"; return 1; }
+  # A record written BEFORE the process started cannot be its record: the pid was recycled after the write.
+  registry_entry "$pid" sA interactive cli daedalus-xx "$((L - 5000))"
+  run python3 "$LL" registry-live-pids sA; [ -z "$output" ] || { echo "record older than the process read as live: '$output'"; return 1; }
+  # procStart present: it names the process start to the second and decides, whatever startedAt says.
+  registry_entry "$pid" sA interactive cli daedalus-xx "$((L + 3000))" "$(utc_lstart "$L")"
+  run python3 "$LL" registry-live-pids sA; [ "$output" = "$pid" ] || { echo "matching procStart read as dead: '$output'"; return 1; }
+  registry_entry "$pid" sA interactive cli daedalus-xx "$L" "$(utc_lstart "$((L + 10000))")"
+  run python3 "$LL" registry-live-pids sA; [ -z "$output" ] || { echo "procStart 10 s off read as live (startedAt matched): '$output'"; return 1; }
+  # The lease's own record, copied from the registry at bind, is judged the same way.
+  python3 "$LL" _test-write 02 "{\"lease\":\"02\",\"session_id\":\"sA\",\"pid\":$pid,\"proc_started\":$((L + 3000))}"
+  run python3 "$LL" liveness 02; [ "$output" = "live" ] || { echo "lease with 3 s lag: $output"; return 1; }
+  python3 "$LL" _test-write 02 "{\"lease\":\"02\",\"session_id\":\"sA\",\"pid\":$pid,\"proc_started\":1,\"proc_start\":\"$(utc_lstart "$L")\"}"
+  run python3 "$LL" liveness 02; [ "$output" = "live" ] || { echo "lease with proc_start and a bad proc_started: $output"; return 1; }
+  python3 "$LL" _test-write 02 "{\"lease\":\"02\",\"session_id\":\"sA\",\"pid\":$pid,\"proc_started\":$L,\"proc_start\":\"$(utc_lstart "$((L + 10000))")\"}"
+  rm -f "$BATS_TEST_TMPDIR/sessions"/*.json
+  run python3 "$LL" liveness 02; [ "$output" = "stale" ] || { echo "lease whose proc_start names another start: $output"; return 1; }
+  # bind copies procStart into the lease, so later judgements are exact.
+  registry_entry "$pid" sA interactive cli daedalus-02 "$((L + 3000))" "$(utc_lstart "$L")"
+  python3 "$LL" _test-write 02 '{"lease":"02","session_id":null,"worktree":"worktrees/02","branch":"lease/02"}'
+  DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" claim 02 >/dev/null
+  [ "$(lease_json 02 pid)" = "$pid" ]; [ "$(lease_json 02 proc_start)" = "$(utc_lstart "$L")" ]
+}
+
+@test "an unleased session's refusal says what is true — it holds no window — never that several sessions are live (one lease on disk, and the sentence the 2026-10-10 window repeated as its cause)" {
+  python3 "$LL" _test-write 02 '{"lease":"02","session_id":"sA","worktree":"worktrees/02","branch":"lease/02"}'
+  run bash -c "DAEDALUS_SESSION_ID=sZ python3 '$LL' resolve thing 2>&1 >/dev/null"
+  [ "$status" -eq 3 ]
+  case "$output" in *"Several sessions"*) echo "still blames other sessions: $output"; return 1 ;; *) : ;; esac
+  case "$output" in *"This session holds no window"*"core/lease.sh create"*"claim <NN>"*) : ;; *) echo "wrong: $output"; return 1 ;; esac
+}
+
+@test "create reclaims a window whose session ended with nothing to lose: dead recorded process, clean worktree, nothing unpromoted — the number comes back instead of the next one" {
+  pid="$(live_pid)"; registry_entry "$pid" sA interactive cli daedalus-01
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" claim 01 >/dev/null
+  [ "$(lease_json 01 pid)" = "$pid" ]
+  kill "$pid"; wait "$pid" 2>/dev/null || true
+  run bash "$DAEDALUS_HOME/core/lease.sh" create
+  [ "$status" -eq 0 ]
+  case "$output" in *"Window 01 is ready"*) : ;; *) echo "expected 01 back, got: $output"; return 1 ;; esac
+  case "$output" in *"window 01"*"reclaimed"*|*"Reclaimed window 01"*) : ;; *) echo "no reclaim sentence: $output"; return 1 ;; esac
+  [ "$(lease_json 01 session_id)" = "None" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
 }

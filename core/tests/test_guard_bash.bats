@@ -326,7 +326,7 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   run write_as sA "$DAEDALUS_HOME/worktrees/02"; denied; case "$output" in *"This is window 02's worktree (worktrees/02). Your work goes in worktrees/01."*) : ;; *) echo "$output"; return 1 ;; esac
   run write_as sA "$DAEDALUS_HOME/worktrees"; denied
   run write_as sB "$DAEDALUS_HOME/target"; denied; case "$output" in *"This is the prime's checkout (target)."*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sZ 'git push origin HEAD:main' "$T"; denied; case "$output" in *"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sZ 'git push origin HEAD:main' "$T"; denied; case "$output" in *"holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
   # a released window's OWN worktree is closed to its Bash tool too (§4.2 "edits under it are denied")
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["released"]="2026-09-25T12:00:00"; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
   run guard_as sB 'echo x > a.txt' "$DAEDALUS_HOME/worktrees/02/thing"; denied; case "$output" in *"this window is released; its worktree is closed"*) : ;; *) echo "$output"; return 1 ;; esac

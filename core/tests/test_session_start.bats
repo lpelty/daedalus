@@ -261,8 +261,8 @@ print(p.returncode, round(time.time()-t,2))' "$(printf '{"hook_event_name":"Sess
   bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
   pu="$(live_pid)"; registry_entry "$pu" sU interactive sdk-cli
   run start sU startup
-  case "$output" in *"This session cannot be bound to a lease: Several sessions are live and I cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
-  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert "cannot tell which tree" in m["target_base_error"] and m["target_base"]=="", m' "$DAEDALUS_HOME/state/session-sU.json"
+  case "$output" in *"This session cannot be bound to a lease: This session holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert "holds no window" in m["target_base_error"] and m["target_base"]=="", m' "$DAEDALUS_HOME/state/session-sU.json"
 }
 
 @test "a worktree add that hangs past the budget leaves worktree_ready false and the session is told to claim" {
@@ -626,4 +626,67 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   run env LEASE_TEST_HOOK_BUDGET=20 bash -c "$(declare -f start); start s2 startup"   # 10 s worktree budget
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   python3 -c 'import sys; x=float(open(sys.argv[1]).read()); assert 4.5 < x <= 6.0, "the upgrade was given %.3f s, not its 6 s share of 10" % x' "$BATS_TEST_TMPDIR/share"
+}
+
+@test "the morning terminal: yesterday's window 01 (its process ended with the OS restart, worktree clean, nothing unpromoted, holding the pen) is reclaimed by the first terminal up — it is window 01 again and holds the pen, with nothing typed; a resume of the old session id afterwards gets a fresh number" {
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01
+  run start sA startup; [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
+  kill "$p1"; wait "$p1" 2>/dev/null || true            # the OS restart; the registry file is left behind, as a crash leaves it
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-01
+  run start sB startup; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sB" ]; [ "$(lease_json 01 pid)" = "$p2" ]
+  [ "$(lease_json prime session_id)" = "sB" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"]=="sA" and h[0]["to"]=="sB" and "previous holder gone" in h[0]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
+  case "$output" in *"You are window 01 and you hold the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 01"*"reclaimed"*|*"Reclaimed window 01"*) : ;; *) echo "no reclaim sentence: $output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse --abbrev-ref HEAD)" = "lease/01" ]
+  # The old session comes back by id later (claude --resume): its number is taken, so it is numbered afresh, not refused.
+  p3="$(live_pid)"; registry_entry "$p3" sA interactive cli daedalus-01
+  run start sA resume; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sB" ]; [ "$(lease_json prime session_id)" = "sB" ]
+}
+
+@test "reclaim never touches a window with anything to lose: unpromoted commits and uncommitted changes each keep their number on a dead window, and the new terminal is numbered after it; a dead clean window beside them is reclaimed" {
+  T1="$DAEDALUS_HOME/worktrees/01/thing"
+  # 1. unpromoted commits on a dead window: kept (the board's STALE line says how to continue it).
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  printf 'w\n' >> "$T1/a.txt"; git -C "$T1" -c user.email=t@x -c user.name=t commit -q -am waiting
+  kill "$p1"; wait "$p1" 2>/dev/null || true
+  p2="$(live_pid)"; registry_entry "$p2" sB
+  run start sB startup; [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sA" ]
+  case "$output" in *"01"*"STALE"*) : ;; *) echo "no STALE line for 01: $output"; return 1 ;; esac
+  # 2. uncommitted changes on a dead window: kept. Window 02 (dead, clean) beside it is reclaimed: the new terminal is 02, not 03.
+  git -C "$T1" reset -q --hard origin/main; printf 'u\n' > "$T1/u.txt"
+  kill "$p2"; wait "$p2" 2>/dev/null || true
+  p3="$(live_pid)"; registry_entry "$p3" sC
+  run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sA" ]; [ "$(lease_json 02 session_id)" = "sC" ]; [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]
+  case "$output" in *"01"*"STALE"*) : ;; *) echo "no STALE line for 01: $output"; return 1 ;; esac
+}
+
+@test "reclaim keeps a quiet window (process alive, heartbeat old), a finished clone, a lease with no recorded pid, and a released window (held until sweep, as before)" {
+  T1="$DAEDALUS_HOME/worktrees/01/thing"
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  # quiet: the process is alive, the heartbeat is a day old
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"
+  p2="$(live_pid)"; registry_entry "$p2" sB
+  run start sB startup; [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sA" ]
+  # finished: a dead spawned clone that reported done is kept until promote or release
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["pid"]=1; d["proc_started"]=1; d["finished"]="2026-01-01T00:00:00"; d["summary"]="done"; d["spawned"]=True; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  # no recorded pid: liveness is by heartbeat alone; a day-old heartbeat is not proof the process is gone
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null       # 03, unbound (pid null)
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/03.seen"
+  p4="$(live_pid)"; registry_entry "$p4" sD
+  run start sD startup; [ "$(first_line)" = "Daedalus session orientation: window 04, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sA" ]; [ "$(lease_json 02 finished)" = "2026-01-01T00:00:00" ]; [ "$(lease_json 03 session_id)" = "None" ]
+  # released: held until sweep, as the spec says — its holder's hooks may still be reading it
+  DAEDALUS_SESSION_ID=sD bash "$DAEDALUS_HOME/core/lease.sh" release 04 >/dev/null
+  p5="$(live_pid)"; registry_entry "$p5" sE
+  run start sE startup; [ "$(first_line)" = "Daedalus session orientation: window 05, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 04 session_id)" = "sD" ]; [ "$(lease_json 04 released)" != "None" ]
 }

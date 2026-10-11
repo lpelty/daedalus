@@ -51,14 +51,25 @@ EOF
 # startedAt is epoch ms, by default that pid's real start time from ps (a real
 # entry lags lstart by under a second: 936 ms measured on 2.1.282); pass a
 # sixth argument to fake a left-behind entry whose pid another process now holds.
+# A seventh argument is the entry's procStart: the process start as Claude Code
+# records it, a UTC "%a %b %d %H:%M:%S %Y" string (2.1.295/296 write it; the
+# fixture leaves it out by default, as 2.1.282 did). startedAt is the moment
+# the entry was WRITTEN, after the process started: 936 ms later measured on
+# 2.1.282, 2.1–3.0 s on 2.1.295/296 after an OS restart (2026-10-10).
 registry_entry() {
-  local pid="$1" sid="$2" kind="${3:-interactive}" ep="${4:-cli}" name="${5:-daedalus-xx}" started="${6:-}"
+  local pid="$1" sid="$2" kind="${3:-interactive}" ep="${4:-cli}" name="${5:-daedalus-xx}" started="${6:-}" pstart="${7:-}"
   [ -n "$started" ] || started="$(python3 -c 'import subprocess,sys,time
 out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
 print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$pid")"
-  printf '{"pid":%s,"sessionId":"%s","startedAt":%s,"kind":"%s","entrypoint":"%s","name":"%s","nameSource":"derived"}\n' \
-    "$pid" "$sid" "$started" "$kind" "$ep" "$name" > "$BATS_TEST_TMPDIR/sessions/$pid.json"
+  local extra=""
+  [ -z "$pstart" ] || extra=",\"procStart\":\"$pstart\""
+  printf '{"pid":%s,"sessionId":"%s","startedAt":%s,"kind":"%s","entrypoint":"%s","name":"%s","nameSource":"derived"%s}\n' \
+    "$pid" "$sid" "$started" "$kind" "$ep" "$name" "$extra" > "$BATS_TEST_TMPDIR/sessions/$pid.json"
 }
+
+# utc_lstart <epoch-ms> — the procStart string Claude Code writes for a process
+# started at that instant (UTC, the ps lstart layout).
+utc_lstart() { python3 -c 'import sys,time; print(time.strftime("%a %b %d %H:%M:%S %Y", time.gmtime(int(sys.argv[1])//1000)))' "$1"; }
 
 # live_pid — a process that outlives the test step (a sleep in the background);
 # every pid is recorded in $BATS_TEST_TMPDIR/live-pids and killed by

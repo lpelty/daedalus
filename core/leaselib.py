@@ -15,6 +15,7 @@ bash caller and a Python caller can never disagree.
 """
 from __future__ import annotations
 
+import calendar
 import contextlib
 import fcntl
 import json
@@ -321,8 +322,11 @@ def resolve_lease(leases: Dict[str, dict], sid: str) -> Tuple[Optional[str], Opt
         return nn, lease
     if leases.get("prime", {}).get("session_id") == sid:
         return None, None
-    raise Refused("Several sessions are live and I cannot tell which tree is mine. This session holds no lease; "
-                  "run `core/lease.sh create` and then `claim <NN>`.")
+    # Said whenever a session holds no window while lease files exist — whatever
+    # the number of live sessions. The old sentence blamed "several sessions";
+    # the window of 2026-10-10 repeated that to the operator as its cause (§4.4).
+    raise Refused("This session holds no window: no lease names it and it does not hold the pen. "
+                  "Run `core/lease.sh create` and then `claim <NN>`.")
 
 
 def resolve(root: Path, sid: Optional[str], name: str) -> Path:
@@ -385,7 +389,8 @@ def registry_live_entries(sid: str) -> list:
     session leaves its sessions/<pid>.json behind, and a pid-only check would
     call that entry live as soon as any long-lived process reused the pid,
     making a dead lease read "resumed" and therefore never sweepable."""
-    return [e for e in registry_by_session(sid) if pid_is_recorded_process(e.get("pid"), e.get("startedAt"))]
+    return [e for e in registry_by_session(sid)
+            if pid_is_recorded_process(e.get("pid"), e.get("startedAt"), e.get("procStart"))]
 
 
 def is_interactive_window(entry: Optional[dict]) -> bool:
@@ -420,24 +425,57 @@ def proc_started_of(pid: object) -> Optional[int]:
         return None
 
 
-def pid_is_recorded_process(pid: object, proc_started: object) -> bool:
-    """The pid is alive AND is the process the record was made for: its start
-    time is within 2 s of the recorded start (a recycled pid fails here), or —
-    when ps cannot be parsed — its command is claude. The record is a lease's
-    (pid, proc_started) or a registry entry's (pid, startedAt): the registry
-    writes startedAt under a second after the process starts (936 ms measured
-    on 2.1.282), so one predicate serves both, and a left-behind
-    sessions/<pid>.json whose pid another process now holds is not "live"."""
+# How long after its process started a registry entry may have been written and
+# still be that process's record. startedAt is NOT the process start: it is the
+# moment Claude Code finished starting and wrote sessions/<pid>.json — 936 ms
+# after the process on 2.1.282, 2.07 s and 3.0 s on 2.1.295/296 on the first
+# starts after an OS restart (2026-10-10). A 2 s window called both of those
+# sessions dead: not terminal windows, so no number, no first-up, and the pen
+# stayed with a session that had ended. The lag has no upper bound in
+# principle (a cold start), so the ceiling is generous; a recycled pid passes
+# it only when its process started inside the minute before the record, and
+# procStart, when the entry has it, decides exactly (proc_start_text_ms).
+REGISTRY_LAG_MS = 60000
+
+
+def proc_start_text_ms(text: object) -> Optional[int]:
+    """The registry's procStart (and a lease's proc_start, copied from it at
+    bind): the process start as Claude Code records it, a UTC string in ps's
+    lstart layout ("Sat Oct 10 14:48:45 2026" for a process ps shows as
+    09:48:45 CDT — spec §4.5: never compare the strings). Epoch ms, None when
+    absent or not in that layout."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        return int(calendar.timegm(time.strptime(text.strip(), "%a %b %d %H:%M:%S %Y")) * 1000)
+    except ValueError:
+        return None
+
+
+def pid_is_recorded_process(pid: object, proc_started: object, proc_start: object = None) -> bool:
+    """The pid is alive AND is the process the record was made for, or — when
+    ps cannot be parsed — its command is claude. The record is a lease's (pid,
+    proc_started, proc_start) or a registry entry's (pid, startedAt, procStart).
+    With proc_start (the process start, UTC text): its second must be the one
+    ps reports, ±2 s for ps's one-second resolution. Without it: the record
+    (startedAt) must have been written AFTER the process started — never
+    before, that pid was recycled after the write — and within REGISTRY_LAG_MS
+    of it. A left-behind sessions/<pid>.json whose pid another process now
+    holds fails either test."""
     if not pid_alive(pid):
         return False
     started = proc_started_of(pid)
     if started is None:
         code, out, _ = v.run(["ps", "-o", "comm=", "-p", str(pid)], timeout=5)
         return code == 0 and out.strip().endswith("claude")
+    exact = proc_start_text_ms(proc_start)
+    if exact is not None:
+        return abs(int(started) - exact) <= 2000
     try:
-        return abs(int(started) - int(proc_started)) <= 2000
+        lag = int(proc_started) - int(started)
     except (TypeError, ValueError):
         return False
+    return -2000 <= lag <= REGISTRY_LAG_MS
 
 
 _STALE_AFTER: Dict[str, int] = {}
@@ -476,7 +514,7 @@ def liveness(root: Path, nn: str, lease: dict, now: Optional[float] = None, quie
         if hb is None or now - hb > quiet_after:
             return "stale"
         return "live"
-    if pid_is_recorded_process(pid, lease.get("proc_started")):
+    if pid_is_recorded_process(pid, lease.get("proc_started"), lease.get("proc_start")):
         return "quiet" if (hb is not None and now - hb > quiet_after) else "live"
     sid = lease.get("session_id")
     if sid and registry_live_entries(str(sid)):
@@ -1197,16 +1235,61 @@ def pen_cutoff(root: Path, prime: dict) -> float:
         return time.time()
 
 
+def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, str]) -> list:
+    """§4.2 'Numbering': before a number is chosen, every lease with nothing to
+    lose and nobody to lose it is removed, so the number it held is free again
+    and re-use-or-refuse adopts its worktree. Nothing to lose: no commit on
+    lease/<NN> that origin/<trunk> lacks (waiting_work) and no uncommitted
+    or untracked file in any of its worktrees (dirty_files); the worktree and
+    branch are kept, as sweep keeps them (§4.5). Nobody to lose it: its
+    RECORDED process is gone — liveness "stale" with a pid on file — never a
+    lease that recorded no pid (its staleness is a heartbeat's age, not proof
+    the terminal closed), never a finished clone (kept until promote or
+    release), and never a released one (held until sweep, §4.2: its holder's
+    hooks may still be reading). A listing that cannot answer (Refused) keeps
+    the lease: cannot tell is not "nothing".
+    Added 2026-10-11: the operator's morning terminal reclaims yesterday's
+    window 01 and its pen (first_up: previous holder gone) instead of numbering
+    02 beside a STALE 01 every day. CALLER HOLDS THE LOCK; mutates `leases`;
+    returns the numbers removed, with why, as (nn, sentence)."""
+    out = []
+    for nn in sorted(k for k in leases if k != "prime"):
+        lease = leases[nn]
+        if lease.get("finished") or lease.get("released"):
+            continue
+        if lease.get("pid") is None or liveness(root, nn, lease) != "stale":
+            continue
+        why = "its session (pid %s) has ended" % lease.get("pid")
+        lease_trunks = lease.get("trunks") or trunks
+        try:
+            if any(waiting_work(root / "target" / repo, trunk, nn) for repo, trunk in lease_trunks.items()):
+                continue
+            if any(dirty_files(root / "worktrees" / nn / repo) for repo in lease_trunks):
+                continue
+        except Refused:
+            continue
+        _remove_lease_files(root, nn)
+        del leases[nn]
+        out.append((nn, "Reclaimed window %s: %s, its worktree is clean and nothing is unpromoted; the number is free again."
+                    % (nn, why)))
+    return out
+
+
 def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
                     spawned: bool = False, timeout: Optional[int] = None,
-                    deadline: Optional[float] = None) -> Tuple[str, dict]:
-    """§4.2 'Allocation': lowest free number; prune; re-use or refuse; worktree
-    add; lease O_EXCL; empty .changed. CALLER HOLDS THE LOCK (session_start_bind
-    and claim call this from inside theirs; the lock is not re-entrant).
-    `deadline` bounds the worktree adds (SessionStart's budget, §4.2)."""
+                    deadline: Optional[float] = None, notes: Optional[list] = None) -> Tuple[str, dict]:
+    """§4.2 'Allocation': reclaim idle numbers; lowest free number; prune;
+    re-use or refuse; worktree add; lease O_EXCL; empty .changed. CALLER HOLDS
+    THE LOCK (session_start_bind and claim call this from inside theirs; the
+    lock is not re-entrant). `deadline` bounds the worktree adds
+    (SessionStart's budget, §4.2). `notes`, when given, receives one sentence
+    per number reclaimed (reclaim_idle_locked)."""
     timeout = int(os.environ.get("LEASE_WORKTREE_TIMEOUT") or (timeout or 20))
     target_base = root / "target"
     trunks = trunks_of(root, target_base)
+    for _nn, sentence in reclaim_idle_locked(root, read_all(root), trunks):
+        if notes is not None:
+            notes.append(sentence)
     while True:
         leases = read_all(root)
         nn = free_number(root, leases, target_base, trunks)
@@ -1342,6 +1425,7 @@ def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True, deadline: 
     fresh.update({"session_id": sid, "bound_at": now_stamp(),
                   "pid": entry.get("pid") if entry else None,
                   "proc_started": entry.get("startedAt") if entry else None,
+                  "proc_start": entry.get("procStart") if entry else None,
                   "peer_name": entry.get("name") if entry else None})
     fresh.pop("released", None)
     if expect and expect != sid:
@@ -1385,8 +1469,9 @@ def self_rebind(root: Path, sid: str, leases: Optional[Dict[str, dict]] = None,
     else:
         entry = live[0] if live else None
     if entry and (lease.get("pid") != entry.get("pid") or lease.get("proc_started") != entry.get("startedAt")
-                  or lease.get("peer_name") != entry.get("name")):
-        lease.update({"pid": entry.get("pid"), "proc_started": entry.get("startedAt"), "peer_name": entry.get("name")})
+                  or lease.get("proc_start") != entry.get("procStart") or lease.get("peer_name") != entry.get("name")):
+        lease.update({"pid": entry.get("pid"), "proc_started": entry.get("startedAt"),
+                      "proc_start": entry.get("procStart"), "peer_name": entry.get("name")})
         write_lease(root, nn, lease)
     return nn
 
@@ -3090,7 +3175,7 @@ def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -
         if out["lease"] is None:
             out["lease"] = self_rebind(root, sid)
         if out["lease"] is None and terminal:
-            nn, data = allocate_locked(root, sid, deadline=deadline)      # NOT allocate(): the lock is held here
+            nn, data = allocate_locked(root, sid, deadline=deadline, notes=out["notes"])   # NOT allocate(): the lock is held
             try:
                 bind(root, nn, sid, finish_worktree=False)
             except Refused:
@@ -3381,7 +3466,8 @@ def registry_live_map() -> Dict[str, list]:
             e = json.loads(p.read_text())
         except (OSError, ValueError):
             continue
-        if isinstance(e, dict) and e.get("sessionId") and pid_is_recorded_process(e.get("pid"), e.get("startedAt")):
+        if isinstance(e, dict) and e.get("sessionId") and pid_is_recorded_process(e.get("pid"), e.get("startedAt"),
+                                                                                    e.get("procStart")):
             out.setdefault(str(e["sessionId"]), []).append(e)
     return out
 
@@ -3862,9 +3948,12 @@ def main(argv: list) -> int:
         try:
             # a spawner/operator path: fetch first (no network only inside a hook — §4.2)
             fetch_origin(root / "target" / target_name(root), timeout=60)
-            nn, data = allocate(root, None, note=note, criteria=crit, spawned="--spawned" in args)
+            reclaimed: list = []
+            nn, data = allocate(root, None, note=note, criteria=crit, spawned="--spawned" in args, notes=reclaimed)
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
+        for sentence in reclaimed:
+            print(sentence)
         print(launch_line(root, nn))
         if data.get("worktree_ready") is False:
             print("Window %s's worktree was not finished inside the budget; run `core/lease.sh claim %s` to finish it." % (nn, nn))

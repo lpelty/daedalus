@@ -333,6 +333,37 @@ shows what is left.
 - `docs/handoff-reverse-caller.md`: for a Daedalus that the target's agent
   calls — what it exposes, what this release changed, and how to check each.
 
+
+#### Fixed on trunk after the v0.7.0 tag — 2026-10-11: the morning terminal is window 01 again
+
+**What went wrong.** A session was judged dead while it ran. The registry
+Claude Code keeps per session records when the entry was written, not when
+the process started. On the first starts after an OS restart that was 2 to
+3 seconds later, and Daedalus allowed 2. So the new session was not seen as
+a terminal window: it took no number, and it did not take the pen from the
+session that had ended. The refusal it printed blamed "several sessions".
+The window it then claimed by hand recorded no pid, so its own board would
+have called it stale after four idle hours.
+
+**What changed.**
+
+- Liveness compares process start to process start. The registry's
+  `procStart` (copied into the lease as `proc_start` at bind) decides when
+  present. Without it, the entry must have been written after the process
+  started and within a minute of it. A recycled pid still fails both.
+- A window with nothing to lose and nobody to lose it is reclaimed before a
+  number is chosen: its recorded process gone, its worktree clean, nothing
+  unpromoted. Yesterday's window 01 becomes today's, and the pen comes with
+  it. A window holding work, a quiet one, a finished clone, a released one,
+  or one that never recorded a pid is left for `sweep`, as before.
+  `session-start.py`, `lease.sh create`, `spawn` and `adopt` all do this.
+- An unleased session is told "This session holds no window: no lease names
+  it and it does not hold the pen", never "several sessions are live".
+
+**How you get it.** `git pull --ff-only` in the Daedalus home. VERSION stays
+0.7.0: nothing here needs a migration step, so no upgrade runs at the next
+start; the code is live at the next hook run.
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named

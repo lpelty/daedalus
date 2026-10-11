@@ -3869,7 +3869,7 @@ def _live_sessions(root: Path) -> List[str]:
             continue
         live = bool(ll.registry_live_entries(sid))
         if not live and d.get("pid"):
-            live = ll.pid_is_recorded_process(d.get("pid"), d.get("proc_started"))
+            live = ll.pid_is_recorded_process(d.get("pid"), d.get("proc_started"), d.get("proc_start"))
         if live:
             seen.add(sid)
             out.append("the session holding the pen (session %s)" % sid if nn == "prime"

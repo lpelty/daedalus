@@ -542,9 +542,9 @@ EOF
   printf '{"lease":"02","session_id":"s2","worktree":"worktrees/02","branch":"lease/02"}' > "$DAEDALUS_HOME/state/leases/02.json"
   printf '{"lease":"03","session_id":"s3","worktree":"worktrees/03","branch":"lease/03"}' > "$DAEDALUS_HOME/state/leases/03.json"
   run hook "$(edit_call "$DAEDALUS_HOME/worktrees/02/thing/t.bats" s2)"; case "$output" in *"bats"*) : ;; *) echo "bound: $output"; return 1 ;; esac
-  run hook "$(edit_call "$DAEDALUS_HOME/worktrees/02/thing/t.bats" sZ)"; case "$output" in *"bats"*"cannot tell which tree is mine"*) : ;; *) echo "unbound: $output"; return 1 ;; esac
+  run hook "$(edit_call "$DAEDALUS_HOME/worktrees/02/thing/t.bats" sZ)"; case "$output" in *"bats"*"holds no window"*) : ;; *) echo "unbound: $output"; return 1 ;; esac
   run env DAEDALUS_SESSION_ID=sZ python3 "$SCRIPT" --check
-  case "$output" in *"target root: Several sessions are live"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"target root: This session holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"did not resolve"*) echo "old line must be gone: $output"; return 1 ;; *) : ;; esac
 }
 

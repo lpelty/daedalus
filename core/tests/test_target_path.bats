@@ -29,7 +29,7 @@ tp() { bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"; }
   run env DAEDALUS_SESSION_ID=sA DAEDALUS_LEASE=03 bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"; [ "$status" -ne 0 ]
   run env DAEDALUS_SESSION_ID=sZ DAEDALUS_LEASE=07 bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"; [ "$status" -ne 0 ]
   run env DAEDALUS_SESSION_ID=sZ bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"; [ "$status" -ne 0 ]
-  case "$output" in *"Several sessions are live and I cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"This session holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
   python3 "$LL" _test-write prime '{"session_id":"sP","history":[]}'
   [ "$(DAEDALUS_SESSION_ID=sP tp)" = "$DAEDALUS_HOME/target/thing" ]
   run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u DAEDALUS_LEASE bash -c \"source '$DAEDALUS_HOME/core/lib.sh'; target_path\" 2>'$BATS_TEST_TMPDIR/err'"
@@ -47,7 +47,7 @@ tp() { bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"; }
   run python3 -c "
 import sys; sys.path.insert(0,'$DAEDALUS_HOME/core'); import verifylib as v
 from pathlib import Path; root=Path('$DAEDALUS_HOME')
-r=v.resolve_target(root,'sZ'); assert isinstance(r,v.Refused) and 'cannot tell which tree' in r.sentence, r
+r=v.resolve_target(root,'sZ'); assert isinstance(r,v.Refused) and 'holds no window' in r.sentence, r
 r=v.resolve_target(root,'sA'); assert isinstance(r,v.Resolved) and r.path.name=='thing', r
 print('ok')"
   [ "$output" = "ok" ]
@@ -74,10 +74,10 @@ print('ok')"
   LS create >/dev/null; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
   guard='{"hook_event_name":"PreToolUse","session_id":"sZ","tool_name":"Bash","cwd":"'"$T"'","tool_input":{"command":"git push origin HEAD:main"}}'
   run bash -c "env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u DAEDALUS_SESSION_ID bash -c 'printf %s \"\$1\" | python3 $DAEDALUS_HOME/core/guard-bash.py' _ '$guard'"
-  case "$output" in *'"permissionDecision": "deny"'*"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *'"permissionDecision": "deny"'*"holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
   edit='{"hook_event_name":"PreToolUse","session_id":"sZ","tool_name":"Edit","tool_input":{"file_path":"'"$T"'/README.md"}}'
   run bash -c "printf %s '$edit' | python3 $DAEDALUS_HOME/core/boundary-hook.py"
   case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "$output"; return 1 ;; esac
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sZ\"}' | python3 $DAEDALUS_HOME/core/boundary-hook.py"
-  [ "$status" -eq 2 ]; case "$output" in *"cannot tell which tree is mine"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -eq 2 ]; case "$output" in *"holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
 }
