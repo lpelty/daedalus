@@ -238,9 +238,8 @@ clean, nothing unpromoted — does not wait for a sweep: the next terminal
 start reclaims it (a resumed window too, before it rebinds; `create`,
 `spawn` and `adopt` before they choose a number), so the terminal you open
 in the morning is window 01 again and takes the pen from yesterday's
-session. A stale window
-that still holds work keeps its number until you continue it or release
-it. Session logs
+session. A stale window that still holds work, or a background clone that never
+reported, keeps its number until you continue it or release it. Session logs
 are named by window number and date (`vault/sessions/YYYY/MM/YYYY-MM-DD-02.md`).
 `core/doctor.sh` reports the two lease directories, stale and released
 windows, swept numbers with work still waiting, and the session registry

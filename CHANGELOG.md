@@ -350,12 +350,15 @@ have called it stale after four idle hours.
 - Liveness compares process start to process start. The registry's
   `procStart` (copied into the lease as `proc_start` at bind) decides when
   present. Without it, the entry must have been written after the process
-  started and within a minute of it. A recycled pid still fails both.
+  started and within a minute of it. A recycled pid still fails both. The
+  process start is read from `ps` in UTC, so the hour the clocks fall back
+  no longer reads every session dead.
 - A window with nothing to lose and nobody to lose it is reclaimed before a
   number is chosen: its recorded process gone, its worktree clean, nothing
   unpromoted. Yesterday's window 01 becomes today's, and the pen comes with
-  it. A window holding work, a quiet one, a finished clone, a released one,
-  or one that never recorded a pid is left for `sweep`, as before. Every
+  it. A window holding work, a quiet one, a finished clone, a background
+  clone that never reported, a released one, or one that never recorded a
+  pid is left for `sweep`, as before. Every
   terminal start does this, a resume included, and so do `lease.sh create`,
   `spawn` and `adopt` before they choose a number.
 - An unleased session is told "This session holds no window: no lease names

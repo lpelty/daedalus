@@ -1658,3 +1658,22 @@ print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() 
   [ "$(lease_json 01 session_id)" = "None" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
   [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
 }
+
+@test "liveness in the hour the clocks fall back: a process started 01:30 CST on 2026-11-01 (a stamp that happens twice in America/Chicago) reads live — ps is read in UTC, so no local-time guess is made" {
+  rm -f "$BATS_TEST_TMPDIR/sessions"/*.json
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-ps-dst" "$BATS_TEST_TMPDIR/bin/ps"; chmod +x "$BATS_TEST_TMPDIR/bin/ps"
+  pid="$(live_pid)"                                                   # alive for kill -0; the fake ps answers for its start time
+  START="$(python3 -c 'import calendar,time; print(calendar.timegm(time.strptime("Sun Nov 01 07:30:00 2026","%a %b %d %H:%M:%S %Y"))*1000)')"
+  # with procStart: exact
+  registry_entry "$pid" sA interactive cli daedalus-xx "$((START + 1500))" "Sun Nov 01 07:30:00 2026"
+  run env TZ=America/Chicago PATH="$BATS_TEST_TMPDIR/bin:$PATH" python3 "$LL" registry-live-pids sA
+  [ "$output" = "$pid" ] || { echo "fall-back hour with procStart read as dead: '$output'"; return 1; }
+  # without procStart: the write lag (1.5 s) is judged against the UTC start
+  registry_entry "$pid" sA interactive cli daedalus-xx "$((START + 1500))"
+  run env TZ=America/Chicago PATH="$BATS_TEST_TMPDIR/bin:$PATH" python3 "$LL" registry-live-pids sA
+  [ "$output" = "$pid" ] || { echo "fall-back hour without procStart read as dead: '$output'"; return 1; }
+  # and a lease judged the same way, under another zone entirely
+  python3 "$LL" _test-write 02 "{\"lease\":\"02\",\"session_id\":\"sA\",\"pid\":$pid,\"proc_started\":$((START + 1500))}"
+  run env TZ=Asia/Tokyo PATH="$BATS_TEST_TMPDIR/bin:$PATH" python3 "$LL" liveness 02
+  [ "$output" = "live" ] || { echo "lease under TZ=Asia/Tokyo: $output"; return 1; }
+}

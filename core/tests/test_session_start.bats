@@ -668,7 +668,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   case "$output" in *"01"*"STALE"*) : ;; *) echo "no STALE line for 01: $output"; return 1 ;; esac
 }
 
-@test "reclaim keeps a quiet window (process alive, heartbeat old), a finished clone, a lease with no recorded pid, and a released window (held until sweep, as before)" {
+@test "reclaim keeps a quiet window (process alive, heartbeat old), a finished clone, a dead spawned clone that never reported done, a lease with no recorded pid, and a released window (held until sweep, as before)" {
   T1="$DAEDALUS_HOME/worktrees/01/thing"
   p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
   # quiet: the process is alive, the heartbeat is a day old
@@ -681,14 +681,21 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   # no recorded pid: liveness is by heartbeat alone; a day-old heartbeat is not proof the process is gone
   bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null       # 03, unbound (pid null)
   touch -t 202001010000 "$DAEDALUS_HOME/state/leases/03.seen"
+  # a spawned clone that died (dead pid) without `done`: kept, so the board's STALE line can say to read its log (spec §4.2)
+  bash "$DAEDALUS_HOME/core/lease.sh" create --spawned --note "index the docs" >/dev/null    # 04
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 04 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sX"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/04.json")"
+  [ "$(lease_json 04 spawned)" = "True" ]
   p4="$(live_pid)"; registry_entry "$p4" sD
-  run start sD startup; [ "$(first_line)" = "Daedalus session orientation: window 04, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  run start sD startup; [ "$(first_line)" = "Daedalus session orientation: window 05, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
   [ "$(lease_json 01 session_id)" = "sA" ]; [ "$(lease_json 02 finished)" = "2026-01-01T00:00:00" ]; [ "$(lease_json 03 session_id)" = "None" ]
+  [ "$(lease_json 04 spawned)" = "True" ]; [ "$(lease_json 04 session_id)" = "sX" ]
+  case "$output" in *"04"*"STALE"*) : ;; *) echo "no STALE line for the dead clone: $output"; return 1 ;; esac
+  bash "$DAEDALUS_HOME/core/lease.sh" release 04 --remove --force >/dev/null
   # released: held until sweep, as the spec says — its holder's hooks may still be reading it
-  DAEDALUS_SESSION_ID=sD bash "$DAEDALUS_HOME/core/lease.sh" release 04 >/dev/null
+  DAEDALUS_SESSION_ID=sD bash "$DAEDALUS_HOME/core/lease.sh" release 05 >/dev/null
   p5="$(live_pid)"; registry_entry "$p5" sE
-  run start sE startup; [ "$(first_line)" = "Daedalus session orientation: window 05, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
-  [ "$(lease_json 04 session_id)" = "sD" ]; [ "$(lease_json 04 released)" != "None" ]
+  run start sE startup; [ "$(first_line)" = "Daedalus session orientation: window 04, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 05 session_id)" = "sD" ]; [ "$(lease_json 05 released)" != "None" ]
 }
 
 @test "a resumed window reclaims too: the operator resumes yesterday's window 02 by session id while window 01's process is gone and clean — 02 stays 02, 01's lease is gone, and the pen moves to 02 (previous holder gone); a headless start never reclaims" {

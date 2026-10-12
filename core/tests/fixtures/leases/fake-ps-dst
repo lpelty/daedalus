@@ -1,0 +1,5 @@
+#!/bin/sh
+# A `ps -o lstart= -p <pid>` whose process started at 01:30 CST on 2026-11-01 —
+# the hour the clocks fall back in America/Chicago, when "01:30" happens twice.
+# Zone-less like the real ps: 01:30 local, or 07:30 when asked in UTC.
+case "${TZ:-}" in UTC) echo "Sun Nov 01 07:30:00 2026" ;; *) echo "Sun Nov 01 01:30:00 2026" ;; esac

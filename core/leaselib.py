@@ -413,14 +413,20 @@ def pid_alive(pid: object) -> bool:
 
 
 def proc_started_of(pid: object) -> Optional[int]:
-    """Epoch milliseconds from `ps -o lstart=` (local time; the registry's
-    procStart string is UTC, so never compare strings — §4.5)."""
-    code, out, _ = v.run(["ps", "-o", "lstart=", "-p", str(pid)], timeout=5)
+    """Epoch milliseconds of the process start, from `ps -o lstart=` run with
+    TZ=UTC and read with calendar.timegm. ps prints a zone-less local stamp;
+    read in the local zone through time.mktime, the stamp of a process started
+    in the hour the clocks fall back (01:00–02:00 CST on 2026-11-01) is
+    ambiguous and mktime guesses an hour off, so for that hour every live
+    session read dead (review of 2026-10-11, finding 2). In UTC there is no
+    ambiguous hour. The registry's procStart string is UTC too; strings are
+    never compared (§4.5)."""
+    code, out, _ = v.run(["env", "TZ=UTC", "ps", "-o", "lstart=", "-p", str(pid)], timeout=5)
     out = out.strip()
     if code != 0 or not out:
         return None
     try:
-        return int(time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) * 1000)
+        return int(calendar.timegm(time.strptime(out, "%a %b %d %H:%M:%S %Y")) * 1000)
     except ValueError:
         return None
 
@@ -432,9 +438,11 @@ def proc_started_of(pid: object) -> Optional[int]:
 # starts after an OS restart (2026-10-10). A 2 s window called both of those
 # sessions dead: not terminal windows, so no number, no first-up, and the pen
 # stayed with a session that had ended. The lag has no upper bound in
-# principle (a cold start), so the ceiling is generous; a recycled pid passes
-# it only when its process started inside the minute before the record, and
-# procStart, when the entry has it, decides exactly (proc_start_text_ms).
+# principle (a cold start), so the ceiling is generous. It costs nothing in
+# recycling safety: the original process held the pid when the record was
+# written, so a recycler starts after it and fails the lower bound; the only
+# exposure is ps's one-second resolution (−2 s), the same as before. procStart,
+# when the entry has it, decides exactly (proc_start_text_ms).
 REGISTRY_LAG_MS = 60000
 
 
@@ -612,15 +620,17 @@ def require_trunk_ref(target_repo: Path, repo: str, trunk: str) -> None:
                       % (repo, trunk, repo))
 
 
-def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
+def waiting_work(target_repo: Path, trunk: str, nn: str, timeout: int = 20) -> list:
     """Subjects of commits on lease/<NN> that origin/<trunk> does not contain;
-    [] when there are none or the branch is absent (§4.2 'Numbering')."""
+    [] when there are none or the branch is absent (§4.2 'Numbering').
+    `timeout` bounds each git call (reclaim passes what the start has left)."""
     branch = "lease/%s" % nn
-    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", "refs/heads/" + branch])
+    code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", "refs/heads/" + branch],
+                       timeout=timeout)
     if code != 0:
         return []
     code, _, err = v.run(["git", "-C", str(target_repo), "merge-base", "--is-ancestor", "refs/heads/" + branch,
-                          remote_ref(trunk)])
+                          remote_ref(trunk)], timeout=timeout)
     if code == 0:
         return []
     if code != 1:
@@ -630,7 +640,7 @@ def waiting_work(target_repo: Path, trunk: str, nn: str) -> list:
         raise Refused("cannot tell whether %s has unpromoted work in %s (git merge-base against origin/%s failed: %s)"
                       % (branch, target_repo.name, trunk, last[0]))
     code, out, err = v.run(["git", "-C", str(target_repo), "log", "--format=%s",
-                            "%s..refs/heads/%s" % (remote_ref(trunk), branch)])
+                            "%s..refs/heads/%s" % (remote_ref(trunk), branch)], timeout=timeout)
     if code != 0:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot list %s's unpromoted work in %s (git log origin/%s..%s failed: %s)"
@@ -1235,7 +1245,11 @@ def pen_cutoff(root: Path, prime: dict) -> float:
         return time.time()
 
 
-def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, str]) -> list:
+RECLAIM_MIN_SECS = 5
+
+
+def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, str],
+                        deadline: Optional[float] = None) -> list:
     """§4.2 'Numbering': before a number is chosen, every lease with nothing to
     lose and nobody to lose it is removed, so the number it held is free again
     and re-use-or-refuse adopts its worktree. Nothing to lose: no commit on
@@ -1245,9 +1259,13 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
     RECORDED process is gone — liveness "stale" with a pid on file — never a
     lease that recorded no pid (its staleness is a heartbeat's age, not proof
     the terminal closed), never a finished clone (kept until promote or
-    release), and never a released one (held until sweep, §4.2: its holder's
-    hooks may still be reading). A listing that cannot answer (Refused) keeps
-    the lease: cannot tell is not "nothing".
+    release), never a released one (held until sweep, §4.2: its holder's
+    hooks may still be reading), and never a spawned clone that has not
+    reported `done` (its STALE line on the board says to read its log before
+    it is swept — spec §4.2 "How a spawned clone finishes"). A listing that
+    cannot answer (Refused) keeps the lease: cannot tell is not "nothing".
+    `deadline` (SessionStart's budget): the pass stops, keeping the rest, when
+    fewer than RECLAIM_MIN_SECS remain, and each git call gets what is left.
     Added 2026-10-11: the operator's morning terminal reclaims yesterday's
     window 01 and its pen (first_up: previous holder gone) instead of numbering
     02 beside a STALE 01 every day. CALLER HOLDS THE LOCK; mutates `leases`;
@@ -1255,16 +1273,20 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
     out = []
     for nn in sorted(k for k in leases if k != "prime"):
         lease = leases[nn]
-        if lease.get("finished") or lease.get("released"):
+        if lease.get("finished") or lease.get("released") or lease.get("spawned"):
             continue
         if lease.get("pid") is None or liveness(root, nn, lease) != "stale":
             continue
+        budget = _left(deadline, 20)
+        if budget < RECLAIM_MIN_SECS:
+            break                               # out of time: the rest are kept, as they were
         why = "its session (pid %s) has ended" % lease.get("pid")
         lease_trunks = lease.get("trunks") or trunks
         try:
-            if any(waiting_work(root / "target" / repo, trunk, nn) for repo, trunk in lease_trunks.items()):
+            if any(waiting_work(root / "target" / repo, trunk, nn, timeout=budget)
+                   for repo, trunk in lease_trunks.items()):
                 continue
-            if any(dirty_files(root / "worktrees" / nn / repo) for repo in lease_trunks):
+            if any(dirty_files(root / "worktrees" / nn / repo, timeout=budget) for repo in lease_trunks):
                 continue
         except Refused:
             continue
@@ -1277,19 +1299,22 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
 
 def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
                     spawned: bool = False, timeout: Optional[int] = None,
-                    deadline: Optional[float] = None, notes: Optional[list] = None) -> Tuple[str, dict]:
+                    deadline: Optional[float] = None, notes: Optional[list] = None,
+                    reclaimed: bool = False) -> Tuple[str, dict]:
     """§4.2 'Allocation': reclaim idle numbers; lowest free number; prune;
     re-use or refuse; worktree add; lease O_EXCL; empty .changed. CALLER HOLDS
     THE LOCK (session_start_bind and claim call this from inside theirs; the
     lock is not re-entrant). `deadline` bounds the worktree adds
     (SessionStart's budget, §4.2). `notes`, when given, receives one sentence
-    per number reclaimed (reclaim_idle_locked)."""
+    per number reclaimed (reclaim_idle_locked); `reclaimed` True when the
+    caller ran that pass itself under the same lock (session_start_bind)."""
     timeout = int(os.environ.get("LEASE_WORKTREE_TIMEOUT") or (timeout or 20))
     target_base = root / "target"
     trunks = trunks_of(root, target_base)
-    for _nn, sentence in reclaim_idle_locked(root, read_all(root), trunks):
-        if notes is not None:
-            notes.append(sentence)
+    if not reclaimed:
+        for _nn, sentence in reclaim_idle_locked(root, read_all(root), trunks, deadline=deadline):
+            if notes is not None:
+                notes.append(sentence)
     while True:
         leases = read_all(root)
         nn = free_number(root, leases, target_base, trunks)
@@ -1554,13 +1579,13 @@ def set_field(root: Path, token: str, cmd: str, key: str, value: object) -> str:
         return nn
 
 
-def dirty_files(worktree: Path) -> list:
+def dirty_files(worktree: Path, timeout: int = 20) -> list:
     """Paths `git status` reports in a lease worktree — modified, staged and
     untracked alike; [] for a clean tree or a path that is not there. A
     failing status is an answer we do not have, never 'clean'."""
     if not worktree.is_dir():
         return []
-    code, out, err = _git(worktree, "status", "--porcelain", "--untracked-files=all")
+    code, out, err = _git(worktree, "status", "--porcelain", "--untracked-files=all", timeout=timeout)
     if code != 0:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot tell whether %s has uncommitted changes (git status failed: %s)" % (worktree, last[0]))
@@ -3182,12 +3207,14 @@ def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -
             # cannot be told is allocate_locked's refusal to make, not this
             # pass's — it skips, and the bind goes on.
             try:
-                for _nn, sentence in reclaim_idle_locked(root, read_all(root), trunks_of(root, root / "target")):
+                for _nn, sentence in reclaim_idle_locked(root, read_all(root), trunks_of(root, root / "target"),
+                                                         deadline=deadline):
                     out["notes"].append(sentence)
             except Refused:
                 pass
         if out["lease"] is None and terminal:
-            nn, data = allocate_locked(root, sid, deadline=deadline, notes=out["notes"])   # NOT allocate(): the lock is held
+            nn, data = allocate_locked(root, sid, deadline=deadline, notes=out["notes"],
+                                       reclaimed=True)              # NOT allocate(): the lock is held here
             try:
                 bind(root, nn, sid, finish_worktree=False)
             except Refused:
