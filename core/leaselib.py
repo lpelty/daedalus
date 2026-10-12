@@ -421,9 +421,15 @@ def proc_started_of(pid: object) -> Optional[int]:
     session read dead (review of 2026-10-11, finding 2). In UTC there is no
     ambiguous hour. The registry's procStart string is UTC too; strings are
     never compared (§4.5)."""
-    code, out, _ = v.run(["env", "TZ=UTC", "ps", "-o", "lstart=", "-p", str(pid)], timeout=5)
-    out = out.strip()
-    if code != 0 or not out:
+    try:
+        # TZ in the child's environment, not an `env` in front: one process per
+        # lease (the board does one of these per lease on every prompt).
+        pr = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                            env=dict(os.environ, TZ="UTC"))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = pr.stdout.strip()
+    if pr.returncode != 0 or not out:
         return None
     try:
         return int(calendar.timegm(time.strptime(out, "%a %b %d %H:%M:%S %Y")) * 1000)

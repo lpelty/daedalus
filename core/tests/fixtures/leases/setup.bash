@@ -58,9 +58,7 @@ EOF
 # 2.1.282, 2.1–3.0 s on 2.1.295/296 after an OS restart (2026-10-10).
 registry_entry() {
   local pid="$1" sid="$2" kind="${3:-interactive}" ep="${4:-cli}" name="${5:-daedalus-xx}" started="${6:-}" pstart="${7:-}"
-  [ -n "$started" ] || started="$(python3 -c 'import subprocess,sys,time
-out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
-print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$pid")"
+  [ -n "$started" ] || started="$(ps_ms "$pid")"
   local extra=""
   [ -z "$pstart" ] || extra=",\"procStart\":\"$pstart\""
   printf '{"pid":%s,"sessionId":"%s","startedAt":%s,"kind":"%s","entrypoint":"%s","name":"%s","nameSource":"derived"%s}\n' \
@@ -92,11 +90,13 @@ teardown_live() {
 }
 
 # ps_ms <pid> — the epoch-millisecond start time of a live pid, exactly as
-# leaselib.proc_started_of computes it; a lease whose proc_started carries this
-# value for a live pid reads "live", one that carries 1 reads "stale" (pid reuse).
-ps_ms() { python3 -c 'import subprocess,sys,time
-out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True).stdout.strip()
-print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
+# leaselib.proc_started_of computes it (ps under TZ=UTC, read with timegm: the
+# local-zone read is ambiguous in the hour the clocks fall back); a lease whose
+# proc_started carries this value for a live pid reads "live", one that
+# carries 1 reads "stale" (pid reuse).
+ps_ms() { python3 -c 'import calendar,os,subprocess,sys,time
+out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True,env=dict(os.environ,TZ="UTC")).stdout.strip()
+print(int(calendar.timegm(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
 
 hook_json() {   # hook_json <event> <session-id> [extra-json-fields]
   printf '{"hook_event_name":"%s","session_id":"%s","source":"startup","transcript_path":"%s/transcripts/%s.jsonl"%s}' \
