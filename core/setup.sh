@@ -59,6 +59,28 @@ else
   log "scaffold: nothing configured"
 fi
 
+# The lease board on screen (lease-board spec §4.6): the mod under mods/lease-board/ is listed by the
+# marketplace at mods/.claude-plugin/marketplace.json and registered once per deployment at LOCAL scope,
+# so the absolute path the CLI writes lands in the gitignored .claude/settings.local.json, never in the
+# tracked settings. Skipped, with a line saying so, when mods/ is absent (a fixture) or claude is not on
+# PATH; a second run is a no-op because the file already names the plugin. doctor says the same (§5.3).
+log "lease board: the band above the prompt"
+if [ ! -f "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json" ]; then
+  log "lease board: skipped (mods/ absent)"
+elif ! command -v claude >/dev/null 2>&1; then
+  log "lease board: skipped (claude is not on PATH; run the two install commands in README.md \"Windows (leases)\" yourself)"
+elif python3 -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and "lease-board@daedalus-mods" in (d.get("enabledPlugins") or {}) else 1)' "$DAEDALUS_HOME/.claude/settings.local.json" 2>/dev/null; then
+  log "lease board: already installed for this deployment (.claude/settings.local.json names lease-board@daedalus-mods)"
+else
+  ( cd "$DAEDALUS_HOME" && claude plugin marketplace add ./mods --scope local && claude plugin install lease-board@daedalus-mods --scope local ) \
+    || log "lease board: the install did not finish — run the two commands in README.md \"Windows (leases)\" yourself"
+fi
+
 log "phase 5/5: doctor"
 bash "$DAEDALUS_HOME/core/doctor.sh" || die "the deployment is not correctly wired — see the report above"
 

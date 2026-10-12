@@ -1,0 +1,4 @@
+{
+  "description": "The lease-board hooks module",
+  "modules": ["./register.js"]
+}

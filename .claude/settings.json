@@ -2,6 +2,7 @@
   "permissions": {
     "deny": [
       "Edit(./core/**)",
+      "Edit(./mods/**)",
       "Edit(./CLAUDE.md)",
       "Edit(./SOUL.md)",
       "Edit(./.claude/settings.json)",

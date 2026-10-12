@@ -1,0 +1,12 @@
+{
+  "name": "daedalus-mods",
+  "description": "Mods that ship with Daedalus",
+  "owner": { "name": "Daedalus" },
+  "plugins": [
+    {
+      "name": "lease-board",
+      "source": "./lease-board",
+      "description": "The lease board, drawn above the prompt in every window"
+    }
+  ]
+}

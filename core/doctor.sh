@@ -187,6 +187,41 @@ EOF
 $reg_out
 EOF
   fi
+  # The lease board on screen (lease-board spec §5.3): the band above the prompt is a mod each
+  # deployment installs once, at local scope, so the absolute path lands in the gitignored
+  # .claude/settings.local.json. NOTE, never MISSING: the deployment works without the band, and
+  # the model-facing board is unchanged. Judged by a JSON read of that file, as local_capture_wiring
+  # does below; a file that is not JSON reads as not installed.
+  board_state="$(python3 - "$DAEDALUS_HOME/.claude/settings.local.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+v = (d.get("enabledPlugins") or {}).get("lease-board@daedalus-mods") if isinstance(d, dict) else None
+print("enabled" if v is True else ("disabled" if v is False else ""))
+PY
+)"
+  case "$board_state" in
+    enabled) log "OK       lease board on screen: lease-board@daedalus-mods is enabled in .claude/settings.local.json" ;;
+    disabled) log "NOTE     lease board on screen: lease-board@daedalus-mods is disabled in .claude/settings.local.json — \`claude plugin enable lease-board@daedalus-mods --scope local\` turns it back on" ;;
+    *) log "NOTE     lease board on screen: not installed for this deployment — run \`claude plugin marketplace add ./mods --scope local\` then \`claude plugin install lease-board@daedalus-mods --scope local\` in the Daedalus home, then open a new terminal" ;;
+  esac
+  # Mods need Claude Code 2.1.287 or later in the terminal (mods overview). The version is the first
+  # word of `claude --version` ("2.1.296 (Claude Code)"); compared as numbers, not as text.
+  if command -v claude >/dev/null 2>&1; then
+    claude_ver="$(claude --version 2>/dev/null | awk 'NR==1{print $1}')"
+    if [ -n "$claude_ver" ] && ! python3 -c 'import sys
+try:
+    a = [int(x) for x in sys.argv[1].split(".")[:3]]
+except ValueError:
+    sys.exit(0)
+sys.exit(0 if a >= [2, 1, 287] else 1)' "$claude_ver"; then
+      log "NOTE     lease board on screen: claude $claude_ver is older than 2.1.287, which mods need — update Claude Code"
+    fi
+  else
+    log "NOTE     lease board on screen: claude is not on PATH here, so its version was not checked (mods need 2.1.287 or later)"
+  fi
   for old in pitfall-seen.json code-context-seen.json; do
     [ -f "$DAEDALUS_HOME/state/$old" ] && log "NOTE     state/$old is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"
   done

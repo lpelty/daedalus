@@ -368,6 +368,45 @@ have called it stale after four idle hours.
 0.7.0: nothing here needs a migration step, so no upgrade runs at the next
 start; the code is live at the next hook run.
 
+
+#### Added on trunk after the v0.7.0 tag — 2026-10-11: the lease board on screen
+
+**What you see.** Every window now shows the lease board above its prompt. It
+refreshes itself every 2 seconds. One line per window, yours first: the
+number, "this window" on your own line, "holds the pen" on the pen holder's.
+Then the state: live, quiet since 09:40, stale, finished, or released. Then
+how many files the window has changed, its name if you gave it one, and its
+note. Live is plain, quiet is yellow, stale is red, released is dim. Nothing
+to run and nothing to ask: before, the board was only in the model's context.
+When the board cannot be read, one dim line says why. The last good board
+stays until the next read works.
+
+**One-time install, per deployment.** The board is a Claude Code mod that
+ships in the repo under `mods/`. In the Daedalus home, run
+`claude plugin marketplace add ./mods --scope local`, then
+`claude plugin install lease-board@daedalus-mods --scope local`. Then open a
+new terminal, or run `/reload-plugins` in a window that is already open.
+`core/setup.sh` runs the two commands when they have not been run. The
+install writes to `.claude/settings.local.json`, which git ignores, and
+nowhere else. Mods need Claude Code 2.1.287 or later. This was built and
+tested against 2.1.296.
+
+**What changed underneath.**
+- `python3 core/leaselib.py board-json` prints the board as one line of JSON.
+  It reads the lease files and the session registry under the shared lock. It
+  runs no git and writes nothing, so forty windows read in under a second.
+- `core/doctor.sh` gains two lines. `registry shape` says whether the session
+  registry Claude Code keeps still has the fields liveness reads. `lease
+  board on screen` says whether this deployment has installed the board, and
+  whether its Claude Code is new enough.
+- `mods/` is distribution code. The launcher and promote refuse while it is
+  modified, as they do for `core/`.
+
+**How you get it.** `git pull --ff-only` in the Daedalus home, then the two
+install commands above, once. VERSION stays 0.7.0: nothing moves and no
+state changes shape, so no upgrade runs at the next start.
+
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named

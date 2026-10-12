@@ -118,7 +118,7 @@ setup() {
       offenders="$offenders $f(agent name)"
     fi
   done <<EOF
-$(git ls-files -- core .claude CLAUDE.md SOUL.md README.md CHANGELOG.md config.example.yaml VERSION docs)
+$(git ls-files -- core mods .claude CLAUDE.md SOUL.md README.md CHANGELOG.md config.example.yaml VERSION docs)
 EOF
 
   [ -z "$offenders" ] || { echo "personal-identity leak in:$offenders"; return 1; }

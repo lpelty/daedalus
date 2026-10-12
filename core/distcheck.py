@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Distribution integrity (spec §6.1): is every file under core/, CLAUDE.md and
+"""Distribution integrity (spec §6.1): is every file under core/, mods/, CLAUDE.md and
 .claude/settings.json on disk exactly HEAD's? Standalone on purpose — standard
 library only, nothing imported from core/ — because it must run BEFORE any
 other distribution code: core/call-agent.sh (and, from plan 4 Task 7,
@@ -22,7 +22,8 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-DIST_PATHS = ("core", "CLAUDE.md", ".claude/settings.json")
+# mods/ since the lease board on screen (2026-10-11): the band's code runs as the operator in every window
+DIST_PATHS = ("core", "CLAUDE.md", ".claude/settings.json", "mods")
 SUFFIX = {"launch": "Nothing was launched.", "promote": "Nothing was pushed."}
 
 

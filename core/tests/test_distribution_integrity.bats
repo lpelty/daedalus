@@ -137,3 +137,9 @@ PY
   # core/call-agent.sh and the spec's Appendix E with it.
   [ -e "$BATS_TEST_TMPDIR/lib-ran" ] || { echo "lib.sh no longer runs first on this path: the documented boundary moved"; return 1; }
 }
+
+@test "a file added under mods/ is modified: the band's code runs as the operator in every window, so mods/ is distribution code (lease-board spec §9 Q4)" {
+  mkdir -p "$DAEDALUS_HOME/mods/lease-board/hooks"
+  printf 'export function register() {}\n' > "$DAEDALUS_HOME/mods/lease-board/hooks/register.js"
+  refused mods/lease-board/hooks/register.js
+}

@@ -226,6 +226,28 @@ next try (`core/guard-bash.py` does the same for Bash write operands). One
 window holds the pen — the board marks it `prime` — and only it writes
 `vault/hot.md` and commits the vault, through `core/vault-commit.sh`.
 
+The board is also on your screen. A Claude Code mod under `mods/lease-board/`
+draws it in the band above the prompt in every window and refreshes it every
+2 seconds: one line per window, this window first — `window 02 · this window ·
+live · 4 changed · poc-ui`, `window 01 · holds the pen · live · 0 changed`,
+`window 03 · quiet since 09:40 · 14 changed · electron`. Live is plain, quiet is
+yellow, stale is red, released is dim. It reads the lease files through
+`python3 core/leaselib.py board-json` (shared lock, no git, nothing written)
+and itself writes nothing. Install it once per deployment, in the Daedalus
+home: `claude plugin marketplace add ./mods --scope local`, then
+`claude plugin install lease-board@daedalus-mods --scope local`; `core/setup.sh`
+runs both when they have not been run. Then open a new terminal, or run
+`/reload-plugins` in a window that is already open. The install writes only to
+the gitignored `.claude/settings.local.json`, and the mod loads in place from
+`mods/`, so a `git pull` that changes it reaches the next session start with no
+version bump. A dim `board unavailable: …` line means the read failed (no
+`python3` on the path, the Daedalus home not found above the plugin or the
+working directory, a lease file unreadable); the last good board stays above
+it. Mods need Claude Code 2.1.287 or later in the terminal; this was built and
+tested against 2.1.296. `core/doctor.sh` reports the install (`lease board on
+screen`) and whether the session registry still has the shape liveness reads
+(`registry shape`).
+
 `core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
 `alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,
 `release <NN>`, `done <NN>`, `sweep` (removes windows with no live session),

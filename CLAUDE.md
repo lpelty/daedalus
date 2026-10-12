@@ -80,6 +80,7 @@ it.
 | When the operator says (in any words) | Said to | You run, and say |
 |---|---|---|
 | (opens a terminal and runs `claude`) | — | Nothing to run, and nothing to announce: do not open with the window number, the board, or a rename suggestion — the operator knows which window they opened. Start with whatever they ask. Speak up about the start only when it needs them: an upgrade line or stop, unpromoted work waiting on this number from an earlier session, a stale window, a window the start reclaimed (the context says "Reclaimed window 01: …"; say it in one line), or the pen changing hands. "Which window is this?" is answered from the orientation line. |
+| "Which window is this?" / "who holds the pen?" | any window | Nothing to run: the board is on screen above the prompt in every window and refreshes itself. Answer from the orientation line only when the band is missing (then say so: the mod is not installed or failed). |
 | "Call this window the POC window" | that window | `core/lease.sh alias 03 poc`; say "Window 03 is now shown as poc on the board." Display only. |
 | "Note for this window: …" | that window | `core/lease.sh note 03 "<their words>"`; the board shows it; nothing is enforced by it. |
 | "This is window 2" (a session that did not number itself) | that session | `core/lease.sh claim 02`; say which waiting work it continues, if any. If there is no window 02 yet, run `core/lease.sh create` and claim the number it printed. |

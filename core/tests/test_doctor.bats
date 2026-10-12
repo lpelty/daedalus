@@ -1270,3 +1270,42 @@ verify:
   case "$output" in *"NOTE     registry shape: $BATS_TEST_TMPDIR/sessions is absent — nothing to check"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"NOTE     session registry absent — liveness by heartbeat only on this build"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- the lease board on screen (lease-board spec §5.3) ---------------------------------------------------------
+# The band above the prompt is a mod each deployment installs once, at local scope, so the absolute path lands in
+# the gitignored .claude/settings.local.json. doctor says whether this deployment has done that. NOTE, never
+# MISSING: the deployment works without the band; the model-facing board is unchanged.
+@test "doctor: lease board on screen — NOTE naming the two install commands while .claude/settings.local.json does not enable lease-board@daedalus-mods; OK when it does; a disabled entry is a NOTE naming the enable command; doctor stays green" {
+  doctor_upgrade_fixture
+  note='NOTE     lease board on screen: not installed for this deployment — run `claude plugin marketplace add ./mods --scope local` then `claude plugin install lease-board@daedalus-mods --scope local` in the Daedalus home, then open a new terminal'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  mkdir -p "$DAEDALUS_HOME/.claude"
+  printf '{"enabledPlugins":{"other@elsewhere":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"extraKnownMarketplaces":{"daedalus-mods":{"source":{"source":"directory","path":"%s/mods"}}},"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' "$DAEDALUS_HOME" > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       lease board on screen: lease-board@daedalus-mods is enabled in .claude/settings.local.json"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     lease board on screen: not installed"*) echo "a NOTE beside the OK: $output"; return 1 ;; *) : ;; esac
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":false}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     lease board on screen: lease-board@daedalus-mods is disabled in .claude/settings.local.json — `claude plugin enable lease-board@daedalus-mods --scope local` turns it back on'*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'not json\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: lease board on screen — a claude older than 2.1.287 is a NOTE naming the version mods need; a claude that is new enough adds no line; no claude on PATH is a NOTE saying the version was not checked" {
+  doctor_upgrade_fixture
+  fake="$BATS_TEST_TMPDIR/fakeclaude"; mkdir -p "$fake"
+  printf '#!/bin/sh\necho "2.1.282 (Claude Code)"\n' > "$fake/claude"; chmod +x "$fake/claude"
+  PATH="$fake:$PATH" run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     lease board on screen: claude 2.1.282 is older than 2.1.287, which mods need — update Claude Code"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '#!/bin/sh\necho "2.1.296 (Claude Code)"\n' > "$fake/claude"
+  PATH="$fake:$PATH" run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"lease board on screen: claude 2.1.296"*) echo "a version line for a new-enough claude: $output"; return 1 ;; *) : ;; esac
+  # the system paths alone: python3, git, ps and awk are there; claude is not
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     lease board on screen: claude is not on PATH here, so its version was not checked (mods need 2.1.287 or later)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
