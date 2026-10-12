@@ -190,23 +190,53 @@ EOF
   # The lease board on screen (lease-board spec §5.3): the band above the prompt is a mod each
   # deployment installs once, at local scope, so the absolute path lands in the gitignored
   # .claude/settings.local.json. NOTE, never MISSING: the deployment works without the band, and
-  # the model-facing board is unchanged. Judged by a JSON read of that file, as local_capture_wiring
-  # does below; a file that is not JSON reads as not installed.
-  board_state="$(python3 - "$DAEDALUS_HOME/.claude/settings.local.json" <<'PY' 2>/dev/null || true
+  # the model-facing board is unchanged. Judged by a JSON read of that file and of the user-scope
+  # settings (~/.claude/settings.json: `claude plugin install` without --scope installs there, install
+  # page "user scope by default"; local beats user, plugin loading reference "Find where a plugin is
+  # enabled"), as local_capture_wiring does below; a file that is not JSON reads as not written
+  # (review 2026-10-11, finding 14). The line names the file that decided.
+  board_state="$(python3 - "$DAEDALUS_HOME/.claude/settings.local.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" <<'PY' 2>/dev/null || true
 import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    sys.exit(0)
-v = (d.get("enabledPlugins") or {}).get("lease-board@daedalus-mods") if isinstance(d, dict) else None
-print("enabled" if v is True else ("disabled" if v is False else ""))
+for path, label in ((sys.argv[1], ".claude/settings.local.json"), (sys.argv[2], sys.argv[2])):
+    try:
+        d = json.load(open(path))
+    except (OSError, ValueError):
+        continue
+    v = (d.get("enabledPlugins") or {}).get("lease-board@daedalus-mods") if isinstance(d, dict) else None
+    if v is True:
+        print("enabled " + label); break
+    if v is False:
+        print("disabled " + label); break
 PY
 )"
   case "$board_state" in
-    enabled) log "OK       lease board on screen: lease-board@daedalus-mods is enabled in .claude/settings.local.json" ;;
-    disabled) log "NOTE     lease board on screen: lease-board@daedalus-mods is disabled in .claude/settings.local.json — \`claude plugin enable lease-board@daedalus-mods --scope local\` turns it back on" ;;
+    "enabled "*) log "OK       lease board on screen: lease-board@daedalus-mods is enabled in ${board_state#enabled }" ;;
+    "disabled .claude/settings.local.json") log "NOTE     lease board on screen: lease-board@daedalus-mods is disabled in .claude/settings.local.json — \`claude plugin enable lease-board@daedalus-mods --scope local\` turns it back on" ;;
+    "disabled "*) log "NOTE     lease board on screen: lease-board@daedalus-mods is disabled in ${board_state#disabled } — \`claude plugin enable lease-board@daedalus-mods\` turns it back on" ;;
     *) log "NOTE     lease board on screen: not installed for this deployment — run \`claude plugin marketplace add ./mods --scope local\` then \`claude plugin install lease-board@daedalus-mods --scope local\` in the Daedalus home, then open a new terminal" ;;
   esac
+  # One machine holds one marketplace record per name ("There is one known_marketplaces.json per
+  # user, so a marketplace you add in one project is available in every project", plugin loading
+  # reference; a repeat `marketplace add` prints "already on disk" and exits 0, CLI reference), so a
+  # second Daedalus checkout on the machine loads the FIRST checkout's mods/. The record lives under
+  # the plugins root, ~/.claude/plugins unless CLAUDE_CODE_PLUGIN_CACHE_DIR is set (loading reference,
+  # "Find plugins on disk"); whether CLAUDE_CONFIG_DIR moves it is not documented, so it is not read
+  # here. NOTE when the record names another path (review 2026-10-11, findings 12 and 18).
+  other_mods="$(python3 - "${CLAUDE_CODE_PLUGIN_CACHE_DIR:-$HOME/.claude/plugins}/known_marketplaces.json" "$DAEDALUS_HOME/mods" <<'PY' 2>/dev/null || true
+import json, os, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    rec = d.get("daedalus-mods") if isinstance(d, dict) else None
+except (OSError, ValueError):
+    rec = None
+if isinstance(rec, dict):
+    path = (rec.get("source") or {}).get("path") if isinstance(rec.get("source"), dict) else None
+    path = path or rec.get("installLocation")
+    if isinstance(path, str) and path and os.path.realpath(path) != os.path.realpath(sys.argv[2]):
+        print(path)
+PY
+)"
+  [ -z "$other_mods" ] || log "NOTE     lease board on screen: this machine's daedalus-mods marketplace points at $other_mods, not $DAEDALUS_HOME/mods — one machine holds one record of that name, so a window here would load the other checkout's board; remove it there (\`claude plugin marketplace remove daedalus-mods\`) before installing here"
   # Mods need Claude Code 2.1.287 or later in the terminal (mods overview). The version is the first
   # word of `claude --version` ("2.1.296 (Claude Code)"); compared as numbers, not as text.
   if command -v claude >/dev/null 2>&1; then

@@ -237,16 +237,23 @@ and itself writes nothing. Install it once per deployment, in the Daedalus
 home: `claude plugin marketplace add ./mods --scope local`, then
 `claude plugin install lease-board@daedalus-mods --scope local`; `core/setup.sh`
 runs both when they have not been run. Then open a new terminal, or run
-`/reload-plugins` in a window that is already open. The install writes only to
-the gitignored `.claude/settings.local.json`, and the mod loads in place from
-`mods/`, so a `git pull` that changes it reaches the next session start with no
-version bump. A dim `board unavailable: …` line means the read failed (no
-`python3` on the path, the Daedalus home not found above the plugin or the
-working directory, a lease file unreadable); the last good board stays above
-it. Mods need Claude Code 2.1.287 or later in the terminal; this was built and
-tested against 2.1.296. `core/doctor.sh` reports the install (`lease board on
-screen`) and whether the session registry still has the shape liveness reads
-(`registry shape`).
+`/reload-plugins` in a window that is already open. Inside the repo the install
+writes only the gitignored `.claude/settings.local.json`; Claude Code also
+records the marketplace and the install in its own per-user files under
+`~/.claude/plugins/`. The mod loads in place from `mods/`, so a `git pull` that
+changes it reaches the next session start with no version bump. One machine
+holds one `daedalus-mods` record, so a second Daedalus checkout on the same
+machine would load the first checkout's copy of the mod; the band still shows
+the home the window was opened in, and `core/doctor.sh` notes the mismatch.
+Two dim lines can appear under the board: `one window is not shown: …` when one
+lease file cannot be read (every other window is still listed), and
+`board unavailable: …` when the read itself failed (no `python3` on the path,
+the Daedalus home not found above the working directory or the plugin, the
+lease lock busy for over 1.5 seconds, a timeout); the last good board stays
+above it. Mods need Claude Code 2.1.287 or later in the terminal; this was
+built and tested against 2.1.296. `core/doctor.sh` reports the install (`lease
+board on screen`) and whether the session registry still has the shape
+liveness reads (`registry shape`).
 
 `core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
 `alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,

@@ -1271,6 +1271,48 @@ verify:
   case "$output" in *"NOTE     session registry absent — liveness by heartbeat only on this build"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "doctor: registry shape — a live pid that fails the recorded-process test is judged, not skipped: startedAt in seconds (the 2026-10-10 class) is a NOTE naming the values and that its window reads dead; so is a complete entry whose procStart is an hour off; an entry whose pid key is gone lacks pid; one with neither startedAt nor procStart names both; a dead left-behind pid is skipped (review 2026-10-11, finding 1)" {
+  doctor_upgrade_fixture
+  p="$(live_pid)"; ms="$(ps_ms "$p")"
+  # the lease's own recorded pid is dead, so liveness(01) is decided by the registry entry for sR
+  printf '{"lease":"01","session_id":"sR","pid":1,"proc_started":1}' > "$DAEDALUS_HOME/state/leases/01.json"; touch "$DAEDALUS_HOME/state/leases/01.seen"
+  # six fields, startedAt in SECONDS, no procStart: pid_is_recorded_process fails and the window reads dead
+  secs=$((ms / 1000))
+  registry_entry "$p" sR interactive cli daedalus-01 "$secs"
+  [ "$(python3 "$DAEDALUS_HOME/core/leaselib.py" liveness 01)" = "stale" ]
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) lacks procStart — liveness falls back to startedAt for it; and is a live pid that fails the recorded-process test (startedAt=$secs, procStart=null) — the registry may have changed meaning, or its process ended and the pid was reused; its window reads dead"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"no live window entries to check"*) echo "skipped as unjudged: $output"; return 1 ;; *) : ;; esac
+  # all seven fields and procStart parses, but it is an hour off (the string in local time, say): the standalone NOTE
+  off="$(utc_lstart $((ms - 3600000)))"
+  registry_entry "$p" sR interactive cli daedalus-01 "$ms" "$off"
+  [ "$(python3 "$DAEDALUS_HOME/core/leaselib.py" liveness 01)" = "stale" ]
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) is a live pid that fails the recorded-process test (startedAt=$ms, procStart=\"$off\") — the registry may have changed meaning, or its process ended and the pid was reused; its window reads dead"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the pid key renamed: the entry is this home's (a lease names its session) and lacks pid
+  printf '{"processId":%s,"sessionId":"sR","startedAt":%s,"kind":"interactive","entrypoint":"cli","name":"daedalus-01"}\n' "$p" "$ms" > "$BATS_TEST_TMPDIR/sessions/$p.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) lacks pid, procStart — "*"liveness cannot check its process"*) : ;; *) echo "$output"; return 1 ;; esac
+  # neither startedAt nor procStart, pid live and named by the lease: one NOTE naming both, and that it reads dead
+  printf '{"pid":%s,"sessionId":"sR","kind":"interactive","entrypoint":"cli","name":"daedalus-01"}\n' "$p" > "$BATS_TEST_TMPDIR/sessions/$p.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) lacks startedAt, procStart — "*"; and is a live pid that fails the recorded-process test (startedAt=null, procStart=null)"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a left-behind entry whose pid is DEAD is an ended session's file: skipped, as before
+  printf '{"pid":1999999,"sessionId":"sR","startedAt":%s,"kind":"interactive","entrypoint":"cli","name":"daedalus-01"}\n' "$ms" > "$BATS_TEST_TMPDIR/sessions/$p.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       registry shape: no live window entries to check"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: registry shape — a registry directory that cannot be read is a NOTE naming the directory and the error, not an OK with nothing to check (review 2026-10-11, finding 7)" {
+  doctor_upgrade_fixture
+  chmod 000 "$BATS_TEST_TMPDIR/sessions"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  chmod 755 "$BATS_TEST_TMPDIR/sessions"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: $BATS_TEST_TMPDIR/sessions cannot be read (Permission denied) — liveness has no registry on this build"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       registry shape"*) echo "an OK beside the NOTE: $output"; return 1 ;; *) : ;; esac
+}
+
 # --- the lease board on screen (lease-board spec §5.3) ---------------------------------------------------------
 # The band above the prompt is a mod each deployment installs once, at local scope, so the absolute path lands in
 # the gitignored .claude/settings.local.json. doctor says whether this deployment has done that. NOTE, never
@@ -1294,6 +1336,32 @@ verify:
   printf 'not json\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: lease board on screen — a plugin enabled at user scope (~/.claude/settings.json) is OK naming that file, not the not-installed NOTE (review 2026-10-11, finding 14)" {
+  doctor_upgrade_fixture
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       lease board on screen: lease-board@daedalus-mods is enabled in $CLAUDE_CONFIG_DIR/settings.json"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lease board on screen: not installed"*) echo "a NOTE beside the OK: $output"; return 1 ;; *) : ;; esac
+  # local beats user: a local false is the disabled NOTE even with the user-scope true
+  mkdir -p "$DAEDALUS_HOME/.claude"; printf '{"enabledPlugins":{"lease-board@daedalus-mods":false}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     lease board on screen: lease-board@daedalus-mods is disabled in .claude/settings.local.json"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: lease board on screen — this machine's one daedalus-mods marketplace record pointing at another checkout's mods/ is a NOTE naming both paths; pointing here, no line (review 2026-10-11, findings 12, 18)" {
+  doctor_upgrade_fixture
+  export CLAUDE_CODE_PLUGIN_CACHE_DIR="$BATS_TEST_TMPDIR/plugins"; mkdir -p "$CLAUDE_CODE_PLUGIN_CACHE_DIR"
+  printf '{"daedalus-mods":{"source":{"source":"directory","path":"/elsewhere/daedalus/mods"},"installLocation":"/elsewhere/daedalus/mods"}}\n' > "$CLAUDE_CODE_PLUGIN_CACHE_DIR/known_marketplaces.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     lease board on screen: this machine's daedalus-mods marketplace points at /elsewhere/daedalus/mods, not $DAEDALUS_HOME/mods — one machine holds one record of that name, so a window here would load the other checkout's board; remove it there (\`claude plugin marketplace remove daedalus-mods\`) before installing here"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"daedalus-mods":{"source":{"source":"directory","path":"%s/mods"},"installLocation":"%s/mods"}}\n' "$DAEDALUS_HOME" "$DAEDALUS_HOME" > "$CLAUDE_CODE_PLUGIN_CACHE_DIR/known_marketplaces.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"marketplace points at"*) echo "a NOTE for a matching record: $output"; return 1 ;; *) : ;; esac
+  printf 'not json\n' > "$CLAUDE_CODE_PLUGIN_CACHE_DIR/known_marketplaces.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"marketplace points at"*) echo "a NOTE for an unreadable record: $output"; return 1 ;; *) : ;; esac
 }
 
 @test "doctor: lease board on screen — a claude older than 2.1.287 is a NOTE naming the version mods need; a claude that is new enough adds no line; no claude on PATH is a NOTE saying the version was not checked" {

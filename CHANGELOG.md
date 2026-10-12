@@ -386,19 +386,25 @@ ships in the repo under `mods/`. In the Daedalus home, run
 `claude plugin marketplace add ./mods --scope local`, then
 `claude plugin install lease-board@daedalus-mods --scope local`. Then open a
 new terminal, or run `/reload-plugins` in a window that is already open.
-`core/setup.sh` runs the two commands when they have not been run. The
-install writes to `.claude/settings.local.json`, which git ignores, and
-nowhere else. Mods need Claude Code 2.1.287 or later. This was built and
-tested against 2.1.296.
+`core/setup.sh` runs the two commands when they have not been run. Inside
+the repo the install writes only `.claude/settings.local.json`, which git
+ignores. Claude Code also records the marketplace and the install in its own
+per-user files under `~/.claude/plugins/`, so one machine holds one
+`daedalus-mods` record: a second Daedalus checkout on the same machine would
+load the first one's board, and `core/doctor.sh` says so. Mods need Claude
+Code 2.1.287 or later. This was built and tested against 2.1.296.
 
 **What changed underneath.**
 - `python3 core/leaselib.py board-json` prints the board as one line of JSON.
-  It reads the lease files and the session registry under the shared lock. It
-  runs no git and writes nothing, so forty windows read in under a second.
+  It reads the lease files and their sidecars under the shared lock, then the
+  session registry once. It runs no git and writes nothing, so forty windows
+  read in under a second. It waits at most 1.5 seconds for the lock.
 - `core/doctor.sh` gains two lines. `registry shape` says whether the session
-  registry Claude Code keeps still has the fields liveness reads. `lease
-  board on screen` says whether this deployment has installed the board, and
-  whether its Claude Code is new enough.
+  registry Claude Code keeps still has the fields liveness reads, and names a
+  live window whose entry fails the liveness test. `lease board on screen`
+  says whether this deployment has installed the board, at local or user
+  scope, and whether its Claude Code is new enough. It also notes a
+  `daedalus-mods` record that points at another checkout on this machine.
 - `mods/` is distribution code. The launcher and promote refuse while it is
   modified, as they do for `core/`.
 

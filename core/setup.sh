@@ -69,13 +69,18 @@ if [ ! -f "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json" ]; then
   log "lease board: skipped (mods/ absent)"
 elif ! command -v claude >/dev/null 2>&1; then
   log "lease board: skipped (claude is not on PATH; run the two install commands in README.md \"Windows (leases)\" yourself)"
-elif python3 -c 'import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    sys.exit(1)
-sys.exit(0 if isinstance(d, dict) and "lease-board@daedalus-mods" in (d.get("enabledPlugins") or {}) else 1)' "$DAEDALUS_HOME/.claude/settings.local.json" 2>/dev/null; then
-  log "lease board: already installed for this deployment (.claude/settings.local.json names lease-board@daedalus-mods)"
+elif board_file="$(python3 -c 'import json, sys
+# the local file, then the user-scope one (`claude plugin install` without --scope writes there): a second
+# declaration at local scope would double-declare the plugin (review 2026-10-11, finding 14)
+for path, label in ((sys.argv[1], ".claude/settings.local.json"), (sys.argv[2], sys.argv[2])):
+    try:
+        d = json.load(open(path))
+    except (OSError, ValueError):
+        continue
+    if isinstance(d, dict) and "lease-board@daedalus-mods" in (d.get("enabledPlugins") or {}):
+        print(label); sys.exit(0)
+sys.exit(1)' "$DAEDALUS_HOME/.claude/settings.local.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null)"; then
+  log "lease board: already installed for this deployment ($board_file names lease-board@daedalus-mods)"
 else
   ( cd "$DAEDALUS_HOME" && claude plugin marketplace add ./mods --scope local && claude plugin install lease-board@daedalus-mods --scope local ) \
     || log "lease board: the install did not finish — run the two commands in README.md \"Windows (leases)\" yourself"

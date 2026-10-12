@@ -309,3 +309,62 @@ EOF
   run bash "$DAEDALUS_HOME/core/setup.sh"
   [ "$status" -eq 0 ]; case "$output" in *"Setup: created"*) echo "a rerun created something: $output"; return 1 ;; esac
 }
+
+# --- the lease board install (lease-board spec §4.6; review 2026-10-11, finding 19) -----------------------------
+# A fake `claude` on PATH records every argv line; `--version` answers as 2.1.296 so doctor's version line stays quiet.
+setup_board_fixture() {
+  SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  for f in setup.sh sync-target.sh sync-vault.sh doctor.sh upgrade.py verifylib.py leaselib.py prepush.py; do cp "$SRC/$f" "$DAEDALUS_HOME/core/"; done
+  cp -R "$SRC/templates" "$DAEDALUS_HOME/core/templates"
+  SHIP="$BATS_TEST_TMPDIR/ship"; git init -q -b main "$SHIP"; echo code > "$SHIP/file.txt"
+  git -C "$SHIP" add -A; git -C "$SHIP" -c user.email=t@t -c user.name=t commit -q -m init
+  KB="$BATS_TEST_TMPDIR/kb"; git init -q -b main "$KB"; echo kb > "$KB/README.md"
+  git -C "$KB" add -A; git -C "$KB" -c user.email=t@t -c user.name=t commit -q -m init
+  printf 'target:\n  repo: %s\n  branch: main\nvault:\n  repo: %s\ngates:\n  - true\nproposals:\n  budget: 5\n' "$SHIP" "$KB" > "$DAEDALUS_HOME/config.yaml"
+  FAKE="$BATS_TEST_TMPDIR/fakeclaude"; mkdir -p "$FAKE"; CALLS="$BATS_TEST_TMPDIR/claude-calls"
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "2.1.296 (Claude Code)"; exit 0; }\nprintf "%%s\\n" "$*" >> "%s"\nexit "${FAKE_CLAUDE_RC:-0}"\n' "$CALLS" > "$FAKE/claude"; chmod +x "$FAKE/claude"
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  export CLAUDE_CODE_PLUGIN_CACHE_DIR="$BATS_TEST_TMPDIR/plugins"
+  unset DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID
+}
+
+@test "setup: the lease board — with mods/ present and nothing enabling the plugin, the two commands run in order at local scope; a second run finds .claude/settings.local.json naming it and runs nothing" {
+  setup_board_fixture
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin"; printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"lease board: the band above the prompt"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$CALLS")" = "plugin marketplace add ./mods --scope local
+plugin install lease-board@daedalus-mods --scope local" ] || { echo "calls: $(cat "$CALLS")"; return 1; }
+  # the real CLI writes this; the fake does not, so write what it would have
+  mkdir -p "$DAEDALUS_HOME/.claude"; printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  rm -f "$CALLS"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"lease board: already installed for this deployment (.claude/settings.local.json names lease-board@daedalus-mods)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$CALLS" ] || { echo "claude was run: $(cat "$CALLS")"; return 1; }
+}
+
+@test "setup: the lease board — a claude that fails prints the did-not-finish line and setup still finishes; mods/ absent is the skipped line and no call" {
+  setup_board_fixture
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin"; printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  FAKE_CLAUDE_RC=1 PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'lease board: the install did not finish — run the two commands in README.md "Windows (leases)" yourself'*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$CALLS")" = "plugin marketplace add ./mods --scope local" ] || { echo "calls: $(cat "$CALLS")"; return 1; }
+  rm -rf "$DAEDALUS_HOME/mods" "$CALLS"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"lease board: skipped (mods/ absent)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$CALLS" ]
+}
+
+@test "setup: the lease board — a plugin enabled at user scope (~/.claude/settings.json) counts as installed: no second declaration at local scope (review 2026-10-11, finding 14)" {
+  setup_board_fixture
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin"; printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"lease board: already installed for this deployment ($CLAUDE_CONFIG_DIR/settings.json names lease-board@daedalus-mods)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$CALLS" ] || { echo "claude was run: $(cat "$CALLS")"; return 1; }
+}

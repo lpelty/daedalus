@@ -12,11 +12,14 @@ window 03 · quiet since 09:40 · 14 changed · electron · peer name daedalus-0
 ```
 
 It reads only. Every 2 seconds it runs `python3 core/leaselib.py board-json
---session <id>` in the Daedalus home — the lease files, their sidecars and the
-session registry, under the shared lock, with no git — and asks Claude Code to
-draw the band again. It never writes a file, never runs `git` or
-`core/lease.sh`, and never throws: when the read fails, the last good board
-stays and one dim line says why (`board unavailable: …`).
+--session <id>` in the Daedalus home — the lease files and their sidecars under
+the shared lock (waiting at most 1.5 seconds for it), then the session registry
+once, with no git — and asks Claude Code to draw the band again. One read at a
+time; a session nobody sits at (`claude -p`) starts no timer. It never writes a
+file, never runs `git` or `core/lease.sh`, and never throws: when the read
+fails, the last good board stays and one dim line says why
+(`board unavailable: …`); when one lease file cannot be read, every other
+window is still listed and one dim line names it (`one window is not shown: …`).
 
 ## Loading it
 

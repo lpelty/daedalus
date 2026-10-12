@@ -130,12 +130,13 @@ test('a failed read keeps the last good board and adds one dim line saying so', 
   expect(line?.props.dimColor).toBe(true)
 })
 
-test('a non-zero exit shows the operator sentence without its daedalus: prefix, and nothing else before a first good board', async ($, on) => {
-  stubs(on, () => ({ value: { exitCode: 1, stdout: '', stderr: 'daedalus: The lease file for window 02 cannot be read (not valid JSON)\n', isStdoutTruncated: false, isStderrTruncated: false } }))
+test('a non-zero exit shows the first stderr sentence without its daedalus: prefix, and nothing else before a first good board', async ($, on) => {
+  // any exit 1: the lease lock busy, state/leases/ unreadable (an unreadable lease FILE is exit 0 with an error key, tested below)
+  stubs(on, () => ({ value: { exitCode: 1, stdout: '', stderr: 'daedalus: the lease lock is busy — a window is being made or swept; the board refreshes when it frees\n', isStdoutTruncated: false, isStderrTruncated: false } }))
   await start($)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await windowLines(ui)).length).toBe(0)
-  const line = await ui.find({ type: 'Text', text: 'board unavailable: The lease file for window 02 cannot be read (not valid JSON)' })
+  const line = await ui.find({ type: 'Text', text: 'board unavailable: the lease lock is busy — a window is being made or swept; the board refreshes when it frees' })
   expect(line).toBeDefined()
   expect(line?.props.dimColor).toBe(true)
 })
@@ -213,4 +214,174 @@ test('the Desktop app draws the same lines', async ($, on) => {
   expect(lines.length).toBe(5)
   expect(lines[0]).toMatch(/^window 03 · this window · quiet since /)
   expect(lines[1]).toBe('window 01 · holds the pen · live · 0 changed')
+})
+
+// --- the review of 2026-10-11 ---------------------------------------------------------------------------------
+
+// The stamp the band prints for a read at that clock time: the mod's clockText, which prints the date too
+// when the day is not today (the mock clock starts at the epoch).
+function asOf(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const p = (n: number) => (n < 10 ? '0' : '') + n
+  const hhmm = p(d.getHours()) + ':' + p(d.getMinutes())
+  const today = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  return today ? hhmm : d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + hhmm
+}
+
+test('the last good board stays through a failure and the failure line goes away once a read works again; the time shown is the last good read', async ($, on) => {
+  let mode: 'ok' | 'deny' = 'ok'
+  const { clock } = stubs(on, () => (mode === 'ok' ? ok(FIXTURE) : { deny: 'boom' }))
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  mode = 'deny'
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: new RegExp('^board unavailable: .*boom.* \\(showing the board as of ' + asOf(0) + '\\)$') })).toBeDefined()
+  mode = 'ok'
+  await clock.advance(120000) // good reads every 2 s; the last one at 122000 ms, two minutes after the first
+  expect((await windowLines(ui)).length).toBe(5)
+  expect(await ui.find({ type: 'Text', text: /^board unavailable/ })).toBeUndefined()
+  mode = 'deny'
+  await clock.advance(2000)
+  expect(asOf(122000)).not.toBe(asOf(0))
+  expect(await ui.find({ type: 'Text', text: new RegExp('^board unavailable: .*boom.* \\(showing the board as of ' + asOf(122000) + '\\)$') })).toBeDefined()
+})
+
+test('an object with no windows array is a failure, not an empty board', async ($, on) => {
+  stubs(on, () => ({ value: { exitCode: 0, stdout: '{}', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'board unavailable: board-json printed no board' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'no windows open in this Daedalus home' })).toBeUndefined()
+})
+
+test('the session id is read again on every tick, so after /resume the band follows the new transcript (finding 9)', async ($, on) => {
+  let sid = 'sC'
+  const runs: Run[] = []
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.id', () => ({ value: sid }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.exists', () => ({ value: true }))
+  on('ui.log', () => ({ value: undefined }))
+  on('process.run', (_$: unknown, e: any) => {
+    runs.push({ argv: e.argv, init: e.init })
+    return ok(FIXTURE)
+  })
+  on('ui.render', () => THEIRS)
+  const clock = mock.clock(on)
+  await start($)
+  expect(runs[0].argv[4]).toBe('sC')
+  sid = 'sNew'
+  await clock.advance(2000)
+  expect(runs.length).toBe(2)
+  expect(runs[1].argv[4]).toBe('sNew')
+})
+
+test('a session nobody sits at (claude -p: isInteractive false) starts no timer and runs board-json never (finding 10)', async ($, on) => {
+  const { runs, clock } = stubs(on, () => ok(FIXTURE))
+  await $.session.start({ surface: 'terminal', isInteractive: false, cwd: '/work' })
+  expect(runs.length).toBe(0)
+  await clock.advance(4000)
+  expect(runs.length).toBe(0)
+})
+
+test('one read at a time: while board-json is still running, a tick starts no second one (finding 11)', async ($, on) => {
+  let calls = 0
+  const { runs, clock } = stubs(on, () => {
+    calls += 1
+    if (calls === 1) return ok(FIXTURE)
+    return new Promise(() => {}) // the second read never finishes
+  })
+  await start($)
+  expect(runs.length).toBe(1)
+  await clock.advance(2000)
+  await clock.advance(2000)
+  await clock.advance(2000)
+  expect(runs.length).toBe(2)
+})
+
+test('the first prompt is not held behind the first read: session.start returns while board-json is still running (finding 13)', async ($, on) => {
+  let release: (v: unknown) => void = () => {}
+  const held = new Promise((r) => { release = r })
+  const { clock } = stubs(on, () => held.then(() => ok(FIXTURE)))
+  let started = false
+  const p = start($).then(() => { started = true })
+  await clock.settle()
+  await clock.settle()
+  expect(started).toBe(true)
+  release(null)
+  await p
+})
+
+test('with room for one row this window\'s own line is the one shown, and no "+N more" line takes its place (findings 15, 26)', async ($, on) => {
+  stubs(on, () => ok(FIXTURE))
+  await start($)
+  const one = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 1, scroll: { offset: 0, bodyRows: 1 } } })
+  const lines = await windowLines(one)
+  expect(lines.length).toBe(1)
+  expect(lines[0]).toMatch(/^window 03 · this window/)
+  expect(await one.find({ type: 'Text', text: /more windows$/ })).toBeUndefined()
+  await one.unmount()
+  // two rows: this window and the count of the rest
+  const two = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 2, scroll: { offset: 0, bodyRows: 2 } } })
+  expect((await windowLines(two)).length).toBe(1)
+  expect(await two.find({ type: 'Text', text: '+4 more windows' })).toBeDefined()
+})
+
+test('the home is the one above the session cwd; the plugin directory is the fallback, and a disagreement is logged (findings 12, 18, 21)', async ($, on) => {
+  const logs: string[] = []
+  const runs: Run[] = []
+  const exists: string[] = []
+  // the plugin's grandparent (in the kit: the Daedalus checkout holding this mod) has core/leaselib.py too
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.id', () => ({ value: 'sC' }))
+  on('session.cwd', () => ({ value: '/work/deep' }))
+  on('fs.exists', (_$: unknown, e: any) => {
+    exists.push(String(e.path))
+    return { value: !String(e.path).startsWith('/work/deep/') }
+  })
+  on('ui.log', (_$: unknown, e: any) => { logs.push(String(e.text)); return { value: undefined } })
+  on('process.run', (_$: unknown, e: any) => { runs.push({ argv: e.argv, init: e.init }); return ok(FIXTURE) })
+  on('ui.render', () => THEIRS)
+  mock.clock(on)
+  await start($)
+  expect(runs[0].init?.cwd).toBe('/work')
+  expect(exists[0]).toBe('/work/deep/core/leaselib.py')
+  expect(logs.some((l) => l.includes('/work') && l.includes('plugin directory') && l.includes('mods/lease-board'))).toBe(true)
+})
+
+test('with no Daedalus home above the cwd, the home above the plugin directory is used', async ($, on) => {
+  const runs: Run[] = []
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.id', () => ({ value: 'sC' }))
+  on('session.cwd', () => ({ value: '/elsewhere' }))
+  on('fs.exists', (_$: unknown, e: any) => ({ value: !String(e.path).startsWith('/elsewhere') && !String(e.path).startsWith('/core') && !String(e.path).startsWith('/VERSION') }))
+  on('ui.log', () => ({ value: undefined }))
+  on('process.run', (_$: unknown, e: any) => { runs.push({ argv: e.argv, init: e.init }); return ok(FIXTURE) })
+  on('ui.render', () => THEIRS)
+  mock.clock(on)
+  await start($)
+  const home = String(runs[0].init?.cwd)
+  expect(home.endsWith('/mods/lease-board')).toBe(false)
+  expect(home.startsWith('/')).toBe(true)
+  // the plugin directory is <home>/mods/lease-board: its grandparent is the home
+  expect(new URL('../../..', import.meta.url).pathname.replace(/\/$/, '')).toBe(home)
+})
+
+test('the first render logs what next(e) resolved to, once, for the human step (spec §9 Q3)', async ($, on) => {
+  const logs: string[] = []
+  const runs: Run[] = []
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.id', () => ({ value: 'sC' }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.exists', () => ({ value: true }))
+  on('ui.log', (_$: unknown, e: any) => { logs.push(String(e.text)); return { value: undefined } })
+  on('process.run', (_$: unknown, e: any) => { runs.push({ argv: e.argv, init: e.init }); return ok(FIXTURE) })
+  on('ui.render', () => THEIRS)
+  mock.clock(on)
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.unmount()
+  await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(logs.filter((l) => l.includes('next(e) resolved to object')).length).toBe(1)
 })

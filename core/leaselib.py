@@ -3590,7 +3590,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
                 parts.append("prime (holds the pen: hot.md, vault commits, promote)")
             if entries and entries[0].get("kind") == "bg" and not d.get("spawned"):
                 parts.append("background clone")
-            paths = sorted(p for repo in (changed.get(nn) or {}) for p in changed[nn][repo])
+            # distinct paths across repos, as board_json counts them (lease-board spec §3.4; finding 23)
+            paths = sorted({p for repo in (changed.get(nn) or {}) for p in changed[nn][repo]})
             if paths:
                 shown = ", ".join(paths[:3]) + (", … (+%d)" % (len(paths) - 3) if len(paths) > 3 else "")
                 parts.append("%d changed: %s" % (len(paths), shown))
@@ -3613,8 +3614,10 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
             else:
                 parts.append("last seen %s" % _ago(seen_mtime(root, nn), now))
         # §4.1: the peer name is RE-READ from the registry at every render (renames,
-        # two-word variants); the stored field is only the fallback.
-        peer = (entries[0].get("name") if entries else None) or d.get("peer_name")
+        # two-word variants); the stored field is only the fallback — and the one used when
+        # the session is open in two terminals, which has no single name (the same rule as
+        # board_json, so the two boards show one peer name; review 2026-10-11, finding 5).
+        peer = (entries[0].get("name") if len(entries) == 1 else None) or d.get("peer_name")
         if peer and peer != "daedalus-%s" % nn:
             parts.append("peer name %s (not a window number)" % peer)
         lines.append("%s — %s" % (label, " — ".join(parts)))
@@ -3857,6 +3860,20 @@ def doctor_lines(root: Path) -> list:
 BOARD_STATES = ("live", "quiet", "stale", "finished", "released", "swept-waiting")
 
 
+BOARD_JSON_LOCK_WAIT = 1.5   # seconds; the band's tick is 2 s and its process timeout 5 s
+BOARD_JSON_LOCK_BUSY = "the lease lock is busy — a window is being made or swept; the board refreshes when it frees"
+_CONTROL_RUN = re.compile(r"\s*[\x00-\x1f\x7f]+\s*")   # a run of control characters and the blanks around it
+
+
+def _band_text(value: object) -> Optional[str]:
+    """A lease's free text as one row of the band can hold it: every run of
+    control characters is one space; empty is None."""
+    if not value:
+        return None
+    text = _CONTROL_RUN.sub(" ", str(value)).strip()
+    return text or None
+
+
 def board_json(root: Path, sid: Optional[str]) -> dict:
     """The lease board as one object for the band above the prompt, which asks
     for it every 2 s in every open window. A READER: one pass over the lease
@@ -3872,16 +3889,31 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
     more, `error`, only when a lease file could not be read: its operator
     sentence(s), while every readable window is still listed — one bad file
     must never blank the band (build brief, 2026-10-11; the spec's §3.5 exit 1
-    was dropped for that reason)."""
+    was dropped for that reason).
+
+    The shared lock is taken with a 1.5 s deadline, never a blocking wait: the
+    writers hold the exclusive lock across git worktree adds and fetches
+    (claim, create, adopt, sweep; up to the worktree budget), and a band that
+    blocks there spawns another python3 every 2 s in every open window until
+    the lock frees (review 2026-10-11, finding 2). Past the deadline this
+    raises Refused with the busy sentence — exit 1, the band keeps its last
+    good board and tries again at the next tick.
+
+    alias, note and peer_name are plain text on one row of the band: every
+    run of control characters (newline, ESC, ...) becomes one space (finding
+    3), so a note typed with a newline cannot break the one-row-per-window
+    layout and an escape sequence cannot reach the terminal."""
     errors: list = []
-    with lock(root, shared=True):
+    with lock(root, shared=True, deadline=time.time() + BOARD_JSON_LOCK_WAIT, busy=BOARD_JSON_LOCK_BUSY):
         leases = read_all(root, prune_empty=False, errors=errors)
         numbered = {k: d for k, d in leases.items() if k != "prime"}
         seen = {nn: seen_mtime(root, nn) for nn in numbered}
         changed = {nn: read_changed(root, nn) for nn in numbered}
     prime_sid = (leases.get("prime") or {}).get("session_id") or None
-    # both sides bound, else an unclaimed lease would read as the holder of a pen nobody took (§4.8)
-    prime_nn = lease_of_session(leases, str(prime_sid))[0] if prime_sid else None
+    # both sides bound, else an unclaimed lease would read as the holder of a pen nobody took (§4.8); compared
+    # unconverted, as render_board compares, so the two boards agree about the pen whatever the value's type
+    # (finding 4)
+    prime_nn = lease_of_session(leases, prime_sid)[0] if prime_sid else None
     mine = lease_of_session(leases, sid)[0] if sid else None
     now, quiet_after = time.time(), stale_after_secs(root)
     live_map = registry_live_map()                                      # read ONCE
@@ -3906,14 +3938,14 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
                 paths.update(str(x) for x in per_repo)
         windows.append({
             "nn": nn,
-            "alias": str(d["alias"]) if d.get("alias") else None,
+            "alias": _band_text(d.get("alias")),
             "state": state,
             "changed_count": len(paths),
-            "peer_name": str(peer) if peer else None,
+            "peer_name": _band_text(peer),
             "is_prime": nn == prime_nn,
             "is_this": nn == mine,
             "last_seen_epoch": float(seen[nn]) if seen[nn] is not None else None,
-            "note": str(d["note"]) if d.get("note") else None,
+            "note": _band_text(d.get("note")),
         })
     obj: dict = {"this_window": mine, "prime_window": prime_nn, "windows": windows, "generated_epoch": time.time()}
     if errors:
@@ -3948,15 +3980,27 @@ def doctor_registry_lines(root: Path) -> list:
     """One `registry shape` line for doctor.sh, OK or NOTE — never MISSING: the
     registry (~/.claude/sessions/<pid>.json) is undocumented and changed
     meaning on 2026-10-10 with nothing here saying so, and liveness has a
-    fallback for every field it reads. Judged: live entries (the same test
-    liveness uses) that a lease names or whose cwd is this home; other
-    projects' entries are not Daedalus's business. One NOTE per entry with a
-    problem naming every missing field; a file that is not JSON is skipped as
-    registry_live_map skips it, and counted. Runs whether or not state/leases/
+    fallback for every field it reads. Judged: this home's entries — a lease
+    names the session, or cwd is this home — whose pid is alive (or absent:
+    a renamed key is exactly the kind of change to report); an entry whose
+    pid is dead is an ended session's left-behind file and nobody's business,
+    and other projects' entries are not Daedalus's. NOT judged by
+    pid_is_recorded_process: that test reads the very fields under check, so
+    a registry whose shape or meaning changed would be filtered out and read
+    OK (review 2026-10-11, finding 1). An entry that fails it is a NOTE saying
+    its window reads dead. One NOTE per entry with a problem naming every
+    missing field; a file that is not JSON is skipped as registry_live_map
+    skips it, and counted; a directory that cannot be listed is a NOTE, not an
+    OK with nothing to check (finding 7). Runs whether or not state/leases/
     exists."""
     d = registry_dir()
     if not d.is_dir():
         return ["NOTE     registry shape: %s is absent — nothing to check" % d]
+    try:
+        names = sorted(os.listdir(str(d)))
+    except OSError as e:
+        return ["NOTE     registry shape: %s cannot be read (%s) — liveness has no registry on this build"
+                % (d, e.strerror or e)]
     by_sid: Dict[str, str] = {}
     if leases_dir(root).is_dir():
         try:
@@ -3969,26 +4013,41 @@ def doctor_registry_lines(root: Path) -> list:
                 by_sid[str(lease["session_id"])] = nn
     home = str(root.resolve())
     judged, notes, not_json = 0, [], []
-    for p in sorted(d.glob("*.json")):
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        p = d / name
         try:
             e = json.loads(p.read_text())
         except (OSError, ValueError):
             not_json.append("sessions/%s" % p.name)
             continue
-        if not isinstance(e, dict) or not pid_is_recorded_process(e.get("pid"), e.get("startedAt"), e.get("procStart")):
+        if not isinstance(e, dict):
             continue
         nn = by_sid.get(str(e.get("sessionId"))) if e.get("sessionId") else None
         if nn is None and not _same_dir(e.get("cwd"), home):
             continue
+        pid = e.get("pid")
+        if pid is not None and not pid_alive(pid):
+            continue
         judged += 1
         where = "sessions/%s%s" % (p.name, " (window %s)" % nn if nn else "")
+        # the test liveness applies; failing it with a live pid is the 2026-10-10 class, whatever else is wrong
+        dead = pid is not None and not pid_is_recorded_process(pid, e.get("startedAt"), e.get("procStart"))
+        reads_dead = ("is a live pid that fails the recorded-process test (startedAt=%s, procStart=%s) — the registry may "
+                      "have changed meaning, or its process ended and the pid was reused; its window reads dead"
+                      % (json.dumps(e.get("startedAt")), json.dumps(e.get("procStart"))))
         missing = [f for f in REGISTRY_FIELDS if e.get(f) is None]
         if missing:
             costs = [cost for fields, cost in _REGISTRY_COST if any(f in missing for f in fields)]
-            notes.append("NOTE     registry shape: %s lacks %s — %s" % (where, ", ".join(missing), "; ".join(costs)))
+            notes.append("NOTE     registry shape: %s lacks %s — %s%s" % (where, ", ".join(missing), "; ".join(costs),
+                                                                         ("; and " + reads_dead) if dead else ""))
         elif proc_start_text_ms(e.get("procStart")) is None:
             notes.append('NOTE     registry shape: %s has procStart "%s" that does not parse as "%s" UTC — liveness falls '
-                         "back to startedAt for it" % (where, e.get("procStart"), PROC_START_LAYOUT))
+                         "back to startedAt for it%s" % (where, e.get("procStart"), PROC_START_LAYOUT,
+                                                        ("; and " + reads_dead) if dead else ""))
+        elif dead:
+            notes.append("NOTE     registry shape: %s %s" % (where, reads_dead))
     if notes:
         lines = notes
     elif judged:

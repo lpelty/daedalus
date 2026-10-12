@@ -360,3 +360,61 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
   [ "$status" -eq 0 ]; python3 -c 'import sys; d=float(sys.argv[2])-float(sys.argv[1]); print("board-json took %.3fs" % d, file=sys.stderr); assert d < 1.0, "slow: %.2fs" % d' "$t0" "$t1"
   bj_check 'len(o["windows"]) == 40 and all(w["state"] == "live" for w in o["windows"]) and o["windows"][0]["nn"] == "01"'
 }
+
+# --- board-json: the review of 2026-10-11 ------------------------------------------------------------------------
+@test "board-json: never waits on the lease lock past its own tick — with the exclusive lock held (a window being made or swept), it is refused within 2 s, exit 1, the busy sentence on stderr, nothing on stdout (finding 2)" {
+  LS create >/dev/null; bind_live 01 sA
+  L="$DAEDALUS_HOME/state/leases"
+  python3 -c 'import fcntl,os,sys,time
+fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(8)' "$L/.lock" 3>&- </dev/null >/dev/null 2>&1 &
+  holder=$!; printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
+  sleep 0.5
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run --separate-stderr BJ --session sA
+  t1="$(python3 -c 'import time; print(time.time())')"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 1 ] || { echo "status $status: $output / $stderr"; return 1; }
+  [ -z "$output" ]
+  case "$stderr" in *"daedalus: the lease lock is busy — a window is being made or swept; the board refreshes when it frees"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  python3 -c 'import sys; d=float(sys.argv[2])-float(sys.argv[1]); print("refused after %.2fs" % d, file=sys.stderr); assert d < 3.0, "waited %.2fs" % d' "$t0" "$t1"
+}
+
+@test "board-json: control characters in an alias, a note or a stored peer name never reach the band — each run of them is one space, the words stay (finding 3)" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  set_lease 02 "dict(session_id='sB', pid=1, proc_started=1, alias='bad\nal\x1b[31mias', note='line1\nline2 \"q\" \x1b[2J', peer_name='two\nwords')"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["windows"][1]["nn"] == "02" and o["windows"][1]["note"] == "line1 line2 \"q\" [2J"'     # the ESC byte is gone; what followed it is text'
+  bj_check 'o["windows"][1]["alias"] == "bad al [31mias" and o["windows"][1]["peer_name"] == "two words"'
+  bj_check 'not any(ord(c) < 32 or ord(c) == 127 for w in o["windows"] for k in ("alias", "note", "peer_name") if w[k] for c in w[k])'
+}
+
+@test "board-json and the model-facing board agree on the pen when prime.json's session_id is not a string: both mark the lease carrying the same value (finding 4)" {
+  LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  pr="$(live_pid)"; set_lease 03 "dict(session_id=123, pid=$pr, proc_started=$(ps_ms "$pr"))"     # live: the model board marks the pen on live lines only
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":123,"history":[]}'
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["prime_window"] == "03" and [w["nn"] for w in o["windows"] if w["is_prime"]] == ["03"]'
+  run board sA; c="$(ctx)"
+  case "$c" in *"- 03 — "*"prime (holds the pen"*) : ;; *) echo "the model board does not mark 03: $c"; return 1 ;; esac
+}
+
+@test "both boards use one peer-name rule: the registry name only when exactly one live entry names the session; a session open in two terminals falls back to the stored name on the model-facing board too (finding 5; spec §3.4 sentence fixed)" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; bind_live 02 sB
+  # a second live pid for sA, with a name of its own; the first entry's name is daedalus-01 (bind_live)
+  q="$(live_pid)"; registry_entry "$q" sA interactive cli name-b
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["name"]="name-a"; json.dump(d, open(p, "w"))' "$BATS_TEST_TMPDIR/sessions/$(lease_json 01 pid).json"
+  run --separate-stderr BJ --session sB; [ "$status" -eq 0 ]
+  bj_check 'o["windows"][1]["nn"] == "01" and o["windows"][1]["peer_name"] == "daedalus-01"'
+  run board sB; c="$(ctx)"
+  case "$c" in *"- 01 — open in two terminals"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"name-a"*|*"name-b"*) echo "the model board took one of two names: $c"; return 1 ;; *) : ;; esac
+}
+
+@test "both boards count changed files the same way — distinct paths across repos: a README.md changed in two repos and one more file is 2 on the band and '2 changed' on the model-facing board (finding 23)" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; bind_live 02 sB
+  printf '{"thing": {"README.md": "2026-10-11T10:00:00", "src/a.py": "2026-10-11T10:00:00"}, "thing/sub": {"README.md": "2026-10-11T10:00:00"}}\n' > "$DAEDALUS_HOME/state/leases/01.changed"
+  run --separate-stderr BJ --session sB; [ "$status" -eq 0 ]
+  bj_check '[w["changed_count"] for w in o["windows"] if w["nn"] == "01"] == [2]'
+  run board sB; c="$(ctx)"     # sB is the reader: 01's sidecar is read, not recomputed
+  case "$c" in *"- 01 — "*"2 changed: README.md, src/a.py"*) : ;; *) echo "$c"; return 1 ;; esac
+}

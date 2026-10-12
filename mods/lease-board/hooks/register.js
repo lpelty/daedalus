@@ -20,8 +20,10 @@ let board = null // the last good board-json object
 let boardAt = 0 // when it was read, milliseconds since the epoch
 let failure = null // why the last read failed, or null
 let home = null // the Daedalus home, absolute, or null when none was found
-let sid = '' // this session's id: the one a lease's session_id names
+let sid = '' // this session's id: the one a lease's session_id names; read again on every tick (/resume changes it)
 let searched = '' // where findHome started looking, for the failure line
+let inflight = false // one read at a time: a tick while board-json still runs starts no second one
+let loggedTheirs = false // the first render logs what next(e) resolved to, for the human step (spec §9 Q3)
 
 function parentOf(path) {
   const s = path.length > 1 ? path.replace(/\/+$/, '') : path
@@ -119,8 +121,14 @@ function linesFor(Text, props) {
   let shown = windows
   let more = null
   if (windows.length > room) {
-    shown = windows.slice(0, Math.max(0, room - 1))
-    more = dim('+' + (windows.length - shown.length) + ' more windows')
+    // room for one row: this window's own line, the one that matters most, and no count in its place
+    // (review 2026-10-11, findings 15 and 26)
+    if (room <= 1) {
+      shown = windows.slice(0, 1)
+    } else {
+      shown = windows.slice(0, room - 1)
+      more = dim('+' + (windows.length - shown.length) + ' more windows')
+    }
   }
   const rows = shown.map((w) => {
     const p = Object.assign({ wrap: 'truncate-end' }, styleFor(w.state))
@@ -131,31 +139,57 @@ function linesFor(Text, props) {
   return head.concat(rows, more ? [more] : [], tail)
 }
 
-// Where the Daedalus home is (spec §4.5): above the plugin for an in-place load, else above the cwd.
+// Where the Daedalus home is (spec §4.5, order changed at the review of 2026-10-11, findings 12 and 18):
+// the home above the session's cwd first, the one above the plugin directory as the fallback. The
+// marketplace name `daedalus-mods` is one record per machine (plugin loading reference: "There is one
+// known_marketplaces.json per user"), so with two Daedalus checkouts on one machine the plugin loads
+// from whichever checkout the record names — the plugin directory can be the OTHER checkout's, while
+// the cwd is the home the window was opened in. When both are found and differ, a debug line says so.
 async function findHome($) {
-  // "$.plugin | name, root: this plugin's name and directory" (reference); "The plugin's directory
-  // (the one holding plugin.json), absolute." (the types). In place, that is <home>/mods/lease-board.
-  const root = typeof $.plugin.root === 'string' ? $.plugin.root : ''
-  const above = root ? parentOf(parentOf(root)) : ''
-  // "$.fs | read(path), write(path, text), exists(path), stat(path), and list(path) work on files and
-  // directories" (api page); "Returns whether the path exists" (the types). Reads only.
-  if (above && (await $.fs.exists(above + '/' + LEASELIB))) return above
   // "Returns the directory the session runs in, absolute." (the types, $.session.cwd). Windows start
   // in the Daedalus home, so this is usually one exists call; the walk upward is the safety net.
+  // "$.fs | read(path), write(path, text), exists(path), stat(path), and list(path) work on files and
+  // directories" (api page); "Returns whether the path exists" (the types). Reads only.
   let dir = String(await $.session.cwd())
   searched = dir
+  let fromCwd = null
   for (let i = 0; i < 64 && dir; i += 1) {
-    if ((await $.fs.exists(dir + '/' + LEASELIB)) && (await $.fs.exists(dir + '/VERSION'))) return dir
+    if ((await $.fs.exists(dir + '/' + LEASELIB)) && (await $.fs.exists(dir + '/VERSION'))) {
+      fromCwd = dir
+      break
+    }
     const up = parentOf(dir)
     if (!up || up === dir) break
     dir = up
   }
-  return null
+  // "$.plugin | name, root: this plugin's name and directory" (reference); "The plugin's directory
+  // (the one holding plugin.json), absolute." (the types; a string under `claude plugin test` too,
+  // probed 2026-10-11). In place, that is <home>/mods/lease-board.
+  const root = typeof $.plugin.root === 'string' ? $.plugin.root : ''
+  const above = root ? parentOf(parentOf(root)) : ''
+  const fromPlugin = above && (await $.fs.exists(above + '/' + LEASELIB)) ? above : null
+  if (fromCwd && fromPlugin && fromCwd !== fromPlugin) {
+    $.ui.log('lease-board: the Daedalus home above the session cwd (' + fromCwd + ') is not the one above the plugin directory (' + fromPlugin + ', mods/lease-board): this machine\'s daedalus-mods marketplace names another checkout; the board shows ' + fromCwd, { to: 'debug' })
+  }
+  return fromCwd || fromPlugin
 }
 
-// One read of the board. Never throws: the last good board stays and `failure` says why.
+// One read of the board. Never throws: the last good board stays and `failure` says why. One at a
+// time: a tick that finds a read still running (python3 waiting, up to the 5 s timeout) does nothing,
+// so reads never pile up and an older, slower result never lands over a newer one (findings 11, 25).
 async function refresh($) {
+  if (inflight) return
+  inflight = true
   try {
+    // "Returns the session's id (the transcript file's name)." (the types, $.session.id): read on
+    // every tick, not once at session.start — /resume moves the session to another transcript and
+    // fires no session.start ("Not after /clear, /resume, or /branch", reference), so a cached id
+    // would be the dead one from then on (finding 9). The lease's session_id follows the same id.
+    try {
+      sid = String(await $.session.id())
+    } catch (err) {
+      // keep the last id
+    }
     // "$.process.run: takes an argument list and uses no shell. It resolves to { exitCode, stdout,
     // stderr } whatever the exit code. It rejects if the program can't start or is still running at
     // the timeout, which is 30 seconds by default, so wrap it in try and catch." (api page);
@@ -172,6 +206,8 @@ async function refresh($) {
     failure = null
   } catch (err) {
     failure = firstLine(err && err.message ? err.message : String(err)) || 'board-json failed'
+  } finally {
+    inflight = false
   }
   // "To have your sites drawn again after your own data changes, call $.ui.invalidate('ui.render')"
   // (interface page). Throttled by the engine: "10 a second, or 30 in the terminal" (reference, Limits).
@@ -185,9 +221,14 @@ export function register(on) {
   // after /clear, /resume, or /branch." (reference, session.start). "Work that outlives one event,
   // such as checking on something once a minute, runs on a timer you start from session.start." (api page)
   on('session.start', async ($, e, next) => {
+    // "isInteractive: Whether a person is at the prompt: true under the REPL, false for a -p run or
+    // the SDK." (the types, SessionStartInput). A headless run — a direct call, a clone — draws no
+    // band, so it gets no timer and no python3 every 2 s for its whole life (finding 10).
+    if (!e.isInteractive) return next(e)
     try {
       // "Returns the session's id (the transcript file's name)." (the types, $.session.id): the
-      // same id the hooks' payload carries, which the lease's session_id stores.
+      // same id the hooks' payload carries, which the lease's session_id stores. Read again at
+      // every refresh (see there).
       sid = String(await $.session.id())
     } catch (err) {
       sid = ''
@@ -196,7 +237,10 @@ export function register(on) {
     // "$.ui.log(text) ... or with { to: "debug" } to the debug log alone." (the types): the human
     // step reads which home this build found, in `claude --debug`.
     $.ui.log('lease-board: home ' + (home || 'not found') + '; session ' + (sid || '(none)'), { to: 'debug' })
-    if (home) await refresh($)
+    // Not awaited: "Claude Code waits for that hook before the first prompt" (api page), and a
+    // board-json waiting on the lease lock would hold the operator's first prompt for up to the
+    // 5 s timeout (finding 13). The band fills when the read lands, within one tick either way.
+    if (home) refresh($)
     else failure = LEASELIB + ' not found above ' + searched
     // "$.clock.every and $.clock.after take the place of setInterval and setTimeout, with the delay in
     // milliseconds first ... Each returns a timer with a cancel() method." (api page). "The timer's
@@ -220,6 +264,11 @@ export function register(on) {
     // $.ui.resolve(e)." (interface page)
     const { Box, Text } = $.ui.resolve(e)
     const theirs = await next(e)
+    if (!loggedTheirs) {
+      // what next(e) resolves to on an empty band is undocumented (spec §9 Q3): said once, for `claude --debug`
+      loggedTheirs = true
+      $.ui.log('lease-board: next(e) resolved to ' + (theirs === null ? 'null' : typeof theirs) + ' on the band', { to: 'debug' })
+    }
     const lines = linesFor(Text, e.props)
     // what next resolves to on an empty band is undocumented (spec §9 Q3): kept when it is an object
     const children = theirs && typeof theirs === 'object' ? lines.concat([theirs]) : lines

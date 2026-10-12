@@ -428,6 +428,15 @@ text = re.sub(r"`[^`]*`", "X", sys.argv[1])
 long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
 print("\n".join(long)); sys.exit(1 if long else 0)' "$top"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the top section:"; echo "$output"; return 1; }
+  # the same guard over each dated part added under v0.7.0 after the tag ("#### Added on trunk after the v0.7.0 tag — ..."):
+  # it is written for the same operator (review 2026-10-11, finding 24)
+  part="$(awk '/^#### Added on trunk after the v0.7.0 tag/{f=1} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  [ -n "$part" ] || { echo "no dated part under v0.7.0"; return 1; }
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the dated part:"; echo "$output"; return 1; }
   ! grep -q '^## Unreleased' "$DAEDALUS_HOME/CHANGELOG.md"
   ! grep -qi 'not yet in this release' "$DAEDALUS_HOME/CHANGELOG.md"
 }
