@@ -169,6 +169,24 @@ EOF
   else
     log "NOTE     session registry absent — liveness by heartbeat only on this build; peer names unknown; no window numbers itself and nobody takes the pen at start (launch each window with DAEDALUS_LEASE=<NN>; core/lease.sh prime take gives one the pen)"
   fi
+  # The registry's shape (lease-board spec §5): whether this home's live window
+  # entries still carry the fields leaselib.py reads (pid, sessionId, startedAt,
+  # procStart, kind, entrypoint, name) and procStart still parses. The registry
+  # is undocumented and changed meaning on 2026-10-10 with nothing here saying
+  # so. NOTE, never MISSING: liveness has a fallback for every field. Runs
+  # whether or not state/leases/ exists (the command takes no lock when the
+  # directory is absent, so it never creates it).
+  reg_out="$(python3 "$DAEDALUS_HOME/core/leaselib.py" doctor-registry 2>/dev/null)"
+  reg_rc=$?
+  if [ "$reg_rc" -ne 0 ]; then
+    log "NOTE     registry shape: check failed (core/leaselib.py doctor-registry exited $reg_rc)"
+  else
+    while IFS= read -r line; do
+      [ -n "$line" ] && log "$line"
+    done <<EOF
+$reg_out
+EOF
+  fi
   for old in pitfall-seen.json code-context-seen.json; do
     [ -f "$DAEDALUS_HOME/state/$old" ] && log "NOTE     state/$old is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"
   done

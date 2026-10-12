@@ -214,3 +214,149 @@ except tl.NotSubmitted as e: print("refused:", e)' "$DAEDALUS_HOME/core" "$F" "$
   run board s1
   [ -z "$output" ] || { echo "a line after the stamp: $output"; return 1; }
 }
+
+# --- board-json: the cheap read behind the on-screen band (lease-board spec §3) ----------------------------------
+# The band in every window asks for this every 2 s, so it is the second reader of state/leases/ and must stay a
+# reader: a shared lock for one pass over the lease files, the .seen and .changed sidecars, prime.json and the
+# registry; no git, no heartbeat, no rebind, no sidecar recompute. The states come from the same liveness() the
+# model-facing board uses, so the two can never disagree.
+BJ() { python3 "$DAEDALUS_HOME/core/leaselib.py" board-json "$@"; }
+# bj_check <python-expression> — true over the parsed object in $output as `o`; prints the object when it is not
+bj_check() { printf '%s' "$output" | python3 -c 'import json,sys
+o=json.loads(sys.stdin.read())
+if not eval(sys.argv[1]): print("FAILED: %s\n%s" % (sys.argv[1], json.dumps(o, indent=1))); sys.exit(1)' "$1"; }
+set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a lease file through the fixture writer
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write "$1" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(eval(sys.argv[2])); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/$1.json" "$2")"
+}
+
+@test "board-json: one JSON line; this window first, then by number; released, then finished, then liveness decide the state; the pen and this-window marks; alias, note, last seen, changed count, peer name" {
+  for i in 1 2 3 4 5; do LS create >/dev/null; done
+  bind_live 01 sA; bind_live 03 sC; bind_live 04 sD; bind_live 05 sE
+  set_lease 02 'dict(session_id="sB", pid=1, proc_started=1, alias="electron")'              # dead recorded pid, nobody resumed it: stale
+  touch -t 202001010940 "$DAEDALUS_HOME/state/leases/03.seen"                                  # live pid, old heartbeat: quiet
+  set_lease 04 'dict(spawned=True, finished="2026-09-25T11:42:00", summary="did the thing")'
+  CLAUDE_CODE_SESSION_ID=sE LS release 05 >/dev/null
+  LS note 01 "EX-024 capture error-field fix" >/dev/null
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
+  W="$DAEDALUS_HOME/worktrees/01/thing"; for f in one two three four; do printf 'x\n' > "$W/$f.txt"; done
+  git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m "four files"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" changed 01 >/dev/null     # the sidecar is written here; board-json only reads it
+  run --separate-stderr BJ --session sC; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ] || { echo "not one line: $output"; return 1; }
+  bj_check 'o["this_window"] == "03" and o["prime_window"] == "01"'
+  bj_check '[w["nn"] for w in o["windows"]] == ["03", "01", "02", "04", "05"]'
+  bj_check '[w["state"] for w in o["windows"]] == ["quiet", "live", "stale", "finished", "released"]'
+  bj_check 'o["windows"][0]["is_this"] and not o["windows"][0]["is_prime"]'
+  bj_check 'o["windows"][1]["is_prime"] and not o["windows"][1]["is_this"]'
+  bj_check 'sum(w["is_this"] for w in o["windows"]) == 1 and sum(w["is_prime"] for w in o["windows"]) == 1'
+  bj_check 'o["windows"][2]["alias"] == "electron" and o["windows"][0]["alias"] is None'
+  bj_check 'o["windows"][1]["note"] == "EX-024 capture error-field fix" and o["windows"][0]["note"] is None'
+  bj_check 'o["windows"][1]["changed_count"] == 4 and o["windows"][2]["changed_count"] == 0'
+  seen="$(stat -f %m "$DAEDALUS_HOME/state/leases/03.seen")"
+  bj_check "abs(o['windows'][0]['last_seen_epoch'] - $seen) < 1.0"
+  bj_check 'o["windows"][1]["peer_name"] == "daedalus-01" and o["windows"][2]["peer_name"] is None'
+  bj_check 'isinstance(o["generated_epoch"], float) and o["generated_epoch"] > 1.7e9'
+  bj_check 'all(isinstance(w["changed_count"], int) and w["nn"].isdigit() and len(w["nn"]) == 2 for w in o["windows"])'
+}
+
+@test "board-json: exactly the four top-level keys and exactly the nine window keys the contract names, nothing more" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check 'sorted(o) == ["generated_epoch", "prime_window", "this_window", "windows"]'
+  bj_check 'len(o["windows"]) == 2 and all(sorted(w) == ["alias", "changed_count", "is_prime", "is_this", "last_seen_epoch", "nn", "note", "peer_name", "state"] for w in o["windows"])'
+  bj_check 'o["windows"][1]["nn"] == "02" and o["windows"][1]["peer_name"] is None and o["windows"][1]["alias"] is None'   # created, never claimed
+  rm -f "$DAEDALUS_HOME/state/leases/02.seen"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check 'o["windows"][1]["last_seen_epoch"] is None and isinstance(o["windows"][0]["last_seen_epoch"], float)'   # null means no .seen file
+}
+
+@test "board-json: a reader only — every file under state/leases/ is byte-identical after two runs, no .seen or .lock mtime moves, an empty 07.json is kept and not listed (the model-facing board still prunes it)" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; bind_live 02 sB
+  L="$DAEDALUS_HOME/state/leases"
+  touch -t 202001010000 "$L/01.seen" "$L/02.seen"
+  : > "$L/07.json"
+  before="$(cd "$L" && shasum -a 256 * .lock | sort)"; mt_before="$(cd "$L" && stat -f '%N %Fm' * .lock | sort)"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  run --separate-stderr BJ --session sB; [ "$status" -eq 0 ]
+  bj_check '"07" not in [w["nn"] for w in o["windows"]] and [w["nn"] for w in o["windows"]] == ["02", "01"]'
+  [ "$(cd "$L" && shasum -a 256 * .lock | sort)" = "$before" ] || { echo "a file changed"; diff <(printf '%s\n' "$before") <(cd "$L" && shasum -a 256 * .lock | sort); return 1; }
+  [ "$(cd "$L" && stat -f '%N %Fm' * .lock | sort)" = "$mt_before" ] || { echo "an mtime moved"; diff <(printf '%s\n' "$mt_before") <(cd "$L" && stat -f '%N %Fm' * .lock | sort); return 1; }
+  [ -f "$L/07.json" ] && [ ! -s "$L/07.json" ]
+  run board sA; [ ! -f "$L/07.json" ]       # read_all's default is unchanged: the model-facing board removes the interrupted reservation
+}
+
+@test "board-json: never runs git — with a failing git first on PATH that also records every call, the command succeeds and nothing was recorded (the model-facing board in the same state does hit it)" {
+  LS create >/dev/null; bind_live 01 sA; printf 'z\n' > "$DAEDALUS_HOME/worktrees/01/thing/z.txt"
+  shim="$BATS_TEST_TMPDIR/shim"; mkdir -p "$shim"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "git $*" >> "%s/GIT-CALLED"\nexec "%s/fixtures/leases/fake-git-fail" "$@"\n' "$BATS_TEST_TMPDIR" "$BATS_TEST_DIRNAME" > "$shim/git"; chmod +x "$shim/git"
+  run --separate-stderr env PATH="$shim:$PATH" python3 "$DAEDALUS_HOME/core/leaselib.py" board-json --session sA
+  [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["this_window"] == "01" and o["windows"][0]["state"] == "live"'
+  [ ! -e "$BATS_TEST_TMPDIR/GIT-CALLED" ] || { echo "git was run:"; cat "$BATS_TEST_TMPDIR/GIT-CALLED"; return 1; }
+  run env PATH="$shim:$PATH" bash -c "$(declare -f board); board sA"       # control: the shim is on the path the model-facing board takes
+  [ -e "$BATS_TEST_TMPDIR/GIT-CALLED" ] || { echo "the control did not reach the shim: $output"; return 1; }
+}
+
+@test "board-json: --session beats the environment; with neither, this_window is null and no window is marked (an operator shell); a bad flag is exit 2" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; bind_live 02 sB
+  run --separate-stderr env CLAUDE_CODE_SESSION_ID=sA python3 "$DAEDALUS_HOME/core/leaselib.py" board-json --session sB
+  [ "$status" -eq 0 ]; bj_check 'o["this_window"] == "02" and o["windows"][0]["nn"] == "02" and o["windows"][0]["is_this"]'
+  run --separate-stderr env CLAUDE_CODE_SESSION_ID=sA python3 "$DAEDALUS_HOME/core/leaselib.py" board-json
+  [ "$status" -eq 0 ]; bj_check 'o["this_window"] == "01"'
+  run --separate-stderr BJ
+  [ "$status" -eq 0 ]; bj_check 'o["this_window"] is None and not any(w["is_this"] for w in o["windows"]) and [w["nn"] for w in o["windows"]] == ["01", "02"]'
+  run --separate-stderr BJ --bogus; [ "$status" -eq 2 ]; [ -z "$output" ]; [ -n "$stderr" ]
+  run --separate-stderr BJ --session; [ "$status" -eq 2 ]; [ -z "$output" ]
+}
+
+@test "board-json: prime_window is null when prime.json is absent, unclaimed, or names a session holding no window; it never marks an unclaimed lease" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  run --separate-stderr BJ --session sA; bj_check 'o["prime_window"] is None and not any(w["is_prime"] for w in o["windows"])'
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":null,"history":[]}'
+  run --separate-stderr BJ --session sA; bj_check 'o["prime_window"] is None and not any(w["is_prime"] for w in o["windows"])'
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sGone","history":[]}'
+  run --separate-stderr BJ --session sA; bj_check 'o["prime_window"] is None and not any(w["is_prime"] for w in o["windows"])'
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
+  run --separate-stderr BJ --session sB; bj_check 'o["prime_window"] == "01" and o["this_window"] is None and o["windows"][0]["is_prime"]'
+}
+
+@test "board-json: a lease file that cannot be read is reported in the object's error field and every other window still renders (exit 0: the band never goes blank over one bad file); no state/leases/ is exit 0 with no windows, and the directory stays absent" {
+  LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  printf 'not json\n' > "$DAEDALUS_HOME/state/leases/02.json"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'sorted(o) == ["error", "generated_epoch", "prime_window", "this_window", "windows"]'
+  bj_check '"The lease file for window 02 cannot be read (not valid JSON" in o["error"] and "core/lease.sh sweep" in o["error"]'
+  bj_check '[w["nn"] for w in o["windows"]] == ["01", "03"] and o["this_window"] == "01"'
+  [ -f "$DAEDALUS_HOME/state/leases/02.json" ]                      # reported, never removed: that is sweep's job
+  rm -rf "$DAEDALUS_HOME/state/leases"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["windows"] == [] and o["this_window"] is None and o["prime_window"] is None and "error" not in o'
+  [ ! -d "$DAEDALUS_HOME/state/leases" ]
+}
+
+@test "board-json: a resumed session (dead recorded pid, the same session live under another pid) reads live, and the lease file is not rebound" {
+  LS create >/dev/null; pr="$(live_pid)"; registry_entry "$pr" sD
+  set_lease 01 'dict(session_id="sD", pid=1, proc_started=1)'
+  before="$(shasum -a 256 "$DAEDALUS_HOME/state/leases/01.json")"
+  run --separate-stderr BJ --session sD; [ "$status" -eq 0 ]
+  bj_check 'o["this_window"] == "01" and o["windows"][0]["state"] == "live" and o["windows"][0]["peer_name"] == "daedalus-xx"'
+  [ "$(shasum -a 256 "$DAEDALUS_HOME/state/leases/01.json")" = "$before" ]; [ "$(lease_json 01 pid)" = "1" ]
+  run board sD; [ "$(lease_json 01 pid)" = "$pr" ]       # the model-facing board is what rebinds
+}
+
+@test "board-json: a visitor (direct-call session) may read — exit 0, no window is its own" {
+  LS create >/dev/null; bind_live 01 sA
+  run --separate-stderr env DIRECT_CALL_ID=x python3 "$DAEDALUS_HOME/core/leaselib.py" board-json --session sV
+  [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["this_window"] is None and [w["nn"] for w in o["windows"]] == ["01"]'
+}
+
+@test "board-json: runs under 1 s with 40 LIVE leases (one ps per lease; no git at all)" {
+  for i in $(seq 1 40); do LS create >/dev/null; done
+  for i in $(seq 1 40); do nn="$(printf '%02d' "$i")"
+    set_lease "$nn" "dict(session_id='s$nn', pid=$$, proc_started=$(ps_ms $$))"
+    python3 "$DAEDALUS_HOME/core/leaselib.py" heartbeat "$nn"; done
+  t0="$(python3 -c 'import time; print(time.time())')"; run --separate-stderr BJ --session s01; t1="$(python3 -c 'import time; print(time.time())')"
+  [ "$status" -eq 0 ]; python3 -c 'import sys; d=float(sys.argv[2])-float(sys.argv[1]); print("board-json took %.3fs" % d, file=sys.stderr); assert d < 1.0, "slow: %.2fs" % d' "$t0" "$t1"
+  bj_check 'len(o["windows"]) == 40 and all(w["state"] == "live" for w in o["windows"]) and o["windows"][0]["nn"] == "01"'
+}

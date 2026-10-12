@@ -1223,3 +1223,50 @@ verify:
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   case "$output" in *"$note"*"  callers: <agent names>"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- the registry's shape (lease-board spec §5) ----------------------------------------------------------------
+# ~/.claude/sessions/<pid>.json is undocumented; on 2026-10-10 startedAt changed meaning and every window read dead with
+# nothing in doctor saying so. The check judges only this home's live window entries (a lease names the session, or
+# its cwd is this home) and is a NOTE, never MISSING: liveness has a fallback for each field it names.
+@test "doctor: registry shape — OK naming the seven fields when every live window entry carries them and procStart parses; a NOTE naming the entry, its window and the field when procStart is missing or does not parse" {
+  doctor_upgrade_fixture
+  p="$(live_pid)"; ms="$(ps_ms "$p")"
+  printf '{"lease":"01","session_id":"sR","pid":%s,"proc_started":%s}' "$p" "$ms" > "$DAEDALUS_HOME/state/leases/01.json"; touch "$DAEDALUS_HOME/state/leases/01.seen"
+  registry_entry "$p" sR interactive cli daedalus-01 "" "$(utc_lstart "$ms")"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       registry shape: 1 live window entry carries pid, sessionId, startedAt, procStart, kind, entrypoint, name; procStart parses"*) : ;; *) echo "$output"; return 1 ;; esac
+  registry_entry "$p" sR interactive cli daedalus-01                     # the fixture default: no procStart (2.1.282)
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) lacks procStart — liveness falls back to startedAt for it"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       registry shape"*) echo "an OK beside the NOTE: $output"; return 1 ;; *) : ;; esac
+  registry_entry "$p" sR interactive cli daedalus-01 "" "Oct 10 14:48:45"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) has procStart \"Oct 10 14:48:45\" that does not parse as \"%a %b %d %H:%M:%S %Y\" UTC — liveness falls back to startedAt for it"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: registry shape — an entry lacking kind and entrypoint is one NOTE naming both; a live entry of another project (cwd elsewhere, no lease names it) is not judged; one whose cwd is this home is; a file that is not JSON is counted" {
+  doctor_upgrade_fixture
+  p="$(live_pid)"; ms="$(ps_ms "$p")"
+  printf '{"lease":"01","session_id":"sR","pid":%s,"proc_started":%s}' "$p" "$ms" > "$DAEDALUS_HOME/state/leases/01.json"; touch "$DAEDALUS_HOME/state/leases/01.seen"
+  printf '{"pid":%s,"sessionId":"sR","startedAt":%s,"procStart":"%s","name":"daedalus-01"}\n' "$p" "$ms" "$(utc_lstart "$ms")" > "$BATS_TEST_TMPDIR/sessions/$p.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$p.json (window 01) lacks kind, entrypoint — this session cannot be told from a headless one; it will not number itself or take the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/state/leases/01.json" "$BATS_TEST_TMPDIR/sessions/$p.json"
+  q="$(live_pid)"; registry_entry "$q" sQ
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["cwd"]=sys.argv[2]; json.dump(d, open(p, "w"))' "$BATS_TEST_TMPDIR/sessions/$q.json" "/elsewhere/project"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       registry shape: no live window entries to check"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["cwd"]=sys.argv[2]; json.dump(d, open(p, "w"))' "$BATS_TEST_TMPDIR/sessions/$q.json" "$DAEDALUS_HOME"
+  printf 'not json\n' > "$BATS_TEST_TMPDIR/sessions/123.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: sessions/$q.json lacks procStart — liveness falls back to startedAt for it"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     registry shape: 1 registry file is not JSON (sessions/123.json)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: registry shape — an absent registry is a NOTE naming the path, beside the existing absent-registry NOTE; doctor stays green" {
+  doctor_upgrade_fixture
+  rm -rf "$BATS_TEST_TMPDIR/sessions"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     registry shape: $BATS_TEST_TMPDIR/sessions is absent — nothing to check"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     session registry absent — liveness by heartbeat only on this build"*) : ;; *) echo "$output"; return 1 ;; esac
+}

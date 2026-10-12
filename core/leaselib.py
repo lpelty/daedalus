@@ -149,9 +149,17 @@ def read_lease(root: Path, nn: str) -> Optional[dict]:
     return d
 
 
-def read_all(root: Path) -> Dict[str, dict]:
+def read_all(root: Path, prune_empty: bool = True, errors: Optional[list] = None) -> Dict[str, dict]:
     """Every lease file, keyed by number ('prime' for prime.json). Caller holds
-    the lock. Raises Refused on the first file that exists but cannot be read."""
+    the lock. Raises Refused on the first file that exists but cannot be read.
+
+    prune_empty=False leaves an empty <NN>.json where it is and treats it as
+    absent: the unlink is a write, and `board-json` reads under the shared lock
+    every 2 s in every window (lease-board spec §3.2). Every other caller keeps
+    the default. errors: when a list, a file that cannot be read is appended to
+    it as its Refused and the pass goes on, instead of raising on the first —
+    the band must list the windows whose files are fine beside the one that is
+    not; a hook or command that fails closed on one bad file keeps the default."""
     out: Dict[str, dict] = {}
     d = leases_dir(root)
     if not d.is_dir():
@@ -160,15 +168,22 @@ def read_all(root: Path) -> Dict[str, dict]:
         key = p.stem
         if key != "prime" and not valid_id(key):
             continue
+        if prune_empty:
+            try:
+                if p.stat().st_size == 0:
+                    # an interrupted reservation (read_lease): every later start, sweep and board refused on it
+                    # before, and the sentence's own remedy refused the same (release-candidate review 3, finding 7)
+                    p.unlink()
+                    continue
+            except OSError:
+                pass
         try:
-            if p.stat().st_size == 0:
-                # an interrupted reservation (read_lease): every later start, sweep and board refused on it
-                # before, and the sentence's own remedy refused the same (release-candidate review 3, finding 7)
-                p.unlink()
-                continue
-        except OSError:
-            pass
-        data = read_lease(root, key)
+            data = read_lease(root, key)
+        except Refused as e:
+            if errors is None:
+                raise
+            errors.append(e)
+            continue
         if data is not None:
             out[key] = data
     return out
@@ -3835,6 +3850,159 @@ def doctor_lines(root: Path) -> list:
     return lines
 
 
+# --- The on-screen band's data (lease-board spec §3) ----------------------------
+
+# windows[].state. "swept-waiting" is reserved and never emitted here: knowing a swept number still has unpromoted
+# work needs git (waiting_numbers), which this reader never runs (spec §9 Q1).
+BOARD_STATES = ("live", "quiet", "stale", "finished", "released", "swept-waiting")
+
+
+def board_json(root: Path, sid: Optional[str]) -> dict:
+    """The lease board as one object for the band above the prompt, which asks
+    for it every 2 s in every open window. A READER: one pass over the lease
+    files, .seen and .changed sidecars and prime.json under the shared lock,
+    then liveness() per lease and registry_live_map() once — the same calls the
+    model-facing board makes, so the two never disagree about a state. Never:
+    git, heartbeat, self_rebind, recompute_changed, write_lease, waiting_numbers,
+    an exclusive lock, or read_all's pruning of an empty file.
+
+    Keys (spec §3.4): this_window, prime_window, windows (this window first,
+    then by number), generated_epoch; each window has exactly nn, alias, state,
+    changed_count, peer_name, is_prime, is_this, last_seen_epoch, note. One
+    more, `error`, only when a lease file could not be read: its operator
+    sentence(s), while every readable window is still listed — one bad file
+    must never blank the band (build brief, 2026-10-11; the spec's §3.5 exit 1
+    was dropped for that reason)."""
+    errors: list = []
+    with lock(root, shared=True):
+        leases = read_all(root, prune_empty=False, errors=errors)
+        numbered = {k: d for k, d in leases.items() if k != "prime"}
+        seen = {nn: seen_mtime(root, nn) for nn in numbered}
+        changed = {nn: read_changed(root, nn) for nn in numbered}
+    prime_sid = (leases.get("prime") or {}).get("session_id") or None
+    # both sides bound, else an unclaimed lease would read as the holder of a pen nobody took (§4.8)
+    prime_nn = lease_of_session(leases, str(prime_sid))[0] if prime_sid else None
+    mine = lease_of_session(leases, sid)[0] if sid else None
+    now, quiet_after = time.time(), stale_after_secs(root)
+    live_map = registry_live_map()                                      # read ONCE
+    windows = []
+    for nn in ([mine] if mine else []) + [k for k in sorted(numbered) if k != mine]:
+        d = numbered[nn]
+        if d.get("released"):
+            state = "released"
+        elif d.get("finished"):
+            state = "finished"
+        else:
+            state = liveness(root, nn, d, now, quiet_after)
+            if state == "resumed":
+                state = "live"      # the window is live; the next model-facing render rebinds it
+        entries = live_map.get(str(d.get("session_id")), []) if d.get("session_id") else []
+        # §4.1: the peer name is re-read from the registry when exactly one live entry names the session
+        peer = (entries[0].get("name") if len(entries) == 1 else None) or d.get("peer_name") or None
+        # the sidecar is {"<repo>": {"<path>": "<first-seen stamp>"}} (compute_changed); distinct paths across repos
+        paths: set = set()
+        for per_repo in changed[nn].values():
+            if isinstance(per_repo, (dict, list)):
+                paths.update(str(x) for x in per_repo)
+        windows.append({
+            "nn": nn,
+            "alias": str(d["alias"]) if d.get("alias") else None,
+            "state": state,
+            "changed_count": len(paths),
+            "peer_name": str(peer) if peer else None,
+            "is_prime": nn == prime_nn,
+            "is_this": nn == mine,
+            "last_seen_epoch": float(seen[nn]) if seen[nn] is not None else None,
+            "note": str(d["note"]) if d.get("note") else None,
+        })
+    obj: dict = {"this_window": mine, "prime_window": prime_nn, "windows": windows, "generated_epoch": time.time()}
+    if errors:
+        obj["error"] = " ".join(str(e) for e in errors)
+    return obj
+
+
+# --- The registry's shape (lease-board spec §5) --------------------------------
+
+# what liveness(), registry_live_map(), is_interactive_window() and the peer name read from sessions/<pid>.json
+REGISTRY_FIELDS = ("pid", "sessionId", "startedAt", "procStart", "kind", "entrypoint", "name")
+PROC_START_LAYOUT = "%a %b %d %H:%M:%S %Y"
+# what each missing field costs, in the words of the thing that stops working
+_REGISTRY_COST = (
+    (("procStart",), "liveness falls back to startedAt for it"),
+    (("kind", "entrypoint"), "this session cannot be told from a headless one; it will not number itself or take the pen"),
+    (("name",), "its peer name is unknown; the board shows the one its lease stored"),
+    (("sessionId",), "no lease can name this session"),
+    (("startedAt",), "liveness has no fallback for it when procStart does not parse"),
+    (("pid",), "liveness cannot check its process"),
+)
+
+
+def _same_dir(a: object, b: str) -> bool:
+    try:
+        return isinstance(a, str) and bool(a) and os.path.realpath(a) == b
+    except (OSError, ValueError):
+        return False
+
+
+def doctor_registry_lines(root: Path) -> list:
+    """One `registry shape` line for doctor.sh, OK or NOTE — never MISSING: the
+    registry (~/.claude/sessions/<pid>.json) is undocumented and changed
+    meaning on 2026-10-10 with nothing here saying so, and liveness has a
+    fallback for every field it reads. Judged: live entries (the same test
+    liveness uses) that a lease names or whose cwd is this home; other
+    projects' entries are not Daedalus's business. One NOTE per entry with a
+    problem naming every missing field; a file that is not JSON is skipped as
+    registry_live_map skips it, and counted. Runs whether or not state/leases/
+    exists."""
+    d = registry_dir()
+    if not d.is_dir():
+        return ["NOTE     registry shape: %s is absent — nothing to check" % d]
+    by_sid: Dict[str, str] = {}
+    if leases_dir(root).is_dir():
+        try:
+            with lock(root, shared=True):
+                leases = read_all(root, prune_empty=False, errors=[])
+        except OSError:
+            leases = {}
+        for nn, lease in leases.items():
+            if nn != "prime" and lease.get("session_id"):
+                by_sid[str(lease["session_id"])] = nn
+    home = str(root.resolve())
+    judged, notes, not_json = 0, [], []
+    for p in sorted(d.glob("*.json")):
+        try:
+            e = json.loads(p.read_text())
+        except (OSError, ValueError):
+            not_json.append("sessions/%s" % p.name)
+            continue
+        if not isinstance(e, dict) or not pid_is_recorded_process(e.get("pid"), e.get("startedAt"), e.get("procStart")):
+            continue
+        nn = by_sid.get(str(e.get("sessionId"))) if e.get("sessionId") else None
+        if nn is None and not _same_dir(e.get("cwd"), home):
+            continue
+        judged += 1
+        where = "sessions/%s%s" % (p.name, " (window %s)" % nn if nn else "")
+        missing = [f for f in REGISTRY_FIELDS if e.get(f) is None]
+        if missing:
+            costs = [cost for fields, cost in _REGISTRY_COST if any(f in missing for f in fields)]
+            notes.append("NOTE     registry shape: %s lacks %s — %s" % (where, ", ".join(missing), "; ".join(costs)))
+        elif proc_start_text_ms(e.get("procStart")) is None:
+            notes.append('NOTE     registry shape: %s has procStart "%s" that does not parse as "%s" UTC — liveness falls '
+                         "back to startedAt for it" % (where, e.get("procStart"), PROC_START_LAYOUT))
+    if notes:
+        lines = notes
+    elif judged:
+        lines = ["OK       registry shape: %d live window entr%s carr%s %s; procStart parses"
+                 % (judged, "y" if judged == 1 else "ies", "ies" if judged == 1 else "y", ", ".join(REGISTRY_FIELDS))]
+    else:
+        lines = ["OK       registry shape: no live window entries to check"]
+    if not_json:
+        n = len(not_json)
+        lines.append("NOTE     registry shape: %d registry file%s %s not JSON (%s)"
+                     % (n, "" if n == 1 else "s", "is" if n == 1 else "are", ", ".join(not_json)))
+    return lines
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def main(argv: list) -> int:
@@ -3955,6 +4123,32 @@ def main(argv: list) -> int:
         for line in doctor_lines(root):
             print(line)
         return 0
+    if cmd == "doctor-registry":
+        # doctor.sh: the registry shape line(s), OK or NOTE only (lease-board spec §5)
+        for line in doctor_registry_lines(root):
+            print(line)
+        return 0
+    if cmd == "board-json":
+        # The band above the prompt (the lease-board mod) runs this every 2 s in every window. A reader, so it sits
+        # with doctor-lines and my-lease, outside the visitor, copy and upgrade gates: the operator wants to see the
+        # board while the upgrade is pending (spec §14), and a visitor may read. --session because a mod's child is
+        # not a Bash-tool child and carries no CLAUDE_CODE_SESSION_ID (lease-board spec §3.1).
+        if not args:
+            sid = session_id_from_env()
+        elif len(args) == 2 and args[0] == "--session":
+            sid = args[1] or None
+        else:
+            sys.stderr.write("usage: leaselib.py board-json [--session <id>]\n")
+            return 2
+        try:
+            print(json.dumps(board_json(root, sid), sort_keys=True))
+            return 0
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e)
+            return 1
+        except OSError as e:
+            sys.stderr.write("daedalus: state/leases/ cannot be read (%s)\n" % (e.strerror or e))
+            return 1
     if cmd in ("list", "status"):
         # sid is None from an operator shell: the head says "you hold no lease"
         # and there is no nag (a person at a shell holds no lease by design).
