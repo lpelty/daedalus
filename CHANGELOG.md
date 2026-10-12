@@ -355,8 +355,9 @@ have called it stale after four idle hours.
   number is chosen: its recorded process gone, its worktree clean, nothing
   unpromoted. Yesterday's window 01 becomes today's, and the pen comes with
   it. A window holding work, a quiet one, a finished clone, a released one,
-  or one that never recorded a pid is left for `sweep`, as before.
-  `session-start.py`, `lease.sh create`, `spawn` and `adopt` all do this.
+  or one that never recorded a pid is left for `sweep`, as before. Every
+  terminal start does this, a resume included, and so do `lease.sh create`,
+  `spawn` and `adopt` before they choose a number.
 - An unleased session is told "This session holds no window: no lease names
   it and it does not hold the pen", never "several sessions are live".
 

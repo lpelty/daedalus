@@ -3174,6 +3174,18 @@ def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -
                     out["notes"].append(msg)
         if out["lease"] is None:
             out["lease"] = self_rebind(root, sid)
+        if terminal:
+            # Every terminal start reclaims the idle windows, not only one that
+            # numbers itself: a resumed window (self_rebind above) never
+            # allocates, and without this pass yesterday's STALE window would
+            # sit on its board at every prompt until a sweep. A trunk that
+            # cannot be told is allocate_locked's refusal to make, not this
+            # pass's — it skips, and the bind goes on.
+            try:
+                for _nn, sentence in reclaim_idle_locked(root, read_all(root), trunks_of(root, root / "target")):
+                    out["notes"].append(sentence)
+            except Refused:
+                pass
         if out["lease"] is None and terminal:
             nn, data = allocate_locked(root, sid, deadline=deadline, notes=out["notes"])   # NOT allocate(): the lock is held
             try:

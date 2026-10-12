@@ -690,3 +690,25 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   run start sE startup; [ "$(first_line)" = "Daedalus session orientation: window 05, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
   [ "$(lease_json 04 session_id)" = "sD" ]; [ "$(lease_json 04 released)" != "None" ]
 }
+
+@test "a resumed window reclaims too: the operator resumes yesterday's window 02 by session id while window 01's process is gone and clean — 02 stays 02, 01's lease is gone, and the pen moves to 02 (previous holder gone); a headless start never reclaims" {
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; start sA startup >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02; start sB startup >/dev/null
+  [ "$(lease_json prime session_id)" = "sA" ]
+  kill "$p1"; wait "$p1" 2>/dev/null || true; kill "$p2"; wait "$p2" 2>/dev/null || true
+  # a headless start (sdk-cli) is not a terminal window: it binds nothing and reclaims nothing
+  p3="$(live_pid)"; registry_entry "$p3" sH interactive sdk-cli
+  run start sH startup; [ -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  # the operator resumes window 02 (same session id, new pid)
+  p4="$(live_pid)"; registry_entry "$p4" sB interactive cli daedalus-02
+  run start sB resume; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ "$(lease_json 02 session_id)" = "sB" ]; [ "$(lease_json 02 pid)" = "$p4" ]
+  [ "$(lease_json prime session_id)" = "sB" ]
+  case "$output" in *"Reclaimed window 01"*) : ;; *) echo "no reclaim sentence: $output"; return 1 ;; esac
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert len(h)==1 and h[0]["from"]=="sA" and h[0]["to"]=="sB" and "previous holder gone" in h[0]["reason"], h' "$DAEDALUS_HOME/state/leases/prime.json"
+  # 01's worktree and branch are kept; the next window to be numbered re-uses them
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  p5="$(live_pid)"; registry_entry "$p5" sC interactive cli daedalus-01
+  run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 01, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+}
