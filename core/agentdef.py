@@ -3,7 +3,7 @@
 into the JSON object `claude --agents <file>` takes.
 
 The refuter charter lives at core/agents/refuter.md — distribution code,
-under the same `Edit(./core/**)` deny rule as every other file in core/, so
+under the same `Edit(/core/**)` deny rule as every other file in core/, so
 the running Daedalus cannot rewrite its own reviewer. `claude -p --agent
 <name>` resolves agents only from `.claude/agents/` of the cwd project, which
 is a write surface; `--agents <file>` takes a definition from any path, so

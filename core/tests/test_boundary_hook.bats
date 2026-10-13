@@ -11,8 +11,8 @@ setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault/evidence"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$SRC/distcheck.py" "$DAEDALUS_HOME/core/"
-  printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
-  printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"permissions":{"deny":["Edit(/core/**)","Edit(/CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
+  printf '{"permissions":{"deny":["Edit(//elsewhere/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   # The refuter is on by default (v0.6.1); this suite is about the boundary
   # hook, and a real claude must never run in tests, so it is off with the
@@ -103,7 +103,7 @@ open('$m', 'w').write(json.dumps(d))
   git -C "$DAEDALUS_HOME" checkout -q -- . 2>/dev/null || true
   printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n  - true\nverify:\n  refute: false\n  refute_off_reason: bats fixture — a real claude must never be invoked in tests\n' > "$DAEDALUS_HOME/config.yaml"
   run hook Stop; [ "$status" -eq 0 ]
-  printf '{"permissions":{"deny":["Edit(/elsewhere/**)"],"allow":["Bash(ls:*)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"permissions":{"deny":["Edit(//elsewhere/**)"],"allow":["Bash(ls:*)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   run hook Stop; [ "$status" -eq 0 ]
   printf '{"permissions":{"deny":[],"allow":["Bash(ls:*)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   run hook Stop; [ "$status" -eq 2 ]
@@ -636,4 +636,34 @@ PY
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s7\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 2 ]
   case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the deny list's path anchors: Edit(/core/**) (the project-anchored form the docs give), Edit(./core/**) and an absolute Edit(//<home>/core/**) all protect core/; an absolute rule outside the home protects nothing here" {
+  python3 - "$SRC" "$DAEDALUS_HOME" <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import verifylib as v
+root = Path(sys.argv[2]).resolve()
+s = root / ".claude" / "settings.json"
+for rule in ("Edit(/core/**)", "Edit(./core/**)", "Edit(//%s/core/**)" % root, "Edit(/CLAUDE.md)", "Edit(//%s/CLAUDE.md)" % root):
+    s.write_text(json.dumps({"permissions": {"deny": [rule]}}))
+    target = root / ("core/x.py" if "core" in rule else "CLAUDE.md")
+    assert v.is_protected(root, target), (rule, v.protected_globs(root))
+    assert not v.is_protected(root, root / "vault" / "notes.md"), rule
+    specs = v.protected_pathspecs(root)
+    assert all(not p.startswith("/") for p in specs), (rule, specs)
+s.write_text(json.dumps({"permissions": {"deny": ["Edit(//elsewhere/core/**)", "Edit(~/core/**)"]}}))
+assert not v.is_protected(root, root / "core" / "x.py"), v.protected_globs(root)
+# a rule naming the home itself names no file: nothing is protected and git status gets no "." pathspec
+for rule in ("Edit(//%s)" % root, "Edit(//%s/)" % root, "Edit(/)", "Edit(.)", "Edit(./)"):
+    s.write_text(json.dumps({"permissions": {"deny": [rule]}}))
+    assert v.protected_globs(root) == v.EXTRA_PROTECTED, (rule, v.protected_globs(root))
+    assert "." not in v.protected_pathspecs(root), rule
+# a trailing slash is the directory and everything in it, in every form
+for rule in ("Edit(/core/)", "Edit(./core/)", "Edit(//%s/core/)" % root):
+    s.write_text(json.dumps({"permissions": {"deny": [rule]}}))
+    assert v.protected_globs(root)[0] == "core/**", (rule, v.protected_globs(root))
+    assert v.is_protected(root, root / "core" / "x.py"), rule
+PY
 }

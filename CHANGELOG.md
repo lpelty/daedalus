@@ -413,6 +413,13 @@ install commands above, once. VERSION stays 0.7.0: nothing moves and no
 state changes shape, so no upgrade runs at the next start.
 
 
+#### Fixed on trunk after the v0.7.0 tag — 2026-10-13: the deny rules are anchored at the home
+
+- The deny rules in `.claude/settings.json` now read `Edit(/core/**)`, not `Edit(./core/**)`. Claude Code anchors a `/path` rule at the settings file's project, and a `./path` rule at the session's current directory. A shell that changed directory made the old rules match nothing; another deployment saw this and committed them absolute.
+- The boundary hook and the bash guard read those rules to know what is distribution code. They now understand all three forms: `/path`, `./path`, and an absolute `//<home>/path`. Before, anything but `./path` silently protected nothing.
+- The README's example for a deployment's own deny rules in `.claude/settings.local.json` now shows the absolute `//` form. The single slash it showed is not absolute in Claude Code's rules.
+- That example's `Write(...)` line is gone: Claude Code checks file writes against `Edit(path)` rules only and never consults a `Write(path)` rule.
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named

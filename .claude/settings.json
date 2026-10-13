@@ -1,20 +1,20 @@
 {
   "permissions": {
     "deny": [
-      "Edit(./core/**)",
-      "Edit(./mods/**)",
-      "Edit(./CLAUDE.md)",
-      "Edit(./SOUL.md)",
-      "Edit(./.claude/settings.json)",
-      "Edit(./.claude/settings.local.json)",
-      "Edit(./config.example.yaml)",
-      "Edit(./README.md)",
-      "Edit(./CHANGELOG.md)",
-      "Edit(./VERSION)",
-      "Edit(./docs/**)",
-      "Edit(./config.yaml)",
-      "Edit(./state/**)",
-      "Edit(./vault/evidence/**)"
+      "Edit(/core/**)",
+      "Edit(/mods/**)",
+      "Edit(/CLAUDE.md)",
+      "Edit(/SOUL.md)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/settings.local.json)",
+      "Edit(/config.example.yaml)",
+      "Edit(/README.md)",
+      "Edit(/CHANGELOG.md)",
+      "Edit(/VERSION)",
+      "Edit(/docs/**)",
+      "Edit(/config.yaml)",
+      "Edit(/state/**)",
+      "Edit(/vault/evidence/**)"
     ]
   },
   "hooks": {

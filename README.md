@@ -29,8 +29,7 @@ your live harness:
 {
   "permissions": {
     "deny": [
-      "Write(/path/to/your/harness/**)",
-      "Edit(/path/to/your/harness/**)"
+      "Edit(//path/to/your/harness/**)"
     ]
   }
 }

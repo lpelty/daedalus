@@ -177,6 +177,41 @@ def fingerprint(root: Path) -> str:
     return out if code == 0 and out else "null"
 
 
+def home_relative_glob(root: Path, pattern: str) -> Optional[str]:
+    """A deny rule's path pattern as a glob relative to the home, or None when
+    it cannot name a file under the home. Claude Code's anchors (docs,
+    "Configure permissions"): `//path` is absolute; `~/path` is the user's
+    home; `/path` is anchored at the settings source, which for
+    .claude/settings.json is the primary working directory, i.e. this home;
+    `./path` is relative to the session's current directory, which is this
+    home only while nothing has changed directory. A bare `path` is read
+    here as anchored at the home too (Claude Code matches it at any depth;
+    the shipped rules never use that form). A trailing slash names the
+    directory and everything in it, as gitignore reads it. The shipped
+    rules use `/path`; a deployment that committed them absolute (seen
+    2026-10-13 on another laptop) is read the same way instead of silently
+    protecting nothing. The home itself is never a rule."""
+    g = pattern
+    if g.startswith("//"):
+        try:
+            g = Path(g[1:]).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None
+        if pattern.endswith("/"):
+            g += "/"
+    elif g.startswith("~"):
+        return None
+    elif g.startswith("./"):
+        g = g[2:]
+    elif g.startswith("/"):
+        g = g[1:]
+    if g.endswith("/"):
+        g = g.rstrip("/") + "/**"
+    if g in ("", ".", "/**", "./**"):
+        return None
+    return g
+
+
 def protected_globs(root: Path) -> List[str]:
     globs: List[str] = []
     try:
@@ -184,8 +219,9 @@ def protected_globs(root: Path) -> List[str]:
         for rule in (data.get("permissions") or {}).get("deny", []):
             m = re.fullmatch(r"Edit\((.+)\)", rule)
             if m:
-                g = m.group(1)
-                globs.append(g[2:] if g.startswith("./") else g)
+                g = home_relative_glob(root, m.group(1))
+                if g is not None:
+                    globs.append(g)
     except (OSError, ValueError):
         pass
     for g in EXTRA_PROTECTED:

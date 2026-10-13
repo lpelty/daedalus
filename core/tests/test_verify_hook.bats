@@ -8,7 +8,7 @@ setup() {
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/fingerprint.sh" "$SRC/gates.sh" "$SRC/manifest-append.py" "$SRC/session-start.py" "$SRC/verify-hook.py" "$DAEDALUS_HOME/core/"
-  printf '{"permissions":{"deny":["Edit(./core/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
+  printf '{"permissions":{"deny":["Edit(/core/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   # Refuter off with a reason (v0.6.1 default-on): this suite is about the
   # Stop gate, and a real claude must never run in tests.
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'

@@ -13,7 +13,7 @@ lease_fixture() {
            transcriptlib.py capture.py prepush.py distcheck.py upgrade.py capture-tick.sh; do
     [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DAEDALUS_HOME/core/"
   done
-  printf '{"permissions":{"deny":["Edit(./core/**)","Edit(./CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
+  printf '{"permissions":{"deny":["Edit(/core/**)","Edit(/CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
 target:

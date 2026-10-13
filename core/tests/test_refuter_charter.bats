@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # The refuter charter is distribution code: core/agents/refuter.md, under the
-# same Edit(./core/**) deny rule as everything else in core/. refute.sh
+# same Edit(/core/**) deny rule as everything else in core/. refute.sh
 # renders it with core/agentdef.py and hands the JSON to `claude --agents`.
 # These tests pin the charter's shape (the restrictions that make it a
 # second opinion and not a second author) and the renderer's grammar.
