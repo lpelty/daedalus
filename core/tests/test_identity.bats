@@ -307,14 +307,18 @@ _run_scan_in_fixture() {
   [ -z "$bad" ] || { echo "PEP 604 unions without the future import:$bad"; return 1; }
 }
 
-# Spec §4.7 "Logs", D7: a session log is named by window number and date
-# (YYYY-MM-DD-<NN>.md), never by the retired global running count. The
-# templates carry the lease fields the log's frontmatter needs, and hot.md
-# holds a copy of the lease board (leases:) rather than mirroring a session
-# number that no longer exists.
-@test "CLAUDE.md names session logs by window number and date, and the templates carry lease fields" {
-  run grep -q 'YYYY-MM-DD-<NN>.md' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
-  run grep -q 'global running count' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -ne 0 ]
+# Spec §4.7 "Logs", D7 as amended 2026-10-14 (the operator's ruling): a session log is
+# named by date and one global counter per vault (YYYY-MM-DD-NNN.md), reserved
+# in the lease file at session start and read with `core/lease.sh log` — never
+# counted from a directory listing, and never the window number, which lives in
+# the frontmatter. The templates carry the lease fields the log's frontmatter
+# needs, and hot.md holds a copy of the lease board (leases:) rather than
+# mirroring a session number.
+@test "CLAUDE.md names session logs by date and the global counter, hands the path out with lease.sh log, and the templates carry lease fields" {
+  run grep -q 'YYYY-MM-DD-NNN.md' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -q 'YYYY-MM-DD-<NN>.md' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -ne 0 ]
+  run grep -q 'core/lease.sh log' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
+  run grep -q 'YYYY-MM-DD-NN.md\|YYYY-MM-DD-prime.md' "$DAEDALUS_HOME/CLAUDE.md" "$DAEDALUS_HOME/core/templates/session.md"; [ "$status" -ne 0 ]
   run grep -q '## Continued HH:MM' "$DAEDALUS_HOME/CLAUDE.md"; [ "$status" -eq 0 ]
   run grep -q '^lease: ' "$DAEDALUS_HOME/core/templates/session.md"; [ "$status" -eq 0 ]
   run grep -q '^lease-created: ' "$DAEDALUS_HOME/core/templates/session.md"; [ "$status" -eq 0 ]

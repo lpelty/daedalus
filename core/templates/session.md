@@ -13,13 +13,15 @@ findings: 0
 status: open
 ---
 
-<!-- File: vault/sessions/YYYY/MM/YYYY-MM-DD-NN.md — NN is your window number
-     (the lease this session holds); one file per window per day. A restart
-     under the same lease instance (same lease-created) appends a
+<!-- File: vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md — NNN is the vault's one
+     running counter. The session start says your path for today and
+     `core/lease.sh log` prints it again; never count the directory. The
+     window is `lease:` below, not the filename. A restart under the same
+     lease instance (same lease-created) on the same day appends a
      "## Continued HH:MM" section here. See the session-logs section of
      CLAUDE.md. -->
 
-# Session YYYY-MM-DD, window NN — <what this session was about>
+# Session YYYY-MM-DD-NNN, window NN — <what this session was about>
 
 <!-- The reader of this log is you, retrieving. Retrieval surfaces one
      fragment without its neighbours, so every entry must stand alone: name

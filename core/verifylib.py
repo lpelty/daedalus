@@ -348,6 +348,18 @@ def vault_git(root: Path) -> Tuple[List[str], List[str]]:
     return ["git", "-C", str(root)], ["--", "vault"]
 
 
+def vault_git_base(root: Path, g: List[str], spec: List[str]) -> Path:
+    """The directory git's repo-relative names (status --porcelain, diff
+    --name-only) resolve against: the vault for its own repository; otherwise
+    the top level of the repository that tracks it, which is the home or —
+    a home inside a larger repository — some ancestor of it. The home itself
+    is the fallback when git cannot say."""
+    if not spec:
+        return root / "vault"
+    code, out, _ = run(g + ["rev-parse", "--show-toplevel"], timeout=5)
+    return Path(out.strip()) if code == 0 and out.strip() else root
+
+
 def vault_head(root: Path) -> Optional[str]:
     g, _ = vault_git(root)
     code, out, _ = run(g + ["rev-parse", "HEAD"])
@@ -403,7 +415,7 @@ def changed_vault_docs(root: Path, since_sha: Optional[str], since_time: Optiona
     if since_sha is None and since_time is None:
         vdir = root / "vault"
         return sorted(p for p in vdir.rglob("*.md") if p.is_file())
-    base = root / "vault" if not spec else root
+    base = vault_git_base(root, g, spec)
     names: set = set()
     if since_sha:
         code, out, _ = run(g + ["diff", "--name-only", since_sha] + spec)

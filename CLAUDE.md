@@ -333,38 +333,47 @@ verification pass moves `verified-against-live:`.
 
 ## Session logs
 
-One log per window per day, in the vault:
+One log per session per day, in the vault, named by the date and one global
+counter for the whole vault:
 
 ```
-vault/sessions/YYYY/MM/YYYY-MM-DD-<NN>.md
+vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md
 ```
 
-`<NN>` is your **window number** — the two-digit lease the session took at
-start (the orientation line at the top of your context says it: "window 02").
-`YYYY/MM` is keyed to the date the session **opened**, so a session that runs
-past midnight stays in the month it began. A session that holds only the pen
-and no window (rare) logs as `YYYY-MM-DD-prime.md`.
+`NNN` is the next number in the vault's single running sequence — the one
+the operator navigates by. You never compute it. The session start says
+"Your session log for today is vault/sessions/…", and `core/lease.sh log`
+prints the same path again at any time. The number is reserved in your lease
+file under the lease lock, so two windows open on one day never share a
+number, and a number another window reserved but has not written yet is
+skipped. Never count the files in the directory to pick a number: with
+several windows open, two sessions counting the same listing write the same
+name.
 
-**Restarted under the same window on the same day?** Append a dated
-`## Continued HH:MM` section to the same file instead of opening a second.
-"Same window" means the same lease *instance*: the log's frontmatter records
-the lease file's `created` stamp as `lease-created:`, and a number re-issued
-the same day to a new window (02 swept, then a new terminal allocated 02) has
-a new stamp — it opens `YYYY-MM-DD-02-2.md` rather than continuing another
-window's record.
+The log is keyed to the date the session **opened**: a session that runs past
+midnight keeps the file it was told at start (`core/lease.sh log` and a
+compaction both return it), and a start or resume on the new day gets the next
+number. A session that holds only the pen and no window gets its number the
+same way. A window swept before its session wrote the log frees the number.
 
-The frontmatter carries `lease:` (the number), `alias:` (the display alias,
-if the operator gave one — display only, never the filename, because an alias
-can change mid-day and the file must not) and `lease-created:`.
+**Restarted under the same window on the same day?** `core/lease.sh log`
+prints the path you already have: append a dated `## Continued HH:MM` section
+to that file instead of opening a second. A number re-issued the same day to a
+new window (02 swept, then a new terminal allocated 02) is a new lease with no
+reservation, so it gets the next number in the sequence.
+
+The window is recorded in the frontmatter, never in the filename: `lease:`
+(the number), `alias:` (the display alias, if the operator gave one — display
+only, because an alias can change mid-day) and `lease-created:`.
 
 Holding the pen is a line in the log, not a second file. `hot.md`'s `leases:`
 field is a copy of the lease board at the time the prime wrote it — intent
 (which windows are open and why), not status. Only the prime writes `hot.md`,
 and only through `core/vault-commit.sh` does the vault get committed.
 
-Logs written before this release used a global counter
-(`YYYY-MM-DD-NNN.md`). They stay as they are — history is append-only and is
-never renumbered.
+Logs written under v0.7.0's window naming (a two-digit tail) are outside the
+sequence and are not counted. The operator may rename one into the sequence
+by hand; a session never renumbers history.
 
 A descriptive slug in the filename looks helpful and costs retrieval: the
 title inside the file carries the description.

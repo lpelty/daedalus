@@ -23,7 +23,34 @@ while [ $# -gt 0 ]; do
     *) die 'usage: core/vault-commit.sh [-m "<message>"] [--push]' ;;
   esac
 done
-[ -e "$V/.git" ] || die "the vault at $V is not its own git repository"
+# The vault is its own repository, or a directory the Daedalus home repository
+# tracks (the two layouts doctor accepts). In the second, the commit is made in
+# that repository and must carry the vault alone: work the operator has staged
+# there outside vault/ is theirs to commit, so it refuses by name.
+if [ -e "$V/.git" ]; then
+  G="$V"; SPEC=""
+elif git -C "$DAEDALUS_HOME" ls-files --error-unmatch vault >/dev/null 2>&1; then
+  G="$DAEDALUS_HOME"; SPEC="vault"
+  # A tracked vault that an ignore rule still matches (force-added once) makes `git add -A -- vault`
+  # refuse every new file: say the cause and the fix, not git's hint.
+  if ign="$(git -C "$G" check-ignore -v --no-index -- vault 2>/dev/null)"; then   # --no-index: a tracked path is otherwise never reported
+    src="${ign%%:*}"; case "$src" in /*) : ;; *) src="$G/$src" ;; esac
+    die "vault/ is ignored by $src (the rule \`${ign##*	}\`); remove that line — a tracked directory stays tracked — and run core/vault-commit.sh again"
+  fi
+  # The whole index of that repository, which may be larger than the home (a home inside a
+  # ship repo): --show-prefix is the home's path from the repository root, "" at the root.
+  # core.quotepath=false: a name with accents is listed as itself, not C-quoted.
+  prefix="$(git -C "$G" rev-parse --show-prefix)"
+  staged=""
+  while IFS= read -r f; do
+    case "$f" in "${prefix}vault/"*|"") ;; *) staged="$staged$f "; [ "$(printf '%s' "$staged" | wc -w)" -lt 3 ] || break ;; esac
+  done <<EOF
+$(git -C "$G" -c core.quotepath=false diff --cached --name-only)
+EOF
+  [ -z "$staged" ] || die "the repository holding the vault has staged changes outside vault/ (${staged% }); commit or unstage them first, then run core/vault-commit.sh again"
+else
+  die "the vault at $V is neither its own git repository nor tracked by the Daedalus home repository ($DAEDALUS_HOME)"
+fi
 
 # 1. Only the prime window commits (§4.7); a shell with no session identity is the operator.
 if python3 "$LL" my-session >/dev/null 2>&1; then
@@ -37,7 +64,7 @@ fi
 retry_git() {
   local n=0 out
   while :; do
-    if out="$(git -C "$V" "$@" 2>&1)"; then printf '%s\n' "$out"; return 0; fi
+    if out="$(git -C "$G" "$@" 2>&1)"; then printf '%s\n' "$out"; return 0; fi
     case "$out" in
       *index.lock*) n=$((n + 1)); [ "$n" -lt 3 ] || { printf '%s\n' "$out" >&2; return 1; }; sleep 1 ;;
       *) printf '%s\n' "$out" >&2; return 1 ;;
@@ -102,17 +129,17 @@ $report
 EOF
 
 # 5. Stage everything, take the live other windows' claims back out, commit.
-retry_git add -A >/dev/null || die "git add failed in the vault"
-while IFS= read -r p; do [ -n "$p" ] && git -C "$V" reset -q -- "$p"; done <<EOF
+retry_git add -A ${SPEC:+-- "$SPEC"} >/dev/null || die "git add failed in the vault"
+while IFS= read -r p; do [ -n "$p" ] && git -C "$G" reset -q -- "$p"; done <<EOF
 $skip
 EOF
-if git -C "$V" diff --cached --quiet; then
+if git -C "$G" diff --cached --quiet; then
   log "nothing to commit"
 else
   [ -n "$msg" ] || msg="vault: prime commit $(date +%Y-%m-%d) (leases: ${leases:-none})"
   # The vault's own identity when it has one; a placeholder only where none is configured.
   ident=""
-  if ! git -C "$V" config user.email >/dev/null 2>&1 || ! git -C "$V" config user.name >/dev/null 2>&1; then
+  if ! git -C "$G" config user.email >/dev/null 2>&1 || ! git -C "$G" config user.name >/dev/null 2>&1; then
     ident="-c user.email=${GIT_AUTHOR_EMAIL:-daedalus@localhost} -c user.name=${GIT_AUTHOR_NAME:-daedalus}"
   fi
   # shellcheck disable=SC2086
@@ -122,7 +149,7 @@ fi
 
 # 6. --push (also with nothing new to commit: an earlier commit may still be unpushed)
 if [ "$push" -eq 1 ]; then
-  git -C "$V" remote get-url origin >/dev/null 2>&1 || die "the vault has no origin to push to"
+  git -C "$G" remote get-url origin >/dev/null 2>&1 || die "the repository holding the vault has no origin to push to"
   retry_git push -q >/dev/null || die "push failed"
   log "pushed"
 fi

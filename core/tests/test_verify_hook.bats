@@ -185,7 +185,8 @@ claim_l() {  # claim_l <file> <lease-or-empty>
   run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"This session holds no lease, so its claims cannot be attributed. Claim a lease and restart."*) : ;; *) echo "$output"; return 1 ;; esac
   # Only stale leases (their sessions are gone, not yet swept) are not "live leases" (§4.9): an
   # unleased session is not refused — it answers for lease-less claims as it would with no leases.
-  for nn in 01 02; do sed -i.bak "s/\"pid\":$$/\"pid\":999999/" "$DAEDALUS_HOME/state/leases/$nn.json"; rm -f "$DAEDALUS_HOME/state/leases/$nn.json.bak"; touch -t 202001010000 "$DAEDALUS_HOME/state/leases/$nn.seen"; done
+  # "pid": *  — session start re-serialises a lease it reserves a log number in (json.dump, a space after the colon)
+  for nn in 01 02; do sed -i.bak "s/\"pid\": *$$,/\"pid\":999999,/" "$DAEDALUS_HOME/state/leases/$nn.json"; rm -f "$DAEDALUS_HOME/state/leases/$nn.json.bak"; touch -t 202001010000 "$DAEDALUS_HOME/state/leases/$nn.seen"; done
   run stop sZ; [ "$status" -eq 0 ]
   claim_l PROP-Z.md ""
   run stop sZ; [ "$status" -eq 2 ]; case "$output" in *"PROP-Z.md"*"no evidence-run"*) : ;; *) echo "$output"; return 1 ;; esac

@@ -256,7 +256,8 @@ liveness reads (`registry shape`).
 
 `core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
 `alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,
-`unpromoted <NN>` (what `release <NN> --remove` would delete; deletes nothing),
+`log` (this session's log path for today — the counter is reserved in the
+lease, never counted from the directory), `unpromoted <NN>` (what `release <NN> --remove` would delete; deletes nothing),
 `release <NN>`, `done <NN>`, `sweep` (removes windows with no live session),
 `adopt <branch>` (an in-flight branch in `target/` becomes a window) and
 `prime take`. `leases.stale_after` in `config.yaml` (default `4h`) is
@@ -269,7 +270,9 @@ start reclaims it (a resumed window too, before it rebinds; `create`,
 in the morning is window 01 again and takes the pen from yesterday's
 session. A stale window that still holds work, or a background clone that never
 reported, keeps its number until you continue it or release it. Session logs
-are named by window number and date (`vault/sessions/YYYY/MM/YYYY-MM-DD-02.md`).
+are named by date and one running counter per vault
+(`vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md`); the start says each session's
+path, and the window number is in the log's frontmatter.
 `core/doctor.sh` reports the two lease directories, stale and released
 windows, swept numbers with work still waiting, and the session registry
 Claude Code keeps under `~/.claude/sessions/` (liveness reads it).

@@ -207,7 +207,9 @@ def main() -> int:
         ll = None
     if ll is not None and not visitor and sid and not skip_bind:
         try:
-            b = ll.session_start_bind(root, sid, deadline=started_at + ADD_BUDGET_SECS)
+            # startup / resume open a session today; compact / clear continue one — its log stays the file it opened with
+            b = ll.session_start_bind(root, sid, deadline=started_at + ADD_BUDGET_SECS,
+                                      new_day=str(payload.get("source", "")).lower() not in ("compact", "clear"))
             lease_nn = b["lease"]
             bind_notes.extend(b["notes"])
             if b["numbered"]:
@@ -221,6 +223,11 @@ def main() -> int:
                 bind_notes.append(line)
             elif b["took_pen"]:
                 bind_notes.append("You hold the pen (prime) now: hot.md, vault commits, promote.")
+            if b.get("log"):
+                bind_notes.append("Your session log for today is %s (the window goes in its frontmatter, never the "
+                                  "filename); a restart today continues that file under `## Continued HH:MM`, and a "
+                                  "session that runs past midnight keeps it. `core/lease.sh log` prints the path again."
+                                  % b["log"])
             if lease_nn is None:
                 # §3.1: an unleased session that is not a visitor is told at start what to run
                 # (the board's own sentence, so the dedup below can recognise it).

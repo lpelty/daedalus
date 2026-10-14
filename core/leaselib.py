@@ -1515,7 +1515,9 @@ def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True, deadline: 
         # they render a live window FINISHED and keep sweep from ever clearing
         # it (Task 4 review). A null holder is the clone's own first binding of
         # a spawned lease, which keeps spawned: true.
-        for key in ("finished", "summary", "spawned"):
+        # ... and its session-log reservation: the number was that session's, for the day it
+        # opened; this one is told today's at `lease.sh log` (fresh-context review, 2026-10-14).
+        for key in ("finished", "summary", "spawned", "logs"):
             fresh.pop(key, None)
     if finish_worktree and fresh.get("worktree_ready") is False:
         if add_worktrees(root, nn, fresh.get("trunks") or trunks_of(root, root / "target"), deadline=deadline):
@@ -3224,13 +3226,16 @@ def first_up(root: Path, sid: str) -> bool:
         return False
     fresh["history"] = (fresh.get("history") or []) + [{"from": holder, "to": sid, "at": now_stamp(),
                                                         "reason": "first-up (previous holder gone)"}]
+    fresh.pop("logs", None)      # a pen-only reservation was the gone holder's, like a window's on takeover
     fresh.update(dict({"session_id": sid}, **pen_bound()))
     write_lease(root, "prime", fresh)
     return True
 
 
-def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -> dict:
-    """Returns {"lease": NN|None, "prime": bool, "took_pen": bool, "numbered": bool, "notes": [..]}.
+def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None, new_day: bool = True) -> dict:
+    """Returns {"lease": NN|None, "prime": bool, "took_pen": bool, "numbered": bool, "notes": [..],
+    "log": <the session-log path, reserved>|None}. `new_day` False (a compaction, a clear) returns the
+    log the session opened with instead of reserving today's (log_path_locked).
     Order per §4.2: hint bind -> self-rebind -> auto-number (terminal windows only) -> first-up.
     ONE lock around the whole sequence; everything called inside is a *_locked /
     "caller holds the lock" function (allocate_locked, bind, self_rebind, first_up).
@@ -3239,7 +3244,7 @@ def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -
     `DAEDALUS_LEASE` bind and the auto-number alike. The wait for the lease lock
     is bounded by the same deadline: still busy then, it raises
     Refused(LOCK_BUSY_AT_START) having written nothing (plan 2 Decision 18)."""
-    out = {"lease": None, "prime": False, "took_pen": False, "numbered": False, "notes": []}
+    out = {"lease": None, "prime": False, "took_pen": False, "numbered": False, "notes": [], "log": None}
     terminal = is_terminal_window(sid)
     hint = os.environ.get("DAEDALUS_LEASE", "").strip()
     if hint and not valid_id(hint):
@@ -3306,7 +3311,109 @@ def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None) -
             out["took_pen"] = out["prime"] and not was
         else:
             out["prime"] = (read_lease(root, "prime") or {}).get("session_id") == sid
+        # The session-log number, reserved here under the same lock (§4.7 D7 as
+        # amended): the start says the path, so no session ever counts the directory.
+        key = out["lease"] or ("prime" if out["prime"] else None)
+        if key is not None:
+            try:
+                leases = read_all(root)
+                if key in leases:
+                    out["log"] = log_path_locked(root, key, leases, time.strftime("%Y-%m-%d"), new_day=new_day)
+            except Refused as e:
+                out["notes"].append(str(e))
     return out
+
+
+# --- Session logs (§4.7 D7, amended 2026-10-14) ------------------------------
+# One global counter per vault: vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md. The
+# number is reserved in the session's lease file (logs: {"<date>": N}) under
+# the exclusive lease lock — at session start, and by `core/lease.sh log` —
+# never computed from a directory listing at close, where two windows open on
+# one day count the same next number (D7's collision). The operator's ruling of
+# 2026-10-14 keeps the counter they navigate by; the window number lives in the
+# frontmatter only. A window-numbered log of v0.7.0 (a two-digit tail) and a
+# prime log are not part of the sequence and are not counted.
+
+LOG_FILE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}-([0-9]{3,})\.md$")
+LOG_NEEDS_SESSION = ("`core/lease.sh log` names the calling session's log for today; run it from a session, "
+                     "not from an operator shell.")
+
+
+def _max_log_number(root: Path, leases: Dict[str, dict]) -> int:
+    """The highest number in the sequence: in the vault's files, or reserved in
+    any lease file (prime.json included) for a log not written yet, whatever
+    day it was reserved for."""
+    n = 0
+    sdir = root / "vault" / "sessions"
+    if sdir.is_dir():
+        for path in sdir.glob("*/*/*.md"):
+            m = LOG_FILE_RE.match(path.name)
+            if m:
+                n = max(n, int(m.group(1)))
+    for lease in leases.values():
+        for val in _reservations(lease).values():
+            n = max(n, val)
+    return n
+
+
+def _reservations(lease: dict) -> Dict[str, int]:
+    """The lease's logs: {"<date>": N} with every entry that is not a date
+    and a positive int left out — only leaselib writes it, so a corrupt value
+    is treated as no reservation rather than a traceback."""
+    logs = lease.get("logs")
+    out: Dict[str, int] = {}
+    if not isinstance(logs, dict):
+        return out
+    for day, val in logs.items():
+        if isinstance(day, str) and _DATE_RE.match(day) and isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            out[day] = val
+    return out
+
+
+_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _log_file(day: str, n: int) -> str:
+    return "vault/sessions/%s/%s/%s-%03d.md" % (day[:4], day[5:7], day, n)
+
+
+def log_path_locked(root: Path, key: str, leases: Dict[str, dict], today: str, new_day: bool = False) -> str:
+    """The home-relative path of the log for the lease `key` (NN, or 'prime'
+    for a session that holds only the pen). A day already reserved gives the
+    same path again. With no reservation for `today`: new_day=True (a session
+    starting or resuming today) reserves the next number for today;
+    new_day=False (`lease.sh log`, a compaction) returns the latest reservation
+    — the file the session opened with, so a session that runs past midnight
+    keeps its log — and reserves today only when the lease has none at all.
+    CALLER HOLDS THE LOCK."""
+    lease = leases[key]
+    logs = _reservations(lease)
+    if today in logs:
+        return _log_file(today, logs[today])
+    if logs and not new_day:
+        day = max(logs)
+        return _log_file(day, logs[day])
+    n = _max_log_number(root, leases) + 1
+    logs[today] = n
+    lease["logs"] = logs
+    write_lease(root, key, lease)
+    return _log_file(today, n)
+
+
+def log_path(root: Path, sid: str, today: Optional[str] = None) -> str:
+    """`core/lease.sh log`: the calling session's log path for today, reserved
+    under the lock. A session with no window and no pen is refused with the
+    same sentence every other command gives it (resolve_lease)."""
+    today = today or time.strftime("%Y-%m-%d")
+    with lock(root):
+        leases = read_all(root)
+        key, _ = lease_of_session(leases, sid)
+        if key is None and leases.get("prime", {}).get("session_id") == sid:
+            key = "prime"
+        if key is None:
+            resolve_lease(leases, sid, pending_version(root))   # raises the no-window sentence when leases exist
+            raise Refused(UNLEASED_NAG)
+        return log_path_locked(root, key, leases, today)
 
 
 def orientation(root: Path, sid: Optional[str], visitor: bool = False, deadline: Optional[float] = None) -> str:
@@ -3501,6 +3608,7 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
                                     "reason": reason or "previous holder gone"}
         entry.update(record)
         fresh["history"] = (fresh.get("history") or []) + [entry]
+        fresh.pop("logs", None)      # the pen's reservation, if any, was the previous holder's
         fresh.update(dict({"session_id": sid}, **pen_bound()))
         write_lease(root, "prime", fresh)
     return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
@@ -3517,7 +3625,7 @@ VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take
 # `prime take` would move the pen to a read-only headless session that exits
 # in minutes. list/status stay allowed (they read).
 VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime",
-                   "rebase", "split", "adopt")
+                   "rebase", "split", "adopt", "log")
 # what makes, moves or removes a window's worktree in target/'s repositories: refused while the upgrade's safety copy
 # of target/ is not taken (safety-copy review 3, finding 4)
 # what makes or binds a window: refused while the upgrade is not stamped (upgrade.windows_wait_lease), all but
@@ -4339,6 +4447,14 @@ def main(argv: list) -> int:
         if not r["already"]:
             print(launch_line(root, r["nn"]))
         return 0
+    if cmd == "log":
+        sid = session_id_from_env()
+        if not sid:
+            sys.stderr.write("daedalus: %s\n" % LOG_NEEDS_SESSION); return 1
+        try:
+            print(log_path(root, sid)); return 0
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
     if cmd == "unpromoted":
         if not args or args[0].startswith("--"):
             sys.stderr.write("usage: core/lease.sh unpromoted <NN>\n"); return 2

@@ -462,6 +462,37 @@ with `!`.
 **Small.** `core/lease.sh` in a home whose upgrade stamp is absent no longer
 prints a shell error about the missing file before its own sentence.
 
+#### Added on trunk after the v0.7.0 tag — 2026-10-14: session logs keep the global counter; the vault commits inside the home repo
+
+**In short.** Session logs go back to one running number per vault,
+`YYYY-MM-DD-NNN.md`. The harness hands the number out. A vault that lives
+inside the Daedalus home repository can be committed again.
+
+- **The global counter is back, reserved by the harness.** v0.7.0 named logs
+  by window number. The operator ruled on 2026-10-14 that the sequence they navigate
+  by stays. The number is now reserved in the lease file under the lease
+  lock, at session start and by the new `core/lease.sh log`. No session
+  counts the directory, so two windows on one day never share a number. The
+  window number lives in the frontmatter only. A v0.7.0 log with a two-digit
+  tail is outside the sequence and is not counted. The session start says
+  the path: "Your session log for today is vault/sessions/…". The log is
+  keyed to the day the session opened: past midnight it keeps that file, a
+  compaction returns the same path, and a start or resume on the new day
+  takes the next number. A window swept before its log is written frees
+  the number.
+- **`core/vault-commit.sh` commits a vault the home repository tracks.** It
+  refused every layout but a vault with its own `.git`, while doctor accepted
+  a vault absorbed into the home repository. Now it commits in the home
+  repository, vault paths only. Other work staged anywhere in that
+  repository is refused by name first. So a home that sits inside a larger
+  repository never sweeps the operator's staged files into a vault commit.
+  The claim report resolves paths against that repository too. A vault
+  tracked by neither is refused by name. A tracked vault that an ignore
+  rule still matches is refused naming the file and the rule.
+- README and `docs/handoff-reverse-caller.md` say the same convention.
+- Tests: `core/tests/test_session_log.bats` (new), two nested-vault cases in
+  `test_vault_commit.bats`, and the `test_identity` pin on the naming.
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named
