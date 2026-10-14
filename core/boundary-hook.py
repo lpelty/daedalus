@@ -338,16 +338,44 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
                        % (", ".join(sorted(stray)), RESTART))
 
 
-def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[str]) -> None:
+def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[str],
+                    restart_only: Optional[List[str]] = None) -> None:
     """PROP-019: the gate reads config target.branch, and FAILS CLOSED. The one benign
     skip — the target has no origin remote, so there is nothing shared to protect — says
     so in those words. Every other state in which the comparison cannot be made is a
     refusal that names what could not be determined, never a note that reads like
     "nothing to check"."""
     sid = marker.get("session_id")
+    unrepairable = restart_only if restart_only is not None else []
+
+    def refuse(sentence: str) -> None:
+        # a comparison that cannot be made, which no action of the agent's repairs — a restart does (main: a
+        # re-fired Stop carries these as notes). A refusal from the lease resolution that names a command
+        # (claim, create, unset a variable) is the agent's to act on and never lands here.
+        reasons.append(sentence)
+        unrepairable.append(sentence)
+
     r = v.resolve_target(root, sid)
     if isinstance(r, v.Refused):
-        reasons.append("Promotion check could not evaluate: %s" % r.sentence)
+        if r.sentence.startswith(PENDING_PREFIX):
+            # A session started before the upgrade finished (leaselib.NO_WINDOW_PENDING): no window can be made
+            # for it, so nothing it does repairs this. Said once as a block, so the agent tells the operator;
+            # after that a note — the same shape as the release's config.yaml change (check_config).
+            b = load_boundary(root, sid)
+            if b.get("upgrade_pending_told") == r.sentence:
+                notes.append(r.sentence)
+            else:
+                reasons.append(r.sentence)
+                b["upgrade_pending_told"] = r.sentence
+                try:
+                    save_boundary(root, sid, b)
+                except OSError:
+                    pass
+            return
+        if r.sentence.startswith(RESOLUTION_FAILED):
+            refuse(COULD_NOT_EVALUATE + r.sentence)      # the seam did not answer or could not run
+        else:
+            reasons.append(COULD_NOT_EVALUATE + r.sentence)
         return
     if not isinstance(r, v.Resolved):
         return
@@ -357,8 +385,8 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
         notes.append("Promotion check does not apply in a lease worktree; trunk is guarded by promote.")
         return
     if "target_branch" not in marker:
-        reasons.append("Promotion check could not evaluate: this session's marker predates the branch-aware gate "
-                       "(no target_branch recorded), so the comparison base is unknown.%s" % RESTART)
+        refuse("Promotion check could not evaluate: this session's marker predates the branch-aware gate "
+               "(no target_branch recorded), so the comparison base is unknown.%s" % RESTART)
         return
     branch = marker.get("target_branch") or "main"
     base = marker.get("target_base") or ""
@@ -368,15 +396,15 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
                      "branch to protect. (Add a remote and restart the session to arm it.)")
         return
     if not base:
-        reasons.append("Promotion check could not evaluate: %s. The gate refuses rather than skips when it cannot "
-                       "compare; fix config target.branch or fetch origin, then restart the session."
-                       % (err or "origin/%s was not recorded at session start" % branch))
+        refuse("Promotion check could not evaluate: %s. The gate refuses rather than skips when it cannot "
+               "compare; fix config target.branch or fetch origin, then restart the session."
+               % (err or "origin/%s was not recorded at session start" % branch))
         return
     code, out, gerr = v.run(["git", "-C", str(t), "rev-list", "--count", base + ".." + branch])
     if code != 0:
-        reasons.append("Promotion check could not evaluate: git rev-list %s..%s failed in the target (%s). The gate "
-                       "refuses rather than skips when it cannot compare.%s"
-                       % (base[:12], branch, (gerr or "").strip().splitlines()[-1:] or ["no output"], RESTART))
+        refuse("Promotion check could not evaluate: git rev-list %s..%s failed in the target (%s). The gate "
+               "refuses rather than skips when it cannot compare.%s"
+               % (base[:12], branch, (gerr or "").strip().splitlines()[-1:] or ["no output"], RESTART))
         return
     if out.strip() not in ("", "0"):
         # confirm rewrites the marker's target_base after a push (§7.2 step 6), so a promoted merge is
@@ -384,6 +412,10 @@ def check_promotion(root: Path, marker: dict, reasons: List[str], notes: List[st
         reasons.append("Target %s moved this session (%s commit(s) past origin/%s at session start) — trunk is "
                        "reached only through promote; work on a window's branch.%s" % (branch, out.strip(), branch, RESTART))
 
+
+PENDING_PREFIX = "This session started before the upgrade to "      # leaselib.NO_WINDOW_PENDING's opening
+COULD_NOT_EVALUATE = "Promotion check could not evaluate: "
+RESOLUTION_FAILED = "the lease resolution "                          # verifylib.resolve_target's two seam failures
 
 NEVER_FIRED = ("you changed %s, which window %s%s had already changed, and the warning never fired "
                "(the pre-write hook timed out?). Message that window before you go on.")
@@ -731,6 +763,7 @@ def main() -> int:
     marker = v.read_marker(root, sid)
     reasons: List[str] = []
     notes: List[str] = []
+    restart_only: List[str] = []       # reasons in `reasons` that only a restart repairs (check_promotion)
     try:
         if marker is None:
             marker = {"session_id": sid, "protected_status": [], "config_sha": v.sha256_file(root / "config.yaml"),
@@ -746,9 +779,17 @@ def main() -> int:
             if not visitor:
                 check_backstop(root, sid, reasons, notes)
             check_distribution(root, reasons)
-            check_promotion(root, marker, reasons, notes)
+            check_promotion(root, marker, reasons, notes, restart_only)
     except Exception:
         return 0
+    if event == "Stop" and payload.get("stop_hook_active") and restart_only:
+        # Claude Code re-fires Stop after a blocked one with stop_hook_active true. A promotion check that could
+        # not evaluate for a reason only a restart repairs (a missing base, a tree not known, a marker from
+        # before the gate) blocked that Stop again and re-prompted the agent without end (another deployment,
+        # 2026-10-13: 15+ times in one session). Once said, such a reason rides along as a note. Everything
+        # the agent can repair — protected files, config, evidence, a refusal that names a command — still blocks.
+        notes.extend(r for r in reasons if r in restart_only)
+        reasons = [r for r in reasons if r not in restart_only]
     if visitor and reasons and event == "Stop":
         # §8.5: a direct-call session is read-only and cannot have caused any of this — say
         # it, never block (a blocked Stop in a -p session spins until max_turns). Stop only:

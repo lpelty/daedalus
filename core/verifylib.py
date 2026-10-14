@@ -589,7 +589,7 @@ def lease_context(root: Path, session_id: Optional[str]) -> dict:
     refused = None
     if session_id and leases:
         try:
-            ll.resolve_lease(leases, session_id)
+            ll.resolve_lease(leases, session_id, ll.pending_version(root))
         except ll.Refused as e:
             refused = str(e)
     ctx.update({"leases": leases, "changed": changed, "mine": mine,

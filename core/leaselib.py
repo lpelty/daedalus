@@ -48,6 +48,13 @@ class Refused(Exception):
 
 BOARD_UNRENDERED = "The lease board could not be rendered: %s"
 
+# A session that started before the upgrade finished holds no window and none opens for it (spec §14: create and
+# claim are refused until the stamp is written), so the ordinary no-window remedy is impossible there; the Stop
+# hook repeated it every turn on another deployment (2026-10-13). What that session is told instead:
+NO_WINDOW_PENDING = ("This session started before the upgrade to %s finished, so it holds no window and none opens "
+                     "for it. Tell the operator to close this session and start a new one; that start finishes the "
+                     "upgrade.")
+
 # SessionStart's two lease-lock waits are bounded by the hook's budget (§4.2;
 # plan 2 Decision 18). What each says when the lock stays busy past it:
 LOCK_BUSY_AT_START = ("This window was not bound at start: the lease lock stayed busy past the start budget (a "
@@ -305,11 +312,36 @@ def bad_hint_sentence(hint: str) -> str:
     return "`DAEDALUS_LEASE=%s` is not a window number (two digits, 01–99)" % hint
 
 
-def resolve_lease(leases: Dict[str, dict], sid: str) -> Tuple[Optional[str], Optional[dict]]:
+_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def pending_version(root: Path) -> Optional[str]:
+    """The release waiting for the next session start — VERSION reads X.Y.Z and state/upgraded-to (trimmed) is
+    not it (lib.sh upgrade_pending, session-start.py upgrade_pending: the same rule) — or None. Read where
+    resolve_lease is called with a root in hand; resolve_lease itself stays pure. Reads the two files directly
+    and never imports upgrade.py: resolve runs on every target_path, and a home at its VERSION must not load the
+    module (test_session_start "a stub that records its import stays silent")."""
+    try:
+        ver = (root / "VERSION").read_text().split("\n", 1)[0].strip()
+    except OSError:
+        return None
+    if not _VERSION_RE.fullmatch(ver):
+        return None
+    try:
+        done = (root / "state" / "upgraded-to").read_text().strip()
+    except OSError:
+        done = ""
+    return ver if done != ver else None
+
+
+def resolve_lease(leases: Dict[str, dict], sid: str,
+                  pending: Optional[str] = None) -> Tuple[Optional[str], Optional[dict]]:
     """§4.4 steps 2–3 over an already-read lease dict. Pure: no I/O, no lock.
     (nn, lease) when the session is bound; (None, None) when no lease file
     exists or the session holds only the pen; Refused for every case that
-    must fail closed. The PreToolUse hooks call this on lease_context's read."""
+    must fail closed. The PreToolUse hooks call this on lease_context's read.
+    `pending` (pending_version): the no-window refusal names the upgrade
+    instead of create/claim, which are refused until it finishes."""
     if not leases:
         return None, None
     numbered = {k: d for k, d in leases.items() if k != "prime"}
@@ -340,6 +372,8 @@ def resolve_lease(leases: Dict[str, dict], sid: str) -> Tuple[Optional[str], Opt
     # Said whenever a session holds no window while lease files exist — whatever
     # the number of live sessions. The old sentence blamed "several sessions";
     # the window of 2026-10-10 repeated that to the operator as its cause (§4.4).
+    if pending:
+        raise Refused(NO_WINDOW_PENDING % pending)
     raise Refused("This session holds no window: no lease names it and it does not hold the pen. "
                   "Run `core/lease.sh create` and then `claim <NN>`.")
 
@@ -367,7 +401,7 @@ def resolve(root: Path, sid: Optional[str], name: str) -> Path:
         sys.stderr.write("daedalus: no session — using the prime's checkout target/%s (%d window%s live)\n"
                          % (name, live, "" if live == 1 else "s"))
         return default
-    nn, lease = resolve_lease(leases, sid)
+    nn, lease = resolve_lease(leases, sid, pending_version(root))
     if lease is None:
         return default
     return root / str(lease.get("worktree") or ("worktrees/%s" % nn)) / name
@@ -1643,22 +1677,7 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
             write_lease(root, nn, lease)
             return "Window %s released; this window is done — close it." % nn
         trunks = lease.get("trunks") or {}
-        subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
-        # Uncommitted work is work too (§4.5): `git worktree remove` refuses a
-        # dirty tree on its own, and the --force below would bypass that
-        # refusal silently, so it is gated and named here first (Task 4 review).
-        dirty = []
-        for repo in trunks:
-            files = dirty_files(root / "worktrees" / nn / repo)
-            if files:
-                dirty.append((repo, files))
-        problems = []
-        if subjects:
-            problems.append("has %d unpromoted commit%s: %s"
-                            % (len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects)))
-        for repo, files in dirty:
-            problems.append("has uncommitted changes in worktrees/%s/%s (%d file%s: %s)"
-                            % (nn, repo, len(files), "" if len(files) == 1 else "s", ", ".join(files)))
+        subjects, dirty, problems = unpromoted_work(root, nn, lease)
         if problems and not force:
             raise Refused("Window %s %s. Add --force to delete them." % (nn, ", and ".join(problems)))
         out = []
@@ -1689,6 +1708,46 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
         _remove_lease_files(root, nn)
         out.append("Window %s released; its worktree and branch are deleted." % nn)
         return "\n".join(out)
+
+
+def unpromoted_work(root: Path, nn: str, lease: dict) -> Tuple[list, list, list]:
+    """What `release --remove` would delete: the window's commits not on its trunk (subjects), its uncommitted
+    files per repo, and the same as the sentences the refusal and the `unpromoted` report are built from.
+    Uncommitted work is work too (§4.5): `git worktree remove` refuses a dirty tree on its own, and --force
+    would bypass that refusal silently, so it is named here first (Task 4 review)."""
+    trunks = lease.get("trunks") or {}
+    subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
+    dirty = []
+    for repo in trunks:
+        files = dirty_files(root / "worktrees" / nn / repo)
+        if files:
+            dirty.append((repo, files))
+    problems = []
+    if subjects:
+        problems.append("has %d unpromoted commit%s: %s"
+                        % (len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects)))
+    for repo, files in dirty:
+        problems.append("has uncommitted changes in worktrees/%s/%s (%d file%s: %s)"
+                        % (nn, repo, len(files), "" if len(files) == 1 else "s", ", ".join(files)))
+    return subjects, dirty, problems
+
+
+def unpromoted_report(root: Path, token: str) -> str:
+    """`core/lease.sh unpromoted <NN>`: the report-only first step of "release NN and delete its work" — what
+    `release NN --remove` would delete, deleting nothing. A verb of its own because `release --remove` was denied
+    by Claude Code's auto-mode classifier before it ran (another deployment, 2026-10-13), and because with nothing
+    unpromoted it deletes at once instead of reporting. Read-only: a shared lock, any session, a visitor too."""
+    with lock(root, shared=True):
+        leases = read_all(root)
+        nn = number_of(leases, token, "unpromoted")
+        lease = leases.get(nn)
+        if lease is None:
+            raise Refused("There is no window %s." % nn)
+        _, _, problems = unpromoted_work(root, nn, lease)
+    if not problems:
+        return ("Window %s has no unpromoted commits and no uncommitted changes; `core/lease.sh release %s --remove` "
+                "deletes only its worktree and branch." % (nn, nn))
+    return "Window %s %s. `core/lease.sh release %s --remove --force` deletes them." % (nn, ", and ".join(problems), nn)
 
 
 def _holder_or_shell(root: Path, nn: str, lease: dict, sid: Optional[str], cmd: str) -> None:
@@ -3633,8 +3692,10 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
     elif mine and numbered[mine].get("released"):
         lines.append("Window %s is released; this window is done — close it." % mine)
     elif sid is not None and not mine and numbered:
-        # a session with no lease is nagged; an operator shell (sid None) is not a session
-        lines.append(UNLEASED_NAG)
+        # a session with no lease is nagged; an operator shell (sid None) is not a session. While the upgrade
+        # is pending the nag's remedy is refused (create/claim), so the sentence names the upgrade instead.
+        pv = pending_version(root)
+        lines.append(NO_WINDOW_PENDING % pv if pv else UNLEASED_NAG)
     lines.append(MESSAGE_LINE)
     return "\n".join(lines)
 
@@ -4278,6 +4339,13 @@ def main(argv: list) -> int:
         if not r["already"]:
             print(launch_line(root, r["nn"]))
         return 0
+    if cmd == "unpromoted":
+        if not args or args[0].startswith("--"):
+            sys.stderr.write("usage: core/lease.sh unpromoted <NN>\n"); return 2
+        try:
+            print(unpromoted_report(root, args[0])); return 0
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
     if cmd == "waiting-work":
         try:
             trunk = v.target_branch(root)

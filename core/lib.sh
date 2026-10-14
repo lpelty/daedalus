@@ -39,7 +39,7 @@ daedalus_version() {
 upgrade_pending() {
   local ver done_ver
   ver="$(daedalus_version)" || return 1
-  done_ver="$(tr -d '[:space:]' < "$DAEDALUS_HOME/state/upgraded-to" 2>/dev/null || true)"
+  done_ver="$(tr -d '[:space:]' 2>/dev/null < "$DAEDALUS_HOME/state/upgraded-to" || true)"
   [ "$done_ver" != "$ver" ]
 }
 

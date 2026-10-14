@@ -256,6 +256,7 @@ liveness reads (`registry shape`).
 
 `core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
 `alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,
+`unpromoted <NN>` (what `release <NN> --remove` would delete; deletes nothing),
 `release <NN>`, `done <NN>`, `sweep` (removes windows with no live session),
 `adopt <branch>` (an in-flight branch in `target/` becomes a window) and
 `prime take`. `leases.stale_after` in `config.yaml` (default `4h`) is

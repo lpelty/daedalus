@@ -1677,3 +1677,28 @@ print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() 
   run env TZ=Asia/Tokyo PATH="$BATS_TEST_TMPDIR/bin:$PATH" python3 "$LL" liveness 02
   [ "$output" = "live" ] || { echo "lease under TZ=Asia/Tokyo: $output"; return 1; }
 }
+
+@test "unpromoted <NN>: names a window's unpromoted commits and uncommitted files without deleting anything, says so when there are none, refuses a window that does not exist, and runs for a visitor" {
+  # The report-only half of "release NN --remove": the delete procedure's first step. `release --remove` itself
+  # was denied by Claude Code's auto-mode classifier on another deployment (2026-10-13) before it ran, and with
+  # nothing unpromoted it deletes at once rather than reporting — so the report is a verb of its own.
+  LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run LS unpromoted 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Window 01 has no unpromoted commits and no uncommitted changes; \`core/lease.sh release 01 --remove\` deletes only its worktree and branch." ] || { echo "$output"; return 1; }
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
+  printf 'd\n' >> "$W/a.txt"; printf 'u\n' > "$W/untracked.txt"
+  run LS unpromoted 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Window 01 has 1 unpromoted commit: \"unmerged work\", and has uncommitted changes in worktrees/01/thing (2 files: a.txt, untracked.txt). \`core/lease.sh release 01 --remove --force\` deletes them." ] || { echo "$output"; return 1; }
+  [ -d "$W" ]; [ -f "$W/untracked.txt" ]; [ -f "$DAEDALUS_HOME/state/leases/01.json" ]
+  git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null
+  DIRECT_CALL_ID=visit run LS unpromoted 01
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"1 unpromoted commit"*) : ;; *) echo "$output"; return 1 ;; esac
+  run LS unpromoted 07
+  [ "$status" -ne 0 ]; case "$output" in *"There is no window 07."*) : ;; *) echo "$output"; return 1 ;; esac
+  run LS unpromoted
+  [ "$status" -ne 0 ]; case "$output" in *"usage: core/lease.sh unpromoted <NN>"*) : ;; *) echo "$output"; return 1 ;; esac
+}

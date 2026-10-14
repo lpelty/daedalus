@@ -420,6 +420,48 @@ state changes shape, so no upgrade runs at the next start.
 - The README's example for a deployment's own deny rules in `.claude/settings.local.json` now shows the absolute `//` form. The single slash it showed is not absolute in Claude Code's rules.
 - That example's `Write(...)` line is gone: Claude Code checks file writes against `Edit(path)` rules only and never consults a `Write(path)` rule.
 
+#### Added on trunk after the v0.7.0 tag — 2026-10-13: the Stop hook stops looping; a report-only delete step
+
+Taken the same way as v0.7.0: `git pull --ff-only` in the Daedalus home,
+then a new session. VERSION stays 0.7.0, so no upgrade step runs.
+
+**The Stop hook no longer buries a session that was open while the upgrade
+waited.** A session started before the upgrade finished holds no window.
+None opens for it until the upgrade is done: `create` and `claim` are
+refused. Its Stop check used to block every turn with "run `core/lease.sh
+create` and then `claim <NN>`", the one thing the release forbids. Claude
+Code re-fired the Stop each time: more than 15 times in a row on one
+deployment (2026-10-13). Now that session is told once, as a block: "This
+session started before the upgrade to 0.7.0 finished, so it holds no window
+and none opens for it. Tell the operator to close this session and start a
+new one; that start finishes the upgrade." After that it is only a note.
+The board above the prompt, `core/lease.sh list`, the per-prompt context
+and `lib.sh target_path` say the same sentence in that state. Once the
+upgrade is stamped, the ordinary no-window refusal returns, because its
+remedy is then possible.
+
+**A re-fired Stop is not blocked again by a check only a restart repairs.**
+Claude Code marks the Stop it fires after a blocked one (`stop_hook_active`).
+On that Stop, a "Promotion check could not evaluate" reason that no action
+of the agent's repairs becomes a note instead of a second block: a missing
+comparison base, a tree not known, a marker from before the gate. Everything
+the agent can repair still blocks on every Stop: protected files changed,
+the gate definition changed, evidence no gate produced, a refusal that names
+a command to run.
+
+**`core/lease.sh unpromoted <NN>`** reports what `release <NN> --remove`
+would delete, the window's unpromoted commits and uncommitted files, and
+deletes nothing. It is now the first step of "release window N and delete
+its work" in CLAUDE.md. Before, that step was `release --remove` itself.
+Claude Code's auto-mode permission classifier denied it before it ran on
+one deployment, and with nothing unpromoted it deletes at once instead of
+reporting. The procedure now also says what to do when the permission
+system refuses the delete: say so, and give the operator the line to run
+with `!`.
+
+**Small.** `core/lease.sh` in a home whose upgrade stamp is absent no longer
+prints a shell error about the missing file before its own sentence.
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named

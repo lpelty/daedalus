@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # The lease fixture helper is loaded for live_pid / ps_ms / teardown_live only —
 # this suite keeps its own setup() (its own target, vault and marker shape).
+bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
 teardown() { teardown_live; chmod -R u+w "$DAEDALUS_HOME/state" 2>/dev/null || true; }
 
@@ -666,4 +667,23 @@ for rule in ("Edit(/core/)", "Edit(./core/)", "Edit(//%s/core/)" % root):
     assert v.protected_globs(root)[0] == "core/**", (rule, v.protected_globs(root))
     assert v.is_protected(root, root / "core" / "x.py"), rule
 PY
+}
+
+@test "a Stop re-fired by Claude Code (stop_hook_active true) is not blocked again by a promotion check that could not evaluate — the agent cannot repair that; a protected-file change still blocks the re-fired Stop" {
+  # Claude Code sets stop_hook_active on the Stop it fires after a blocked one. A reason only a restart can
+  # repair re-prompted the agent without end (another deployment, 2026-10-13: 15+ times in one session).
+  python3 - "$DAEDALUS_HOME/state/session-s1.json" <<'PY'
+import json, sys
+p = sys.argv[1]; m = json.load(open(p)); m.pop("target_branch", None); json.dump(m, open(p, "w"))
+PY
+  run --separate-stderr bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s1\",\"stop_hook_active\":false}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ] || { echo "status $status: $output $stderr"; return 1; }
+  case "$stderr" in *"Promotion check could not evaluate: this session's marker predates the branch-aware gate"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run --separate-stderr bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s1\",\"stop_hook_active\":true}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 0 ] || { echo "status $status: $output $stderr"; return 1; }
+  case "$output" in *"Promotion check could not evaluate: this session's marker predates the branch-aware gate"*) : ;; *) echo "the reason must survive as a note: $output"; return 1 ;; esac
+  printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  run --separate-stderr bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s1\",\"stop_hook_active\":true}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
+  [ "$status" -eq 2 ] || { echo "status $status: $output $stderr"; return 1; }
+  case "$stderr" in *"CLAUDE.md"*) : ;; *) echo "$stderr"; return 1 ;; esac
 }

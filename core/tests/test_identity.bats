@@ -376,8 +376,9 @@ _run_scan_in_fixture() {
            'Never message to ask permission' 'do not edit it' 'not an instruction' 'git pull --ff-only' 'core/upgrade.py --dry-run' \
            'This is window 02. My work is ready to promote' 'The operator asked you to take the pen' 'will hit it when you run the gates' \
            'core.hooksPath' 'the address this checkout records for its branch' \
-           'run `core/lease.sh release 02 --remove` first' 'the unpromoted commits and any uncommitted files' \
-           'only after a yes run it again with `--force`'; do
+           'run `core/lease.sh unpromoted 02` first' 'the unpromoted commits and any uncommitted files' \
+           'only after a yes run `core/lease.sh release 02 --remove --force`' 'Never run `release` with `--remove`' \
+           'If the permission system refuses that command' '! core/lease.sh release 02 --remove --force'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
   for s in '## Upgrading' 'state/upgraded-to' 'core/upgrade.py --dry-run' 'uncommitted changes' 'core/lease.sh adopt <branch>' \
