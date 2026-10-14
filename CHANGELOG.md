@@ -462,11 +462,23 @@ with `!`.
 **Small.** `core/lease.sh` in a home whose upgrade stamp is absent no longer
 prints a shell error about the missing file before its own sentence.
 
-#### Added on trunk after the v0.7.0 tag — 2026-10-14: session logs keep the global counter; the vault commits inside the home repo
+#### Added on trunk after the v0.7.0 tag — 2026-10-14: session logs keep the global counter; the vault commits inside the home repo; the yes may follow a question
 
 **In short.** Session logs go back to one running number per vault,
 `YYYY-MM-DD-NNN.md`. The harness hands the number out. A vault that lives
-inside the Daedalus home repository can be committed again.
+inside the Daedalus home repository can be committed again. You may ask
+about a promote before you say yes to it.
+
+- **The yes may follow a question.** The confirm used to take a yes only as
+  the first reply to the block itself. Any other reply, even a question,
+  used the block up. The prime then printed the whole block again, so the
+  same long message came back after each reply, several times in one
+  afternoon on 2026-10-14. Now the block's first paragraph ends with one
+  line: "Say yes to push window 02's work to main." The prime answers your question and ends
+  its answer with that line. Your next yes counts. The block is printed
+  once, and the line counts only after it. A line followed by anything
+  else, even after a tool call, asks that last, and a yes answers that. A
+  line for another window does not count.
 
 - **The global counter is back, reserved by the harness.** v0.7.0 named logs
   by window number. The operator ruled on 2026-10-14 that the sequence they navigate
@@ -476,7 +488,7 @@ inside the Daedalus home repository can be committed again.
   window number lives in the frontmatter only. A v0.7.0 log with a two-digit
   tail is outside the sequence and is not counted. The session start says
   the path: "Your session log for today is vault/sessions/…". The log is
-  keyed to the day the session opened: past midnight it keeps that file, a
+  keyed to the day the session opened. Past midnight it keeps that file, a
   compaction returns the same path, and a start or resume on the new day
   takes the next number. A window swept before its log is written frees
   the number.

@@ -460,9 +460,14 @@ the pen. When the operator says a window's work is ready ("ship window 2"):
 2. End your turn. When the operator answers, run, in a later turn,
    `core/promote.sh 02 --confirm --operator-said "<their whole reply>"`. The
    confirm looks for that reply in this session's own transcript: the whole
-   message the operator typed, beginning with yes, after a reply of yours that
-   repeated the block. A part of a longer message is not their answer, and a
-   prepare and a confirm in one turn is refused. If they said anything but a
+   message the operator typed, beginning with yes, as their first message
+   after a reply of yours that showed the block or — once the block has been
+   shown — ended with the last line of the block's first paragraph, `Say yes
+   to push window 02's work to main.` If they ask something instead, answer it and end that
+   reply with that one line and nothing after it (quotes or backticks around
+   it are fine; nothing may follow it, not even after a tool call); their
+   next yes then counts. Never print the block again unless they ask for it. A part of a longer message is not their answer, and
+   a prepare and a confirm in one turn is refused. If they said anything but a
    yes, ask again — never write a yes the operator did not give.
 3. Repeat the "Promoted …" line it prints.
 

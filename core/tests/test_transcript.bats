@@ -27,7 +27,7 @@ except tl.NoTerminal as e:
 PY
 }
 
-# yes_check <file> <quote> <after-epoch> [shown 1|0] [shown text] — ACCEPTED <operator uuid> <shown uuid> | NOTFOUND | NOTSHOWN | UNREADABLE <why> | MISSING
+# yes_check <file> <quote> <after-epoch> [shown 1|0] [shown text] [shown end] — ACCEPTED <operator uuid> <shown uuid> | NOTFOUND | NOTSHOWN | UNREADABLE <why> | MISSING
 yes_check() {
   python3 - "$SRC" "$@" <<'PY'
 import sys
@@ -36,8 +36,9 @@ import transcriptlib as tl
 f, quote, after = sys.argv[2], sys.argv[3], float(sys.argv[4])
 shown = (sys.argv[5] if len(sys.argv) > 5 else "1") == "1"
 mark = sys.argv[6] if len(sys.argv) > 6 else None
+end = sys.argv[7] if len(sys.argv) > 7 else None
 try:
-    r = tl.find_operator_words(f, quote, after, shown, mark)
+    r = tl.find_operator_words(f, quote, after, shown, mark, shown_end=end)
     print("ACCEPTED", r["transcript_ref"]["uuid"], (r["shown_ref"] or {}).get("uuid") or "")
 except tl.Missing:
     print("MISSING")
@@ -409,4 +410,65 @@ PY
   cp "$F.base" "$F"; u="$(tx "$F" operator "a docs-only change" "$(plus "$T0" 5)")"
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl; print(tl.operator_entry(sys.argv[2], sys.argv[3]))' "$SRC" "$F" "$u"
   [ "$output" = "a docs-only change" ] || { echo "skip genuine: $output"; return 1; }
+}
+
+@test "the operator may ask first: after their question, a reply of the prime's that ENDS with the invitation line re-arms the check and their next yes is accepted; the line buried before another question, or another window's line, does not; the block's own turn still counts" {
+  mark="Ready to promote window 02's work onto main"; line="Say yes to push window 02's work to main"
+  block="Ready to promote window 02's work onto main. Nothing has been pushed. Say yes to push window 02's work to main. For the record: merge commit abc1234."
+  tx "$F" assistant "$block" "$(plus "$T0" 1)" >/dev/null
+  tx "$F" operator "What did the reviewer find?" "$(plus "$T0" 2)" >/dev/null
+  again="$(tx "$F" assistant "One medium: a status read took a failed git call as clean. Fixed in the last commit.  Say yes to push window 02's work to main." "$(plus "$T0" 3)")"
+  said="$(tx "$F" operator "yes" "$(plus "$T0" 4)")"
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "ACCEPTED $said $again" ] || { echo "asked first: $output"; return 1; }
+  run yes_check "$F" "yes" "$T0" 1 "$mark"; [ "$output" = "NOTSHOWN" ] || { echo "no end named: $output"; return 1; }
+  rm -f "$F"
+  tx "$F" assistant "$block" "$(plus "$T0" 1)" >/dev/null
+  tx "$F" operator "What did the reviewer find?" "$(plus "$T0" 2)" >/dev/null
+  tx "$F" assistant "One medium. Say yes to push window 02's work to main. Separately: shall I update the CHANGELOG now?" "$(plus "$T0" 3)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 4)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "NOTSHOWN" ] || { echo "line buried: $output"; return 1; }
+  rm -f "$F"
+  tx "$F" assistant "$block" "$(plus "$T0" 1)" >/dev/null
+  tx "$F" operator "and window 3?" "$(plus "$T0" 2)" >/dev/null
+  tx "$F" assistant "Window 03 is ready too. Say yes to push window 03's work to main." "$(plus "$T0" 3)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 4)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "NOTSHOWN" ] || { echo "other window: $output"; return 1; }
+  tx "$F" assistant "Then window 02 first. Say yes to push window 102's work to main." "$(plus "$T0" 5)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 6)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "NOTSHOWN" ] || { echo "no word boundary: $output"; return 1; }
+  rm -f "$F"
+  shown="$(tx "$F" assistant "$block" "$(plus "$T0" 1)")"
+  said="$(tx "$F" operator "Yes." "$(plus "$T0" 2)")"
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "ACCEPTED $said $shown" ] || { echo "block itself: $output"; return 1; }
+}
+
+@test "the invitation line counts only once the block was shown in a reply, however the line is wrapped (quotes, bold, a code span, an emoji after it, a curly apostrophe), and only as the last thing the prime said in the turn: a later entry asking something else clears it; the line with the block only in a tool result is NOTSHOWN" {
+  mark="Ready to promote window 02's work onto main"; line="Say yes to push window 02's work to main"
+  block="Ready to promote window 02's work onto main. Nothing has been pushed. Say yes to push window 02's work to main. For the record: merge commit abc1234."
+  tx "$F" tool-result "$block" "$(plus "$T0" 1)" >/dev/null
+  tx "$F" assistant "Say yes to push window 02's work to main." "$(plus "$T0" 2)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 3)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "NOTSHOWN" ] || { echo "block never shown: $output"; return 1; }
+  while IFS= read -r form; do
+    rm -f "$F"
+    tx "$F" assistant "$block" "$(plus "$T0" 1)" >/dev/null
+    tx "$F" operator "What did the reviewer find?" "$(plus "$T0" 2)" >/dev/null
+    again="$(tx "$F" assistant "One medium, fixed. $form" "$(plus "$T0" 3)")"
+    said="$(tx "$F" operator "yes" "$(plus "$T0" 4)")"
+    run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "ACCEPTED $said $again" ] || { echo "form <$form>: $output"; return 1; }
+  done <<'FORMS'
+"Say yes to push window 02's work to main."
+**Say yes to push window 02's work to main.**
+`Say yes to push window 02's work to main.`
+Say yes to push window 02's work to main. 🚀
+Say yes to push window 02’s work to main.
+FORMS
+  rm -f "$F"
+  tx "$F" assistant "$block" "$(plus "$T0" 1)" >/dev/null
+  tx "$F" operator "What did the reviewer find?" "$(plus "$T0" 2)" >/dev/null
+  tx "$F" assistant "One medium, fixed. Say yes to push window 02's work to main." "$(plus "$T0" 3)" >/dev/null
+  tx "$F" tool-result "branch list" "$(plus "$T0" 4)" >/dev/null
+  tx "$F" assistant "Also: should I delete the window-03 branch?" "$(plus "$T0" 5)" >/dev/null
+  tx "$F" operator "yes" "$(plus "$T0" 6)" >/dev/null
+  run yes_check "$F" "yes" "$T0" 1 "$mark" "$line"; [ "$output" = "NOTSHOWN" ] || { echo "asked something else after: $output"; return 1; }
 }

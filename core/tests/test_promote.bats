@@ -15,7 +15,7 @@ teardown() { teardown_live; }
   [ "${lines[1]}" = 'Window 02: 2 commits — "capture: read error before error_message", "test: error field fallback".' ]
   case "${lines[2]}" in "Tests on the merged result: PASS (1 gate, "*" second"*").") : ;; *) echo "${lines[2]}"; return 1 ;; esac
   [ "${lines[3]}" = "Reviewer on the merged change: STANDS — no high findings." ]
-  [ "${lines[4]}" = "Nothing has been pushed. Say yes to push." ]
+  [ "${lines[4]}" = "Nothing has been pushed. Say yes to push window 02's work to main." ]
   pid="$(pj promote_id)"; rid="$(pj run_id)"; m="$(pj merge_sha)"; t="$(pj trunk_sha_at_prepare)"; fp="$(pj fp_merged)"
   case "$pid" in 02-[0-9]*-[0-9]*-[0-9a-f][0-9a-f][0-9a-f]) : ;; *) echo "promote id $pid"; return 1 ;; esac
   case "${lines[5]}" in "For the record: merge commit ${m:0:7} onto trunk ${t:0:7} (origin/main, fetched "[0-9][0-9]:[0-9][0-9]");") : ;; *) echo "${lines[5]}"; return 1 ;; esac
@@ -386,7 +386,7 @@ PY
   : > "$TXP"; tx "$TXP" operator "yes ship it" "$(plus "$P" -30)" >/dev/null; tx "$TXP" assistant "$B" "$(plus "$P" 2)" >/dev/null
   c "yes ship it"; refused "I could not find those words as something the operator typed after the promote block was shown."
   : > "$TXP"; tx "$TXP" tool-result "prepared" "$(plus "$P" 1)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 2)" >/dev/null
-  c "yes ship it"; refused "The promote block was not shown to the operator before that yes (prepare and confirm ran in one turn, no reply since the prepare repeated the block, or the operator's reply to it came before that yes). Show the block, then ask."
+  c "yes ship it"; refused "The promote block was not shown to the operator before that yes: prepare and confirm ran in one turn, the operator's reply to the block came before that yes, or your last words before it were not the line. Show the block once; after that, end every reply of yours with the line \"Say yes to push window 02's work to main.\" and nothing after it, then ask again."
   : > "$TXP"; tx "$TXP" assistant "Shall I go ahead?" "$(plus "$P" 1)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 2)" >/dev/null
   c "yes ship it"; refused "The promote block was not shown to the operator before that yes"
   tx "$TXP" assistant "$B" "$(plus "$P" 3)" >/dev/null; tx "$TXP" malformed "x" "$(plus "$P" 4)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 5)" >/dev/null
@@ -912,4 +912,32 @@ PY
   done
   grep -q '^## v0.7.0 — ' "$R/CHANGELOG.md"; grep -qF 'core/promote.sh' "$R/CHANGELOG.md"
   ! grep -qi 'the operator merges' "$R/CLAUDE.md" "$R/README.md"
+}
+
+
+@test "confirm (transcribed): the operator asks first; the prime's answer that ends with the invitation line the block prints re-arms the check, and the next yes is pushed — an answer that does not end with it is refused naming the line" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Nothing has been pushed. Say yes to push window 02's work to main."*) : ;; *) echo "block lacks the line: $output"; return 1 ;; esac
+  m="$(pj merge_sha)"; rid="$(pj run_id)"; P="$(pj prepared_ts)"; before="$(origin_main)"
+  tx "$TXP" tool-result "prepared" "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" assistant "$output" "$(plus "$P" 2)" >/dev/null
+  tx "$TXP" operator "What did the reviewer find?" "$(plus "$P" 3)" >/dev/null
+  tx "$TXP" assistant "One medium and three low; none high. Say yes to push window 02's work to main, or ask about a finding." "$(plus "$P" 4)" >/dev/null
+  tx "$TXP" operator "yes" "$(plus "$P" 5)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "The promote block was not shown to the operator before that yes: prepare and confirm ran in one turn, the operator's reply to the block came before that yes, or your last words before it were not the line. Show the block once; after that, end every reply of yours with the line \"Say yes to push window 02's work to main.\" and nothing after it, then ask again."
+  [ "$(origin_main)" = "$before" ]
+  shown="$(tx "$TXP" assistant "The medium was a fail-open read of git status, fixed in the last commit. Say yes to push window 02's work to main." "$(plus "$P" 6)")"
+  said="$(tx "$TXP" operator "Yes." "$(plus "$P" 7)")"
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "Yes."
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"Promoted window 02's work to main (merge commit ${m:0:7}; evidence $rid)."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]
+  python3 - "$DAEDALUS_HOME" "$rid" "$said" "$shown" <<'PY'
+import json, sys
+home, rid, said, shown = sys.argv[1:5]
+r = json.load(open("%s/state/evidence/%s/run.json" % (home, rid)))["promotion"]
+assert r["operator_said"] == "Yes." and r["transcript_ref"]["uuid"] == said and r["shown_ref"]["uuid"] == shown, r
+PY
 }

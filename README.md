@@ -297,7 +297,11 @@ until it is released.
 - `confirm: transcribed` (the default) — the prime types the operator's reply
   with `--operator-said "…"`, and promote requires it in the prime's own
   session transcript as a whole message the operator typed, which begins with
-  yes, after a reply of the prime's that repeated the block, in a later turn.
+  yes, as their first message after a reply of the prime's that showed the
+  block or, once the block has been shown, ended with the last line of the
+  block's first paragraph (`Say yes to push window 02's work to main.` — the operator may ask
+  questions first; each answer ends with that line and nothing after it), in
+  a later turn.
   A transcript this Claude Code build writes in a shape the parser cannot read
   is refused, never passed — switch to `promote.confirm: tty` until the parser
   is updated. The transcript directory is closed to writes by both the Bash

@@ -12,7 +12,9 @@ bound_epoch — always an absolute instant, never a local stamp the reading
 process's TZ would move) and — for
 promote — as the operator's first reply to an assistant entry with text that
 follows the cut-off and carries the block's opening words (the turn in which
-the prime showed it; a turn between them answered the block instead). A
+the prime showed it) or ENDS with the block's one-line invitation (the prime's
+answer to a question of theirs, asking again — the operator may ask first,
+2026-10-14; a turn between them answered that turn instead). A
 transcript this build cannot read fails CLOSED, never a pass.
 
 One parser (A12): capture.scan_entries reads the lines; this module decides who
@@ -100,7 +102,8 @@ class NotSubmitted(NotFound):
 
 
 class NotShown(Exception):
-    """The words were typed after the cut-off, but not as the operator's first reply to a turn showing the block."""
+    """The words were typed after the cut-off, but not as the operator's first reply to a turn showing the block
+    or ending with its invitation line."""
 
 
 class NoTerminal(Exception):
@@ -210,9 +213,12 @@ def iso_utc(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch)) + ".%03dZ" % int((epoch % 1) * 1000)
 
 
+_CURLY = {0x2018: "'", 0x2019: "'", 0x201c: '"', 0x201d: '"'}
+
+
 def normalize(text: str) -> str:
-    """Whitespace collapsed, case-folded, surrounding punctuation stripped (§7.2)."""
-    return " ".join(text.split()).casefold().strip(EDGES)
+    """Whitespace collapsed, case-folded, curly quotes straightened, surrounding punctuation stripped (§7.2)."""
+    return " ".join(text.translate(_CURLY).split()).casefold().strip(EDGES)
 
 
 def is_yes(text: str) -> bool:
@@ -481,8 +487,15 @@ def _entries(path: Path) -> list:
     return capture.scan_entries(lines)[0]
 
 
+def ends_with_line(n: str, end: str) -> bool:
+    """Whether normalized text `n` ends with the invitation `end` as a whole phrase: nothing alphanumeric
+    touches its start (so window 102's line is not window 02's), and only punctuation, quotes, markdown
+    marks or symbols — an emoji, a closing backtick or asterisks — may follow it."""
+    return re.search(r"(?:^|[^0-9a-z])%s[^0-9a-z]*$" % re.escape(end), n) is not None
+
+
 def find_operator_words(path: Path, quote: str, after: float, require_shown: bool,
-                        shown_text: Optional[str] = None) -> dict:
+                        shown_text: Optional[str] = None, shown_end: Optional[str] = None) -> dict:
     """{"transcript_ref": {uuid, timestamp}, "shown_ref": {uuid, timestamp} | None,
     "text": the entry's own text} for the first operator-typed entry after `after` that Claude Code wrote
     into the conversation it went on with (harness_wrote — critic finding 2),
@@ -490,7 +503,11 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     (Decision 30: a fragment of a longer turn is not what the operator said) —
     with require_shown, one that is the operator's FIRST turn after an assistant
     entry with text that follows the cut-off (when shown_text is given, one whose
-    normalized text contains normalize(shown_text): the block, not any reply);
+    normalized text contains normalize(shown_text): the block, not any reply;
+    when shown_end is given, also — once the block was in a reply after the cut-off — one whose
+    normalized text ends with normalize(shown_end) as a whole phrase (`ends_with_line`): a reply that
+    asks again; with shown_end, the prime's LAST text entry before the words must be one of those two,
+    so a further question after a tool call clears the line);
     that entry is shown_ref. The yes answers the block itself: any user turn
     between the block and the words (operator-typed, queued, or of unknown
     provenance) was the reply to it, and words after it answer something else
@@ -523,12 +540,21 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     not_written = False
     not_submitted: Optional[str] = None
     mark = normalize(shown_text) if shown_text else None
+    end = normalize(shown_end) if shown_end else None
     shown: Optional[dict] = None
+    block_seen = mark is None     # with shown_end, the line arms only once the block itself was in a reply
     not_shown = unknown_hit = False
     for e in tail:
         kind = classify(e)
         if kind == "assistant_text":
-            if mark is None or mark in normalize(e["text"]):
+            n = normalize(e["text"])
+            if mark is not None and mark in n:
+                block_seen, shown = True, e
+            elif end is not None:
+                # The yes answers the last thing the prime said: an entry that neither shows the block nor
+                # ends with its line (a further question after a tool call, say) clears an earlier one.
+                shown = e if block_seen and ends_with_line(n, end) else None
+            elif mark is None:
                 shown = e
             continue
         if kind not in ("operator", "queued", "unknown_provenance"):
@@ -559,8 +585,8 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
     if not_submitted:
         raise NotSubmitted(not_submitted)
     if not_shown:
-        raise NotShown("the words are not the operator's first reply to an assistant turn showing the block "
-                       "after the cut-off")
+        raise NotShown("the words are not the operator's first reply to an assistant turn showing the block, "
+                       "or ending with its invitation line, after the cut-off")
     raise NotFound("not an operator-typed entry after the cut-off")
 
 

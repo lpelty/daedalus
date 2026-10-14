@@ -471,6 +471,13 @@ def block_opening(p: dict) -> str:
     return "Ready to promote window %s's work%s onto %s" % (p["lease"], alias, p["trunk"])
 
 
+def invitation(p: dict) -> str:
+    """The one line a reply must END with for the operator's next yes to count (2026-10-14: the operator
+    may ask first). The block prints it; the prime repeats it, never the block, after answering a question.
+    Window and trunk are in it so a yes to another window's line is not this one's."""
+    return "Say yes to push window %s's work to %s" % (p["lease"], p["trunk"])
+
+
 def earlier_line(p: dict) -> List[str]:
     """Decision 39: a STANDS review of a change an earlier review REFUTED says so."""
     er, rv = p.get("earlier_refuted") or [], p.get("review")
@@ -496,7 +503,7 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
                                                        "1 second" if g["seconds"] == 1 else "%d seconds" % g["seconds"]),
         reviewer_line(rv, p.get("review_skipped_reason")),
     ] + earlier_line(p) + [
-        "Nothing has been pushed. Say yes to push." if ready else
+        "Nothing has been pushed. %s." % invitation(p) if ready else
         "Nothing has been pushed. Ask me to ask the reviewer why, or give a written reason to promote without the review.",
     ])
     if rv is not None:
@@ -790,11 +797,12 @@ def confirm_mode(root: Path) -> str:
 
 
 def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, shown_text: Optional[str] = None,
-                    must_be_yes: bool = False) -> dict:
+                    must_be_yes: bool = False, shown_end: Optional[str] = None) -> dict:
     """The operator's words, found in the confirming session's own transcript
     (§7.2 step 2): the operator's WHOLE turn (Decision 30), typed after `after`,
     after an assistant turn that showed `what` — carrying `shown_text` when it is
-    given. With must_be_yes the words must begin with yes. Every failure is a
+    given, or ending with `shown_end` when that is given (the operator asked first;
+    the prime answered and asked again). With must_be_yes the words must begin with yes. Every failure is a
     refusal; an unreadable transcript, or one outside the denied directories
     (Decision 36), is never a pass (A12)."""
     if me["kind"] != "prime-session":
@@ -807,7 +815,8 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
                    "yes begins with yes." % said.strip())
     try:
         path = tl.transcript_for(root, me["session_id"])
-        found = tl.find_operator_words(path, said, after, require_shown=True, shown_text=shown_text)
+        found = tl.find_operator_words(path, said, after, require_shown=True, shown_text=shown_text,
+                                       shown_end=shown_end)
     except tl.Unprotected as e:
         raise Stop("This session's transcript (%s) is outside every directory nothing may write, so it is not evidence "
                    "of the operator's words. Set memory.transcript_dir in config.yaml, or set `promote.confirm: tty` "
@@ -823,11 +832,16 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
         raise Stop("%s (%s)%s. Until then, set `promote.confirm: tty` and paste the confirm line in your own shell."
                    % (d[:cut], e, d[cut:]))
     except tl.NotShown:
+        what_ = what[:1].upper() + what[1:]
+        words = "that yes" if must_be_yes else "those words"
+        if shown_end:
+            raise Stop("%s was not shown to the operator before %s: prepare and confirm ran in one turn, the "
+                       "operator's reply to the block came before %s, or your last words before it were not the "
+                       "line. Show the block once; after that, end every reply of yours with the line \"%s.\" and "
+                       "nothing after it, then ask again." % (what_, words, words, shown_end))
         raise Stop("%s was not shown to the operator before %s (prepare and confirm ran in one turn, no reply "
                    "since the prepare repeated the block, or the operator's reply to it came before %s). Show the "
-                   "block, then ask."
-                   % (what[:1].upper() + what[1:], "that yes" if must_be_yes else "those words",
-                      "that yes" if must_be_yes else "those words"))
+                   "block, then ask." % (what_, words, words))
     except tl.NotSubmitted as e:
         raise Stop("Those words are in this session's transcript, but %s. Nothing was recorded; show %s to the "
                    "operator and ask again." % (str(e).replace("the words are", "they are", 1), what))
@@ -1238,7 +1252,7 @@ def confirm(root: Path, a: dict) -> int:
             guarded(root, p["repo"])           # (a repo the window does not have is refused by rederive)
         if mode == "transcribed":
             yes = transcribed_yes(root, me, a.get("said") or "", cutoff(root, p, pdir), "the promote block",
-                                  shown_text=block_opening(p), must_be_yes=True)
+                                  shown_text=block_opening(p), must_be_yes=True, shown_end=invitation(p))
         else:
             if a.get("said") is not None:
                 raise Stop("In tty mode the operator types the yes in a terminal; --operator-said is not accepted. "
