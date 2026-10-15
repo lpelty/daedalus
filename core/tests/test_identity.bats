@@ -31,9 +31,12 @@ setup() {
   [ -f "$DAEDALUS_HOME/SOUL.md" ]
 }
 
+# Read from HEAD, never the working files (2026-10-15): SOUL.md is the instance's own journal, so on a
+# deployment the working copy carries that deployment's words — and CLAUDE.md may carry its local
+# changes; what publishes is what is committed.
 @test "identity files contain no harness-specific facts" {
-  run grep -riE "fleet|atlas|smartsheet|larrypelty" "$DAEDALUS_HOME/CLAUDE.md" "$DAEDALUS_HOME/SOUL.md"
-  [ "$status" -ne 0 ]
+  run bash -c 'cd "$1" && { git show HEAD:CLAUDE.md; git show HEAD:SOUL.md; } | grep -iE "fleet|atlas|smartsheet|larrypelty"' _ "$DAEDALUS_HOME"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
 }
 
 # The test above only ever looked at CLAUDE.md and SOUL.md. That narrow scope
@@ -105,16 +108,23 @@ setup() {
   # Paths come from `git ls-files` over the distribution prefixes (see PREMISE
   # above), so the scan follows the repo as files are added or renamed rather
   # than tracking a hand-maintained list.
+  # The two identity files are read from HEAD, never the working tree (2026-10-15): SOUL.md is the
+  # instance's own journal, CLAUDE.md may carry a deployment's local changes, and what publishes is
+  # what is committed. Every other file is read as it stands, so a leak is caught before its commit.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ "$f" = "$self" ] && continue
-    if grep -qiE "larry|lpelty|/Users/|fleet|atlas|smartsheet" "$f"; then
+    case "$f" in
+      CLAUDE.md|SOUL.md) text="$(git show "HEAD:$f")" ;;
+      *) text="$(cat "$f")" ;;
+    esac
+    if printf '%s\n' "$text" | grep -qiE "larry|lpelty|/Users/|fleet|atlas|smartsheet"; then
       offenders="$offenders $f(token)"
     fi
     # Agent names, word-bounded (spec §8.4): the caller is generalized — the
     # callee is named only by a deployment's gitignored config.yaml — so no
     # agent's name may be hardcoded anywhere in the distribution.
-    if grep -qwiE "bill|wren|clara|moot" "$f"; then
+    if printf '%s\n' "$text" | grep -qwiE "bill|wren|clara|moot"; then
       offenders="$offenders $f(agent name)"
     fi
   done <<EOF
@@ -146,6 +156,8 @@ _make_fixture_repo() {
   printf 'clean core file\n' > "$fixture/core/somefile.sh"
   git -C "$fixture" init -q
   git -C "$fixture" add -A
+  # committed: the scan reads the two identity files from HEAD
+  git -C "$fixture" -c user.email=t@x -c user.name=t commit -q -m seed
 }
 
 # Runs only the wide scan against the fixture, and reports its pass/fail.
@@ -209,6 +221,25 @@ _run_scan_in_fixture() {
 
   run _run_scan_in_fixture
   [ "$status" -eq 0 ]
+}
+
+@test "both scans read SOUL.md and CLAUDE.md from HEAD: a deployment whose instance wrote 'smartsheet' into its working SOUL.md, or whose working CLAUDE.md carries a local change naming it, still passes (2026-10-15: SOUL.md is the instance's own journal)" {
+  clone="$BATS_TEST_TMPDIR/clone"; rm -rf "$clone"
+  git clone -q "$DAEDALUS_HOME" "$clone"
+  cp "$BATS_TEST_DIRNAME/test_identity.bats" "$clone/core/tests/test_identity.bats"   # the scan as written now, not the clone's HEAD copy
+  printf '\n## 2026-10-15\nOn the smartsheet laptop today; larrypelty asked for the fleet view.\n' >> "$clone/SOUL.md"
+  printf '\n<!-- local change on the smartsheet deployment -->\n' >> "$clone/CLAUDE.md"
+  [ -n "$(git -C "$clone" status --porcelain -- SOUL.md CLAUDE.md)" ]
+  run bats --filter "identity files contain no harness-specific facts" "$clone/core/tests/test_identity.bats"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run bats --filter "no distribution file leaks" "$clone/core/tests/test_identity.bats"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # and the same clone with the words COMMITTED into SOUL.md fails both: HEAD is what is read
+  git -C "$clone" -c user.email=t@x -c user.name=t commit -q -am "journal"
+  run bats --filter "identity files contain no harness-specific facts" "$clone/core/tests/test_identity.bats"
+  [ "$status" -ne 0 ]
+  run bats --filter "no distribution file leaks" "$clone/core/tests/test_identity.bats"
+  [ "$status" -ne 0 ]
 }
 
 @test "wide scan catches a hardcoded agent name in core (the callee is named only by config)" {

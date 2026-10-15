@@ -1,10 +1,10 @@
 {
   "permissions": {
+    "allow": ["Bash(core/lease.sh release:*)"],
     "deny": [
       "Edit(/core/**)",
       "Edit(/mods/**)",
       "Edit(/CLAUDE.md)",
-      "Edit(/SOUL.md)",
       "Edit(/.claude/settings.json)",
       "Edit(/.claude/settings.local.json)",
       "Edit(/config.example.yaml)",

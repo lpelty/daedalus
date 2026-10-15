@@ -35,11 +35,15 @@ setup() {
 #
 # Deliberately not a count of anything. Adding a protected area means adding a
 # line here; no test needs its total edited to stay green.
+#
+# SOUL.md is not here on purpose (2026-10-15): it is the instance's own journal,
+# not distribution code — the deployment grows it, no release changes it (a test
+# in test_distribution_integrity.bats pins the tracked seed), and the tracked
+# deny list leaves it to the agent. The test below pins that it stays out.
 _protected_paths() {
   cat <<'EOF'
 ./core/capture.py
 ./CLAUDE.md
-./SOUL.md
 ./.claude/settings.json
 ./.claude/settings.local.json
 ./config.example.yaml
@@ -148,6 +152,30 @@ EOF
   # shellcheck disable=SC2046
   uncovered=$(_uncovered_by_edit_rules .claude/settings.json $(_protected_paths))
   [ -z "$uncovered" ] || { echo "no Edit deny rule covers:$uncovered"; return 1; }
+}
+
+@test "the tracked settings (2026-10-15): allow is exactly Bash(core/lease.sh release:*) — resolved before auto mode's classifier, the safety in guard-bash and leaselib; deny still names core/**, CLAUDE.md and both settings files and never SOUL.md; verifylib.is_protected agrees" {
+  cd "$DAEDALUS_HOME"
+  run python3 - .claude/settings.json <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))["permissions"]
+assert p.get("allow") == ["Bash(core/lease.sh release:*)"], "allow is %r" % (p.get("allow"),)
+deny = p["deny"]
+for r in ("Edit(/core/**)", "Edit(/CLAUDE.md)", "Edit(/.claude/settings.json)", "Edit(/.claude/settings.local.json)"):
+    assert r in deny, "deny lacks %s: %r" % (r, deny)
+assert not any("SOUL" in r for r in deny), "SOUL.md is denied again: %r" % (deny,)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run python3 - "$DAEDALUS_HOME" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, str(root / "core"))
+import verifylib as v
+for rel, want in (("core/x.py", True), ("CLAUDE.md", True), (".claude/settings.json", True), ("SOUL.md", False)):
+    got = v.is_protected(root, root / rel)
+    assert got == want, "%s: is_protected %r, wanted %r" % (rel, got, want)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "no deny rule names the Write tool, in either settings file" {

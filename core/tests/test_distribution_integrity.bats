@@ -143,3 +143,15 @@ PY
   printf 'export function register() {}\n' > "$DAEDALUS_HOME/mods/lease-board/hooks/register.js"
   refused mods/lease-board/hooks/register.js
 }
+
+# SOUL.md stays tracked but is the instance's own journal (2026-10-15: it left the deny list; the agent grows it).
+# A release that changed it would make `git pull --ff-only` refuse on every deployment whose instance has written in
+# it, so the distribution never changes it again — and a promise with no assertion behind it is broken by the first
+# careless commit. The blob is the seed's as committed at v0.7.0 (887533c). Read from the real repository's HEAD,
+# never the working file, which on a deployment carries the instance's words.
+@test "SOUL.md in the distribution is the seed and no release changes it: HEAD:SOUL.md is blob 881014417338756b89df7f77773ea0b849c1ac82" {
+  repo="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  run git -C "$repo" rev-parse HEAD:SOUL.md
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "881014417338756b89df7f77773ea0b849c1ac82" ] || { echo "HEAD:SOUL.md is $output — a release changed the seed; a deployment's SOUL.md is its own, and git pull --ff-only would refuse there"; return 1; }
+}
