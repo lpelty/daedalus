@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 load fixtures/leases/setup.bash
+load fixtures/transcripts/setup.bash
 teardown() { teardown_live; chmod -R u+w "$DAEDALUS_HOME/state" 2>/dev/null || true; }
 
 setup() {
@@ -1055,4 +1056,168 @@ product_home() {  # Daedalus's own checkout (lease_fixture made it a repo on mai
            "config --local pull.rebase true" "config branch.lease/01.description x"; do
     run guard_as sA "git $c" "$W1"; allowed || { echo "denied: git $c: $output"; return 1; }
   done
+}
+
+# --- Deleting a window's work: the guard's early refusal (agent-runnable design 2026-10-15, §4.3) ---------------
+# The tracked settings allow `core/lease.sh release:*` ahead of auto mode's classifier; this hook is what decides
+# whether the delete runs, in every mode, and leaselib.release backstops the forms it cannot read.
+# delete_guard — windows 01 (sA, holds the pen, live) and 02 (stale, one unpromoted commit); sA's transcript at the
+# path transcriptlib reads and its SessionStart marker naming it. W is 02's worktree.
+delete_guard() {
+  guard_leases
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  W="$DAEDALUS_HOME/worktrees/02/thing"
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
+  TX="$(tx_path sA)"; : > "$TX"
+  python3 - "$DAEDALUS_HOME/state/session-sA.json" "$TX" <<'PY'
+import json, sys, time
+json.dump({"session_id": "sA", "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "started_epoch": time.time(),
+           "transcript_path": sys.argv[2], "lease": "01"}, open(sys.argv[1], "w"), indent=2)
+PY
+  M="$DAEDALUS_HOME/state/release-asked/02.json"
+  export W TX M
+}
+asked_by_sA() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02; }
+LINE02="Say yes to delete window 02's work."
+DEL='core/lease.sh release 02 --remove --force'
+ASK_FIRST="Run core/lease.sh unpromoted 02 first, repeat its report to the operator word for word, and ask; the delete runs only after their yes."
+# shown_then_yes <words> [shown text] — the report's tool result, the assistant turn that showed it (the whole
+# report by default), then the operator's words, all after the ask; sets P. The entries are stamped a few seconds
+# ahead of the clock (tx), and each ask moves the cut-off to the clock: a SECOND ask in one test must wait until
+# the clock has passed the earlier entries (settle), or they would land after the new cut-off too.
+settle() { [ -z "${P:-}" ] || python3 -c 'import sys,time; time.sleep(max(0.0, float(sys.argv[1]) - time.time()))' "$(plus "$P" 4)"; }
+shown_then_yes() {
+  local R; settle; R="$(asked_by_sA)"; P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "${2:-$R}" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" operator "$1" "$(plus "$P" 3)" >/dev/null
+}
+
+@test "delete gate: core/lease.sh release 02 --remove is denied without the report, without --operator-said, with words not beginning with yes, with a reply of two lines or carrying a \$ (the one-word-yes sentence), and when only a tool result or the report's first sentence carried the line; nothing else about lease.sh is gated" {
+  delete_guard
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA 'core/lease.sh release 02 --remove --operator-said yes'; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac   # without --force too
+  run guard_as sA 'core/lease.sh release 02'; allowed
+  run guard_as sA 'core/lease.sh unpromoted 02'; allowed
+  run guard_as sA 'core/lease.sh list'; allowed
+  R="$(asked_by_sA)"
+  run guard_as sA "$DEL"; denied; case "$output" in *"Record what the operator said: add --operator-said"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said ok"; denied; case "$output" in *"do not begin with yes"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said \"yes \$HOME\""; denied; case "$output" in *"Ask the operator for a one-word yes and record that"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said \"yes
+please\""; denied; case "$output" in *"Ask the operator for a one-word yes and record that"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said 'yes \`date\`'"; denied
+  # the line only in a tool result (never said to the operator), then only the first sentence in a reply
+  P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$P" 2)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
+  tx "$TX" assistant "${R%%$'\n'*}" "$(plus "$P" 3)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$P" 4)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"The delete line was not shown to the operator before that yes"*"$LINE02"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+}
+
+@test "delete gate: allowed when the reply ended with the line and the operator's next turn is the yes (empty output, nothing deleted by the hook); allowed when the operator asked first and the answer ended with the line" {
+  delete_guard
+  shown_then_yes "yes"
+  run guard_as sA "$DEL --operator-said yes"; allowed
+  [ -d "$W" ]      # the hook decides; it deletes nothing itself
+  # the operator asks first; the prime's answer ends with the line
+  tx "$TX" operator "What is in it?" "$(plus "$P" 4)" >/dev/null
+  tx "$TX" assistant "One commit on a.txt. $LINE02" "$(plus "$P" 5)" >/dev/null
+  tx "$TX" operator "Yes, go ahead." "$(plus "$P" 6)" >/dev/null
+  run guard_as sA "$DEL --operator-said 'Yes, go ahead.'"; allowed
+}
+
+@test "delete gate: denied when a later question cleared the line; denied for another session's marker, for a marker older than the window, and for a yes typed before the window existed with the marker's time forged to 0 (the lease file's own times hold the cut-off)" {
+  delete_guard
+  R="$(asked_by_sA)"; P="$(now)"
+  tx "$TX" assistant "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" operator "And the nested repo?" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" assistant "Nothing in it — did you mean window 03?" "$(plus "$P" 3)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$P" 4)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
+  # another session's marker is no witness for sA, even with the line shown and a yes after it
+  python3 - "$M" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["session_id"] = "sB"; json.dump(d, open(sys.argv[1], "w"))
+PY
+  tx "$TX" assistant "$LINE02" "$(plus "$P" 5)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$P" 6)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a marker older than the window's own created time
+  python3 - "$M" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["session_id"] = "sA"; d["at"] = 1.0; json.dump(d, open(sys.argv[1], "w"))
+PY
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the forged-marker case: the yes typed before the window existed, the marker's time 0 — refused
+  created="$(python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])); print(time.mktime(time.strptime(d["created"], "%Y-%m-%dT%H:%M:%S")))' "$DAEDALUS_HOME/state/leases/02.json")"
+  : > "$TX"
+  tx "$TX" assistant "$LINE02" "$(plus "$created" -20)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$created" -10)" >/dev/null
+  python3 - "$M" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["at"] = 0.0; json.dump(d, open(sys.argv[1], "w"))
+PY
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+}
+
+@test "delete gate: denied after a new commit in the worktree and after an append to a dirty file (the work changed since the report); denied in tty mode with the paste line for the operator's own shell; denied with no session (an operator shell is never the guard's caller)" {
+  delete_guard
+  shown_then_yes "yes"
+  printf 'x\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "another"
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"Window 02's work changed since the report"*"run core/lease.sh unpromoted 02 again and ask again"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'd\n' >> "$W/a.txt"
+  shown_then_yes "yes"
+  run guard_as sA "$DEL --operator-said yes"; allowed
+  printf 'd2\n' >> "$W/a.txt"
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"Window 02's work changed since the report"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  shown_then_yes "yes"
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"This deployment confirms at the terminal (promote.confirm: tty). Paste this line in your own shell: cd $DAEDALUS_HOME && core/lease.sh release 02 --remove --force"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard "$DEL --operator-said yes"; denied; case "$output" in *"The delete runs from a window: this command carries no session."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "delete gate: judged wherever lease.sh stands — inside bash -c, as bash core/lease.sh, behind each wrapper Claude Code strips for the allow rule (timeout, time, nice, nohup, stdbuf, command, builtin, noglob), behind sudo and flock, from a worktree's copy or any path; xargs and parallel refused outright; an alias or a variable for the number refused naming the number" {
+  delete_guard
+  for c in "bash -c '$DEL --operator-said yes'" "bash $DEL --operator-said yes" "eval $DEL --operator-said yes" \
+           "timeout 30 $DEL --operator-said yes" "time $DEL --operator-said yes" "nice -n 5 $DEL --operator-said yes" \
+           "nohup $DEL --operator-said yes" "stdbuf -oL $DEL --operator-said yes" "command $DEL --operator-said yes" \
+           "builtin $DEL --operator-said yes" "noglob $DEL --operator-said yes" "sudo $DEL --operator-said yes" \
+           "flock /tmp/x.lock $DEL --operator-said yes" "caffeinate -i $DEL --operator-said yes" \
+           "worktrees/02/core/lease.sh release 02 --remove --force --operator-said yes" \
+           "/tmp/copy/lease.sh release 02 --remove --force --operator-said yes" \
+           "$DAEDALUS_HOME/core/lease.sh release 02 --remove --force --operator-said yes" \
+           "cd worktrees/02 && ../../core/lease.sh release 02 --remove --force --operator-said yes" \
+           "true && $DEL --operator-said yes" "$DEL --operator-said yes 2>&1 | cat"; do
+    run guard_as sA "$c"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"$ASK_FIRST"*) : ;; *) echo "wrong reason for '$c': $output"; return 1 ;; esac
+  done
+  for c in "xargs $DEL" "echo 'release 02 --remove --force' | xargs core/lease.sh" "xargs -n1 $DEL" "parallel core/lease.sh ::: release" \
+           "printf '02' | xargs -I{} core/lease.sh release {} --remove --force"; do
+    run guard_as sA "$c"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"A delete takes its arguments on the command line, never from xargs or parallel"*) : ;; *) echo "wrong reason for '$c': $output"; return 1 ;; esac
+  done
+  for c in 'core/lease.sh release poc-ui --remove --force --operator-said yes' 'core/lease.sh release $NN --remove --force --operator-said yes' \
+           'NN=02; core/lease.sh release "$NN" --remove --force --operator-said yes'; do
+    run guard_as sA "$c"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"Name the window by its number (core/lease.sh release 02 --remove"*) : ;; *) echo "wrong reason for '$c': $output"; return 1 ;; esac
+  done
+  # data commands that only mention the delete are not the delete
+  run guard_as sA "echo $DEL"; allowed
+  run guard_as sA "grep -n 'release 02 --remove' CLAUDE.md"; allowed
+}
+
+@test "delete gate: the guard's ALLOW_RULE_WRAPPERS is the wrapper list the permissions doc says Claude Code strips before matching an allow rule (read 2026-10-15) — when the docs' list grows, this constant and the wrapper cases above grow with it" {
+  run python3 - "$DAEDALUS_HOME/core/guard-bash.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("guard_bash", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.ALLOW_RULE_WRAPPERS == ("timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "noglob", "xargs"), m.ALLOW_RULE_WRAPPERS
+assert m.LEASE_HEADS == {"lease.sh"}, m.LEASE_HEADS
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

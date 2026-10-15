@@ -274,6 +274,21 @@ DATA_HEADS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "man", "wh
               "test", "[", "[[", "true", "false", "sort", "uniq", "diff", "cmp", "basename", "dirname", "realpath"}
 # The wrappers that feed the command they run arguments from their input.
 STDIN_ARGS = {"xargs", "parallel"}
+# Deleting a window's work (agent-runnable design 2026-10-15, §4.3): `core/lease.sh release NN --remove …` is
+# judged here, wherever lease.sh stands in the segment, and the refusal is leaselib's reason — said before the
+# tracked allow rule (Bash(core/lease.sh release:*)) is consulted, since a PreToolUse deny holds after an allow
+# rule. ALLOW_RULE_WRAPPERS is the wrapper list the permissions doc ("Wrappers", read 2026-10-15 on 2.1.300) says
+# Claude Code strips before matching a Bash allow rule, so `timeout 30 core/lease.sh release …` is pre-approved by
+# the rule: exec_index must see past each of them (a test pins this tuple against the guard). The guard's own
+# reach is wider — any non-data head: sudo, flock, caffeinate, bash … — and leaselib.release backstops the rest.
+ALLOW_RULE_WRAPPERS = ("timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "noglob", "xargs")
+LEASE_HEADS = {"lease.sh"}
+DELETE_FROM_STDIN = ("A delete takes its arguments on the command line, never from xargs or parallel; run "
+                     "core/lease.sh release NN --remove … directly.")
+DELETE_NO_SESSION = "The delete runs from a window: this command carries no session."
+DELETE_NUMBER = "Name the window by its number (core/lease.sh release 02 --remove …), not an alias or a variable."
+DELETE_ONE_WORD = ("Ask the operator for a one-word yes and record that; a reply with several lines or shell "
+                   "characters cannot be carried on the command.")
 # git options that take their value as the next word (git.c handle_options).
 GIT_VALUE_OPTS = {"-C", "-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
 # bash/sh options that take their value as the next word: `bash -o errexit -c '…'`.
@@ -2657,6 +2672,36 @@ def check_command(cmd: str, cwd: Path, g: G, depth: int = 0) -> Tuple[Optional[s
     return None, contexts
 
 
+def check_lease_release(seg: List[str], g: G) -> Optional[str]:
+    """The early refusal for `lease.sh release NN --remove …` (design 2026-10-15, §4.3): the first word naming
+    lease.sh, by basename, behind any wrapper (exec_index) — the home's, a worktree checkout's, a copy. Behind
+    xargs or parallel it is refused outright (bare xargs is a wrapper Claude Code strips for the allow rule; the
+    guard reads no stdin). Then: a session must be present (fail closed), the number literal, the operator's
+    words readable, and leaselib.deletion_confirmed decides — the report shown, the yes after the line in this
+    session's transcript, the work unchanged. Plain `release NN` and every other verb are untouched."""
+    j = exec_index(seg, LEASE_HEADS)
+    if os.path.basename(seg[j]) != "lease.sh":
+        return None
+    if any(os.path.basename(t) in STDIN_ARGS for t in seg[:j]):
+        return DELETE_FROM_STDIN
+    args = seg[j + 1:]
+    if args[:1] != ["release"] or "--remove" not in args[1:]:
+        return None
+    if g.sid is None:
+        return DELETE_NO_SESSION
+    nn = args[1] if len(args) > 1 else ""
+    if unresolved(nn) or not re.fullmatch(r"[0-9]{2}", nn):
+        return DELETE_NUMBER
+    said = ""
+    if "--operator-said" in args:
+        i = args.index("--operator-said")
+        said = args[i + 1] if i + 1 < len(args) else ""
+        if unresolved(said):
+            return DELETE_ONE_WORD                 # a $ or a backtick the guard cannot read
+    import leaselib as ll
+    return ll.deletion_confirmed(g.root, g.sid, nn, said)
+
+
 def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str, here: Path, branch_created: bool,
                   vault: Path, g: G, depth: int) -> Tuple[Optional[str], List[str], Path, bool]:
     """One segment of check_command: (deny reason | None, contexts, the cwd after it, whether a
@@ -2694,6 +2739,9 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
             head in TTY_TOOLS or any("fixtures/tty/" in t for t in seg)
             or (head in INTERPRETERS and any(re.search(r"\bpty\b", t) for t in seg[1:])))):
         return TTY_WRAP, [], here, branch_created           # Decision 32: a program-made terminal
+    reason = check_lease_release(seg, g)                     # design 2026-10-15: the delete's early refusal
+    if reason:
+        return reason, [], here, branch_created
     if seg[0] == "builtin" and len(seg) > 1 and seg[1] in ("cd", "pushd", "popd"):
         seg = seg[1:]                                                   # `builtin cd …` is cd
     if seg[0] in ("cd", "pushd", "popd"):
