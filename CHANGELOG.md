@@ -62,6 +62,53 @@ or later; this is tested with 2.1.300.
 0.7.1` and `OK       upgrade: state/upgraded-to 0.7.1`. And the board is on
 screen.
 
+#### Added on trunk after the v0.7.1 tag — 2026-10-15: the document index rebuilds itself
+
+**In short.** The document index — what `recall.vault-index` builds for
+document recall — waited for someone to run `python3 core/vault-search.py
+index`. Nothing in Daedalus ran it, so recall drifted behind the vault until
+the prime remembered. The prime was told only when someone ran doctor (a
+deployment on another machine, 2026-10-14). Now the index follows the vault
+by itself, and doctor says when it last ran.
+
+**What you will see.**
+- After every vault commit the prime makes — each close with `--commit`, and
+  `core/vault-commit.sh` by hand — one line: "document index: rebuilding in
+  the background (state/recall-index.log)". The commit never waits for the
+  rebuild, and a rebuild that fails never fails the commit: the line says
+  so, and `python3 core/vault-search.py index` runs one by hand.
+- At the start of the window that holds the pen, when the index is older
+  than the vault: "The document index is older than the vault; rebuilding it
+  in the background (state/recall-index.log)." A fresh index, another
+  window, a visitor and a compaction say nothing. A start that spent its
+  time on worktree checkouts skips the rebuild rather than running late; the
+  next commit kicks it.
+- A rebuild kicked while one is running: "a rebuild is already running; it
+  will run again when done". It does, once, so a document changed during a
+  run is indexed by the run that follows.
+- `state/recall-index.log` holds the last run: `started <time> by
+  vault-commit`, then `finished <time> indexed=N purged=M`, or the engine's
+  last lines and `failed <time>: <reason>`.
+- `core/doctor.sh` prints one more line under document recall: "last
+  automatic index <time> by <who>: indexed=N purged=M"; or that it FAILED
+  and where the engine's output is; or that a run is still going; or that
+  one started and did not finish (killed, or the machine slept), and that
+  the next vault commit or the prime's next session start runs it again.
+- A reindex engine that runs past two minutes is stopped as a whole, so
+  nothing of it keeps writing the store after the lock is released.
+
+A deployment without a `recall:` block sees none of this; `core/doctor.sh`
+still says "document recall: reindex command unconfigured".
+
+**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
+session. No upgrade step runs and `VERSION` stays `0.7.1`; a session already
+open keeps the old hooks until it is restarted. A deployment whose tracked
+`CLAUDE.md` or `.claude/settings.json` carry local changes pulls the same
+way until a release touches those files; the part for the routine steps the
+agent runs (the same day's work, on its own branch) carries the
+stash–pull–pop recipe for that case.
+
+
 ## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself
 
 **In short.** Several Daedalus sessions can now work on one target at the
