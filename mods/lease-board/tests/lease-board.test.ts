@@ -17,6 +17,8 @@ const FIXTURE = {
     { nn: '05', alias: null, state: 'released', changed_count: 0, peer_name: null, is_prime: false, is_this: false, last_seen_epoch: null, note: null },
   ],
   generated_epoch: 1791770400.1,
+  // frame-jack spec §9.1: the AMI's word and this session's counts, every key always present
+  ami: { state: 'on', mode: 'shadow', port_alive: true, device: 'mlx', asked: 212, would_ask: 7, would_shorten: 2, unanswered: 0, median_ms: 171, asks: 0, overrides: 0, since_epoch: 1792000000.0, retry_epoch: null } as Record<string, unknown>,
 }
 
 // What Claude Code passes to a ui.render hook for the band, apart from the app.
@@ -191,7 +193,7 @@ test('every line truncates at the end of the band, sized to bodyColumns', async 
   await start($)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 24 } })
   const texts = await ui.findAll({ type: 'Text' })
-  expect(texts.length).toBe(5)
+  expect(texts.length).toBe(6) // five windows and the AMI line
   for (const t of texts) expect(t.props.wrap).toBe('truncate-end')
   // the width sits on this mod's own Box, one level down: the root Box holds the mods beneath beside it and
   // carries no width of its own (the engine's node may not sit under a Box with a width; the last test below)
@@ -204,7 +206,7 @@ test('every line truncates at the end of the band, sized to bodyColumns', async 
 })
 
 test('more windows than rows: maxRows - 1 lines, then "+N more windows"', async ($, on) => {
-  stubs(on, () => ok(FIXTURE))
+  stubs(on, () => ok(withAmi(undefined))) // no AMI line: the room is the window lines' alone
   await start($)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 4, scroll: { offset: 0, bodyRows: 3 } } })
   const lines = await windowLines(ui)
@@ -321,7 +323,7 @@ test('the first prompt is not held behind the first read: session.start returns 
 })
 
 test('with room for one row this window\'s own line is the one shown, and no "+N more" line takes its place (findings 15, 26)', async ($, on) => {
-  stubs(on, () => ok(FIXTURE))
+  stubs(on, () => ok(withAmi(undefined))) // no AMI line: the room is the window lines' alone
   await start($)
   const one = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 1, scroll: { offset: 0, bodyRows: 1 } } })
   const lines = await windowLines(one)
@@ -441,4 +443,119 @@ test('the engine\'s own node from next(e) is kept, outside any Box that has a wi
   const desktop = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(walk(await desktop.drawn()).filter((x) => x.node.type === 'engine').length).toBe(1)
   expect((await windowLines(desktop)).length).toBe(5)
+}
+
+// --- frame-jack: the AMI line (frame-jack spec §9.2) ------------------------------------------------------------
+
+const AMI_ON = 'AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms'
+
+function withAmi(ami: Record<string, unknown> | undefined, extra: Record<string, unknown> = {}) {
+  const b: Record<string, unknown> = { ...FIXTURE, ...extra }
+  if (ami === undefined) delete b.ami
+  else b.ami = { ...FIXTURE.ami, ...ami }
+  return b
+}
+
+async function texts(ui: any): Promise<string[]> {
+  return (await ui.findAll({ type: 'Text' })).map((t: any) => String(t.text))
+}
+
+test('the AMI line when on: the counts in words, plain colour, after the window lines; "· N overruled" only when overrides is not zero', async ($, on) => {
+  let ami: Record<string, unknown> = {}
+  const { clock } = stubs(on, () => ok(withAmi(ami)), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const t = await texts(ui)
+  expect(t[t.length - 1]).toBe(AMI_ON)
+  expect(t.slice(0, 5).every((x) => x.startsWith('window '))).toBe(true)
+  const line = await ui.find({ type: 'Text', text: AMI_ON })
+  expect(line?.props.color).toBe('text')
+  expect(line?.props.wrap).toBe('truncate-end')
+  ami = { overrides: 3 }
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: AMI_ON + ' · 3 overruled' })).toBeDefined()
+})
+
+test('the AMI line when off is dim; down, supervisor gone, battery, tripped and not configured are in the warning colour with their remedies', async ($, on) => {
+  let ami: Record<string, unknown> = { state: 'off' }
+  const { clock } = stubs(on, () => ok(withAmi(ami)))
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: 'AMI off' }))?.props.dimColor).toBe(true)
+  const retry = new Date(2026, 9, 15, 9, 48).getTime() / 1000
+  const cases: Array<[Record<string, unknown>, string | RegExp]> = [
+    [{ state: 'down' }, 'AMI on but the daemon is down — /frame-jack on'],
+    [{ state: 'supervisor gone' }, 'AMI on but its supervisor is gone — /frame-jack off, then on'],
+    [{ state: 'battery' }, 'AMI paused on battery'],
+    [{ state: 'tripped', retry_epoch: retry }, /^AMI tripped \(slow or wedged\) — retrying at (\d{4}-\d\d-\d\d )?09:48$/],
+    [{ state: 'unconfigured' }, 'AMI on but not configured — /frame-jack status'],
+  ]
+  for (const [a, want] of cases) {
+    ami = a
+    await clock.advance(2000)
+    const line = await ui.find({ type: 'Text', text: want })
+    expect(line).toBeDefined()
+    expect(line?.props.color).toBe('warning')
+  }
+})
+
+test('AMI starting shows the seconds since since_epoch, against the clock of the read', async ($, on) => {
+  const { clock } = stubs(on, () => ok(withAmi({ state: 'starting', since_epoch: 88 })))
+  await start($)
+  await clock.advance(100000) // the last read at 100 s on the mock clock: twelve seconds after since_epoch
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const line = await ui.find({ type: 'Text', text: 'AMI starting (12 s)' })
+  expect(line).toBeDefined()
+  expect(line?.props.color).toBe('warning')
+})
+
+test('no AMI line when board-json has no ami key (an older board-json) or the state is absent; the window lines are unchanged', async ($, on) => {
+  let ami: Record<string, unknown> | undefined = undefined
+  const { clock } = stubs(on, () => ok(withAmi(ami)), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  let t = await texts(ui)
+  expect(t.length).toBe(5)
+  expect(t.some((x) => x.startsWith('AMI'))).toBe(false)
+  expect((await windowLines(ui)).length).toBe(5)
+  ami = { state: 'absent' }
+  await clock.advance(2000)
+  t = await texts(ui)
+  expect(t.length).toBe(5)
+  expect(t.some((x) => x.startsWith('AMI'))).toBe(false)
+})
+
+test('zero windows: the AMI line sits between the "no windows" line and the tail; no board yet: no AMI line', async ($, on) => {
+  let mode: 'ok' | 'deny' = 'ok'
+  const { clock } = stubs(on, () => (mode === 'ok' ? ok(withAmi({}, { this_window: null, prime_window: null, windows: [] })) : { deny: 'boom' }), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await texts(ui)).toEqual(['no windows open in this Daedalus home', AMI_ON])
+  mode = 'deny'
+  await clock.advance(2000)
+  const t = await texts(ui)
+  expect(t.length).toBe(3)
+  expect(t[0]).toBe('no windows open in this Daedalus home')
+  expect(t[1]).toBe(AMI_ON)
+  expect(t[2]).toMatch(/^board unavailable: /)
+})
+
+test('no board yet: one dim line and no AMI line', async ($, on) => {
+  stubs(on, () => ({ deny: 'boom' }), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const t = await texts(ui)
+  expect(t.length).toBe(1)
+  expect(t[0]).toMatch(/^board unavailable: /)
+})
+
+test('maxRows reached: the AMI line is drawn and it takes one window row — it counts in the room', async ($, on) => {
+  stubs(on, () => ok(FIXTURE), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 4, scroll: { offset: 0, bodyRows: 3 } } })
+  const t = await texts(ui)
+  expect(t.length).toBe(4)
+  expect((await windowLines(ui)).length).toBe(2)
+  expect(t[2]).toBe('+3 more windows')
+  expect(t[3]).toBe(AMI_ON)
 })

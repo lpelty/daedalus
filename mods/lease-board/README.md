@@ -21,6 +21,63 @@ fails, the last good board stays and one dim line says why
 (`board unavailable: …`); when one lease file cannot be read, every other
 window is still listed and one dim line names it (`one window is not shown: …`).
 
+## The AMI line (frame-jack)
+
+When frame-jack has been switched on in this deployment, one more line follows
+the window lines: what the AMI (the small local decision model behind
+`/frame-jack`) is doing in this session. It comes from the `ami` key of the same
+`board-json` read — the switch file under `state/ami/`, the daemon's record, this
+session's counts and one port check bounded at 100 ms; no config, no bash, no
+git, no question asked of the model.
+
+```
+AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms
+AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms · 3 overruled
+AMI off
+AMI on but the daemon is down — /frame-jack on
+AMI on but its supervisor is gone — /frame-jack off, then on
+AMI paused on battery
+AMI starting (12 s)
+AMI tripped (slow or wedged) — retrying at 09:48
+AMI on but not configured — /frame-jack status
+```
+
+Plain when on, dim when off, the warning colour for every line that needs you.
+`· N overruled` appears only when the AMI's call was overruled at least once.
+The line counts in the band's rows, so it never pushes a window line off; with
+no windows it sits between the "no windows" line and the tail. It is left out
+entirely when `board-json` has no `ami` key (an older Daedalus) or frame-jack was
+never switched on here (`state/ami/` does not exist). `/frame-jack status`
+prints the long form.
+
+### The status line fallback (not built)
+
+If the band cannot carry the line — a Claude Code build where this mod does not
+load (doctor's `lease board on screen` says so), or mods disabled — the same line
+can come from a `statusLine` script instead. It is not built: a status line is
+one script per machine in user settings and would replace one you may already
+run. This is what it would run, from the Daedalus home, so the fallback is a
+paste rather than a design:
+
+```bash
+python3 core/leaselib.py board-json --session "$CLAUDE_CODE_SESSION_ID" | python3 -c '
+import json, sys
+a = json.load(sys.stdin).get("ami") or {}
+s = a.get("state")
+n = lambda k: a.get(k) or 0
+if s == "on":
+    line = "AMI on · shadow (logs, never acts) · %d asked · would have asked you %d times · would have shortened %d" % (n("asked"), n("would_ask"), n("would_shorten"))
+    line += " · %d ms" % a["median_ms"] if a.get("median_ms") is not None else ""
+    line += " · %d overruled" % n("overrides") if n("overrides") else ""
+    print(line)
+elif s and s != "absent":
+    print("AMI " + s)
+'
+```
+
+Where neither the band nor a status line shows, the once-per-session message
+the guard prints when the daemon is down is what tells you.
+
 ## Loading it
 
 The mod ships inside the Daedalus repo, listed by the marketplace at

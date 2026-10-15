@@ -103,6 +103,65 @@ function lineText(w) {
   return parts.join(' · ')
 }
 
+// The AMI line (frame-jack spec §9.2), from board-json's `ami` key: the switch's word and this
+// session's counts. Plain words; a slash command only as the remedy. `now` is the clock of the read
+// (boardAt), so the line stays pure over the board.
+function count(n) {
+  return typeof n === 'number' ? n : 0
+}
+
+function amiText(a, nowMs) {
+  switch (a.state) {
+    case 'on': {
+      const parts = [
+        'AMI on',
+        'shadow (logs, never acts)',
+        count(a.asked) + ' asked',
+        'would have asked you ' + count(a.would_ask) + ' times',
+        'would have shortened ' + count(a.would_shorten),
+      ]
+      if (typeof a.median_ms === 'number') parts.push(a.median_ms + ' ms')
+      if (count(a.overrides) > 0) parts.push(a.overrides + ' overruled')
+      return parts.join(' · ')
+    }
+    case 'off':
+      return 'AMI off'
+    case 'down':
+      return 'AMI on but the daemon is down — /frame-jack on'
+    case 'supervisor gone':
+      return 'AMI on but its supervisor is gone — /frame-jack off, then on'
+    case 'battery':
+      return 'AMI paused on battery'
+    case 'starting': {
+      const secs = typeof a.since_epoch === 'number' ? Math.max(0, Math.round(nowMs / 1000 - a.since_epoch)) : null
+      return secs === null ? 'AMI starting' : 'AMI starting (' + secs + ' s)'
+    }
+    case 'tripped':
+      return typeof a.retry_epoch === 'number'
+        ? 'AMI tripped (slow or wedged) — retrying at ' + clockText(a.retry_epoch * 1000)
+        : 'AMI tripped (slow or wedged)'
+    case 'unconfigured':
+      return 'AMI on but not configured — /frame-jack status'
+    default:
+      return 'AMI ' + String(a.state)
+  }
+}
+
+// Dim when off, plain when on, the warning colour for everything that needs the operator.
+function amiStyle(a) {
+  if (a.state === 'off') return { dimColor: true }
+  if (a.state === 'on') return { color: 'text' }
+  return { color: 'warning' }
+}
+
+// The AMI's Text, or null: omitted when board-json has no `ami` key (an older board-json) or the
+// deployment never switched frame-jack on (`absent`), so it never takes a row for a switch that is
+// not there.
+function amiLine(Text, a, nowMs) {
+  if (!a || typeof a !== 'object' || !a.state || a.state === 'absent') return null
+  return Text(Object.assign({ wrap: 'truncate-end' }, amiStyle(a), { children: [amiText(a, nowMs)] }))
+}
+
 // Pure over board, failure and boardAt: the Text elements for the band, top to bottom.
 // "Text ... Takes color, bold, dimColor, italic, and wrap. ... A wrap is 'wrap', 'truncate',
 // 'truncate-start', 'truncate-middle', or 'truncate-end'." (interface page)
@@ -114,10 +173,12 @@ function linesFor(Text, props) {
   const tail = []
   if (failure) tail.push(dim('board unavailable: ' + failure + ' (showing the board as of ' + clockText(boardAt) + ')'))
   else if (board.error) tail.push(dim('one window is not shown: ' + String(board.error)))
-  if (windows.length === 0) return [dim('no windows open in this Daedalus home')].concat(tail)
+  // the AMI line goes after the window lines and before the dim tail, and counts in the room
+  const ami = amiLine(Text, board.ami, boardAt)
+  if (windows.length === 0) return [dim('no windows open in this Daedalus home')].concat(ami ? [ami] : [], tail)
   const head = []
   if (!board.this_window) head.push(dim('this window holds no number'))
-  const room = Math.max(1, maxRows - head.length - tail.length)
+  const room = Math.max(1, maxRows - head.length - tail.length - (ami ? 1 : 0))
   let shown = windows
   let more = null
   if (windows.length > room) {
@@ -136,7 +197,7 @@ function linesFor(Text, props) {
     p.children = [lineText(w)]
     return Text(p)
   })
-  return head.concat(rows, more ? [more] : [], tail)
+  return head.concat(rows, more ? [more] : [], ami ? [ami] : [], tail)
 }
 
 // Where the Daedalus home is (spec §4.5, order changed at the review of 2026-10-11, findings 12 and 18):

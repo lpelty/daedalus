@@ -1179,10 +1179,14 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
 # ---------------------------------------------------------------- §9.1 the band's object
 def board_ami(root, sid) -> dict:
     """The `ami` key of `leaselib.py board-json`: the switch's word plus the session's counts, every key
-    always present; counts None for a shell or a missing counters file. No config, no bash, no inference."""
+    always present; counts None for a shell or a missing counters file. No config, no bash, no inference.
+    One word differs from switch(): `down` whose reason is a stale heartbeat is `supervisor gone`, the
+    band's own line (§9.2) — the key set stays the thirteen §9.1 names."""
     d = switch_detail(root, sid)
     c = counters(root, sid) if sid else None
-    out = {"state": d["state"], "mode": "shadow", "port_alive": d["state"] == "on", "device": d["device"],
+    # the band names a gone supervisor apart from a dead daemon (§5.1 step 4, §9.2): the remedy differs
+    state = "supervisor gone" if d["state"] == "down" and d["reason"] == "supervisor gone" else d["state"]
+    out = {"state": state, "mode": "shadow", "port_alive": d["state"] == "on", "device": d["device"],
            "asked": None, "would_ask": None, "would_shorten": None, "unanswered": None, "median_ms": None,
            "asks": None, "overrides": None, "since_epoch": d["since_epoch"], "retry_epoch": d["retry_epoch"]}
     if not c:

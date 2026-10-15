@@ -8,6 +8,7 @@ bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
 load fixtures/transcripts/setup.bash
 load fixtures/tty/setup.bash
+load fixtures/ami/setup.bash
 setup() { lease_fixture; LS() { bash "$DAEDALUS_HOME/core/lease.sh" "$@"; }; }
 teardown() { teardown_live; }
 board() { printf '{"hook_event_name":"%s","session_id":"%s","prompt":"hello there"}' "${2:-UserPromptSubmit}" "$1" | python3 "$DAEDALUS_HOME/core/lease-board.py"; }
@@ -266,10 +267,10 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
   bj_check 'all(isinstance(w["changed_count"], int) and w["nn"].isdigit() and len(w["nn"]) == 2 for w in o["windows"])'
 }
 
-@test "board-json: exactly the four top-level keys and exactly the nine window keys the contract names, nothing more" {
+@test "board-json: exactly the five top-level keys (ami included) and exactly the nine window keys the contract names, nothing more" {
   LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
-  bj_check 'sorted(o) == ["generated_epoch", "prime_window", "this_window", "windows"]'
+  bj_check 'sorted(o) == ["ami", "generated_epoch", "prime_window", "this_window", "windows"]'
   bj_check 'len(o["windows"]) == 2 and all(sorted(w) == ["alias", "changed_count", "is_prime", "is_this", "last_seen_epoch", "nn", "note", "peer_name", "state"] for w in o["windows"])'
   bj_check 'o["windows"][1]["nn"] == "02" and o["windows"][1]["peer_name"] is None and o["windows"][1]["alias"] is None'   # created, never claimed
   rm -f "$DAEDALUS_HOME/state/leases/02.seen"
@@ -331,7 +332,7 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
   LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
   printf 'not json\n' > "$DAEDALUS_HOME/state/leases/02.json"
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
-  bj_check 'sorted(o) == ["error", "generated_epoch", "prime_window", "this_window", "windows"]'
+  bj_check 'sorted(o) == ["ami", "error", "generated_epoch", "prime_window", "this_window", "windows"]'
   bj_check '"The lease file for window 02 cannot be read (not valid JSON" in o["error"] and "core/lease.sh sweep" in o["error"]'
   bj_check '[w["nn"] for w in o["windows"]] == ["01", "03"] and o["this_window"] == "01"'
   [ -f "$DAEDALUS_HOME/state/leases/02.json" ]                      # reported, never removed: that is sweep's job
@@ -363,9 +364,101 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
   for i in $(seq 1 40); do nn="$(printf '%02d' "$i")"
     set_lease "$nn" "dict(session_id='s$nn', pid=$$, proc_started=$(ps_ms $$))"
     python3 "$DAEDALUS_HOME/core/leaselib.py" heartbeat "$nn"; done
+  # frame-jack on, as the band finds it: the sentinel, a daemon.json, a counters file (the port is dead: refused is the cheap probe)
+  ami_state_files s01 "$(free_port)" up
   t0="$(python3 -c 'import time; print(time.time())')"; run --separate-stderr BJ --session s01; t1="$(python3 -c 'import time; print(time.time())')"
   [ "$status" -eq 0 ]; python3 -c 'import sys; d=float(sys.argv[2])-float(sys.argv[1]); print("board-json took %.3fs" % d, file=sys.stderr); assert d < 1.0, "slow: %.2fs" % d' "$t0" "$t1"
   bj_check 'len(o["windows"]) == 40 and all(w["state"] == "live" for w in o["windows"]) and o["windows"][0]["nn"] == "01"'
+  bj_check 'o["ami"]["state"] == "down" and o["ami"]["asked"] == 6'
+}
+
+# --- board-json: the ami key (frame-jack spec §9.1) ---------------------------------------------------------------
+# One more top-level key, always present with every sub-key: the switch's word and this session's counts. Read from
+# state/ami/ only — the sentinel, daemon.json, the counters file and one bounded port probe; no config, no bash, no git.
+AMI_KEYS='["asked", "asks", "device", "median_ms", "mode", "overrides", "port_alive", "retry_epoch", "since_epoch", "state", "unanswered", "would_ask", "would_shorten"]'
+# ami_state_files <sid> <port> <daemon state> [heartbeat age s] — the sentinel, a daemon.json naming an executable
+# command, and a counters file for <sid> (6 asked, 2 would ask, 1 would shorten, 1 unanswered, 3 overruled)
+ami_state_files() {
+  local A="$DAEDALUS_HOME/state/ami"; mkdir -p "$A"
+  printf '{"at": 1, "session": "%s"}\n' "$1" > "$A/on"
+  python3 -c 'import json, sys, time
+now = time.time()
+json.dump({"command": sys.argv[2], "port": int(sys.argv[3]), "device": "mps", "state": sys.argv[4], "terminal": False,
+           "since": now - 12, "heartbeat": now - float(sys.argv[5])}, open(sys.argv[1] + "/daemon.json", "w"))
+json.dump({"asked": {"destructive": 5, "suite": 1}, "would_ask": 2, "would_shorten": 1, "unanswered": {"down": 1},
+           "latency_recent": [100, 180, 140], "asks": 0, "overrides": 3}, open(sys.argv[1] + "/session-" + sys.argv[6] + ".json", "w"))' \
+    "$A" "$BATS_TEST_DIRNAME/fixtures/ami/fake-decider" "$2" "$3" "${4:-1}" "$1"
+}
+
+@test "board-json: the ami key is always present with every sub-key (asks, overrides, retry_epoch included) — absent with no state/ami; off with the directory and no sentinel; on with a fake serve and counts from a prepared file; down with the sentinel and no serve; supervisor gone from a stale heartbeat; counts null for a missing counters file; a counters file that is unreadable gives nulls, never an error" {
+  LS create >/dev/null; bind_live 01 sA
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check "sorted(o['ami']) == $AMI_KEYS"
+  bj_check 'o["ami"]["state"] == "absent" and o["ami"]["asked"] is None and o["ami"]["port_alive"] is False'
+  [ ! -d "$DAEDALUS_HOME/state/ami" ]                                   # a reader: it never makes the directory
+  mkdir -p "$DAEDALUS_HOME/state/ami"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check "sorted(o['ami']) == $AMI_KEYS and o['ami']['state'] == 'off'"
+  AMI_FIX="$BATS_TEST_TMPDIR/fix/ami"; mkdir -p "$AMI_FIX"               # the fake serve, as start_fake expects it
+  cp "$BATS_TEST_DIRNAME/fixtures/ami/fake-decider" "$AMI_FIX/"; chmod +x "$AMI_FIX/fake-decider"
+  start_fake StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  ami_state_files sA "$FAKE_PORT" up
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check "sorted(o['ami']) == $AMI_KEYS"
+  bj_check 'o["ami"]["state"] == "on" and o["ami"]["port_alive"] is True and o["ami"]["mode"] == "shadow" and o["ami"]["device"] == "mps"'
+  bj_check 'o["ami"]["asked"] == 6 and o["ami"]["would_ask"] == 2 and o["ami"]["would_shorten"] == 1 and o["ami"]["unanswered"] == 1'
+  bj_check 'o["ami"]["median_ms"] == 140 and o["ami"]["asks"] == 0 and o["ami"]["overrides"] == 3 and o["ami"]["retry_epoch"] is None'
+  bj_check 'isinstance(o["ami"]["since_epoch"], float) and o["ami"]["since_epoch"] > 1.7e9'
+  run --separate-stderr BJ --session sNobody; [ "$status" -eq 0 ]      # no counters file for this session: counts null
+  bj_check 'o["ami"]["state"] == "on" and all(o["ami"][k] is None for k in ("asked", "would_ask", "would_shorten", "unanswered", "median_ms", "asks", "overrides"))'
+  run --separate-stderr BJ; [ "$status" -eq 0 ]                         # an operator shell: no session, counts null
+  bj_check 'o["ami"]["asked"] is None'
+  kill "$FAKE_PID"; wait_gone "$FAKE_PID" 5
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check 'o["ami"]["state"] == "down" and o["ami"]["port_alive"] is False and o["ami"]["asked"] == 6'
+  ami_state_files sA "$FAKE_PORT" up 120                                # the heartbeat is two minutes old
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check 'o["ami"]["state"] == "supervisor gone" and o["ami"]["port_alive"] is False'
+  rm -f "$DAEDALUS_HOME/state/ami/session-sA.json"; mkdir "$DAEDALUS_HOME/state/ami/session-sA.json"   # unreadable
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check "sorted(o['ami']) == $AMI_KEYS and o['ami']['asked'] is None and o['ami']['overrides'] is None"
+  bj_check '[w["nn"] for w in o["windows"]] == ["01"]'
+}
+
+@test "board-json: the ami key falls back to absent with every sub-key null when amilib cannot be loaded — the band never goes blank over the AMI" {
+  LS create >/dev/null; bind_live 01 sA
+  printf 'raise RuntimeError("broken")\n' > "$DAEDALUS_HOME/core/amilib.py"
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check "sorted(o['ami']) == $AMI_KEYS and o['ami']['state'] == 'absent' and o['ami']['mode'] is None"
+  bj_check '[w["nn"] for w in o["windows"]] == ["01"]'
+}
+
+@test "board-json: the ami read never spawns bash and never runs git — with recording shims for both first on PATH, frame-jack on adds no bash call and no git call to what board-json makes with frame-jack never switched on; in process, amilib.board_ami with the _lib seam and subprocess made to fail still answers" {
+  LS create >/dev/null; bind_live 01 sA
+  shim="$BATS_TEST_TMPDIR/shim"; mkdir -p "$shim"
+  printf '#!/bin/sh\nprintf "%%s\\n" "git $*" >> "%s/CALLED"\nexec "%s/fixtures/leases/fake-git-fail" "$@"\n' "$BATS_TEST_TMPDIR" "$BATS_TEST_DIRNAME" > "$shim/git"
+  printf '#!/bin/sh\nprintf "%%s\\n" "bash" >> "%s/CALLED"\nexec /bin/bash "$@"\n' "$BATS_TEST_TMPDIR" > "$shim/bash"
+  chmod +x "$shim/git" "$shim/bash"
+  run --separate-stderr env PATH="$shim:$PATH" python3 "$DAEDALUS_HOME/core/leaselib.py" board-json --session sA
+  [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["ami"]["state"] == "absent"'
+  base="$(cat "$BATS_TEST_TMPDIR/CALLED" 2>/dev/null)"; rm -f "$BATS_TEST_TMPDIR/CALLED"
+  ami_state_files sA "$(free_port)" up
+  run --separate-stderr env PATH="$shim:$PATH" python3 "$DAEDALUS_HOME/core/leaselib.py" board-json --session sA
+  [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
+  bj_check 'o["ami"]["state"] == "down" and o["ami"]["asked"] == 6'
+  with="$(cat "$BATS_TEST_TMPDIR/CALLED" 2>/dev/null)"
+  [ "$with" = "$base" ] || { echo "the ami read added calls: before [$base] after [$with]"; return 1; }
+  case "$with" in *git*) echo "git was run: $with"; return 1 ;; esac
+  run python3 -c 'import sys, subprocess
+sys.path.insert(0, sys.argv[1]); import verifylib as v, amilib as a
+from pathlib import Path
+def boom(*x, **k): raise AssertionError("a child process was started")
+v._lib = boom; v._lib_full = boom; subprocess.Popen = boom; subprocess.run = boom
+b = a.board_ami(Path(sys.argv[1]).parent, "sA")
+assert b["state"] == "down" and b["asked"] == 6, b
+print("ok")' "$DAEDALUS_HOME/core"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
 
 # --- board-json: the review of 2026-10-11 ------------------------------------------------------------------------

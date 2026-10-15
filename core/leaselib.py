@@ -5220,6 +5220,27 @@ def _band_text(value: object) -> Optional[str]:
     return text or None
 
 
+# The `ami` key of board-json (frame-jack spec §9.1): every sub-key, always — the mod relies on every key being present.
+BOARD_AMI_KEYS = ("state", "mode", "port_alive", "device", "asked", "would_ask", "would_shorten", "unanswered",
+                  "median_ms", "asks", "overrides", "since_epoch", "retry_epoch")
+
+
+def board_ami(root: Path, sid: Optional[str]) -> dict:
+    """The switch's word and this session's counts, from state/ami/ alone (amilib.board_ami: stats, one read of
+    daemon.json, one of the counters file, one 100 ms-bounded connect — no config, no bash, no git). Outside the
+    lease lock: it reads nothing under state/leases/. Any failure, amilib missing or broken included, is `absent`
+    with every other key None — the band never goes blank over the AMI."""
+    try:
+        import amilib  # noqa: E402 — imported here so a deployment without it, or a broken copy, costs only this key
+        got = amilib.board_ami(root, sid)
+        return {k: got.get(k) for k in BOARD_AMI_KEYS}
+    except Exception:
+        out = dict.fromkeys(BOARD_AMI_KEYS)
+        out["state"] = "absent"
+        out["port_alive"] = False
+        return out
+
+
 def board_json(root: Path, sid: Optional[str]) -> dict:
     """The lease board as one object for the band above the prompt, which asks
     for it every 2 s in every open window. A READER: one pass over the lease
@@ -5230,7 +5251,8 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
     an exclusive lock, or read_all's pruning of an empty file.
 
     Keys (spec §3.4): this_window, prime_window, windows (this window first,
-    then by number), generated_epoch; each window has exactly nn, alias, state,
+    then by number), generated_epoch, ami (frame-jack spec §9.1: board_ami,
+    every sub-key always present); each window has exactly nn, alias, state,
     changed_count, peer_name, is_prime, is_this, last_seen_epoch, note. One
     more, `error`, only when a lease file could not be read: its operator
     sentence(s), while every readable window is still listed — one bad file
@@ -5293,7 +5315,8 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
             "last_seen_epoch": float(seen[nn]) if seen[nn] is not None else None,
             "note": _band_text(d.get("note")),
         })
-    obj: dict = {"this_window": mine, "prime_window": prime_nn, "windows": windows, "generated_epoch": time.time()}
+    obj: dict = {"this_window": mine, "prime_window": prime_nn, "windows": windows, "generated_epoch": time.time(),
+                 "ami": board_ami(root, sid)}
     if errors:
         obj["error"] = " ".join(str(e) for e in errors)
     return obj
