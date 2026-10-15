@@ -1714,6 +1714,18 @@ EOF
   case "$output" in *"NOTE     frame-jack: ami.shadow is no longer read — ami.ask_destructive and ami.ask_suite say which questions are asked; remove the shadow line"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "doctor frame-jack questions: with the AMI on, a daemon that asks other questions than config.yaml now names is a NOTE naming what the running daemon asks and the remedy; the same questions add no such line" {
+  doctor_fj_fixture
+  start_fake "$MODEL"; FJ_PORT="$FAKE_PORT"
+  fj_config "$FJ_PORT" mlx false
+  fj_daemon "{\"serve_pid\": $FAKE_PID, \"questions\": {\"destructive\": true, \"suite\": true}}"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack questions: the running daemon asks destructive and suite asked, not what config.yaml now says (suite asked; destructive not asked (ami.ask_destructive is false — the default)) — /frame-jack off, then on, to apply it"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_daemon "{\"serve_pid\": $FAKE_PID, \"questions\": {\"destructive\": false, \"suite\": true}}"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"the running daemon asks"*) echo "a mismatch NOTE without a mismatch: $output"; return 1 ;; *) : ;; esac
+}
+
 @test "doctor frame-jack device: no device line defaults to mlx on Apple silicon (cpu elsewhere) and the OK line says so; device mps is a NOTE naming the crash two overlapping questions caused and pointing at mlx; device mlx has no such NOTE" {
   doctor_fj_fixture
   P="$(free_port)"

@@ -26,15 +26,16 @@ free_port() {
   python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
 }
 
-# start_fake <model> [VAR=value ...] — starts `fake-decider serve <model> --port 0 --device mps` with the
+# start_fake <model> [VAR=value ...] — starts `fake-decider serve <model> --port <a free port> --device mps` with the
 # given environment, reads the port from its first stdout line, exports FAKE_PORT and FAKE_PID, and
-# records the pid for teardown_live. FAKE_LOG defaults to $BATS_TEST_TMPDIR/fake.log. START_FAKE_PORT
-# pins the port instead of 0 (a fake standing on the configured port: the borrowed and refused cases).
+# records the pid for teardown_live. The port is always explicit on the command line, as a real serve's
+# is: the identity rule matches --port. FAKE_LOG defaults to $BATS_TEST_TMPDIR/fake.log. START_FAKE_PORT
+# pins the port (a fake standing on the configured port: the borrowed and refused cases).
 start_fake() {
   local model="$1"; shift
   local out="$BATS_TEST_TMPDIR/fake-$RANDOM$RANDOM.out"
   : > "$out"
-  env FAKE_LOG="${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" "$@" "$AMI_FIX/fake-decider" serve "$model" --port "${START_FAKE_PORT:-0}" --device mps \
+  env FAKE_LOG="${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" "$@" "$AMI_FIX/fake-decider" serve "$model" --port "${START_FAKE_PORT:-$(free_port)}" --device mps \
       > "$out" 2> "$out.err" 3>&- < /dev/null &
   FAKE_PID=$!
   printf '%s\n' "$FAKE_PID" >> "$BATS_TEST_TMPDIR/live-pids"

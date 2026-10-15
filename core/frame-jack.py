@@ -1018,6 +1018,13 @@ def doctor_lines(root):
         else:
             lines.append("NOTE     frame-jack questions: %s — switched on, the daemon would hold about 5.2 GB for "
                          "nothing; leave frame-jack off" % questions_phrase(cfg["questions"]))
+        # the guard reads the questions from daemon.json, copied at start: after a config edit they can differ
+        rec = amilib._read_json(amilib.daemon_path(root)) or {}
+        if (amilib.sentinel_path(root).exists() and rec.get("command")
+                and amilib.asked_questions(rec) != cfg["questions"]):
+            lines.append("NOTE     frame-jack questions: the running daemon asks %s, not what config.yaml now says "
+                         "(%s) — /frame-jack off, then on, to apply it" % (
+                             questions_phrase(amilib.asked_questions(rec)), questions_phrase(cfg["questions"])))
         if cfg["shadow_leftover"]:
             lines.append("NOTE     frame-jack: ami.shadow is no longer read — ami.ask_destructive and ami.ask_suite "
                          "say which questions are asked; remove the shadow line")
