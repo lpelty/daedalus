@@ -596,6 +596,27 @@ PY
   has "$output" "this session: run from a shell, so there are no session counts"
 }
 
+@test "status: a question switched off reads as not asked, never as a zero meter — the destructive question off (the default) with none asked gives 'destructive not asked' and 'would have asked you: not asked'; the suite question off gives 'would have shortened: not asked'; a count already logged is still shown" {
+  status_home
+  set_counts() {
+    python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c.update(json.loads(sys.argv[2])); json.dump(c, open(p,"w"))' \
+      "$AMI/session-sA.json" "$1"
+  }
+  set_counts '{"asked": {"destructive": 0, "suite": 6}, "would_ask": 0, "would_ask_then_failed": 0, "would_ask_with_guard_warning": 0, "recent_would_ask": []}'
+  run FJ status
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  has "$output" "this session: 6 questions asked (destructive not asked, suite 6)"
+  has "$output" "  would have asked you: not asked (ami.ask_destructive is false)"
+  lacks "$output" "would have asked you 0 times"
+  has "$output" "  would have shortened 2 of the 6 suite runs"
+  set_dj questions '{"destructive": true, "suite": false}'
+  set_counts '{"asked": {"destructive": 9, "suite": 0}, "would_shorten": 0}'
+  run FJ status
+  has "$output" "this session: 9 questions asked (destructive 9, suite not asked)"
+  has "$output" "  would have asked you 0 times"
+  has "$output" "  would have shortened: not asked (ami.ask_suite is false)"
+}
+
 @test "status: off — the sentinel is absent and the sentence says how to switch it on; never switched on says so" {
   run FJ status
   [ "$status" -eq 0 ]

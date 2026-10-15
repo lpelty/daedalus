@@ -805,8 +805,11 @@ def cmd_status(root):
     else:
         asked = c.get("asked") or {}
         total = sum(int(v or 0) for v in asked.values())
+        # a question switched off with nothing logged reads as not asked — a zero would look like a measurement
+        on_q = amilib.asked_questions(d) if d and d.get("command") else (cfg or {}).get("questions") or dict(amilib.ASKED_DEFAULT)
+        off_q = {q: k for q, k in ASK_KEYS if not on_q.get(q) and not int(asked.get(q) or 0)}
         out.append("this session: %s asked (%s)" % (_plural(total, "question"), ", ".join(
-            "%s %s" % (q, _n(asked.get(q) or 0)) for q in amilib.QUESTIONS)))
+            "%s not asked" % q if q in off_q else "%s %s" % (q, _n(asked.get(q) or 0)) for q in amilib.QUESTIONS)))
         wa = int(c.get("would_ask") or 0)
         recent = [x for x in (c.get("recent_would_ask") or []) if isinstance(x, str)]
         if wa:
@@ -819,10 +822,15 @@ def cmd_status(root):
                     _n(wa - len(shown)), _n(wa)))
             out.append("  of those %s: %s carried a guard warning too (the deterministic guard agreed), %s then failed" % (
                 _n(wa), _n(c.get("would_ask_with_guard_warning") or 0), _n(c.get("would_ask_then_failed") or 0)))
+        elif "destructive" in off_q:
+            out.append("  would have asked you: not asked (ami.%s is false)" % off_q["destructive"])
         else:
             out.append("  would have asked you 0 times")
-        out.append("  would have shortened %s of the %s suite runs — %s of those then failed" % (
-            _n(c.get("would_shorten") or 0), _n(asked.get("suite") or 0), _n(c.get("shortened_then_failed") or 0)))
+        if "suite" in off_q and not int(c.get("would_shorten") or 0):
+            out.append("  would have shortened: not asked (ami.%s is false)" % off_q["suite"])
+        else:
+            out.append("  would have shortened %s of the %s suite runs — %s of those then failed" % (
+                _n(c.get("would_shorten") or 0), _n(asked.get("suite") or 0), _n(c.get("shortened_then_failed") or 0)))
         un = {k: int(v or 0) for k, v in (c.get("unanswered") or {}).items() if int(v or 0)}
         if un:
             out.append("unanswered this session: %s (%s)" % (_n(sum(un.values())), ", ".join(
