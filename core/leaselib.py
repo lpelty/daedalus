@@ -18,6 +18,7 @@ from __future__ import annotations
 import calendar
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -1650,14 +1651,17 @@ def dirty_files(worktree: Path, timeout: int = 20) -> list:
 
 
 def _remove_lease_files(root: Path, nn: str) -> None:
-    for p in (lease_path(root, nn), leases_dir(root) / (nn + ".seen"), leases_dir(root) / (nn + ".changed")):
+    # The delete ask (release_asked_path) goes with the lease files, so a reused number never inherits an old ask.
+    for p in (lease_path(root, nn), leases_dir(root) / (nn + ".seen"), leases_dir(root) / (nn + ".changed"),
+              release_asked_path(root, nn)):
         try:
             p.unlink()
         except FileNotFoundError:
             pass
 
 
-def release(root: Path, token: str, sid: Optional[str], remove: bool = False, force: bool = False) -> str:
+def release(root: Path, token: str, sid: Optional[str], remove: bool = False, force: bool = False,
+            said: Optional[str] = None) -> str:
     """The holder ends its lease: released: <time> (removed at the next
     sweep, so the holder's own hooks can still read the state). Any other
     session is refused while the holder is live; a stale lease may be released
@@ -1734,11 +1738,86 @@ def unpromoted_work(root: Path, nn: str, lease: dict) -> Tuple[list, list, list]
     return subjects, dirty, problems
 
 
-def unpromoted_report(root: Path, token: str) -> str:
+# --- Deleting a window's work: report, yes, delete (agent-runnable design 2026-10-15, §4.2) -------------------
+# The one line the report ends with and the operator's yes answers. It is the shown text AND the re-arming line
+# the transcript check looks for (the operator may ask first; a reply that ends with it re-arms the yes, as
+# promote's invitation does): the gate computes it from the number, nothing read from disk supplies it.
+DELETE_INVITATION = "Say yes to delete window %s's work"
+
+
+def release_asked_path(root: Path, nn: str) -> Path:
+    """The witness that `unpromoted <NN>` ran for a session: state/release-asked/<NN>.json. A witness, not a trust
+    root — a script the session runs could write it, so the yes is matched against DELETE_INVITATION (a constant)
+    and the cut-off is never this file's time alone (lease_epochs)."""
+    return root / "state" / "release-asked" / (nn + ".json")
+
+
+def _hash_update(h: "hashlib._Hash", *parts: object) -> None:
+    for part in parts:
+        b = part if isinstance(part, bytes) else str(part).encode("utf-8", "surrogateescape")
+        h.update(b)
+        h.update(b"\0")
+
+
+def work_fingerprint(root: Path, nn: str, lease: dict) -> str:
+    """What the operator's yes answers: a sha256 over, per repo of the window, the worktree's HEAD, its tracked
+    diff, its status and each untracked file's content. A commit, an amended commit with the same subject, a
+    further edit to a file the report already named, or a new file all change it; the report's sentences cannot
+    tell those apart. Git only, no lease lock: it may run under either lock."""
+    h = hashlib.sha256()
+    for repo in (lease.get("trunks") or {}):
+        wt = root / "worktrees" / nn / repo
+        _hash_update(h, "repo", repo)
+        if not wt.is_dir():
+            _hash_update(h, "absent")
+            continue
+        for args in (("rev-parse", "HEAD"), ("diff", "HEAD", "--binary"),
+                     ("status", "--porcelain", "-z", "--untracked-files=all")):
+            code, out, _ = _git(wt, *args)
+            _hash_update(h, " ".join(args), code, out)
+        code, out, _ = _git(wt, "ls-files", "--others", "--exclude-standard", "-z")
+        _hash_update(h, "untracked", code)
+        for rel in sorted(x for x in out.split("\0") if x):
+            try:
+                content = hashlib.sha256((wt / rel).read_bytes()).hexdigest()
+            except OSError as e:
+                content = "unreadable: %s" % e
+            _hash_update(h, rel, content)
+    return h.hexdigest()
+
+
+def lease_epochs(lease: dict) -> float:
+    """The latest instant the lease file itself records — created, bound_at, every history[].at and split_from.at
+    (now_stamp's local %Y-%m-%dT%H:%M:%S, parsed with mktime) — 0.0 when none parses. The delete's cut-off is at
+    least this: a yes from before this window existed never counts, whatever the witness marker says."""
+    stamps = [lease.get("created"), lease.get("bound_at")]
+    for entry in (lease.get("history") or []):
+        if isinstance(entry, dict):
+            stamps.append(entry.get("at"))
+    sf = lease.get("split_from")
+    if isinstance(sf, dict):
+        stamps.append(sf.get("at"))
+    best = 0.0
+    for raw in stamps:
+        if not isinstance(raw, str):
+            continue
+        try:
+            best = max(best, time.mktime(time.strptime(raw, "%Y-%m-%dT%H:%M:%S")))
+        except (ValueError, OverflowError):
+            continue
+    return best
+
+
+def unpromoted_report(root: Path, token: str, sid: Optional[str] = None) -> str:
     """`core/lease.sh unpromoted <NN>`: the report-only first step of "release NN and delete its work" — what
     `release NN --remove` would delete, deleting nothing. A verb of its own because `release --remove` was denied
     by Claude Code's auto-mode classifier before it ran (another deployment, 2026-10-13), and because with nothing
-    unpromoted it deletes at once instead of reporting. Read-only: a shared lock, any session, a visitor too."""
+    unpromoted it deletes at once instead of reporting. Read-only on the leases: a shared lock, any session, a
+    visitor too. Two lines: the report, then DELETE_INVITATION (the agent repeats both word for word and the
+    operator's next yes is what `release --remove` checks). From a session (sid), the ask is witnessed under
+    state/release-asked/<NN>.json — the session id, the report, the problems and the work's fingerprint, the
+    latest ask for the number overwriting an earlier one; a visitor's ask is witnessed too (a visitor cannot
+    release). An operator shell leaves no marker: it needs none."""
     with lock(root, shared=True):
         leases = read_all(root)
         nn = number_of(leases, token, "unpromoted")
@@ -1746,10 +1825,20 @@ def unpromoted_report(root: Path, token: str) -> str:
         if lease is None:
             raise Refused("There is no window %s." % nn)
         _, _, problems = unpromoted_work(root, nn, lease)
+        fp = work_fingerprint(root, nn, lease)
     if not problems:
-        return ("Window %s has no unpromoted commits and no uncommitted changes; `core/lease.sh release %s --remove` "
-                "deletes only its worktree and branch." % (nn, nn))
-    return "Window %s %s. `core/lease.sh release %s --remove --force` deletes them." % (nn, ", and ".join(problems), nn)
+        report = ("Window %s has no unpromoted commits and no uncommitted changes; deleting its work removes only "
+                  "its worktree and branch." % nn)
+    else:
+        report = "Window %s %s." % (nn, ", and ".join(problems))
+    if sid is not None:
+        marker = release_asked_path(root, nn)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_name(marker.name + ".tmp")
+        tmp.write_text(json.dumps({"lease": nn, "session_id": sid, "at": time.time(), "report": report,
+                                   "problems": problems, "fingerprint": fp}, indent=2))
+        os.replace(str(tmp), str(marker))
+    return "%s\n%s." % (report, DELETE_INVITATION % nn)
 
 
 def _holder_or_shell(root: Path, nn: str, lease: dict, sid: Optional[str], cmd: str) -> None:
@@ -4459,7 +4548,7 @@ def main(argv: list) -> int:
         if not args or args[0].startswith("--"):
             sys.stderr.write("usage: core/lease.sh unpromoted <NN>\n"); return 2
         try:
-            print(unpromoted_report(root, args[0])); return 0
+            print(unpromoted_report(root, args[0], session_id_from_env())); return 0
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
     if cmd == "waiting-work":
@@ -4509,7 +4598,10 @@ def main(argv: list) -> int:
             return _refused(lambda: "Window %s's criteria file is %s."
                             % (set_field(root, args[0], "update", "criteria", _after("--criteria")), _after("--criteria")))
         if cmd == "release":
-            return _refused(lambda: release(root, args[0], sid, remove="--remove" in args, force="--force" in args))
+            # --operator-said carries the operator's whole reply to the delete line (the recorded yes, §4.2); read
+            # here so its value is never mistaken for a token or a flag.
+            return _refused(lambda: release(root, args[0], sid, remove="--remove" in args, force="--force" in args,
+                                            said=_after("--operator-said") if "--operator-said" in args else None))
         if cmd == "done":
             return _refused(lambda: mark_done(root, args[0], require_session(sid, "done"), _after("--summary")))
         if cmd == "sweep":

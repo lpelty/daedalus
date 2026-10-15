@@ -1682,16 +1682,21 @@ print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() 
   # The report-only half of "release NN --remove": the delete procedure's first step. `release --remove` itself
   # was denied by Claude Code's auto-mode classifier on another deployment (2026-10-13) before it ran, and with
   # nothing unpromoted it deletes at once rather than reporting — so the report is a verb of its own.
+  # Since 2026-10-15 the report ends with the invitation line the recorded yes answers ("Say yes to delete window
+  # NN's work.") and no longer prints the shell line: the agent runs the delete after the yes (the allow rule in
+  # .claude/settings.json puts it ahead of auto mode's classifier; the guard and leaselib check the yes).
   LS create >/dev/null
   W="$DAEDALUS_HOME/worktrees/01/thing"
   run LS unpromoted 01
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$output" = "Window 01 has no unpromoted commits and no uncommitted changes; \`core/lease.sh release 01 --remove\` deletes only its worktree and branch." ] || { echo "$output"; return 1; }
+  [ "$output" = $'Window 01 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch.\nSay yes to delete window 01\'s work.' ] || { echo "$output"; return 1; }
   printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
   printf 'd\n' >> "$W/a.txt"; printf 'u\n' > "$W/untracked.txt"
   run LS unpromoted 01
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$output" = "Window 01 has 1 unpromoted commit: \"unmerged work\", and has uncommitted changes in worktrees/01/thing (2 files: a.txt, untracked.txt). \`core/lease.sh release 01 --remove --force\` deletes them." ] || { echo "$output"; return 1; }
+  [ "$output" = $'Window 01 has 1 unpromoted commit: "unmerged work", and has uncommitted changes in worktrees/01/thing (2 files: a.txt, untracked.txt).\nSay yes to delete window 01\'s work.' ] || { echo "$output"; return 1; }
+  # the shell line it used to print is gone: the agent runs the delete after the yes (2026-10-15)
+  case "$output" in *"core/lease.sh release"*) echo "the report hands over a shell line: $output"; return 1 ;; *) : ;; esac
   [ -d "$W" ]; [ -f "$W/untracked.txt" ]; [ -f "$DAEDALUS_HOME/state/leases/01.json" ]
   git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null
   DIRECT_CALL_ID=visit run LS unpromoted 01
@@ -1701,4 +1706,63 @@ print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() 
   [ "$status" -ne 0 ]; case "$output" in *"There is no window 07."*) : ;; *) echo "$output"; return 1 ;; esac
   run LS unpromoted
   [ "$status" -ne 0 ]; case "$output" in *"usage: core/lease.sh unpromoted <NN>"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- The delete step runs by the agent after a recorded yes (2026-10-15) --------------------------------------
+# fp <NN> — leaselib.work_fingerprint of a window's work, as `unpromoted` records it and `release --remove` rechecks it.
+fp() {
+  python3 - "$DAEDALUS_HOME" "$1" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, str(root / "core"))
+import leaselib as ll
+print(ll.work_fingerprint(root, sys.argv[2], ll.read_lease(root, sys.argv[2])))
+PY
+}
+marker() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d.get(sys.argv[2]); print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$DAEDALUS_HOME/state/release-asked/$1.json" "$2"; }
+
+@test "unpromoted <NN> from a session is a witness: it writes state/release-asked/<NN>.json with the session id, the report, the problems and the work's fingerprint; a later ask overwrites it; a visitor's ask writes it; an operator shell's does not; release --remove and sweep remove it with the lease files" {
+  LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"; M="$DAEDALUS_HOME/state/release-asked/01.json"
+  run LS unpromoted 01; [ "$status" -eq 0 ]
+  [ ! -e "$M" ] || { echo "an operator shell's ask left a marker"; return 1; }
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$M" ]
+  [ "$(marker 01 session_id)" = "sA" ]; [ "$(marker 01 lease)" = "01" ]; [ "$(marker 01 problems)" = "[]" ]
+  [ "$(marker 01 report)" = "Window 01 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch." ]
+  f1="$(marker 01 fingerprint)"; [ "$f1" = "$(fp 01)" ]; [ "${#f1}" -eq 64 ]
+  at1="$(marker 01 at)"; python3 -c 'import sys,time; a=float(sys.argv[1]); assert time.time()-60 < a <= time.time(), a' "$at1"
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
+  DAEDALUS_SESSION_ID=sB run LS unpromoted 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(marker 01 session_id)" = "sB" ]
+  [ "$(marker 01 problems)" = '["has 1 unpromoted commit: \"unmerged work\""]' ]
+  [ "$(marker 01 fingerprint)" != "$f1" ]; [ "$(marker 01 fingerprint)" = "$(fp 01)" ]
+  DIRECT_CALL_ID=visit DAEDALUS_SESSION_ID=sV run LS unpromoted 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(marker 01 session_id)" = "sV" ]
+  run LS release 01 --remove --force; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$M" ] || { echo "release --remove left the marker"; return 1; }
+  LS create >/dev/null     # 01 again: a reused number never inherits an old ask
+  [ ! -e "$M" ]
+  DAEDALUS_SESSION_ID=sA LS unpromoted 01 >/dev/null; [ -f "$M" ]
+  python3 "$LL" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$M" ] || { echo "sweep left the marker"; return 1; }
+}
+
+@test "work_fingerprint changes on a commit, on commit --amend with the same subject, on an append to an already-dirty file, on a new untracked file and on a change in the nested repo — and not on a no-op (the yes answers the report; a change the report did not name is refused by the gate)" {
+  LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  a="$(fp 01)"; b="$(fp 01)"; [ "$a" = "$b" ]
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
+  c="$(fp 01)"; [ "$c" != "$b" ]
+  printf 'w2\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -a --amend --no-edit
+  [ "$(git -C "$W" log -1 --format=%s)" = "unmerged work" ]
+  d="$(fp 01)"; [ "$d" != "$c" ]
+  printf 'd\n' >> "$W/a.txt"; e="$(fp 01)"; [ "$e" != "$d" ]
+  printf 'd2\n' >> "$W/a.txt"; f="$(fp 01)"; [ "$f" != "$e" ]      # a further edit to a file the report already named
+  printf 'u\n' > "$W/untracked.txt"; g="$(fp 01)"; [ "$g" != "$f" ]
+  printf 'u2\n' > "$W/untracked.txt"; h="$(fp 01)"; [ "$h" != "$g" ]   # the untracked file's CONTENT, not only its name
+  printf 'n2\n' >> "$W/sub/n.txt"; i="$(fp 01)"; [ "$i" != "$h" ]
+  [ "$(fp 01)" = "$i" ]
 }
