@@ -1377,3 +1377,37 @@ verify:
   PATH=/usr/bin:/bin:/usr/sbin:/sbin run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"NOTE     lease board on screen: claude is not on PATH here, so its version was not checked (mods need 2.1.287 or later)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "doctor prints the last automatic index run as a NOTE (from vault-search --check): the finished frame's time, kicker and counts; with no log, that none is recorded yet; doctor stays green" {
+  cp "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
+  cat > "$DAEDALUS_HOME/q.sh" <<'EOF2'
+#!/bin/bash
+echo '[]'
+EOF2
+  chmod +x "$DAEDALUS_HOME/q.sh"
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF2
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+recall:
+  vault-query: '$DAEDALUS_HOME/q.sh "\$1"'
+  vault-index: 'true'
+  store: state/chroma
+EOF2
+  git init -q "$DAEDALUS_HOME/target/thing"
+  mkdir -p "$DAEDALUS_HOME/vault/.git" "$DAEDALUS_HOME/state/chroma"
+  for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+  printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  printf 'started 2026-10-15T09:00:00 by vault-commit\nfinished 2026-10-15T09:00:04 indexed=3 purged=1\n' > "$DAEDALUS_HOME/state/recall-index.log"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -cF 'NOTE     document recall: last automatic index 2026-10-15T09:00:00 by vault-commit: indexed=3 purged=1')" -eq 1 ]
+  rm "$DAEDALUS_HOME/state/recall-index.log"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -cF 'NOTE     document recall: no automatic index run recorded yet')" -eq 1 ]
+}

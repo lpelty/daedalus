@@ -211,7 +211,7 @@ EOF
   [ "$(cat "$DAEDALUS_HOME/state/recall-last-index")" = "old" ]
 }
 
-@test "--check: unconfigured is the summary itself; healthy is summary only" {
+@test "--check: unconfigured is the summary itself; healthy is the summary and the last-run line only" {
   write_config "  store: state/chroma"
   run python3 "$SCRIPT" --check
   [ "$status" -eq 0 ]
@@ -229,7 +229,9 @@ EOF
   printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
   run python3 "$SCRIPT" --check
   [ "$status" -eq 0 ]
-  [ "$output" = "document recall: configured, probe ok" ]
+  # since the reindex design of 2026-10-15 the last automatic run is always reported (§3.3)
+  [ "$output" = "document recall: configured, probe ok
+document recall: no automatic index run recorded yet" ]
 }
 
 @test "--check: each condition line fires on its fixture" {
@@ -537,4 +539,39 @@ print(p.returncode, round(time.time()-t,2)); sys.stdout.write(p.stdout)' "$SCRIP
   run bash -c "cd / && env DAEDALUS_SESSION_ID=sP python3 '$SCRIPT' index --background --by vault-commit"; [ "$status" -eq 0 ]
   [ "$output" = "document index: rebuilding in the background (state/recall-index.log)" ]
   wait_log "finished"; [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
+
+@test "--check reports the last automatic index run from the log: none yet; finished; failed with the pointer; started with the lock held (running); started with the lock free (did not finish); a two-frame log reports the last frame" {
+  cat > "$BATS_TEST_TMPDIR/q.sh" <<'EOF2'
+#!/bin/bash
+echo '[]'
+EOF2
+  chmod +x "$BATS_TEST_TMPDIR/q.sh"
+  write_config "  vault-query: '$BATS_TEST_TMPDIR/q.sh \"\$1\"'" "$(printf "  vault-index: 'true'\n  store: state/chroma")"
+  mkdir -p "$DAEDALUS_HOME/state/chroma"; printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  LOG="$DAEDALUS_HOME/state/recall-index.log"
+  run python3 "$SCRIPT" --check; [ "$status" -eq 0 ]
+  [ "$(count 'document recall: no automatic index run recorded yet')" -eq 1 ]
+  printf 'started 2026-10-15T09:00:00 by vault-commit\nfinished 2026-10-15T09:00:04 indexed=3 purged=1\n' > "$LOG"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'document recall: last automatic index 2026-10-15T09:00:00 by vault-commit: indexed=3 purged=1')" -eq 1 ]
+  printf 'started 2026-10-15T09:00:00 by session-start\nengine: cannot open store\nfailed 2026-10-15T09:00:04: engine failed; stamp untouched\n' > "$LOG"
+  run python3 "$SCRIPT" --check
+  [ "$(count "document recall: last automatic index 2026-10-15T09:00:00 by session-start FAILED: engine failed; stamp untouched (state/recall-index.log has the engine's output)")" -eq 1 ]
+  printf 'started 2026-10-15T09:00:00 by operator\nengine: warming up\n' > "$LOG"
+  python3 -c "import fcntl,os,time; fd=os.open('$DAEDALUS_HOME/state/recall-index.lock',os.O_RDWR|os.O_CREAT); fcntl.flock(fd,fcntl.LOCK_EX); time.sleep(3)" 3>&- </dev/null >/dev/null 2>&1 &
+  sleep 0.5
+  run python3 "$SCRIPT" --check
+  [ "$(count 'document recall: an index run by operator is running since 2026-10-15T09:00:00')" -eq 1 ]
+  wait
+  run python3 "$SCRIPT" --check
+  [ "$(count "document recall: the index run by operator started 2026-10-15T09:00:00 and did not finish (killed, or the machine slept); the next vault commit or the prime's next session start runs it again")" -eq 1 ]
+  printf 'started 2026-10-15T09:00:00 by vault-commit\nfinished 2026-10-15T09:00:04 indexed=3 purged=1\nstarted 2026-10-15T09:00:04 by vault-commit (rerun: the vault changed during the last run)\nfinished 2026-10-15T09:00:08 indexed=4 purged=0\n' > "$LOG"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'last automatic index 2026-10-15T09:00:04 by vault-commit: indexed=4 purged=0')" -eq 1 ]
+  [ "$(count 'last automatic index')" -eq 1 ]
+  # the reindex command unconfigured: that line, never a last-run line
+  write_config "  vault-query: '$BATS_TEST_TMPDIR/q.sh \"\$1\"'" "  store: state/chroma"
+  run python3 "$SCRIPT" --check
+  [ "$(count 'reindex command unconfigured')" -eq 1 ]; [ "$(count 'automatic index')" -eq 0 ]
 }

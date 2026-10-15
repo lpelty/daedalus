@@ -494,7 +494,43 @@ def cmd_check(root: Path) -> int:
                 print("document recall: index run older than newest vault change")
     if not read_cfg("recall.vault-index", root):
         print("document recall: reindex command unconfigured")
+    else:
+        print(last_run_line(root))
     return 0
+
+
+_STARTED_RE = re.compile(r"^started (\S+) by (\S+)")
+
+
+def last_run_line(root: Path) -> str:
+    """The last automatic index run, read from state/recall-index.log (§3.3):
+    its last `started` line names the time and the kicker, its last non-empty
+    line the outcome. A holder that ran again has several frames; the last is
+    the one reported. Read-only but for a momentary lock probe, which tells a
+    run still going from one that was killed or slept through."""
+    log = root / LOG_REL
+    try:
+        lines = [ln.rstrip("\n") for ln in log.read_text().splitlines() if ln.strip()]
+    except OSError:
+        return "document recall: no automatic index run recorded yet"
+    when, who = "?", "?"
+    for ln in lines:
+        m = _STARTED_RE.match(ln)
+        if m:
+            when, who = m.group(1), m.group(2)
+    last = lines[-1] if lines else ""
+    if last.startswith("finished "):
+        return "document recall: last automatic index %s by %s: %s" % (when, who, last.split(" ", 2)[2] if last.count(" ") >= 2 else last)
+    if last.startswith("failed "):
+        reason = last.split(": ", 1)[1] if ": " in last else last
+        return ("document recall: last automatic index %s by %s FAILED: %s (%s has the engine's output)"
+                % (when, who, reason, LOG_REL))
+    fd = _try_lock(root)
+    if fd is None:
+        return "document recall: an index run by %s is running since %s" % (who, when)
+    os.close(fd)
+    return ("document recall: the index run by %s started %s and did not finish (killed, or the machine slept); "
+            "the next vault commit or the prime's next session start runs it again" % (who, when))
 
 
 def main(argv: List[str]) -> int:
