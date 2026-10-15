@@ -141,3 +141,40 @@ up_stops() {
 }
 # pick_up — the operator said "pick it up": the command the agent runs
 pick_up() { run bash "$DAEDALUS_HOME/core/lease.sh" adopt --all-unfinished </dev/null; }
+
+# sparse <file> <MB> — a file of <MB> MB that takes no disk (the safety copy's estimate sums sizes, never reads)
+sparse() {
+  mkdir -p "$(dirname "$1")"
+  python3 -c 'import sys; open(sys.argv[1], "wb").truncate(int(sys.argv[2]) << 20)' "$1" "$2"
+}
+# smartsheet_shape [noclone] — the shape a second machine's deployment reported (update-command Decision 8):
+# target/thing as its product, with engine/pyproject.toml + engine/uv.lock and an ignored engine/.venv of 1800 MB
+# in the checkout, two window worktrees (worktrees/01, worktrees/04) and two pushed promote scratches;
+# extensions/open-design with pnpm-lock.yaml and an ignored 1900 MB node_modules/.pnpm; and, unless noclone,
+# extensions/open-design/open-design-plainclone-unused holding 3840 MB of untracked files. All sparse.
+smartsheet_shape() {
+  local d id n
+  cp "$SRC/promote.py" "$DAEDALUS_HOME/core/"
+  mkdir -p "$T/engine" "$T/extensions/open-design" "$DAEDALUS_HOME/worktrees"
+  printf '[project]\nname = "engine"\n' > "$T/engine/pyproject.toml"; printf 'version = 1\n' > "$T/engine/uv.lock"
+  printf 'lockfileVersion: 9.0\n' > "$T/extensions/open-design/pnpm-lock.yaml"
+  printf '{"name": "open-design"}\n' > "$T/extensions/open-design/package.json"
+  printf 'sub/\n.venv/\nnode_modules/\n' > "$T/.gitignore"
+  git -C "$T" add -A; cmt "$T" -m "engine and open-design"; git -C "$T" push -q origin main
+  git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/worktrees/01" HEAD
+  git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/worktrees/04" HEAD
+  for id in 01-20261015-125249-d0b 04-20261015-160828-526; do
+    d="$DAEDALUS_HOME/state/promote/$id"; mkdir -p "$d"
+    git -C "$T" worktree add -q --detach "$d/thing" HEAD
+    printf '{}\n' > "$d/prepared.json"; : > "$d/pushed"
+  done
+  for d in "$T" "$DAEDALUS_HOME/worktrees/01" "$DAEDALUS_HOME/worktrees/04" \
+           "$DAEDALUS_HOME/state/promote/01-20261015-125249-d0b/thing" "$DAEDALUS_HOME/state/promote/04-20261015-160828-526/thing"; do
+    sparse "$d/engine/.venv/lib/python3.12/site-packages/torch.so" 1800
+    printf 'home = /usr\n' > "$d/engine/.venv/pyvenv.cfg"
+  done
+  sparse "$T/extensions/open-design/node_modules/.pnpm/next@15/next.node" 1900
+  if [ "${1:-}" != noclone ]; then
+    for n in 1 2 3 4; do sparse "$T/extensions/open-design/open-design-plainclone-unused/pack-$n.bin" 960; done
+  fi
+}

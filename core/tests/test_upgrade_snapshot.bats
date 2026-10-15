@@ -340,7 +340,7 @@ kill_each() {
   printf 'upgrade:\n  snapshot_max_mb: 1\n' >> "$DAEDALUS_HOME/config.yaml"
   run python3 "$UP"
   [ "$status" -eq 1 ]
-  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: before it changes anything in target/ it keeps a safety copy of it, and that copy would be about 3 MB, over the 1 MB limit (upgrade.snapshot_max_mb in config.yaml) — raise the limit, or remove files target/ does not need (ignored build output counts), then start a session again" ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | tail -1)" = "upgrade to 0.7.0 incomplete: before it changes anything in target/ it keeps a safety copy of it, and that copy would be about 3 MB, over the 1 MB limit (upgrade.snapshot_max_mb in config.yaml); the largest is target/thing/big.bin (3 MB) — raise the limit, or remove files target/ does not need (ignored build output counts), then start a session again" ] || { echo "$output"; return 1; }
   [ "$(git -C "$T" branch --show-current)" = feat/x ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
   [ -z "$(snaps)" ]; [ -z "$(ls -A "$DAEDALUS_HOME/state/upgrade-snapshot" 2>/dev/null)" ]
   sed -i '' 's/snapshot_max_mb: 1$/snapshot_max_mb: 10/' "$DAEDALUS_HOME/config.yaml"
@@ -1143,4 +1143,118 @@ f = open(sys.argv[1], "a"); fcntl.flock(f.fileno(), fcntl.LOCK_EX); open(sys.arg
   [ -d "$P/02-20261015-130000-aaa/thing" ]; [ -d "$P/03-20261015-140000-bbb/thing" ]
   ! git -C "$T" worktree list --porcelain | grep -q -e 01-20261015 -e 04-20261015
   git -C "$T" worktree list --porcelain | grep -q 02-20261015
+}
+
+# est — the MB figure of the dry run's "would keep a safety copy ... (about N MB ...)" line; 0 for "under 1 MB"
+est() { printf '%s\n' "$1" | sed -n 's/.*would keep a safety copy of .* (about \([0-9]*\) MB, in state.*/\1/p; s/.*would keep a safety copy of .* (about under 1 MB, in state.*/0/p'; }
+
+@test "the Smartsheet shape: 9+ GB of venvs and node_modules a lockfile rebuilds are not counted; with the leftover clone the estimate is 3840-3904 MB and the stop names the clone first among the largest; without it, under 64 MB (update-command Decision 8)" {
+  smartsheet_shape
+  printf 'upgrade:\n  snapshot_max_mb: 2048\n' >> "$DAEDALUS_HOME/config.yaml"
+  run python3 "$UP" --dry-run
+  n="$(est "$output")"
+  [ -n "$n" ] && [ "$n" -ge 3840 ] && [ "$n" -le 3904 ] || { echo "estimate: $n"; echo "$output"; return 1; }
+  stop="$(printf '%s\n' "$output" | grep '^would stop: ')" || { echo "$output"; return 1; }
+  case "$stop" in "would stop: upgrade to 0.7.0 incomplete: before it changes anything in target/ it keeps a safety copy of it, and that copy would be about $n MB, over the 2048 MB limit (upgrade.snapshot_max_mb in config.yaml); the largest is target/thing/extensions/open-design/open-design-plainclone-unused (3840 MB) — raise the limit"*) : ;; *) echo "$output"; return 1 ;; esac
+  sed -i '' 's/snapshot_max_mb: 2048$/snapshot_max_mb: 10000/' "$DAEDALUS_HOME/config.yaml"
+  run python3 "$UP" --dry-run
+  [ "$(est "$output")" = "$n" ] || { echo "$output"; return 1; }
+  case "$output" in *"over the "*" MB limit"*) echo "$output"; return 1 ;; esac
+  rm -rf "$T/extensions/open-design/open-design-plainclone-unused"
+  sed -i '' 's/snapshot_max_mb: 10000$/snapshot_max_mb: 2048/' "$DAEDALUS_HOME/config.yaml"
+  run python3 "$UP" --dry-run
+  n="$(est "$output")"
+  [ -n "$n" ] && [ "$n" -lt 64 ] || { echo "estimate: $n"; echo "$output"; return 1; }
+  case "$output" in *"over the "*" MB limit"*) echo "$output"; return 1 ;; esac
+}
+
+@test "a .venv with no lockfile beside it and a node_modules with none are copied; a tracked file changed under a skipped directory is copied too (update-command Decision 8)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"
+  mkdir -p "$T/loose/.venv" "$T/loose/node_modules/a" "$T/eng/.venv/bin"
+  printf 'v\n' > "$T/loose/.venv/v.txt"; printf 'm\n' > "$T/loose/node_modules/a/m.js"
+  printf 'v = 1\n' > "$T/eng/uv.lock"; printf '#!/bin/sh\n' > "$T/eng/.venv/bin/tool"
+  git -C "$T" add -A; git -C "$T" add -f eng/.venv/bin/tool; cmt "$T" -m "in flight"
+  printf '#!/bin/sh\necho changed\n' > "$T/eng/.venv/bin/tool"; printf 'skip me\n' > "$T/eng/.venv/ignored.txt"
+  git -C "$T" rm -q --cached loose/.venv/v.txt loose/node_modules/a/m.js
+  cmt "$T" -m "untrack the loose ones"
+  run python3 "$UP"
+  m="$DAEDALUS_HOME/state/upgrade-snapshot/$(snaps | head -1)/manifest.json"
+  [ -f "$m" ] || { echo "$output"; return 1; }
+  python3 - "$m" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+files = {f["path"] for r in m["repos"] for f in r["files"]}
+assert {"loose/.venv/v.txt", "loose/node_modules/a/m.js", "eng/.venv/bin/tool"} <= files, files
+assert "eng/.venv/ignored.txt" not in files, files
+sk = [s["path"] for s in m.get("skipped", [])]
+assert sk == ["eng/.venv"], sk
+PY
+}
+
+@test "the manifest names each skipped directory with its bytes and rebuild command, --restore-help prints them, and a change inside a skipped .venv leaves the fingerprint as it was (update-command Decision 8)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"
+  mkdir -p "$T/engine" "$T/web" "$T/py"
+  printf 'v = 1\n' > "$T/engine/uv.lock"; printf '[project]\n' > "$T/py/pyproject.toml"
+  printf '{}\n' > "$T/web/package-lock.json"
+  printf 'sub/\n.venv/\nnode_modules/\n' > "$T/.gitignore"
+  git -C "$T" add -A; cmt "$T" -m "in flight"
+  mkdir -p "$T/engine/.venv" "$T/web/node_modules/x" "$T/py/.venv"; head -c 2000000 /dev/urandom > "$T/engine/.venv/lib.so"; printf 'w\n' > "$T/web/node_modules/x/i.js"; printf 'p\n' > "$T/py/.venv/p"
+  fp() { python3 - "$DAEDALUS_HOME" <<'PY'
+import os, sys
+from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, str(root / "core"))
+import upgrade as u
+repos = u._snap_repos(root)
+coll = [u._snap_collect(root, r, None, {x["common"] for x in repos}) for r in repos]
+try:
+    print(u._snap_fp(coll))
+finally:
+    u._drop_scratch(coll)
+PY
+  }
+  a="$(fp)"; printf 'reinstalled\n' > "$T/engine/.venv/lib.so"; printf 'new\n' > "$T/py/.venv/q"
+  [ "$(fp)" = "$a" ]
+  printf 'x2\n' > "$T/x.txt"; [ "$(fp)" != "$a" ]
+  head -c 2000000 /dev/urandom > "$T/engine/.venv/lib.so"
+  run python3 "$UP"
+  m="$DAEDALUS_HOME/state/upgrade-snapshot/$(snaps | head -1)/manifest.json"
+  [ -f "$m" ] || { echo "$output"; return 1; }
+  python3 - "$m" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+sk = {s["path"]: s for s in m["skipped"]}
+assert sorted(sk) == ["engine/.venv", "py/.venv", "web/node_modules"], sk
+assert sk["engine/.venv"]["rebuild"] == "uv sync --frozen" and sk["engine/.venv"]["bytes"] == 2000000, sk
+assert sk["py/.venv"]["rebuild"] == "uv sync" and sk["web/node_modules"]["rebuild"] == "npm ci", sk
+assert all(s["repo"] == "target/thing" and s["worktree"].endswith("/target/thing") for s in sk.values()), sk
+files = {f["path"] for r in m["repos"] for f in r["files"]}
+assert not [f for f in files if "/.venv/" in f or "node_modules" in f], files
+PY
+  run python3 "$UP" --restore-help
+  case "$output" in *"Not copied, rebuilt from a lockfile: target/thing/engine/.venv (2 MB) — cd target/thing/engine && uv sync --frozen; target/thing/py/.venv (under 1 MB) — cd target/thing/py && uv sync; target/thing/web/node_modules (under 1 MB) — cd target/thing/web && npm ci."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the over-limit stop names the three largest parts of the copy, largest first, and never a fourth (update-command Decision 8)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  sparse "$T/build/out/a.bin" 300; sparse "$T/build/out/b.bin" 200
+  sparse "$T/cache/c.bin" 400; sparse "$T/dump.sql" 100; sparse "$T/logs/l.txt" 50
+  printf 'upgrade:\n  snapshot_max_mb: 10\n' >> "$DAEDALUS_HOME/config.yaml"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  case "$(printf '%s\n' "$output" | tail -1)" in *"over the 10 MB limit (upgrade.snapshot_max_mb in config.yaml); the largest are target/thing/build (500 MB), target/thing/cache (400 MB) and target/thing/dump.sql (100 MB) — raise the limit, or remove files target/ does not need (ignored build output counts), then start a session again") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *logs*) echo "$output"; return 1 ;; esac
+  [ -z "$(snaps)" ]
+}
+
+@test "--progress reports the copy on stderr while it is written, about every 10 s (a test knob shortens it), and nothing on stdout; without --progress, nothing (update-command Decision 8)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  head -c 1000000 /dev/urandom > "$T/small.bin"
+  UPGRADE_TEST_PROGRESS_SECONDS=0 run --separate-stderr python3 "$UP"
+  case "$output" in *"a safety copy of everything in target/ is in state/upgrade-snapshot/"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -z "$stderr" ] || { echo "stderr: $stderr"; return 1; }
+  head -c 3000000 /dev/urandom > "$T/big.bin"
+  UPGRADE_TEST_PROGRESS_SECONDS=0 run --separate-stderr python3 "$UP" --progress
+  printf '%s\n' "$stderr" | grep -qE '^safety copy: [0-9]+ of 3 MB$' || { echo "stderr: $stderr"; echo "$output"; return 1; }
+  case "$output" in *"safety copy: "*" of "*) echo "$output"; return 1 ;; esac
+  case "$output" in *"a safety copy of what is new in target/ since the copy in state/upgrade-snapshot/"*) : ;; *) echo "$output"; return 1 ;; esac
 }

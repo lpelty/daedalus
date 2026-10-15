@@ -37,6 +37,8 @@ board names the copy until --forget-snapshot removes it; nothing else ever does.
     python3 core/upgrade.py                    every step now, as a session start would
     python3 core/upgrade.py --dry-run          what each step would do; changes nothing, fetches nothing
     python3 core/upgrade.py --setup            steps 1-3 (setup.sh's leases phase, spec §15); never stamps
+    python3 core/upgrade.py --progress         (with a run) a line on stderr about every 10 s while the safety
+                                               copy is written: "safety copy: N of M MB"
     python3 core/upgrade.py --doctor           doctor's upgrade lines (§15)
     python3 core/upgrade.py --restore-help     what a safety copy holds that target/ no longer has, and the
                                                commands that bring each back
@@ -1765,7 +1767,7 @@ SNAP_REF = "refs/upgrade-snapshot/"
 GIT_STATE = ("rebase-merge", "rebase-apply", "sequencer", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE",
              "CHERRY_PICK_HEAD", "REVERT_HEAD", "ORIG_HEAD", "index")
 SNAP_BIG = ("upgrade to %s incomplete: before it changes anything in target/ it keeps a safety copy of it, and that "
-            "copy would be about %s, over the %d MB limit (upgrade.snapshot_max_mb in config.yaml) — raise the limit, "
+            "copy would be about %s, over the %d MB limit (upgrade.snapshot_max_mb in config.yaml)%s — raise the limit, "
             "or remove files target/ does not need (ignored build output counts), then start a session again")
 SNAP_DISK = ("upgrade to %s incomplete: before it changes anything in target/ it keeps a safety copy of it, about %s, "
              "and the disk has %s free — free some space, then start a session again")
@@ -1787,6 +1789,16 @@ SNAP_LINE = ("A safety copy of everything in target/ from before the upgrade is 
              "was lost, but if anything looks missing, core/upgrade.py --restore-help lists it")
 SNAP_BG_COPIED = ("The upgrade to %s took its safety copy of target/ in the background; it finishes at the next "
                   "session start in this home")
+# a package directory a lockfile beside it rebuilds is no work: the copy skips its untracked and ignored files and
+# records it with the command that rebuilds it (update-command Decision 8). (directory name, ((lockfile, command), ...))
+REBUILD = ((".venv", (("uv.lock", "uv sync --frozen"), ("pyproject.toml", "uv sync"))),
+           ("node_modules", (("pnpm-lock.yaml", "pnpm install --frozen-lockfile"), ("package-lock.json", "npm ci"),
+                             ("yarn.lock", "yarn install --frozen-lockfile"))))
+SNAP_SKIPPED = "Not copied, rebuilt from a lockfile: %s."
+# --progress: one line on stderr about this often while the copy is written (UPGRADE_TEST_PROGRESS_SECONDS, a test
+# knob, can only shorten it)
+PROGRESS_SECONDS = 10.0
+_PROGRESS: Dict[str, float] = {"on": 0, "done": 0, "total": 0, "last": 0.0}
 FILE_WORDS = {"untracked": "untracked file", "ignored": "ignored file", "changed": "uncommitted change to file",
               "unlisted": "file"}
 SNAP_NOTHING = ("every branch, tag, stash entry, recent commit and file it holds is still in target/ or in a window")
@@ -2278,6 +2290,7 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
         r["subject"] = subjects.get(r["sha"], "")
     files: List[dict] = []
     state: List[dict] = []
+    skipped: List[dict] = []
     scratch: Optional[str] = None
     for w in wts:
         if w["i"] == 0:
@@ -2339,6 +2352,8 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
             full = os.path.join(wp, e)
             for f in (_all_files(full) if os.path.isdir(full) and not os.path.islink(full) else [""]):
                 kinds.setdefault(os.path.join(e, f) if f else e, "unlisted")
+        rebuild = _rebuildable_dirs(wp, kinds)
+        held_back: Dict[str, int] = {}
         for p in sorted(kinds):
             try:
                 st = os.lstat(os.path.join(wp, p))
@@ -2346,15 +2361,117 @@ def _snap_collect(root: Path, repo: dict, deadline: Optional[float], known: Opti
                 continue        # deleted: its content is in the commit
             if not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
                 continue
+            under = _under(p, rebuild) if kinds[p] in ("ignored", "untracked") else None
+            if under is not None:
+                held_back[under] = held_back.get(under, 0) + st.st_size
+                continue
             files.append({"w": w["i"], "path": p, "kind": kinds[p], "size": st.st_size, "mtime_ns": st.st_mtime_ns,
                           "ctime_ns": st.st_ctime_ns, "ino": st.st_ino, "link": stat.S_ISLNK(st.st_mode)})
+        skipped += [{"w": w["i"], "path": d, "bytes": n, "rebuild": rebuild[d]} for d, n in sorted(held_back.items())]
     code, out, _ = _gb(["--git-dir", common, "count-objects", "-v"], deadline=deadline)
     kib = 0
     for ln in (os.fsdecode(out).splitlines() if code == 0 else []):
         k, _, val = ln.partition(": ")
         if k in ("size", "size-pack", "size-garbage") and val.strip().isdigit():
             kib += int(val)
-    return dict(repo, refs=refs, worktrees=wts, files=files, state=state, pack_bytes=kib * 1024, scratch=scratch)
+    return dict(repo, refs=refs, worktrees=wts, files=files, state=state, pack_bytes=kib * 1024, scratch=scratch,
+                skipped=skipped)
+
+
+def _rebuildable_dirs(wp: str, kinds: Dict[str, str]) -> Dict[str, str]:
+    """{directory: the command that rebuilds it} for each .venv or node_modules in the worktree at <wp> whose parent
+    holds a lockfile (REBUILD), read from the directory parts of its untracked and ignored paths — never a second walk
+    of the tree. The outermost such directory on a path is the one kept."""
+    names = dict(REBUILD)
+    seen: Dict[str, Optional[str]] = {}
+    keep: Dict[str, str] = {}
+    for p, kind in kinds.items():
+        if kind not in ("ignored", "untracked"):
+            continue
+        parts = p.split("/")
+        for i, part in enumerate(parts[:-1]):
+            if part not in names:
+                continue
+            d = "/".join(parts[:i + 1])
+            if d not in seen:
+                parent = os.path.join(wp, *parts[:i])
+                seen[d] = None if os.path.islink(os.path.join(wp, d)) else next(
+                    (cmd for lock, cmd in names[part] if os.path.isfile(os.path.join(parent, lock))), None)
+            if seen[d]:
+                keep[d] = seen[d] or ""
+                break
+    return keep
+
+
+def _under(p: str, dirs: Dict[str, str]) -> Optional[str]:
+    """The directory of <dirs> that holds the path <p>, or None."""
+    if not dirs:
+        return None
+    parts = p.split("/")
+    for i in range(1, len(parts)):
+        d = "/".join(parts[:i])
+        if d in dirs:
+            return d
+    return None
+
+
+def _snap_largest(root: Path, coll: List[dict]) -> List[Tuple[int, str]]:
+    """What a copy of <coll> would hold, in its largest parts first: each repository's history (what a new bundle
+    would hold), and the files of each worktree grouped by the directory git names as untracked as a whole (git
+    ls-files --others --directory), else one by one. [(bytes, name)]: names relative to the home where they are in it."""
+    parts: Dict[str, int] = {}
+    seen: Set[str] = set()
+    for r in coll:
+        if r["common"] not in seen:
+            seen.add(r["common"])
+            parts["%s history" % r["label"]] = r.get("new_bytes", r["pack_bytes"])
+        dirs: Dict[int, Dict[str, str]] = {}
+        for f in r["files"]:
+            w = r["worktrees"][f["w"]]
+            wp = _wt_at(w)
+            if f["w"] not in dirs:
+                code, out, _ = _gb(["-C", wp, "ls-files", "-z", "--others", "--directory"])
+                dirs[f["w"]] = {x.rstrip("/"): "" for x in _z(out) if x.endswith("/")} if code == 0 else {}
+            d = _under(f["path"], dirs[f["w"]]) or f["path"]
+            name = _rel(root, os.path.join(wp, d))
+            parts[name] = parts.get(name, 0) + f["size"]
+        for s in r["state"]:
+            name = "%s git state" % _rel(root, _wt_at(r["worktrees"][s["w"]]))
+            parts[name] = parts.get(name, 0) + s["size"]
+    return sorted(((n, k) for k, n in parts.items()), key=lambda x: (-x[0], x[1]))
+
+
+def _snap_big(root: Path, ver: str, size: int, cap: int, coll: List[dict]) -> str:
+    """SNAP_BIG, naming the three largest parts of at least 1 MB, so the operator can tell what to remove."""
+    top = [(n, k) for n, k in _snap_largest(root, coll) if n >= (1 << 20)][:3]
+    names = ["%s (%s)" % (k, _mb(n)) for n, k in top]
+    clause = ""
+    if len(names) == 1:
+        clause = "; the largest is %s" % names[0]
+    elif names:
+        clause = "; the largest are %s and %s" % (", ".join(names[:-1]), names[-1])
+    return SNAP_BIG % (ver, _mb(size), cap, clause)
+
+
+def _progress(n: int) -> None:
+    """--progress: count <n> more bytes written, and about every PROGRESS_SECONDS say how far the copy is."""
+    if not _PROGRESS["on"]:
+        return
+    _PROGRESS["done"] += n
+    every = PROGRESS_SECONDS
+    try:
+        every = min(every, float(os.environ.get("UPGRADE_TEST_PROGRESS_SECONDS", every)))
+    except ValueError:
+        pass
+    now = time.monotonic()
+    if now - _PROGRESS["last"] >= every:
+        _PROGRESS["last"] = now
+        try:
+            sys.stderr.write("safety copy: %d of %d MB\n" % (int(_PROGRESS["done"]) >> 20,
+                                                              -(-int(_PROGRESS["total"]) >> 20)))
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
 
 
 SNAP_IDENT = {"GIT_AUTHOR_NAME": "upgrade safety copy", "GIT_AUTHOR_EMAIL": "upgrade@localhost",
@@ -2669,6 +2786,7 @@ class _Hashing:
     def read(self, size: int = -1) -> bytes:
         b = self.f.read(size)
         self.h.update(b)
+        _progress(len(b))
         if _snap_late(self.deadline):
             raise _OutOfTime()
         return b
@@ -2698,7 +2816,11 @@ def _snap_write(root: Path, coll: List[dict], ver: str, fp: str, cap: int, deadl
     try:
         part.mkdir()
         manifest = {"format": 1, "stamp": stamp, "version": ver, "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "fingerprint": fp, "reflog_days": REFLOG_DAYS, "verified": False, "repos": []}
+                    "fingerprint": fp, "reflog_days": REFLOG_DAYS, "verified": False, "repos": [],
+                    "skipped": [{"repo": r["label"], "worktree": _wt_at(r["worktrees"][x["w"]]), "path": x["path"],
+                                 "bytes": x["bytes"], "rebuild": x["rebuild"]}
+                                for r in coll for x in r.get("skipped", [])]}
+        _PROGRESS.update(done=0, total=_snap_estimate(coll), last=time.monotonic())
         for n, r in enumerate(coll, 1):
             if _snap_late(deadline):
                 raise _OutOfTime()
@@ -2706,7 +2828,7 @@ def _snap_write(root: Path, coll: List[dict], ver: str, fp: str, cap: int, deadl
         _snap_verify(part, manifest)
         size = sum(f.stat().st_size for f in part.iterdir() if f.is_file())
         if size > cap * (1 << 20):
-            raise Stop(SNAP_BIG % (ver, _mb(size), cap))
+            raise Stop(_snap_big(root, ver, size, cap, coll))
         manifest["verified"] = True
         manifest["size_bytes"] = size
         (part / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
@@ -2758,6 +2880,7 @@ def _snap_repo(part: Path, n: int, r: dict, deadline: Optional[float]) -> dict:
         if code != 0:
             raise _SnapFail("written", "the bundle of %s: %s" % (r["label"], _last(err)))
         shutil.rmtree(str(tmp), ignore_errors=True)
+        _progress(bundle.stat().st_size)
         entry["bundle"] = bundle.name
     paths = {w["i"]: _wt_at(w) for w in r["worktrees"]}
     with tarfile.open(str(part / entry["tar"]), "w", format=tarfile.PAX_FORMAT, encoding="utf-8",
@@ -2922,7 +3045,7 @@ def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: 
         est = _snap_estimate(todo)
         cap = _snap_cap(root)
         if est > cap * (1 << 20):
-            raise Stop(SNAP_BIG % (ver, _mb(est), cap))
+            raise Stop(_snap_big(root, ver, est, cap, todo))
         try:
             (root / "state").mkdir(parents=True, exist_ok=True)
             free = shutil.disk_usage(str(root / "state")).free
@@ -3431,13 +3554,22 @@ def _snap_report(root: Path, stamp: str) -> Tuple[List[str], int]:
     m, missing = _snap_missing(root, stamp)
     head = "The safety copy in state/upgrade-snapshot/%s (taken %s, before the upgrade to %s)" % (
         stamp, str(m.get("taken_at", "")).replace("T", " "), m.get("version", "?"))
+    sk = []
+    for x in m.get("skipped") or []:
+        try:
+            full = os.path.join(x["worktree"], x["path"])
+            sk.append("%s (%s) — cd %s && %s" % (_rel(root, full), _mb(int(x["bytes"])),
+                                                 shlex.quote(_rel(root, os.path.dirname(full))), x["rebuild"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    tail = [SNAP_SKIPPED % "; ".join(sk)] if sk else []
     if not missing:
-        return [head + ": nothing in it is missing — " + SNAP_NOTHING + "."], 0
+        return [head + ": nothing in it is missing — " + SNAP_NOTHING + "."] + tail, 0
     lines = [head + " holds %s target/ no longer has. Each command can be run from anywhere (run them in the "
              "order shown: a later copy's commits build on an earlier one's); none overwrites anything — a branch "
              "comes back under restored/, a file under state/upgrade-restore/:"
              % _plural(len(missing), "thing")]
-    return lines + _restore_lines(root, stamp, m, missing), len(missing)
+    return lines + _restore_lines(root, stamp, m, missing) + tail, len(missing)
 
 
 def _names_out() -> None:
@@ -3591,7 +3723,10 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                 if said:
                     lines.append("%s: %s" % (head, said))
             elif n == 2 and upto == 6 and dry:
-                lines += _dry_snapshot(root, head)
+                try:
+                    lines += _dry_snapshot(root, head)
+                except Stop as e:
+                    return lines + getattr(e, "lines", []), str(e)
             if n == 2 and upto == 6:
                 # unfinished work in target/ stops here, before step 2 — the first that changes anything there —
                 # and after the safety copy; recorded as step 6's, whose work it is
@@ -3637,7 +3772,11 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
 
 def _dry_snapshot(root: Path, head: str) -> List[str]:
     first = ["%s: %s" % (head, ln) for ln in _clear_pushed_scratch(root, True)]
-    return first + _dry_estimate(root, head)
+    try:
+        return first + _dry_estimate(root, head)
+    except Stop as e:
+        e.lines = first + getattr(e, "lines", [])      # type: ignore[attr-defined]
+        raise
 
 
 def _dry_estimate(root: Path, head: str) -> List[str]:
@@ -3654,9 +3793,15 @@ def _dry_estimate(root: Path, head: str) -> List[str]:
         _drop_scratch(coll)
     if not todo:
         return []
-    return ["%s: would keep a safety copy of %s target/ (about %s, in state/upgrade-snapshot/) before changing "
-            "anything there." % (head, "what is new in" if _snapshots(root) else "everything in",
-                                 _mb(_snap_estimate(todo)))]
+    est = _snap_estimate(todo)
+    lines = ["%s: would keep a safety copy of %s target/ (about %s, in state/upgrade-snapshot/) before changing "
+             "anything there." % (head, "what is new in" if _snapshots(root) else "everything in", _mb(est))]
+    cap = _snap_cap(root)
+    if est > cap * (1 << 20):
+        e = Stop(_snap_big(root, version(root) or "", est, cap, todo))
+        e.lines = lines      # type: ignore[attr-defined]
+        raise e
+    return lines
 
 
 def _stopped(root: Path, ver: Optional[str], step: int, sentence: str, background: bool = False) -> str:
@@ -4572,11 +4717,12 @@ def main(argv: List[str]) -> int:
             sys.stderr.write("usage: python3 core/upgrade.py --rollback [--dry-run] [--force]\n")
             return 2
         return rollback(root, dry="--dry-run" in args, force="--force" in args)
-    if [a for a in args if a not in ("--dry-run", "--setup")]:
-        sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] | --doctor | --restore-help | "
+    if [a for a in args if a not in ("--dry-run", "--setup", "--progress")]:
+        sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] [--progress] | --doctor | --restore-help | "
                          "--forget-snapshot | --rollback [--dry-run] [--force]\n")
         return 2
     dry, upto = "--dry-run" in args, (3 if "--setup" in args else 6)
+    _PROGRESS["on"] = 1 if "--progress" in args else 0
     ver = version(root)
     if upto == 6 and ver is None:
         sys.stderr.write("daedalus: this checkout has no VERSION file, so there is nothing to upgrade to\n")
