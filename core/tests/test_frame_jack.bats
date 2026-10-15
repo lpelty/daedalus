@@ -388,3 +388,125 @@ e = json.load(open(sys.argv[1])); print("offline:", e.get("HF_HUB_OFFLINE")); pr
   ! grep -qi 'pmset' "$f"
   ! grep -qw 'port' "$f"
 }
+
+# status_home — a prepared, running-looking deployment for the status test: the fake serve on its own port
+# (recorded as serve_pid), two stand-in processes named ami-daemon.py (the supervisor, the leash), the
+# sentinel from 09:12 today by session sA, daemon.json up for 2 h 14 min, a counters file and two days of
+# decision log. No supervisor runs: status reads, it never starts anything.
+status_home() {
+  export DAEDALUS_SESSION_ID=sA
+  start_fake "$MODEL"
+  write_ami_config "$FAKE_PORT" mlx
+  mkdir -p "$AMI/decisions"
+  printf '%s session sA\n' "$(date +%Y-%m-%dT09:12:00%z)" > "$AMI/on"
+  printf 'import time\ntime.sleep(120)\n' > "$BATS_TEST_TMPDIR/ami-daemon.py"
+  python3 "$BATS_TEST_TMPDIR/ami-daemon.py" --home "$DAEDALUS_HOME" 3>&- </dev/null >/dev/null 2>&1 & SUP=$!
+  python3 "$BATS_TEST_TMPDIR/ami-daemon.py" --leash --home "$DAEDALUS_HOME" 3>&- </dev/null >/dev/null 2>&1 & LEASH=$!
+  printf '%s\n%s\n' "$SUP" "$LEASH" >> "$BATS_TEST_TMPDIR/live-pids"
+  TODAY="$(date +%Y-%m-%d)"
+  python3 - "$AMI" "$SUP" "$LEASH" "$FAKE_PID" "$FAKE_PORT" "$AMI_FIX/fake-decider" "$MODEL" "$TODAY" <<'PY'
+import json, sys, time
+ami, sup, leash, serve, port, cmd, model, today = sys.argv[1:]
+now = time.time()
+json.dump({"supervisor_pid": int(sup), "leash_pid": int(leash), "serve_pid": int(serve), "borrowed": False,
+           "port": int(port), "device": "mlx", "state": "up", "terminal": False, "since": now - 8070,
+           "heartbeat": now - 4, "ready_ms": 31000, "restarts": 0, "last_error": None, "off_by": None,
+           "command": cmd, "model": model, "offline": False, "battery_off": True, "request_timeout_ms": 1500,
+           "shadow": ["destructive", "suite"], "enforce": []}, open(ami + "/daemon.json", "w"))
+cmds = ["rm -f state/one.lock", "git checkout -- core/two.py", "rm -rf build/three", "git reset --hard four",
+        "git clean -fdx five", "rm six.txt", "git branch -D seven"]
+json.dump({"asked": {"destructive": 206, "suite": 6}, "would_ask": 7, "would_shorten": 2,
+           "shortened_then_failed": 0, "would_ask_then_failed": 1, "would_ask_with_guard_warning": 2,
+           "unanswered": {}, "latency_ms": [723, 3, 402], "latency_recent": [171, 150, 402], "asks": 0,
+           "overrides": 0, "last_question_epoch": now - 60, "recent_would_ask": cmds, "breaker": {},
+           "operator": {}, "suite": {}}, open(ami + "/session-sA.json", "w"))
+rows = [{"t": now, "session": "sA", "question": "destructive", "p": 0.1, "queued_ms": 12.0},
+        {"t": now, "session": "sA", "question": "destructive", "p": 0.1, "queued_ms": 220.0},
+        {"t": now, "session": "sA", "question": "suite", "p": 0.9, "queued_ms": 40.0},
+        {"t": now, "session": "sA", "question": "destructive", "p": 0.1, "queued_ms": 0.1},
+        {"t": now, "session": "sB", "question": "destructive", "p": 0.1, "queued_ms": 900.0}]
+with open("%s/decisions/%s.jsonl" % (ami, today), "w") as fh:
+    for r in rows:
+        fh.write(json.dumps(r) + "\n")
+open(ami + "/decisions/2001-01-01.jsonl", "w").write(json.dumps({"t": 0, "session": "sZ"}) + "\n")
+PY
+}
+
+@test "status: each sentence of the long form against a prepared daemon.json and counters file — on since, shadow mode, the daemon line with pids and device, the memory line labelled by its source, this session's counts, the would-ask commands listed with the guard-agreement and then-failed counts, the shortened line, unanswered, latency with queued, the overrides line saying inferred, the breaker line, the decision log path, the calibration line naming measured and running device, the config line and the changed-since-start warning" {
+  status_home
+  # footprint stands in with a canned bytes report: 5,336 MB in all, 4,618 MB of it IOAccelerator
+  shim="$BATS_TEST_TMPDIR/shim"; mkdir -p "$shim"
+  cat > "$shim/footprint" <<'SH'
+#!/bin/sh
+cat <<'OUT'
+======================================================================
+strands-decider [1]: 64-bit    Footprint: 5595201536 B (16384 bytes per page)
+======================================================================
+
+      Dirty         Clean   Reclaimable    Regions    Category
+        ---           ---           ---        ---    ---
+ 4842323968 B           0 B           0 B          9    IOAccelerator (graphics)
+   442368 B           0 B           0 B          5    Malloc Small
+OUT
+SH
+  chmod +x "$shim/footprint"
+  PATH="$shim:$PATH" run FJ status
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  has "$output" "frame-jack: on since 09:12 (this session, by the operator), shadow mode — the AMI logs, never acts"
+  has "$output" "daemon: up 2 h 14 min — supervisor pid $SUP (heartbeat "
+  has "$output" " s ago), leash pid $LEASH, serve pid $FAKE_PID, port $FAKE_PORT, device mlx, ready in 31 s, 0 restarts"
+  has "$output" "memory: 5,336 MB resident (footprint; 4,618 MB of it in Metal buffers) — ps shows "
+  has "$output" "this session: 212 questions asked (destructive 206, suite 6)"
+  has "$output" "  would have asked you 7 times — the commands:"
+  for c in "rm -rf build/three" "git reset --hard four" "git clean -fdx five" "rm six.txt" "git branch -D seven"; do
+    has "$output" "    $c"
+  done
+  lacks "$output" "    rm -f state/one.lock"
+  has "$output" "    … (2 more; all 7 are in the decision log, state/ami/decisions/)"
+  has "$output" "  of those 7: 2 carried a guard warning too (the deterministic guard agreed), 1 then failed"
+  has "$output" "  would have shortened 2 of the 6 suite runs — 0 of those then failed"
+  has "$output" "unanswered this session: 0"
+  has "$output" "latency this session: median 171 ms, max 402 ms (queued behind another window: 3 times, longest 220 ms)"
+  has "$output" "overrides: none — shadow mode asks nothing; when a question is certified to act, an ask the operator then approves counts here (inferred from the outcome rows)"
+  has "$output" "breaker: not tripped this session"
+  has "$output" "decision log: state/ami/decisions/$TODAY.jsonl (5 rows today, 2 days kept)"
+  has "$output" "calibration: thresholds from ami-lab/calibration 2026-10-15 (MPS); measured device mps, running device mlx — re-measure before any question acts"
+  has "$output" "config: as the daemon started with (port $FAKE_PORT, device mlx, offline no)"
+  lacks "$output" "§"
+  # footprint unavailable: the memory line says ps, and says why that may under-count
+  printf '#!/bin/sh\nexit 1\n' > "$shim/footprint"
+  PATH="$shim:$PATH" run FJ status
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  has "$output" "MB resident (ps rss; footprint was not available — ps under-counts what the GPU backends hold)"
+  # the breaker tripped, answers missing, the config changed under the daemon
+  python3 - "$AMI/session-sA.json" <<'PY'
+import json, sys, time
+p = sys.argv[1]; c = json.load(open(p))
+c["breaker"] = {"consecutive": 0, "tripped_until": time.time() + 600, "trips": 2}
+c["unanswered"] = {"down": 2, "timeout": 1}
+json.dump(c, open(p, "w"))
+PY
+  sed -i '' 's/^  device: mlx$/  device: cpu/' "$DAEDALUS_HOME/config.yaml"
+  PATH="$shim:$PATH" run FJ status
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  has "$output" "breaker: tripped (slow or wedged) — retrying at "
+  has "$output" "the second trip this session"
+  has "$output" "unanswered this session: 3 (down 2, timeout 1)"
+  has "$output" "config: changed since the daemon started — ami.device is cpu now, mlx when it started; /frame-jack off, then on, applies it"
+  # a shell, not a session: no session counts, the header names who switched it on
+  unset DAEDALUS_SESSION_ID
+  PATH="$shim:$PATH" run FJ status
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  has "$output" "frame-jack: on since 09:12 (session sA), shadow mode"
+  has "$output" "this session: run from a shell, so there are no session counts"
+}
+
+@test "status: off — the sentinel is absent and the sentence says how to switch it on; never switched on says so" {
+  run FJ status
+  [ "$status" -eq 0 ]
+  has "$output" "frame-jack: off — never switched on in this deployment (/frame-jack on starts the AMI)"
+  mkdir -p "$AMI"
+  run FJ status
+  [ "$status" -eq 0 ]
+  has "$output" "frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)"
+}

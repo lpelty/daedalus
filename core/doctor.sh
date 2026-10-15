@@ -260,6 +260,28 @@ sys.exit(0 if a >= [2, 1, 287] else 1)' "$claude_ver"; then
   done
 fi
 
+# Frame-jack, the AMI's switch: the config block, the executable, the weights on disk, the
+# daemon's state, a second daemon on the machine, an enforce request no release has certified.
+# One reader, core/frame-jack.py --doctor; NOTE for anything the deployment works without,
+# MISSING for a block that says something false. Skipped when a fixture has no frame-jack.py.
+if [ -f "$DAEDALUS_HOME/core/frame-jack.py" ]; then
+  fj_out="$(python3 "$DAEDALUS_HOME/core/frame-jack.py" --doctor 2>/dev/null)"
+  fj_rc=$?
+  if [ "$fj_rc" -ne 0 ]; then
+    note_problem "frame-jack: check failed (core/frame-jack.py --doctor exited $fj_rc)"
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        "") ;;
+        "MISSING  "*) note_problem "${line#MISSING  }" ;;
+        *) log "$line" ;;
+      esac
+    done <<EOF
+$fj_out
+EOF
+  fi
+fi
+
 # The upgrade (spec §14, §15): the stamp, what in target/ it would still move, hot.md's
 # field. One reader, core/upgrade.py --doctor — local refs only, it never fetches; the
 # here-string loop keeps the MISSING count (see the leases block). Skipped when a

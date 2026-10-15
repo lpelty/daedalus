@@ -1128,7 +1128,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     off — `segments` may be a callable, run only past that point so an off deployment pays no segmentation),
     classify, count the call, and either run the suite gate (§6.2) or ask the destructive question, under the
     absolute `deadline`, writing the row. Shadow only in this release: never a decision. Returns None when there
-    is nothing to add to the guard's emit, else {"context": sentence | None, "system": sentence | None} — the
+    is nothing to add to the guard's emit, else {"context": sentence or None, "system": sentence or None} — the
     once-per-session sentence of §6.4."""
     d = switch_detail(root, sid)
     state = d["state"]

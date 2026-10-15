@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 load fixtures/leases/setup.bash
+load fixtures/ami/setup.bash
 
 # The target checkout in these fixtures is a real (empty, origin-less) `git
 # init` repository, never a faked `mkdir target/thing/.git`: doctor asks git
@@ -1516,4 +1517,182 @@ EOF2
   run D
   case "$output" in *"NOTE     promote scratch: 1 pushed promotion still holds scratch (04-20261015-100000-abc) — core/promote.sh NN --clean removes it (NN its window: 04)"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(problems)" -eq "$base" ] || { echo "$output"; return 1; }
+}
+
+# --- frame-jack (frame-jack spec §10; plan Task 6) ---------------------------------------------------
+# doctor_fj_fixture — the upgrade fixture plus core/frame-jack.py and amilib.py (leaselib.py is already
+# there), the ami fixture directory (the fake decider as the command), an empty weights cache, an empty
+# prepared ps listing (AMI_TEST_PS), and config.yaml without an ami: block saved as base.yaml.
+doctor_fj_fixture() {
+  doctor_upgrade_fixture
+  cp "$SRC/frame-jack.py" "$SRC/amilib.py" "$DAEDALUS_HOME/core/"
+  AMI_FIX="$BATS_TEST_TMPDIR/fix/ami"; mkdir -p "$BATS_TEST_TMPDIR/fix"
+  cp -R "$BATS_TEST_DIRNAME/fixtures/ami" "$AMI_FIX"; chmod +x "$AMI_FIX/fake-decider"
+  export AMI_FIX
+  export AMI_TEST_HF_HOME="$BATS_TEST_TMPDIR/hf"; mkdir -p "$AMI_TEST_HF_HOME/hub"
+  : > "$BATS_TEST_TMPDIR/ps.txt"; export AMI_TEST_PS="cat $BATS_TEST_TMPDIR/ps.txt"
+  unset CLAUDECODE DAEDALUS_LEASE DAEDALUS_TARGET_OVERRIDE DAEDALUS_PROMOTE_ID DIRECT_CALL_ID HF_HOME
+  cp "$DAEDALUS_HOME/config.yaml" "$BATS_TEST_TMPDIR/base.yaml"
+  MODEL=StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  AMI="$DAEDALUS_HOME/state/ami"
+}
+# fj_config <port> <device> <offline> [extra yaml line ...] — config.yaml is base.yaml plus an ami: block
+fj_config() {
+  cp "$BATS_TEST_TMPDIR/base.yaml" "$DAEDALUS_HOME/config.yaml"
+  write_ami_config "$1" "$2" "$3"
+  shift 3
+  for l in "$@"; do printf '  %s\n' "$l" >> "$DAEDALUS_HOME/config.yaml"; done
+}
+# fj_weights <hub> — both model folders in the huggingface_hub layout: snapshot entries are links into the
+# shared blob store hub/blobs/<2hex>/<sha>; the base model's blob is a sparse 2.5 GB file
+fj_weights() {
+  python3 - "$1" <<'PY'
+import os, sys
+hub = sys.argv[1]
+for name, sha, size in (("models--Qwen--Qwen3.5-2B-Base", "6c" + "a" * 62, 2_500_000_000),
+                        ("models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610", "47" + "b" * 62, 1000)):
+    blob = os.path.join(hub, "blobs", sha[:2], sha)
+    os.makedirs(os.path.dirname(blob), exist_ok=True)
+    with open(blob, "wb") as fh:
+        fh.seek(size - 1); fh.write(b"\0")
+    snap = os.path.join(hub, name, "snapshots", "rev1")
+    os.makedirs(snap, exist_ok=True)
+    os.makedirs(os.path.join(hub, name, "blobs"), exist_ok=True)
+    os.symlink(os.path.relpath(blob, snap), os.path.join(snap, "model.safetensors"))
+    open(os.path.join(snap, "config.json"), "w").write("{}")
+PY
+}
+# fj_daemon <json fields> — writes the sentinel and a daemon.json (heartbeat now unless given) for $FJ_PORT
+fj_daemon() {
+  mkdir -p "$AMI/decisions"
+  printf '2026-10-15T09:12:00+0000 session sA\n' > "$AMI/on"
+  python3 - "$AMI/daemon.json" "$AMI_FIX/fake-decider" "$MODEL" "$FJ_PORT" "$1" <<'PY'
+import json, sys, time
+p, cmd, model, port, extra = sys.argv[1:]
+d = {"supervisor_pid": None, "leash_pid": None, "serve_pid": None, "borrowed": False, "port": int(port),
+     "device": "mlx", "state": "up", "terminal": False, "since": time.time() - 600, "heartbeat": time.time() - 4,
+     "ready_ms": 31000, "restarts": 0, "last_error": None, "off_by": None, "command": cmd, "model": model,
+     "offline": False, "battery_off": True, "request_timeout_ms": 1500, "shadow": ["destructive", "suite"],
+     "enforce": []}
+for k, v in json.loads(extra).items():
+    d[k] = time.time() - v if k == "heartbeat_age" else v
+if "heartbeat_age" in d:
+    d["heartbeat"] = d.pop("heartbeat_age")
+json.dump(d, open(p, "w"))
+PY
+}
+
+@test "doctor frame-jack: no ami: block is a NOTE naming README; a good block with the fake command is OK; a non-executable command, a bad device and an enforce request are MISSING and counted" {
+  doctor_fj_fixture
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     frame-jack: no ami: block in config.yaml — the AMI cannot be switched on (optional; see "Frame-jack" in README.md)'*) : ;; *) echo "$output"; return 1 ;; esac
+  P="$(free_port)"
+  fj_config "$P" mlx true
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack: strands-decider at $AMI_FIX/fake-decider, model $MODEL, device mlx, port $P, offline"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"MISSING  frame-jack"*) echo "a MISSING for a good block: $output"; return 1 ;; *) : ;; esac
+  printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/not-exec"; chmod -x "$BATS_TEST_TMPDIR/not-exec"
+  fj_config "$P" mlx false
+  sed -i '' "s|^  command: .*|  command: $BATS_TEST_TMPDIR/not-exec|" "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  frame-jack: ami.command $BATS_TEST_TMPDIR/not-exec is not an executable file — install strands-decider into a virtual environment and name its strands-decider here"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"1 problem(s) found"*) : ;; *) echo "not counted: $output"; return 1 ;; esac
+  fj_config "$P" cuda false
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  frame-jack: ami.device must be mlx, mps or cpu (got cuda)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       frame-jack: strands-decider at"*) echo "an OK beside a MISSING: $output"; return 1 ;; *) : ;; esac
+  fj_config "$P" mlx false "enforce: destructive"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  frame-jack: ami.enforce names destructive, which no release has certified to act — remove it; the question stays in shadow mode"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"1 problem(s) found"*) : ;; *) echo "not counted: $output"; return 1 ;; esac
+}
+
+@test "doctor frame-jack weights: both snapshots present is OK with the size; a missing snapshot is a NOTE whose remedy differs by ami.offline; a snapshot whose symlinks point into a missing blob store is the copied-without-blobs NOTE; regular files in blobs/ are OK" {
+  doctor_fj_fixture
+  P="$(free_port)"; HUB="$AMI_TEST_HF_HOME/hub"
+  fj_weights "$HUB"
+  fj_config "$P" mlx true
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack weights: both snapshots present (2.50 GB)"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the decider's folder gone: offline true says copy by hand only; offline false says the first start may download it
+  rm -rf "$HUB/models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack weights: the model snapshot is missing under $HUB (models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610) — copy it by hand (README \"Weights by hand\"); ami.offline is true, so the daemon will not download it"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_config "$P" mlx false
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack weights: the model snapshot is missing under $HUB (models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610) — copy it by hand (README \"Weights by hand\") or let the first start download it (ami.offline is false)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"both snapshots present"*) echo "an OK with one missing: $output"; return 1 ;; *) : ;; esac
+  # copied without the blobs: the base model's links point into a store that is not there
+  rm -rf "$HUB"; mkdir -p "$HUB"; fj_weights "$HUB"; rm -rf "$HUB/blobs"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     frame-jack weights: models--Qwen--Qwen3.5-2B-Base has links into a blob store that is not there — the folders were copied without the blobs; copy with the tarball in README "Weights by hand"'*) : ;; *) echo "$output"; return 1 ;; esac
+  # the older layout: regular files in each model's own blobs/, the snapshot links resolving into them
+  rm -rf "$HUB"; mkdir -p "$HUB"
+  for m in models--Qwen--Qwen3.5-2B-Base models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610; do
+    mkdir -p "$HUB/$m/blobs" "$HUB/$m/snapshots/rev1"
+    printf 'weights\n' > "$HUB/$m/blobs/abc123"
+    ln -s ../../blobs/abc123 "$HUB/$m/snapshots/rev1/model.safetensors"
+  done
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack weights: both snapshots present ("*) : ;; *) echo "$output"; return 1 ;; esac
+  # ami.weights_cache names the cache: the hub under it is the one read
+  WC="$BATS_TEST_TMPDIR/wc"; mkdir -p "$WC/hub"
+  fj_config "$P" mlx true "weights_cache: $WC"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"the model snapshot is missing under $WC/hub (models--Qwen--Qwen3.5-2B-Base)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor frame-jack daemon: off; on and up from a prepared daemon.json; down with the last error; down for good naming the snapshot; supervisor gone with the heartbeat age and the serve pid; paused on battery; the port held by something else; a second serve on the machine from a prepared ps listing" {
+  doctor_fj_fixture
+  start_fake "$MODEL"; FJ_PORT="$FAKE_PORT"
+  fj_config "$FJ_PORT" mlx true
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"t": 1, "session": "sA"}\n{"t": 2, "session": "sA"}\n{"t": 3, "session": "sB"}\n' > "$BATS_TEST_TMPDIR/rows"
+  fj_daemon "{\"serve_pid\": $FAKE_PID}"
+  cp "$BATS_TEST_TMPDIR/rows" "$AMI/decisions/$(date +%Y-%m-%d).jsonl"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack: on — daemon up on port $FJ_PORT (serve pid $FAKE_PID, device mlx, supervisor heartbeat "*" s ago), shadow mode, 3 decisions logged today"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_daemon '{"state": "down", "last_error": "serve exited with code 1: boom"}'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack: on but the daemon is down (last error: serve exited with code 1: boom) — /frame-jack on starts it again"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_daemon '{"state": "down", "terminal": true, "last_error": "the weights are missing (models--Qwen--Qwen3.5-2B-Base) — copy them (README \"Weights by hand\"), then /frame-jack on"}'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     frame-jack: on but the daemon stopped for good: the weights are missing (models--Qwen--Qwen3.5-2B-Base) — copy them (README "Weights by hand"), then /frame-jack on'*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_daemon "{\"serve_pid\": $FAKE_PID, \"heartbeat_age\": 365}"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack: on but its supervisor is gone (heartbeat 6 min ago; serve pid $FAKE_PID still running) — /frame-jack off, then on"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_daemon '{"state": "battery"}'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack: on, paused on battery"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the port answers, but not as the AMI: a fake with another checkpoint
+  OWN_PID="$FAKE_PID"
+  start_fake other/model; FJ_PORT="$FAKE_PORT"
+  fj_config "$FJ_PORT" mlx true
+  fj_daemon '{}'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack: port $FJ_PORT is held by something that is not the AMI — change ami.port in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a second serve: the listing holds this deployment's serve (not reported) and another on another port
+  printf '%s /venv/bin/python3 %s serve %s --port %s --device mlx\n70012 /venv/bin/python3 /venv/bin/strands-decider serve %s --port 8762 --device mlx\n70013 /bin/zsh -c grep strands-decider serve\n' \
+    "$OWN_PID" "$AMI_FIX/fake-decider" "$MODEL" "$FJ_PORT" "$MODEL" > "$BATS_TEST_TMPDIR/ps.txt"
+  fj_daemon "{\"serve_pid\": $OWN_PID}"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack: a second strands-decider serve is running on this machine (pid 70012, port 8762, not this deployment's) — two daemons cost twice 5.3 GB; name the same ami.port in both deployments so one borrows the other"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"(pid $OWN_PID,"*|*"(pid 70013,"*) echo "this deployment's serve, or a non-serve line, reported: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "doctor: the block is skipped when core/frame-jack.py is absent, so a fixture home without it prints no frame-jack line" {
+  doctor_upgrade_fixture
+  cat >> "$DAEDALUS_HOME/config.yaml" <<'EOF'
+ami:
+  command: /nonexistent/strands-decider
+  model: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  device: cuda
+EOF
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"frame-jack"*) echo "a frame-jack line without frame-jack.py: $output"; return 1 ;; *) : ;; esac
+  # and with it, the same home reports the block (so the skip is the file, not the block)
+  cp "$SRC/frame-jack.py" "$SRC/amilib.py" "$DAEDALUS_HOME/core/"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  frame-jack: ami.device must be mlx, mps or cpu (got cuda)"*) : ;; *) echo "$output"; return 1 ;; esac
 }

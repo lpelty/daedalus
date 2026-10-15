@@ -9,7 +9,8 @@ then — holding state/ami/.lock from the probe to the supervisor's first daemon
 port (§4.4: borrow the AMI if another deployment's daemon holds it, refuse anything else), writes the
 sentinel and starts core/ami-daemon.py detached with a clean environment. `off` removes the sentinel,
 records who flipped it, signals by the liveness-and-identity rule (§4.5) and prints what is true only
-after the port went dead. `status` and `--doctor` arrive in a later task of the plan.
+after the port went dead. `status` prints the long form with the calibration meter (§8.2); `--doctor` prints
+doctor.sh's frame-jack lines, OK / NOTE / MISSING (§10).
 
 Python 3.9, standard library. Exit codes: 0; 2 a refusal with its sentence; 1 an unexpected error.
 """
@@ -441,6 +442,549 @@ def _wait_supervisor_record(root, d, off_by):
             amilib._write_json(amilib.daemon_path(root), cur)
 
 
+# ---------------------------------------------------------------- §8.2 status
+MEASURED_DEVICE = "mps"            # the device CALIBRATION's thresholds were measured on
+SHOWN_WOULD_ASK = 5                # status lists the last five would-ask commands
+QUEUED_MIN_MS = 5.0                # a wait on the ask lock this long means another window held it
+ROW_SCAN_BYTES = 64 * 1024 * 1024  # status reads at most this much of the decision log for the queued count
+
+
+def _n(x):
+    """A whole number with thousands separators."""
+    try:
+        return "{:,}".format(int(round(float(x))))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _plural(n, one, many=None):
+    return "%s %s" % (_n(n), one if int(n) == 1 else (many or one + "s"))
+
+
+def _ago(secs):
+    secs = max(0, int(secs))
+    if secs < 120:
+        return "%d s" % secs
+    if secs < 7200:
+        return "%d min" % (secs // 60)
+    return "%d h %d min" % (secs // 3600, (secs % 3600) // 60)
+
+
+def _clock(epoch):
+    lt = time.localtime(epoch)
+    if time.strftime("%Y-%m-%d", lt) == time.strftime("%Y-%m-%d"):
+        return time.strftime("%H:%M", lt)
+    return time.strftime("%b %d %H:%M", lt)
+
+
+def _sentinel(root):
+    """(epoch or None, the session word or None) from the sentinel's one line: `<ISO time> session <sid>`."""
+    try:
+        line = amilib.sentinel_path(root).read_text().strip()
+    except OSError:
+        return None, None
+    parts = line.split()
+    when = None
+    if parts:
+        try:
+            from datetime import datetime
+            when = datetime.strptime(parts[0], "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        except ValueError:
+            when = None
+    sid = parts[2] if len(parts) >= 3 and parts[1] == "session" else None
+    return when, sid
+
+
+def _ordinal(n):
+    words = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth"}
+    return words.get(n, "%dth" % n)
+
+
+def memory_line(d, command):
+    """§8.2: footprint when it answers, labelled; else ps rss, labelled — ps under-counts what MPS keeps in Metal
+    buffers (the lab measured 4 GB missing)."""
+    if d.get("borrowed"):
+        return "memory: the daemon is borrowed from another deployment — its memory is that deployment's (footprint -p <pid> there)"
+    pid = d.get("serve_pid")
+    if pid is None or not identified(pid, "serve", command):
+        return "memory: no serve process of this deployment is running"
+    rss_mb = None
+    try:
+        r = subprocess.run(["ps", "-o", "rss=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            rss_mb = int(r.stdout.strip().split()[0]) / 1024.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    total = metal = None
+    try:
+        r = subprocess.run(["footprint", "-p", str(int(pid)), "-f", "bytes"], capture_output=True, text=True,
+                           timeout=20)
+        if r.returncode == 0:
+            import re
+            m = re.search(r"Footprint:\s*(\d+)\s*B", r.stdout)
+            if m:
+                total = int(m.group(1)) / 1048576.0
+                metal = 0.0
+                for ln in r.stdout.splitlines():
+                    if "IOAccelerator" in ln:
+                        mm = re.match(r"\s*(\d+)\s*B", ln)
+                        if mm:
+                            metal += int(mm.group(1)) / 1048576.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        total = None
+    if total is not None:
+        line = "memory: %s MB resident (footprint" % _n(total)
+        line += "; %s MB of it in Metal buffers)" % _n(metal) if metal else ")"
+        if rss_mb is not None:
+            line += " — ps shows %s MB" % _n(rss_mb)
+        return line
+    if rss_mb is not None:
+        return ("memory: %s MB resident (ps rss; footprint was not available — ps under-counts what the GPU "
+                "backends hold)" % _n(rss_mb))
+    return "memory: serve pid %s did not report its memory (neither footprint nor ps answered)" % pid
+
+
+def _log_files(root):
+    try:
+        return sorted(p for p in (amilib.ami_dir(root) / amilib.DECISIONS_DIR).glob("*.jsonl") if p.is_file())
+    except OSError:
+        return []
+
+
+def _count_lines(p):
+    try:
+        with open(str(p), "rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def _queued(root, sid):
+    """How often this session's questions waited on the ask lock behind another window, and the longest wait —
+    from the decision log's question rows (status is not a hot path; the band never reads the log)."""
+    n, longest, budget = 0, 0.0, ROW_SCAN_BYTES
+    for p in reversed(_log_files(root)):
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if size > budget:
+            break
+        budget -= size
+        try:
+            with open(str(p), "r", errors="replace") as fh:
+                for ln in fh:
+                    if '"queued_ms"' not in ln or sid not in ln:
+                        continue
+                    try:
+                        row = json.loads(ln)
+                    except ValueError:
+                        continue
+                    q = row.get("queued_ms")
+                    if row.get("session") == sid and isinstance(q, (int, float)) and q >= QUEUED_MIN_MS:
+                        n += 1
+                        longest = max(longest, float(q))
+        except OSError:
+            continue
+    return n, longest
+
+
+def daemon_status_line(sw, d):
+    state = sw["state"]
+    now = time.time()
+    if state == "on":
+        head = "up %s" % _ago(now - (d.get("since") or now))
+    elif state == "down" and sw.get("reason") == "supervisor gone":
+        head = "its supervisor is gone (heartbeat %s ago) — /frame-jack off, then on" % _ago(now - (d.get("heartbeat") or 0))
+    elif state == "down":
+        if d.get("terminal"):
+            head = "stopped for good: %s" % (d.get("last_error") or "see state/ami/daemon.log")
+        else:
+            head = "down (last error: %s) — /frame-jack on starts it again" % (
+                d.get("last_error") or ("the port does not answer" if d.get("state") == "up" else "none recorded"))
+    elif state == "battery":
+        head = "paused on battery (it starts again on AC power)"
+    elif state == "starting":
+        head = "starting (%s)" % _ago(now - (d.get("since") or now))
+    elif state == "tripped":
+        head = "up, breaker tripped (slow or wedged) until %s" % _clock(sw.get("retry_epoch") or now)
+    else:
+        head = state
+    hb = d.get("heartbeat")
+    sup = "supervisor pid %s" % d.get("supervisor_pid")
+    if pid_status(d.get("supervisor_pid"), "supervisor") != "live":
+        sup += " (not running)"
+    if isinstance(hb, (int, float)):
+        sup += " (heartbeat %s ago)" % _ago(now - hb)
+    parts = [sup]
+    if d.get("borrowed"):
+        parts.append("serve borrowed from another deployment")
+    else:
+        for kind, key in (("leash", "leash_pid"), ("serve", "serve_pid")):
+            pid = d.get(key)
+            if pid is None:
+                parts.append("no %s" % kind)
+                continue
+            st = pid_status(pid, kind, d.get("command"))
+            parts.append("%s pid %s%s" % (kind, pid, "" if st == "live" else
+                                          " (not running)" if st == "dead" else " (recycled — another process now)"))
+    parts.append("port %s" % d.get("port"))
+    parts.append("device %s" % d.get("device"))
+    if isinstance(d.get("ready_ms"), (int, float)):
+        parts.append("ready in %d s" % int(round(d["ready_ms"] / 1000.0)))
+    parts.append(_plural(int(d.get("restarts") or 0), "restart"))
+    return "daemon: %s — %s" % (head, ", ".join(parts))
+
+
+def config_line(cfg, d):
+    if cfg is None:
+        return "config: no ami: block in config.yaml — frame-jack on will refuse until one is pasted"
+    now_desc = "port %s, device %s, offline %s" % (cfg["port"], cfg["device"], "yes" if cfg["offline"] else "no")
+    if not d or not d.get("command"):
+        return "config: %s (no daemon on record to compare with)" % now_desc
+    changed = []
+    for k in ("command", "model", "device", "port", "offline", "battery_off", "request_timeout_ms", "shadow", "enforce"):
+        then, now_v = d.get(k), cfg.get(k)
+        if k in ("shadow", "enforce"):
+            same = sorted(then or []) == sorted(now_v or [])
+            fmt = lambda x: ", ".join(x) if x else "nothing"          # noqa: E731
+        elif k in ("offline", "battery_off"):
+            same = bool(then) == bool(now_v)
+            fmt = lambda x: "true" if x else "false"                  # noqa: E731
+        else:
+            same = str(then) == str(now_v)
+            fmt = str
+        if not same:
+            changed.append("ami.%s is %s now, %s when it started" % (k, fmt(now_v), fmt(then)))
+    if changed:
+        return "config: changed since the daemon started — %s; /frame-jack off, then on, applies it" % "; ".join(changed)
+    return "config: as the daemon started with (%s)" % now_desc
+
+
+def cmd_status(root):
+    sid = ll.session_id_from_env()
+    base = amilib.ami_dir(root)
+    out = []
+    try:
+        cfg = read_config(root)
+    except Exception:
+        cfg = None
+    if not base.is_dir():
+        print("frame-jack: off — never switched on in this deployment (/frame-jack on starts the AMI)")
+        print(config_line(cfg, None))
+        return 0
+    d = amilib._read_json(amilib.daemon_path(root)) or {}
+    sw = amilib.switch_detail(root, sid)
+    if sw["state"] == "off":
+        out.append("frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)")
+        if d.get("off_by"):
+            out.append("last switched off by: %s" % d["off_by"])
+    else:
+        when, who = _sentinel(root)
+        since = "on since %s" % _clock(when) if when else "on"
+        if who and sid and who == sid:
+            by = "this session, by the operator"
+        elif who and who != "shell":
+            by = "session %s" % who
+        else:
+            by = "from a shell"
+        mode = "shadow mode — the AMI logs, never acts"
+        asked_for = amilib.enforce_requested(root)
+        if asked_for:
+            mode += " (ami.enforce names %s, which no release has certified to act)" % ", ".join(asked_for)
+        out.append("frame-jack: %s (%s), %s" % (since, by, mode))
+        if sw["state"] == "unconfigured":
+            out.append("daemon: no usable record (state/ami/daemon.json is missing or its command is not executable) "
+                       "— /frame-jack off, then on")
+        else:
+            out.append(daemon_status_line(sw, d))
+            out.append(memory_line(d, d.get("command")))
+    # this session
+    c = amilib.counters(root, sid) if sid else None
+    if not sid:
+        out.append("this session: run from a shell, so there are no session counts (each session's are in "
+                   "state/ami/session-<id>.json)")
+    elif not c:
+        out.append("this session: no questions asked yet")
+    else:
+        asked = c.get("asked") or {}
+        total = sum(int(v or 0) for v in asked.values())
+        out.append("this session: %s asked (%s)" % (_plural(total, "question"), ", ".join(
+            "%s %s" % (q, _n(asked.get(q) or 0)) for q in amilib.QUESTIONS)))
+        wa = int(c.get("would_ask") or 0)
+        recent = [x for x in (c.get("recent_would_ask") or []) if isinstance(x, str)]
+        if wa:
+            out.append("  would have asked you %s — the commands:" % _plural(wa, "time"))
+            shown = recent[-SHOWN_WOULD_ASK:]
+            for cmd in shown:
+                out.append("    " + (cmd.splitlines()[0] if cmd.strip() else "(empty)"))
+            if wa > len(shown):
+                out.append("    … (%s more; all %s are in the decision log, state/ami/decisions/)" % (
+                    _n(wa - len(shown)), _n(wa)))
+            out.append("  of those %s: %s carried a guard warning too (the deterministic guard agreed), %s then failed" % (
+                _n(wa), _n(c.get("would_ask_with_guard_warning") or 0), _n(c.get("would_ask_then_failed") or 0)))
+        else:
+            out.append("  would have asked you 0 times")
+        out.append("  would have shortened %s of the %s suite runs — %s of those then failed" % (
+            _n(c.get("would_shorten") or 0), _n(asked.get("suite") or 0), _n(c.get("shortened_then_failed") or 0)))
+        un = {k: int(v or 0) for k, v in (c.get("unanswered") or {}).items() if int(v or 0)}
+        if un:
+            out.append("unanswered this session: %s (%s)" % (_n(sum(un.values())), ", ".join(
+                "%s %s" % (k, _n(v)) for k, v in sorted(un.items(), key=lambda kv: (-kv[1], kv[0])))))
+        else:
+            out.append("unanswered this session: 0")
+        recent_lat = sorted(x for x in (c.get("latency_recent") or []) if isinstance(x, (int, float)))
+        lat = c.get("latency_ms") if isinstance(c.get("latency_ms"), list) else [0, 0, 0]
+        if recent_lat:
+            n = len(recent_lat)
+            med = recent_lat[n // 2] if n % 2 else (recent_lat[n // 2 - 1] + recent_lat[n // 2]) / 2.0
+            qn, ql = _queued(root, sid)
+            queued = ("queued behind another window: %s, longest %s ms" % (_plural(qn, "time"), _n(ql))
+                      if qn else "never queued behind another window")
+            out.append("latency this session: median %s ms, max %s ms (%s)" % (
+                _n(med), _n(lat[2] if len(lat) > 2 else max(recent_lat)), queued))
+        else:
+            out.append("latency this session: no answers yet")
+        asks, ov = int(c.get("asks") or 0), int(c.get("overrides") or 0)
+        if not asks:
+            out.append("overrides: none — shadow mode asks nothing; when a question is certified to act, an ask the "
+                       "operator then approves counts here (inferred from the outcome rows)")
+        else:
+            out.append("overrides: %s of %s asks were approved and ran (inferred from the outcome rows: an ask "
+                       "followed by the command running)" % (_n(ov), _n(asks)))
+        br = c.get("breaker") or {}
+        until = br.get("tripped_until")
+        if isinstance(until, (int, float)) and until > time.time():
+            out.append("breaker: tripped (slow or wedged) — retrying at %s; the %s trip this session" % (
+                _clock(until), _ordinal(int(br.get("trips") or 1))))
+        elif int(br.get("consecutive") or 0):
+            out.append("breaker: not tripped; %s failed in a row (it trips at %d)" % (
+                _plural(int(br["consecutive"]), "question"), amilib.BREAKER_STRIKES))
+        else:
+            out.append("breaker: not tripped this session")
+    # the log, the calibration, the config
+    files = _log_files(root)
+    today = amilib.decisions_path(root)
+    rel = "state/ami/%s/%s" % (amilib.DECISIONS_DIR, today.name)
+    if files:
+        out.append("decision log: %s (%s today, %s kept)" % (
+            rel, _plural(_count_lines(today) if today.exists() else 0, "row"), _plural(len(files), "day")))
+    else:
+        out.append("decision log: none yet (state/ami/decisions/ holds one file per day)")
+    running = d.get("device") if d else None
+    label = amilib.CALIBRATION.split(",")
+    cal = "%s (%s)" % (label[0].strip(), label[1].strip() if len(label) > 1 else MEASURED_DEVICE.upper())
+    if running and running == MEASURED_DEVICE:
+        dev = "measured and running device %s" % running
+    elif running:
+        dev = "measured device %s, running device %s" % (MEASURED_DEVICE, running)
+    else:
+        dev = "measured device %s, running device unknown (no daemon on record)" % MEASURED_DEVICE
+    out.append("calibration: thresholds from %s; %s — re-measure before any question acts" % (cal, dev))
+    out.append(config_line(cfg, d))
+    for ln in out:
+        print(ln)
+    return 0
+
+
+# ---------------------------------------------------------------- §10 --doctor
+WEIGHT_FOLDERS = ("models--Qwen--Qwen3.5-2B-Base", "models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610")
+
+
+def _tilde(path):
+    home = os.path.expanduser("~")
+    p = str(path)
+    return "~" + p[len(home):] if home and home != "/" and (p == home or p.startswith(home + os.sep)) else p
+
+
+def hub_dir(cfg):
+    """The weights cache's hub: ami.weights_cache (the daemon's HF_HOME), else the fixture's AMI_TEST_HF_HOME,
+    else HF_HOME, else ~/.cache/huggingface."""
+    home = (cfg or {}).get("weights_cache") or os.environ.get("AMI_TEST_HF_HOME") or os.environ.get("HF_HOME") \
+        or os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+    return Path(os.path.expanduser(home)) / "hub"
+
+
+def snapshot_state(folder):
+    """(`present` | `missing` | `dangling`, bytes) — present when some snapshot has at least one entry and every
+    entry is a regular file or a symlink that resolves (os.path.exists follows links); dangling when the
+    entries are links to nothing (the folders were copied without the shared blob store)."""
+    snaps = folder / "snapshots"
+    best, dangling = None, False
+    try:
+        revs = sorted(p for p in snaps.iterdir() if p.is_dir())
+    except OSError:
+        return "missing", 0
+    for rev in revs:
+        entries, ok, size, seen = 0, True, 0, set()
+        for dirpath, _dirs, names in os.walk(str(rev)):
+            for name in names:
+                path = os.path.join(dirpath, name)
+                entries += 1
+                if not os.path.exists(path):
+                    ok = False
+                    continue
+                real = os.path.realpath(path)
+                if real not in seen:
+                    seen.add(real)
+                    try:
+                        size += os.stat(path).st_size
+                    except OSError:
+                        ok = False
+        if entries and ok:
+            best = size if best is None else max(best, size)
+        elif entries:
+            dangling = True
+    if best is not None:
+        return "present", best
+    return ("dangling" if dangling else "missing"), 0
+
+
+def _size_word(b):
+    return "%.2f GB" % (b / 1e9) if b >= 1e8 else "%.1f MB" % (b / 1e6)
+
+
+def _ps_listing():
+    seam = os.environ.get("AMI_TEST_PS")
+    try:
+        import shlex
+        cmd = shlex.split(seam) if seam else ["ps", "-axo", "pid=,command="]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
+def second_serves(cfg, d):
+    """`ps -axo pid=,command=` lines naming `strands-decider serve` (or the configured command's basename) whose
+    pid is not this deployment's serve_pid and whose port is not this deployment's (a daemon on our port is ours
+    or the one we borrow — one daemon either way). [(pid, port or None)]."""
+    import re
+    names = {"strands-decider"}
+    if cfg and cfg.get("command"):
+        names.add(os.path.basename(str(cfg["command"])))
+    pat = re.compile(r"(?:^|[\s/])(?:%s)\s+serve(?:\s|$)" % "|".join(re.escape(n) for n in sorted(names)))
+    own_pid = (d or {}).get("serve_pid")
+    own_port = (cfg or {}).get("port")
+    found = []
+    for ln in _ps_listing().splitlines():
+        parts = ln.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, command = int(parts[0]), parts[1]
+        argv0 = command.split(None, 1)[0]
+        if os.path.basename(argv0) in ("sh", "bash", "zsh", "grep", "pgrep", "ps"):
+            continue
+        if not pat.search(command):
+            continue
+        m = re.search(r"--port[\s=](\d+)", command)
+        port = int(m.group(1)) if m else None
+        if pid == os.getpid() or (own_pid is not None and pid == own_pid):
+            continue
+        if port is not None and own_port is not None and port == own_port:
+            continue
+        found.append((pid, port))
+    return found
+
+
+def doctor_lines(root):
+    lines = []
+    cfg = read_config(root)
+    base = amilib.ami_dir(root)
+    if cfg is None:
+        lines.append('NOTE     frame-jack: no ami: block in config.yaml — the AMI cannot be switched on (optional; '
+                     'see "Frame-jack" in README.md)')
+        if not base.is_dir():
+            return lines
+    else:
+        problems = list(cfg["problems"])
+        for q in cfg["enforce"]:
+            if q not in amilib.CERTIFIED:
+                problems.append("ami.enforce names %s, which no release has certified to act — remove it; the "
+                                "question stays in shadow mode" % q)
+        for p in problems:
+            lines.append("MISSING  frame-jack: %s" % p)
+        if not problems:
+            lines.append("OK       frame-jack: strands-decider at %s, model %s, device %s, port %s, %s" % (
+                cfg["command"], cfg["model"], cfg["device"], cfg["port"], "offline" if cfg["offline"] else "online"))
+        # the weights
+        hub = hub_dir(cfg)
+        total, states = 0, {}
+        for name in WEIGHT_FOLDERS:
+            st, size = snapshot_state(hub / name)
+            states[name] = st
+            total += size
+        for name in WEIGHT_FOLDERS:
+            if states[name] == "missing":
+                remedy = ('copy it by hand (README "Weights by hand"); ami.offline is true, so the daemon will not '
+                          'download it' if cfg["offline"] else
+                          'copy it by hand (README "Weights by hand") or let the first start download it '
+                          '(ami.offline is false)')
+                lines.append("NOTE     frame-jack weights: the model snapshot is missing under %s (%s) — %s" % (
+                    _tilde(hub), name, remedy))
+            elif states[name] == "dangling":
+                lines.append('NOTE     frame-jack weights: %s has links into a blob store that is not there — the '
+                             'folders were copied without the blobs; copy with the tarball in README "Weights by '
+                             'hand"' % name)
+        if all(s == "present" for s in states.values()):
+            lines.append("OK       frame-jack weights: both snapshots present (%s)" % _size_word(total))
+    # the daemon
+    d = amilib._read_json(amilib.daemon_path(root)) or {}
+    sw = amilib.switch_detail(root, None)
+    state, now = sw["state"], time.time()
+    port = d.get("port") or (cfg or {}).get("port")
+    model = d.get("model") or (cfg or {}).get("model")
+    if state in ("absent", "off"):
+        lines.append("OK       frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)")
+    elif state == "unconfigured":
+        lines.append("NOTE     frame-jack: on but the daemon has no usable record (state/ami/daemon.json is missing or "
+                     "its command is not executable) — /frame-jack off, then on")
+    elif state == "down" and sw.get("reason") == "supervisor gone":
+        serve = d.get("serve_pid")
+        if serve is not None and identified(serve, "serve", d.get("command")):
+            tail = "serve pid %s still running" % serve
+        else:
+            tail = "no serve running"
+        lines.append("NOTE     frame-jack: on but its supervisor is gone (heartbeat %s ago; %s) — /frame-jack off, "
+                     "then on" % (_ago(now - (d.get("heartbeat") or 0)), tail))
+    elif state == "down" and d.get("terminal"):
+        lines.append("NOTE     frame-jack: on but the daemon stopped for good: %s" % (
+            d.get("last_error") or "see state/ami/daemon.log"))
+    elif state == "down":
+        lines.append("NOTE     frame-jack: on but the daemon is down (last error: %s) — /frame-jack on starts it "
+                     "again" % (d.get("last_error") or ("port %s does not answer" % port)))
+    elif state == "battery":
+        lines.append("NOTE     frame-jack: on, paused on battery")
+    elif state == "starting":
+        lines.append("NOTE     frame-jack: on, the daemon is starting (%s)" % _ago(now - (d.get("since") or now)))
+    elif state in ("on", "tripped"):
+        if port is not None and not is_ami(port, model):
+            pass                                            # the port line below says it
+        else:
+            today = amilib.decisions_path(root)
+            serve = ("serve borrowed from another deployment" if d.get("borrowed")
+                     else "serve pid %s" % d.get("serve_pid"))
+            lines.append("OK       frame-jack: on — daemon up on port %s (%s, device %s, supervisor heartbeat %s ago), "
+                         "shadow mode, %s logged today" % (
+                             port, serve, d.get("device"), _ago(now - (d.get("heartbeat") or now)),
+                             _plural(_count_lines(today) if today.exists() else 0, "decision")))
+    # the port, by §4.4's comparison, whenever it answers
+    if port is not None and model and amilib._port_open(port) and not is_ami(port, model):
+        lines.append("NOTE     frame-jack: port %s is held by something that is not the AMI — change ami.port in "
+                     "config.yaml" % port)
+    for pid, other_port in second_serves(cfg, d):
+        lines.append("NOTE     frame-jack: a second strands-decider serve is running on this machine (pid %s, port %s, "
+                     "not this deployment's) — two daemons cost twice 5.3 GB; name the same ami.port in both "
+                     "deployments so one borrows the other" % (pid, other_port if other_port is not None else "unknown"))
+    return lines
+
+
+def cmd_doctor(root):
+    for ln in doctor_lines(root):
+        print(ln)
+    return 0
+
+
 # ---------------------------------------------------------------- main
 def main(argv):
     verb = argv[0] if argv else "status"
@@ -449,9 +993,10 @@ def main(argv):
         return cmd_on(root)
     if verb == "off":
         return cmd_off(root)
-    if verb in ("status", "--doctor"):
-        print("frame-jack %s: not in this build yet" % verb)
-        return 2
+    if verb == "status":
+        return cmd_status(root)
+    if verb == "--doctor":
+        return cmd_doctor(root)
     print("frame-jack: say on, off or status (got %s)" % verb)
     return 2
 
