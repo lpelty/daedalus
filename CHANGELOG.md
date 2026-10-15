@@ -4,6 +4,64 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.7.1 — the lease board appears again on Claude Code 2.1.300
+
+**In short.** On Claude Code 2.1.300 the lease board never appeared above
+the prompt. The mod drew it every 2 seconds, and Claude Code refused the
+drawing every time. It appears again. Nothing else changes.
+
+**What went wrong.** The band the mod draws has to hold Claude Code's own
+drawing too: the spinner and the notices. So the mod asks Claude Code for
+that drawing and puts it in the tree it returns. It put the drawing inside
+the same Box it then sized to the band's width. The width is there so that
+each window's line cuts off at the band's edge, not at the terminal's.
+Claude Code 2.1.300 refuses that shape. In `claude --debug`, every draw
+said: `ui.render (AbovePrompt): a hook returned a tree that does not validate
+(engine node under a Box with prop "width"); drawing the engine's own`. So
+Claude Code drew its own band, and the board was never on screen. The mod's
+tests had not caught it. They answered the mod's request for Claude Code's
+drawing with a plain line of text, not the reference
+(`{ type: 'engine', ref }`) Claude Code really hands back, so nothing
+exercised the real shape. A Daedalus deployment on a second machine found
+this on 2026-10-15 with `claude --debug`. On 2.1.296, which the board was
+built against, the shape was accepted.
+
+**What changed.** The window lines now sit in an inner Box that carries the
+width. Claude Code's own drawing sits beside that Box, inside an outer Box
+with no width. That is the shape the mods interface page sanctions: "place
+it in a Box beside elements of your own". The lines still cut off at the
+band's edge. The mod's tests now answer with the reference Claude Code really
+hands back. They check that exactly one Box carries the width, that the
+reference is not under it, and that the tree validates on 2.1.300. `claude
+plugin validate` and `claude plugin test` pass (24 tests). In a live
+`claude --debug` session on 2.1.300, every draw was accepted where every one
+was refused before. The mod's own version is 0.1.1, and its README says it is
+tested with 2.1.300. Two board reads at startup that exited 1 on the laptop
+where this was found did not reproduce here and are not changed.
+
+**What you will see.** The board above the prompt in every window: one line
+per window, yours first, refreshed every 2 seconds, as the 2026-10-11 entry
+under v0.7.0 describes. On 2.1.300 you saw Claude Code's plain band and no
+board; now you see the board. The first session after the pull says one
+line, "Upgrade to 0.7.1: complete.", and that is all the upgrade does. No
+state changes shape, no file moves, and no target checkout is touched. It
+first takes its usual safety copy of anything new in `target/` and runs its
+usual check for unfinished work there. If that check stops it, the board
+says why and what to do, as for v0.7.0.
+
+**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
+session. The mod loads in place from `mods/lease-board/`, so there is no
+`claude plugin install` to run again. A window that is already open keeps
+the old drawing until it is restarted or runs `/reload-plugins`. A
+deployment that never installed the board runs the two install commands
+from the 2026-10-11 entry under v0.7.0, once. Mods need Claude Code 2.1.287
+or later; this is tested with 2.1.300.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.1`. `git describe
+--tags --abbrev=0` prints `v0.7.1`. `core/doctor.sh` prints `OK       version:
+0.7.1` and `OK       upgrade: state/upgraded-to 0.7.1`. And the board is on
+screen.
+
 ## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself
 
 **In short.** Several Daedalus sessions can now work on one target at the
