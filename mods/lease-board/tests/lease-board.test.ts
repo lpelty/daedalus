@@ -385,3 +385,44 @@ test('the first render logs what next(e) resolved to, once, for the human step (
   await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(logs.filter((l) => l.includes('next(e) resolved to object')).length).toBe(1)
 })
+
+// --- the band that never appeared (Claude Code 2.1.300, 2026-10-15) ------------------------------------------------
+
+// What next(e) resolves to on the real band: "At these sites, next(e) returns a reference to Claude Code's drawing,
+// { type: 'engine', ref }, unless a mod that runs after yours returned a tree of its own" (interface page); the
+// types: "The component core draws itself, with the props held under `ref`. type: 'engine'; ref: number ... 0 draws
+// the original props". The stubs above answer with a Text, which is not the shape the engine hands back, so nothing
+// here had exercised it: on 2.1.300 every ui.render on the band was refused with "a hook returned a tree that does
+// not validate (engine node under a Box with prop "width"); drawing the engine's own", and the band stayed empty.
+const ENGINE = { type: 'engine', ref: 0 }
+
+// Every node of a tree with the chain of Boxes above it, outermost first.
+function walk(node: any, above: any[] = [], out: { node: any; above: any[] }[] = []) {
+  if (!node || typeof node !== 'object') return out
+  out.push({ node, above })
+  for (const c of node.children || []) walk(c, above.concat([node]), out)
+  return out
+}
+
+test('the engine\'s own node from next(e) is kept, outside any Box that has a width, and the tree validates (2.1.300)', async ($, on) => {
+  stubs(on, () => ok(FIXTURE), ENGINE)
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // "rejects with the refusal when the surface could not draw what the chain returned" (the types, Mounted.drawn)
+  let refusal = ''
+  let tree: any
+  try {
+    tree = await ui.drawn()
+  } catch (err: any) {
+    refusal = String(err && err.message ? err.message : err)
+  }
+  expect(refusal).toBe('')
+  // this mod's lines are still there, sized to the band
+  expect((await windowLines(ui)).length).toBe(5)
+  // the engine's node is in the tree exactly once ...
+  const found = walk(tree).filter((x) => x.node.type === 'engine')
+  expect(found.length).toBe(1)
+  // ... and no Box above it carries a width: the engine refuses that shape on this build
+  const sized = found[0].above.filter((b) => b.type === 'Box' && b.props && b.props.width !== undefined)
+  expect(sized.length).toBe(0)
+})
