@@ -4,6 +4,260 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again
+
+**In short.** Since v0.7.0 you had to remember or run some routine steps
+yourself. They are Daedalus's job again. The document index now follows the
+vault without anyone running it. When you say yes to deleting a window's
+work, the window runs the delete itself. SOUL.md, Daedalus's own journal, is
+no longer locked against it. CLAUDE.md stays locked. A deployment that
+unlocked it is told how to let auto mode allow the edit.
+
+**What went wrong.**
+- Document recall reads an index of the vault. Nothing in Daedalus rebuilt
+  that index; only `python3 core/vault-search.py index`, run by hand, did. So
+  recall drifted behind the vault until the prime remembered. Only doctor
+  said so (a deployment on another machine, 2026-10-14).
+- Deleting a window's work ended with a shell line for you to run. Auto
+  mode's classifier refused `core/lease.sh release 02 --remove --force` as
+  "[Interfere With Workloads]". CLAUDE.md then told the window to hand you
+  the line. A builder that hands you shell lines to run is not how Daedalus
+  works.
+- The tracked settings denied every edit to SOUL.md. It is this instance's
+  journal, not distribution code.
+- On a deployment that had chosen to unlock CLAUDE.md, auto mode still
+  refused the edit as "[Self-Modification]".
+- The vault commit at every close was the other such step. It was fixed on
+  2026-10-14 (e1b349e) and is not changed here.
+
+**What changed.**
+- `core/vault-commit.sh` starts a rebuild of the index in the background
+  after every commit the prime makes. The commit never waits for it. A
+  rebuild that fails never fails the commit. The prime's session start does
+  the same when the index is older than the vault.
+- The tracked `.claude/settings.json` allows `Bash(core/lease.sh release:*)`.
+  Claude Code resolves that rule before the classifier, so the classifier no
+  longer stands in the way. Daedalus's own check decides instead.
+  `core/guard-bash.py` refuses the delete unless three things hold. The
+  report was shown in this session. Your yes followed it in the session's
+  transcript. And the window's work has not changed since the report.
+- `Edit(/SOUL.md)` leaves the tracked deny list. `Edit(/CLAUDE.md)` stays:
+  CLAUDE.md is distribution code, and promote and the launcher refuse a tree
+  where it differs from HEAD.
+
+**What you will see.**
+- After each vault commit the prime makes: "document index: rebuilding in
+  the background (state/recall-index.log)".
+- At the prime's start, when the index is older than the vault: "The
+  document index is older than the vault; rebuilding it in the background
+  (state/recall-index.log)." Other windows say nothing.
+- `core/doctor.sh` adds a line under document recall: "last automatic index
+  <time> by <who>: indexed=N purged=M", or that it failed and where the
+  engine's output is.
+- "Release window 2 and delete its work": the window runs `core/lease.sh
+  unpromoted 02` and repeats its report. The report ends with "Say yes to
+  delete window 02's work." You may ask about it first. After your yes, the
+  window runs the delete itself.
+- `core/doctor.sh` prints `OK       CLAUDE.md: edits denied (<file>)`. When no
+  deny rule covers CLAUDE.md, it prints a NOTE pointing at the README
+  instead.
+- The first session after the pull says one line, "Upgrade to 0.7.2:
+  complete.", and that is all the upgrade does. No state changes shape and
+  no file moves.
+
+**If you let Daedalus edit its own CLAUDE.md.** The distribution cannot
+ship auto mode's exception for you. The classifier reads `autoMode` only from
+`~/.claude/settings.json` or managed settings, never from a project's
+`.claude/settings*.json`. So add this once to `~/.claude/settings.json`,
+keeping `"$defaults"`, with your home's path in place of `/path/to/daedalus`:
+
+```json
+{
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Editing CLAUDE.md in the Daedalus home at /path/to/daedalus when the operator asked for that change in this session: the deployment chose to let Daedalus maintain its own brief."
+    ]
+  }
+}
+```
+
+Without it, a message from you in the session asking for the edit clears
+the refusal on its own. README, "Letting Daedalus edit its own CLAUDE.md",
+says the same.
+
+**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
+session. Close and reopen any session that was open through the pull; it is
+still running the old hooks. This release changes `CLAUDE.md` and
+`.claude/settings.json`. If your deployment carries local changes to either,
+the pull refuses. Then run `git stash push -m local-changes CLAUDE.md
+.claude/settings.json && git pull --ff-only && git stash pop`. Resolve what
+conflicts (expect the "Release window 2" row), and commit the result on your
+local branch. README, "Upgrading", says the same.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.2`. `git describe
+--tags --abbrev=0` prints `v0.7.2`. `core/doctor.sh` prints `OK       version:
+0.7.2` and `OK       upgrade: state/upgraded-to 0.7.2`. It also prints the
+CLAUDE.md line and, once a rebuild has run, the last automatic index.
+
+### In detail
+
+#### The document index rebuilds itself
+
+**In short.** The document index — what `recall.vault-index` builds for
+document recall — waited for someone to run `python3 core/vault-search.py
+index`. Nothing in Daedalus ran it, so recall drifted behind the vault until
+the prime remembered. The prime was told only when someone ran doctor (a
+deployment on another machine, 2026-10-14). Now the index follows the vault
+by itself, and doctor says when it last ran.
+
+**What you will see.**
+- After every vault commit the prime makes — each close with `--commit`, and
+  `core/vault-commit.sh` by hand — one line: "document index: rebuilding in
+  the background (state/recall-index.log)". The commit never waits for the
+  rebuild, and a rebuild that fails never fails the commit: the line says
+  so, and `python3 core/vault-search.py index` runs one by hand.
+- At the start of the window that holds the pen, when the index is older
+  than the vault: "The document index is older than the vault; rebuilding it
+  in the background (state/recall-index.log)." A fresh index, another
+  window, a visitor and a compaction say nothing. A start that spent its
+  time on worktree checkouts skips the rebuild rather than running late; the
+  next commit kicks it.
+- A rebuild kicked while one is running: "a rebuild is already running; it
+  will run again when done". It does, once, so a document changed during a
+  run is indexed by the run that follows.
+- `state/recall-index.log` holds the last run: `started <time> by
+  vault-commit`, then `finished <time> indexed=N purged=M`, or the engine's
+  last lines and `failed <time>: <reason>`.
+- `core/doctor.sh` prints one more line under document recall: "last
+  automatic index <time> by <who>: indexed=N purged=M"; or that it FAILED
+  and where the engine's output is; or that a run is still going; or that
+  one started and did not finish (killed, or the machine slept), and that
+  the next vault commit or the prime's next session start runs it again.
+- A reindex engine that runs past two minutes is stopped as a whole, so
+  nothing of it keeps writing the store after the lock is released.
+
+A deployment without a `recall:` block sees none of this; `core/doctor.sh`
+still says "document recall: reindex command unconfigured".
+
+**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
+session. The upgrade at the first start only stamps `0.7.2`; a session
+already open keeps the old hooks until it is restarted. This release also
+touches `CLAUDE.md` and `.claude/settings.json`, so a deployment with local
+changes to them takes it by the stash–pull–pop recipe in "How to take it"
+above.
+
+#### The routine steps run by the agent, not the operator
+
+**In short.** Deleting a window's work no longer ends with a shell line for
+you to run: the agent repeats the report, you say yes, the agent runs the
+delete. SOUL.md is yours again — the distribution stops denying edits to it
+and will never change it. A deployment that chose to let Daedalus edit its
+own CLAUDE.md is told exactly where auto mode's exception goes, and doctor
+says when that choice is in force. The vault commit at every close was
+already fixed on 2026-10-14. A deployment with local changes to the tracked
+files gets a recipe for taking this release.
+
+Taken as v0.7.2 says above: `git pull --ff-only` in the Daedalus home, then
+a new session.
+
+**What you will see.**
+- "Release window 2 and delete its work" is report, yes, delete. The window
+  runs `core/lease.sh unpromoted 02`, which now ends with one line: "Say yes
+  to delete window 02's work." You may ask about it first; the window answers
+  and ends its answer with that line. When you say yes, the window runs
+  `core/lease.sh release 02 --remove --force --operator-said "<your reply>"`
+  itself. That command is allowed in the tracked `.claude/settings.json`
+  (`Bash(core/lease.sh release:*)`). Claude Code resolves such a rule before
+  auto mode's classifier (permissions and permission-modes docs, read
+  2026-10-15 on 2.1.300). So the classifier's "[Interfere With Workloads]"
+  refusal of 2026-10-14 no longer stands in the way. What decides is now
+  Daedalus's own check, in every permission mode. `core/guard-bash.py`
+  refuses the command before it runs unless three things hold. The report
+  was shown in this session. Your yes followed its line in the session's own
+  transcript (the same recorded-yes machinery promote uses). And the window's
+  work is still what the report named: a fingerprint of its commits and
+  files, so a change since the report means asking again. The guard sees the
+  command behind any wrapper (`timeout`, `nice`, `sudo`, `bash -c` …) and
+  from any path, and refuses it outright through `xargs`. `core/leaselib.py`
+  refuses the same for every form the guard cannot read (`python3
+  core/leaselib.py release …`, a copied script). A reply of several lines or
+  with a `$` in it cannot ride on the command: the window asks for a one-word
+  yes. What authorised a deletion is written to `state/evidence/deletions/`
+  first. Your own shell is unchanged. In `promote.confirm: tty` mode the
+  window hands you the line to paste, as promote does there. The sentence
+  "If the permission system refuses that command, say so and give the
+  operator the line to run" is gone from CLAUDE.md.
+- One caveat: a user-scope `autoMode.classifyAllShell: true` suspends every
+  Bash allow rule in auto mode, so on such a deployment the classifier is
+  back in front of the delete; `core/doctor.sh` prints a NOTE when it finds
+  that set.
+- SOUL.md leaves the tracked deny list. It is this instance's own journal:
+  `core/distcheck.py` does not cover it, and promote does not read it. The
+  distribution will not change it in any later release; a test pins the
+  tracked file to its seed. A release that touched it would make `git pull
+  --ff-only` refuse on every deployment whose instance has written in it. The identity leak scan reads it from HEAD, never the working file.
+  CLAUDE.md stays denied: it is distribution code, and promote and the
+  launcher refuse a tree whose CLAUDE.md differs from HEAD.
+- A deployment that chooses to let Daedalus edit its own CLAUDE.md met auto
+  mode's "[Self-Modification]" refusal on 2026-10-14. The distribution cannot
+  give it the exception: the classifier reads `autoMode` only from
+  `~/.claude/settings.json`, managed settings or `--settings`. It never reads
+  it from a project's `.claude/settings*.json`. README, "Letting Daedalus
+  edit its own CLAUDE.md", gives the one-off `autoMode.allow` entry for the
+  user file (keeping `"$defaults"`). It also notes that a message asking for
+  the edit in the session clears the soft deny on its own. `core/doctor.sh` prints `OK       CLAUDE.md: edits denied (<file>)`
+  naming the project, local or user file whose rule covers it, and a NOTE
+  pointing at that README section when none does.
+- The vault commit at every close was shipped on 2026-10-14 (e1b349e):
+  `core/close.sh --commit` runs `core/vault-commit.sh` after a successful
+  capture (`core/tests/test_close.bats:211`), and `vault-commit.sh` commits
+  a vault the home repository tracks (`core/tests/test_vault_commit.bats:90`,
+  `:114`, `:140`). Nothing new here.
+- **Taking this release on a deployment with local changes.** This release
+  edits `CLAUDE.md` (the "Release window 2" row) and `.claude/settings.json`
+  (the permissions block). The deployment this work is for carries local
+  changes to both. There `git pull --ff-only` refuses with "Your local
+  changes to the following files would be overwritten". Keep the local changes on the deployment's own branch and
+  bring the release under them: `git stash push -m local-changes CLAUDE.md
+  .claude/settings.json && git pull --ff-only && git stash pop`, resolve what
+  conflicts (expect the "Release window 2" row), and commit the result on
+  the local branch. README, "Upgrading", says the same.
+- One fact the check below turned up, worth knowing on a deployment: a
+  project's `permissions.allow` rules apply only in a folder whose workspace
+  trust dialog was accepted, and `claude -p` never shows that dialog
+  (permissions doc, "Project allow rules and workspace trust"). The Daedalus
+  home is such a folder once its first interactive session opened there, so
+  the tracked rule applies in every window. A scratch folder a script made
+  is not. So the check carries the rule through `--settings` (the same scope
+  as `~/.claude/settings.json`). One run keeps the rule in the scratch
+  project file instead, to show the difference (run 2a).
+- The headless check of the allow rule (`core/tests/automode-allow-rule.sh`,
+  run once in validation on 2026-10-15 from the real config home, whose
+  user-scope rules name no `lease.sh`; not part of the suite, since it needs
+  a logged-in `claude`, the network and a model call), verbatim:
+
+  $ core/tests/automode-allow-rule.sh   (claude 2.1.300, 2026-10-15)
+  config home: the real one (~/.claude) — a scratch CLAUDE_CONFIG_DIR is not logged in; the user-scope settings there (permissions.allow, autoMode) were in effect
+  effective auto-mode config saved: <scratch>/auto-mode-config.json (81974 bytes); lease.sh named in it: 0 line(s)
+  run1-default-no-rule: exit 0 — ran: no — denied: no — stdout: The command to release window 02 needs your approval before it can run. I ran it once as the project instructions specify, and the harness blocked it pending permission.  Nothing was changed. Approve 
+  run2a-default-project-rule-untrusted: exit 0 — ran: no — denied: no — stdout: The release command for window 02 was blocked pending approval, so it did not run. Approve `core/lease.sh release 02 --remove --force` and I will run it once as instructed. 
+  run2b-default-settings-rule: exit 0 — ran: yes (release 02 --remove --force ) — denied: no — stdout: Window 02 released. Its worktree and branch are deleted. 
+  run3-auto-rule-and-soft-deny: exit 0 — ran: yes (release 02 --remove --force ) — denied: no — stdout: Window 02 released. Its worktree and branch are deleted. 
+  run4-auto-soft-deny-alone: exit 0 — ran: no — denied: yes ({"command": "core/lease.sh release 02 --remove --force", "reason": "The server-side auto mode classifier judged this action dangerous (it gave no explanation)"} ) — stdout: The release command was blocked by the auto mode permission classifier, so window 02 was not tidied.  The project CLAUDE.md specifies running exactly this once with nothing else, so I did not attempt 
+  results: <scratch>
+  claude -p processes left: none
+  RESULT: the allow rule is resolved before the classifier (runs 2b and 3 ran, run 4 was denied, run 1 did not run)
+  exit 0
+
+- Tests: `test_boundary.bats` (the exact allow list, the deny members),
+  `test_distribution_integrity.bats` (the SOUL.md seed pin),
+  `test_identity.bats` (both scans over HEAD; the CLAUDE.md and README
+  pins), `test_lease.bats` (the report, the witness marker, the fingerprint,
+  the gate and the record), `test_guard_bash.bats` (the early refusal behind
+  every wrapper; the docs' wrapper list pinned), `test_doctor.bats` (the
+  CLAUDE.md and classifyAllShell lines).
+
 ## v0.7.1 — the lease board appears again on Claude Code 2.1.300
 
 **In short.** On Claude Code 2.1.300 the lease board never appeared above
@@ -61,53 +315,6 @@ or later; this is tested with 2.1.300.
 --tags --abbrev=0` prints `v0.7.1`. `core/doctor.sh` prints `OK       version:
 0.7.1` and `OK       upgrade: state/upgraded-to 0.7.1`. And the board is on
 screen.
-
-#### Added on trunk after the v0.7.1 tag — 2026-10-15: the document index rebuilds itself
-
-**In short.** The document index — what `recall.vault-index` builds for
-document recall — waited for someone to run `python3 core/vault-search.py
-index`. Nothing in Daedalus ran it, so recall drifted behind the vault until
-the prime remembered. The prime was told only when someone ran doctor (a
-deployment on another machine, 2026-10-14). Now the index follows the vault
-by itself, and doctor says when it last ran.
-
-**What you will see.**
-- After every vault commit the prime makes — each close with `--commit`, and
-  `core/vault-commit.sh` by hand — one line: "document index: rebuilding in
-  the background (state/recall-index.log)". The commit never waits for the
-  rebuild, and a rebuild that fails never fails the commit: the line says
-  so, and `python3 core/vault-search.py index` runs one by hand.
-- At the start of the window that holds the pen, when the index is older
-  than the vault: "The document index is older than the vault; rebuilding it
-  in the background (state/recall-index.log)." A fresh index, another
-  window, a visitor and a compaction say nothing. A start that spent its
-  time on worktree checkouts skips the rebuild rather than running late; the
-  next commit kicks it.
-- A rebuild kicked while one is running: "a rebuild is already running; it
-  will run again when done". It does, once, so a document changed during a
-  run is indexed by the run that follows.
-- `state/recall-index.log` holds the last run: `started <time> by
-  vault-commit`, then `finished <time> indexed=N purged=M`, or the engine's
-  last lines and `failed <time>: <reason>`.
-- `core/doctor.sh` prints one more line under document recall: "last
-  automatic index <time> by <who>: indexed=N purged=M"; or that it FAILED
-  and where the engine's output is; or that a run is still going; or that
-  one started and did not finish (killed, or the machine slept), and that
-  the next vault commit or the prime's next session start runs it again.
-- A reindex engine that runs past two minutes is stopped as a whole, so
-  nothing of it keeps writing the store after the lock is released.
-
-A deployment without a `recall:` block sees none of this; `core/doctor.sh`
-still says "document recall: reindex command unconfigured".
-
-**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
-session. No upgrade step runs and `VERSION` stays `0.7.1`; a session already
-open keeps the old hooks until it is restarted. A deployment whose tracked
-`CLAUDE.md` or `.claude/settings.json` carry local changes pulls the same
-way until a release touches those files; the part for the routine steps the
-agent runs (the same day's work, on its own branch) carries the
-stash–pull–pop recipe for that case.
-
 
 ## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself
 
@@ -625,117 +832,6 @@ about a promote before you say yes to it. A `gates_setup:` list in
 - README and `docs/handoff-reverse-caller.md` say the same convention.
 - Tests: `core/tests/test_session_log.bats` (new), two nested-vault cases in
   `test_vault_commit.bats`, and the `test_identity` pin on the naming.
-
-#### Added on trunk after the v0.7.0 tag — 2026-10-15: the routine steps run by the agent, not the operator
-
-**In short.** Deleting a window's work no longer ends with a shell line for
-you to run: the agent repeats the report, you say yes, the agent runs the
-delete. SOUL.md is yours again — the distribution stops denying edits to it
-and will never change it. A deployment that chose to let Daedalus edit its
-own CLAUDE.md is told exactly where auto mode's exception goes, and doctor
-says when that choice is in force. The vault commit at every close was
-already fixed on 2026-10-14. A deployment with local changes to the tracked
-files gets a recipe for taking this release.
-
-Taken the same way as v0.7.0: `git pull --ff-only` in the Daedalus home,
-then a new session. VERSION stays 0.7.0, so no upgrade step runs.
-
-**What you will see.**
-- "Release window 2 and delete its work" is report, yes, delete. The window
-  runs `core/lease.sh unpromoted 02`, which now ends with one line: "Say yes
-  to delete window 02's work." You may ask about it first; the window answers
-  and ends its answer with that line. When you say yes, the window runs
-  `core/lease.sh release 02 --remove --force --operator-said "<your reply>"`
-  itself. That command is allowed in the tracked `.claude/settings.json`
-  (`Bash(core/lease.sh release:*)`). Claude Code resolves such a rule before
-  auto mode's classifier (permissions and permission-modes docs, read
-  2026-10-15 on 2.1.300). So the classifier's "[Interfere With Workloads]"
-  refusal of 2026-10-14 no longer stands in the way. What decides is now
-  Daedalus's own check, in every permission mode. `core/guard-bash.py`
-  refuses the command before it runs unless three things hold. The report
-  was shown in this session. Your yes followed its line in the session's own
-  transcript (the same recorded-yes machinery promote uses). And the window's
-  work is still what the report named: a fingerprint of its commits and
-  files, so a change since the report means asking again. The guard sees the
-  command behind any wrapper (`timeout`, `nice`, `sudo`, `bash -c` …) and
-  from any path, and refuses it outright through `xargs`. `core/leaselib.py`
-  refuses the same for every form the guard cannot read (`python3
-  core/leaselib.py release …`, a copied script). A reply of several lines or
-  with a `$` in it cannot ride on the command: the window asks for a one-word
-  yes. What authorised a deletion is written to `state/evidence/deletions/`
-  first. Your own shell is unchanged. In `promote.confirm: tty` mode the
-  window hands you the line to paste, as promote does there. The sentence
-  "If the permission system refuses that command, say so and give the
-  operator the line to run" is gone from CLAUDE.md.
-- One caveat: a user-scope `autoMode.classifyAllShell: true` suspends every
-  Bash allow rule in auto mode, so on such a deployment the classifier is
-  back in front of the delete; `core/doctor.sh` prints a NOTE when it finds
-  that set.
-- SOUL.md leaves the tracked deny list. It is this instance's own journal:
-  `core/distcheck.py` does not cover it, and promote does not read it. The
-  distribution will not change it in any later release; a test pins the
-  tracked file to its seed. A release that touched it would make `git pull
-  --ff-only` refuse on every deployment whose instance has written in it. The identity leak scan reads it from HEAD, never the working file.
-  CLAUDE.md stays denied: it is distribution code, and promote and the
-  launcher refuse a tree whose CLAUDE.md differs from HEAD.
-- A deployment that chooses to let Daedalus edit its own CLAUDE.md met auto
-  mode's "[Self-Modification]" refusal on 2026-10-14. The distribution cannot
-  give it the exception: the classifier reads `autoMode` only from
-  `~/.claude/settings.json`, managed settings or `--settings`. It never reads
-  it from a project's `.claude/settings*.json`. README, "Letting Daedalus
-  edit its own CLAUDE.md", gives the one-off `autoMode.allow` entry for the
-  user file (keeping `"$defaults"`). It also notes that a message asking for
-  the edit in the session clears the soft deny on its own. `core/doctor.sh` prints `OK       CLAUDE.md: edits denied (<file>)`
-  naming the project, local or user file whose rule covers it, and a NOTE
-  pointing at that README section when none does.
-- The vault commit at every close was shipped on 2026-10-14 (e1b349e):
-  `core/close.sh --commit` runs `core/vault-commit.sh` after a successful
-  capture (`core/tests/test_close.bats:211`), and `vault-commit.sh` commits
-  a vault the home repository tracks (`core/tests/test_vault_commit.bats:90`,
-  `:114`, `:140`). Nothing new here.
-- **Taking this release on a deployment with local changes.** This release
-  edits `CLAUDE.md` (the "Release window 2" row) and `.claude/settings.json`
-  (the permissions block). The deployment this work is for carries local
-  changes to both. There `git pull --ff-only` refuses with "Your local
-  changes to the following files would be overwritten". Keep the local changes on the deployment's own branch and
-  bring the release under them: `git stash push -m local-changes CLAUDE.md
-  .claude/settings.json && git pull --ff-only && git stash pop`, resolve what
-  conflicts (expect the "Release window 2" row), and commit the result on
-  the local branch. README, "Upgrading", says the same.
-- One fact the check below turned up, worth knowing on a deployment: a
-  project's `permissions.allow` rules apply only in a folder whose workspace
-  trust dialog was accepted, and `claude -p` never shows that dialog
-  (permissions doc, "Project allow rules and workspace trust"). The Daedalus
-  home is such a folder once its first interactive session opened there, so
-  the tracked rule applies in every window. A scratch folder a script made
-  is not. So the check carries the rule through `--settings` (the same scope
-  as `~/.claude/settings.json`). One run keeps the rule in the scratch
-  project file instead, to show the difference (run 2a).
-- The headless check of the allow rule (`core/tests/automode-allow-rule.sh`,
-  run once in validation on 2026-10-15 from the real config home, whose
-  user-scope rules name no `lease.sh`; not part of the suite, since it needs
-  a logged-in `claude`, the network and a model call), verbatim:
-
-  $ core/tests/automode-allow-rule.sh   (claude 2.1.300, 2026-10-15)
-  config home: the real one (~/.claude) — a scratch CLAUDE_CONFIG_DIR is not logged in; the user-scope settings there (permissions.allow, autoMode) were in effect
-  effective auto-mode config saved: <scratch>/auto-mode-config.json (81974 bytes); lease.sh named in it: 0 line(s)
-  run1-default-no-rule: exit 0 — ran: no — denied: no — stdout: The command to release window 02 needs your approval before it can run. I ran it once as the project instructions specify, and the harness blocked it pending permission.  Nothing was changed. Approve 
-  run2a-default-project-rule-untrusted: exit 0 — ran: no — denied: no — stdout: The release command for window 02 was blocked pending approval, so it did not run. Approve `core/lease.sh release 02 --remove --force` and I will run it once as instructed. 
-  run2b-default-settings-rule: exit 0 — ran: yes (release 02 --remove --force ) — denied: no — stdout: Window 02 released. Its worktree and branch are deleted. 
-  run3-auto-rule-and-soft-deny: exit 0 — ran: yes (release 02 --remove --force ) — denied: no — stdout: Window 02 released. Its worktree and branch are deleted. 
-  run4-auto-soft-deny-alone: exit 0 — ran: no — denied: yes ({"command": "core/lease.sh release 02 --remove --force", "reason": "The server-side auto mode classifier judged this action dangerous (it gave no explanation)"} ) — stdout: The release command was blocked by the auto mode permission classifier, so window 02 was not tidied.  The project CLAUDE.md specifies running exactly this once with nothing else, so I did not attempt 
-  results: <scratch>
-  claude -p processes left: none
-  RESULT: the allow rule is resolved before the classifier (runs 2b and 3 ran, run 4 was denied, run 1 did not run)
-  exit 0
-
-- Tests: `test_boundary.bats` (the exact allow list, the deny members),
-  `test_distribution_integrity.bats` (the SOUL.md seed pin),
-  `test_identity.bats` (both scans over HEAD; the CLAUDE.md and README
-  pins), `test_lease.bats` (the report, the witness marker, the fingerprint,
-  the gate and the record), `test_guard_bash.bats` (the early refusal behind
-  every wrapper; the docs' wrapper list pinned), `test_doctor.bats` (the
-  CLAUDE.md and classifyAllShell lines).
 
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 

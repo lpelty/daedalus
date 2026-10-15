@@ -454,3 +454,27 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ "$(lease_json 01 worktree_ready)" = False ]
 }
 
+
+# A patch release bumps VERSION and adds no step (v0.7.1, v0.7.2): a home already upgraded to the release before it
+# runs every step as a no-op at the next start, says only the completion line, and stamps the new VERSION.
+@test "a patch release on an upgraded home: only the completion line, nothing touched, the stamp follows VERSION" {
+  REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  CUR="$(sed -n 1p "$REPO/VERSION")"
+  [ "$CUR" != 0.7.0 ]
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  printf '%s\n' "$CUR" > "$DAEDALUS_HOME/VERSION"
+  before="$(snapshot | grep -v 'state/upgraded-to')"
+  run python3 "$UP" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -c .)" = 1 ] || { echo "the dry run would do more than stamp: $output"; return 1; }
+  case "$output" in *"state/upgraded-to"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$UP"
+  [ "$status" -eq 0 ]
+  [ "$output" = "Upgrade to $CUR: complete. What changed is in CHANGELOG.md under v$CUR; what the target's agent may ask of you is in docs/handoff-reverse-caller.md." ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = "$CUR" ]
+  [ "$(snapshot | grep -v 'state/upgraded-to')" = "$before" ] || { echo "the patch upgrade changed something"; return 1; }
+  run python3 "$UP"
+  [ "$status" -eq 0 ]; [ "$output" = "Already upgraded to $CUR; nothing to do." ] || { echo "$output"; return 1; }
+}

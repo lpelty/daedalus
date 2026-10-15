@@ -383,8 +383,8 @@ _run_scan_in_fixture() {
   run grep -qF 'incremental capture (plan 2)' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -ne 0 ]
 }
 
-@test "VERSION is one line, 0.7.1; the wide scan reads VERSION and docs/, which publish (spec §14)" {
-  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.1" ]
+@test "VERSION is one line, 0.7.2; the wide scan reads VERSION and docs/, which publish (spec §14)" {
+  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.2" ]
   [ "$(wc -l < "$DAEDALUS_HOME/VERSION" | tr -d ' ')" = 1 ]
   _make_fixture_repo
   mkdir -p "$fixture/docs"
@@ -445,8 +445,32 @@ _run_scan_in_fixture() {
   done
 }
 
-@test "CHANGELOG: v0.7.1 is the newest release — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.1 — the lease board appears again on Claude Code 2.1.300" ]
+@test "CHANGELOG: v0.7.2 is the newest release, its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+  # v0.7.2 (the routine steps are the agent's again): the same six parts in order, the autoMode line, short sentences
+  rel="$(awk '/^## v0.7.2 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  order=""
+  for h in '**In short.**' '**What went wrong.**' '**What changed.**' '**What you will see.**' '**How to take it.**' '**How to tell you have it.**'; do
+    case "$rel" in *"$h"*) : ;; *) echo "the v0.7.2 section lacks: $h"; return 1 ;; esac
+    order="$order$(printf '%s' "$rel" | awk -v h="$h" '{print index($0, h)}') "
+  done
+  [ "$(printf '%s\n' $order | sort -n | tr '\n' ' ')" = "$order" ] || { echo "the v0.7.2 parts are out of order: $order"; return 1; }
+  for s in '[Interfere With Workloads]' '[Self-Modification]' 'Bash(core/lease.sh release:*)' "Say yes to delete window 02's work." \
+           '"autoMode"' '"$defaults"' '~/.claude/settings.json' 'git pull --ff-only' 'git stash push -m local-changes CLAUDE.md' \
+           'e1b349e' 'Upgrade to 0.7.2: complete.' 'upgrade: state/upgraded-to 0.7.2' '`cat VERSION` prints `0.7.2`'; do
+    case "$rel" in *"$s"*) : ;; *) echo "the v0.7.2 section lacks: $s"; return 1 ;; esac
+  done
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.2 section:"; echo "$output"; return 1; }
+  det="$(awk '/^## v0.7.2 /{f=1; next} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
+  for s in '#### The document index rebuilds itself' '#### The routine steps run by the agent, not the operator'; do
+    case "$det" in *"$s"*) : ;; *) echo "v0.7.2's In detail lacks: $s"; return 1 ;; esac
+  done
+  ! grep -q '^#### .*after the v0.7.1 tag' "$DAEDALUS_HOME/CHANGELOG.md"
+  ! grep -q '^#### .*2026-10-15' "$DAEDALUS_HOME/CHANGELOG.md"
   # v0.7.1 (the lease board on 2.1.300): the same operator reads it, in the same parts and the same short sentences
   fix="$(awk '/^## v0.7.1 /{f=1; next} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
   order=""
@@ -473,7 +497,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$fix"
   done
   # The top section is for an operator with no engineering background (critic finding 6): its parts in this order,
   # short plain sentences, the one paste and the stops each in a part of their own, 'In detail' kept below.
-  top="$(awk '/^## v0.7.0 /{f=1; next} /^### In detail/{exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  top="$(awk '/^## v0.7.0 /{f=1; next} /^### In detail/{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
   order=""
   for h in '**In short.**' '**What you will see at the first session after the pull.**' '**What the windows are.**' \
            '**How a change reaches trunk now.**' '**One paste into config.yaml, by the operator.**' '**If the upgrade stops.**' \
