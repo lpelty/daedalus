@@ -100,9 +100,9 @@ ps_ms() { python3 -c 'import calendar,os,subprocess,sys,time
 out=subprocess.run(["ps","-o","lstart=","-p",sys.argv[1]],capture_output=True,text=True,env=dict(os.environ,TZ="UTC")).stdout.strip()
 print(int(calendar.timegm(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000) if out else 0)' "$1"; }
 
-hook_json() {   # hook_json <event> <session-id> [extra-json-fields]
-  printf '{"hook_event_name":"%s","session_id":"%s","source":"startup","transcript_path":"%s/transcripts/%s.jsonl"%s}' \
-    "$1" "$2" "$BATS_TEST_TMPDIR" "$2" "${3:+,$3}"
+hook_json() {   # hook_json <event> <session-id> [extra-json-fields] — carries transcript_path and a tool_use_id (toolu_<sid>), as a real payload does
+  printf '{"hook_event_name":"%s","session_id":"%s","source":"startup","transcript_path":"%s/transcripts/%s.jsonl","tool_use_id":"toolu_%s"%s}' \
+    "$1" "$2" "$BATS_TEST_TMPDIR" "$2" "$2" "${3:+,$3}"
 }
 lease_json() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2]))' "$DAEDALUS_HOME/state/leases/$1.json" "$2"; }
 

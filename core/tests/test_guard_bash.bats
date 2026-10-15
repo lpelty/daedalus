@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 load fixtures/leases/setup.bash
 load fixtures/transcripts/setup.bash
+load fixtures/ami/setup.bash
 teardown() { teardown_live; chmod -R u+w "$DAEDALUS_HOME/state" 2>/dev/null || true; }
 
 setup() {
@@ -10,6 +11,11 @@ setup() {
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
   # the guard imports boundary-hook.py for the cross-lease helpers and leaselib for the leases (Task 11)
   cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$SRC/distcheck.py" "$SRC/update.py" "$DAEDALUS_HOME/core/"
+  # the AMI tier (frame-jack spec §6.0): amilib beside the guard; lease-board.py records the operator's message
+  cp "$SRC/amilib.py" "$SRC/lease-board.py" "$DAEDALUS_HOME/core/"
+  AMI_FIX="$BATS_TEST_TMPDIR/fix/ami"; mkdir -p "$BATS_TEST_TMPDIR/fix"; cp -R "$BATS_TEST_DIRNAME/fixtures/ami" "$AMI_FIX"
+  chmod +x "$AMI_FIX/fake-decider" "$AMI_FIX/fake-pmset"; export AMI_FIX
+  unset DIRECT_CALL_ID AMI_TEST_DEADLINE_SECS
   printf '{"permissions":{"deny":["Edit(/core/**)","Edit(/CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
@@ -1263,4 +1269,220 @@ brief_bash_checks() {   # brief_bash_checks <session-id> — the same sentences 
   brief_bash_checks sB
   printf '{"permissions":{"deny":["Edit(./notes/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   run guard_as sB 'echo x > notes/a.md'; denied
+}
+
+# ---------------------------------------------------------------------------------------------------------
+# The AMI tier (frame-jack spec §6.0, §6.3–6.5, §5.5; §13.2 items 1–3, 5–11): after check_command, under the
+# absolute deadline, shadow only. Fixtures only: the fake decider stands in for serve; no model, no network.
+AMI_DIR_OF() { printf '%s/state/ami' "$DAEDALUS_HOME"; }
+guard_ami() {  # guard_ami <session-id> <command> [cwd] — the payload a real Bash call carries: session_id, tool_use_id, transcript_path, cwd
+  local cwd="${3:-$DAEDALUS_HOME}"
+  hook_json PreToolUse "$1" "\"tool_name\":\"Bash\",\"cwd\":\"$cwd\",\"tool_input\":{\"command\":$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2"),\"description\":\"d\"}" \
+    | python3 "$DAEDALUS_HOME/core/guard-bash.py"
+}
+prompt_as() {  # prompt_as <session-id> <text> — a UserPromptSubmit through lease-board.py, the transcript beside it
+  mkdir -p "$BATS_TEST_TMPDIR/transcripts"
+  printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","transcript_path":"%s/transcripts/%s.jsonl","prompt":%s}' \
+    "$1" "$BATS_TEST_TMPDIR" "$1" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2")" \
+    | python3 "$DAEDALUS_HOME/core/lease-board.py" >/dev/null
+}
+ami_daemon_json() {  # ami_daemon_json <port> <state> [heartbeat age secs] [request_timeout_ms] — a hand-written daemon.json, the fake as command
+  mkdir -p "$(AMI_DIR_OF)"
+  python3 - "$(AMI_DIR_OF)/daemon.json" "$AMI_FIX/fake-decider" "$1" "$2" "${3:-1}" "${4:-1500}" <<'PY'
+import json, sys, time
+d = {"supervisor_pid": 1, "leash_pid": 1, "serve_pid": 1, "borrowed": False, "port": int(sys.argv[3]), "device": "mps",
+     "state": sys.argv[4], "terminal": False, "since": time.time() - 12, "heartbeat": time.time() - float(sys.argv[5]),
+     "ready_ms": 31000, "restarts": 0, "last_error": None, "off_by": None, "command": sys.argv[2], "model": "m",
+     "offline": False, "battery_off": True, "request_timeout_ms": int(sys.argv[6]), "shadow": ["destructive", "suite"], "enforce": []}
+open(sys.argv[1], "w").write(json.dumps(d))
+PY
+}
+ami_rows() {  # the day's decision rows as JSON lines (empty when there is no log)
+  cat "$(AMI_DIR_OF)/decisions/$(date +%Y-%m-%d).jsonl" 2>/dev/null || true
+}
+ami_row() {  # ami_row <n> <python expression over r> — field of the nth row (1-based; -1 the last)
+  ami_rows | python3 -c 'import json, sys
+rows = [json.loads(l) for l in sys.stdin if l.strip()]
+r = rows[int(sys.argv[1]) - 1] if int(sys.argv[1]) > 0 else rows[int(sys.argv[1])]
+print(eval(sys.argv[2]))' "$1" "$2"
+}
+ami_rows_count() { ami_rows | grep -c . || true; }
+fake_requests() { [ -f "${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" ] && grep -c '"POST"' "${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" || echo 0; }
+secs() { python3 -c 'import time; print(time.time())'; }
+ami_on_with_fake() {  # sentinel + daemon.json up on a live fake; FAKE_* in the environment reach the fake
+  start_fake StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 "$@"
+  mkdir -p "$(AMI_DIR_OF)"; touch "$(AMI_DIR_OF)/on"
+  ami_daemon_json "$FAKE_PORT" up
+}
+
+@test "AMI: with no state/ami, and then with the directory but no sentinel, a Bash call makes no request and writes nothing under state/ami" {
+  start_fake StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  run guard_ami sA 'ls'; [ "$status" -eq 0 ]; allowed
+  [ ! -e "$(AMI_DIR_OF)" ]
+  mkdir -p "$(AMI_DIR_OF)"
+  run guard_ami sA 'ls'; [ "$status" -eq 0 ]; allowed
+  [ -z "$(ls -A "$(AMI_DIR_OF)")" ]
+  [ "$(fake_requests)" -eq 0 ]
+}
+
+@test "AMI shadow: sentinel present, fake up — rm -rf x writes a destructive row with p from FAKE_P, would_ask by the 0.326 cut, guard allow, mode shadow, acted null, state_inputs.operator_message recorded after a prior prompt through lease-board.py; nothing is emitted (the command goes through)" {
+  ami_on_with_fake FAKE_P=0.4
+  mkdir -p "$BATS_TEST_TMPDIR/transcripts"
+  printf '{"type":"user","cwd":"/w","gitBranch":"fix/x","message":{"role":"user","content":"clean up the scratch files"}}\n' > "$BATS_TEST_TMPDIR/transcripts/sA.jsonl"
+  prompt_as sA "clean up the scratch files"
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  [ "$(fake_requests)" -eq 1 ]
+  [ "$(ami_rows_count)" -eq 1 ]
+  run ami_row 1 '(r["question"], r["p"], r["threshold"], r["would_ask"], r["guard"], r["mode"], r["acted"], r["unanswered"], r["device"], r["session"], r["command_head"], r["state_inputs"]["operator_message"], r["git_branch"], r["latency_ms"] > 0, r["input_tokens"] >= 1, r["state_truncated"], len(r["state_sha"]), r["tool_use_id"])'
+  [ "$output" = "('destructive', 0.4, 0.326, True, 'allow', 'shadow', None, None, 'mps', 'sA', 'rm -rf x', 'recorded', 'fix/x', True, True, False, 64, 'toolu_sA')" ] || { echo "$output"; return 1; }
+  FAKE_LOG="$BATS_TEST_TMPDIR/low.log" ami_on_with_fake FAKE_P=0.1
+  run guard_ami sA 'rm -rf x'; allowed
+  run ami_row 2 '(r["p"], r["would_ask"])'
+  [ "$output" = "(0.1, False)" ] || { echo "$output"; return 1; }
+}
+
+@test "AMI: a denied command (git push origin main in target/) is denied and no request reaches the fake — the tier runs after the deterministic guard" {
+  ami_on_with_fake FAKE_P=0.4
+  run guard_ami sA 'git push origin main' "$T"; denied
+  [ "$(fake_requests)" -eq 0 ]
+  [ "$(ami_rows_count)" -eq 0 ]
+}
+
+@test "AMI: a visitor (DIRECT_CALL_ID) makes no request and writes no row" {
+  ami_on_with_fake FAKE_P=0.4
+  DIRECT_CALL_ID=dc1 run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  [ "$(fake_requests)" -eq 0 ]
+  [ "$(ami_rows_count)" -eq 0 ]
+  [ ! -e "$(AMI_DIR_OF)/session-sA.json" ]
+}
+
+@test "AMI off is conservative and loud once: port closed — row unanswered down, the command goes through, the emitted JSON carries systemMessage and additionalContext with the once sentence; the second call carries neither; a stale heartbeat gives supervisor gone in both" {
+  mkdir -p "$(AMI_DIR_OF)"; touch "$(AMI_DIR_OF)/on"
+  ami_daemon_json "$(free_port)" up
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]
+  case "$output" in *'"permissionDecision"'*) echo "must go through: $output"; return 1 ;; esac
+  run python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["systemMessage"]); print(d["hookSpecificOutput"]["additionalContext"])' "$output"
+  [ "${lines[0]}" = "The AMI is on but its daemon is not answering (down) — /frame-jack on starts it again" ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "${lines[0]}" ]
+  run ami_row 1 '(r["question"], r["unanswered"], r["p"], r["guard"])'
+  [ "$output" = "('destructive', 'down', None, 'allow')" ] || { echo "$output"; return 1; }
+  run guard_ami sA 'rm -rf y'; [ "$status" -eq 0 ]; allowed        # warned once: nothing emitted now
+  run ami_row 2 'r["unanswered"]'; [ "$output" = down ]
+  python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["unanswered"]=={"down": 2} and "down" in c["warned"], c' "$(AMI_DIR_OF)/session-sA.json"
+  ami_daemon_json "$(free_port)" up 200                              # the supervisor stopped writing its heartbeat
+  run guard_ami sA 'rm -rf z'; [ "$status" -eq 0 ]
+  run python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["systemMessage"]); print(d["hookSpecificOutput"]["additionalContext"])' "$output"
+  [ "${lines[0]}" = "The AMI is on but its supervisor is gone — /frame-jack off, then /frame-jack on" ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "${lines[0]}" ]
+  run ami_row 3 'r["unanswered"]'; [ "$output" = "supervisor gone" ]
+  run guard_ami sA 'rm -rf z'; allowed
+  run ami_row 4 'r["unanswered"]'; [ "$output" = "supervisor gone" ]
+}
+
+@test "AMI: daemon.json state battery — row unanswered battery, no request; starting — unanswered starting" {
+  ami_on_with_fake FAKE_P=0.4
+  ami_daemon_json "$FAKE_PORT" battery
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  run ami_row 1 '(r["question"], r["unanswered"])'; [ "$output" = "('destructive', 'battery')" ] || { echo "$output"; return 1; }
+  ami_daemon_json "$FAKE_PORT" starting
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  run ami_row 2 'r["unanswered"]'; [ "$output" = starting ]
+  [ "$(fake_requests)" -eq 0 ]
+}
+
+@test "AMI: FAKE_DELAY_MS=3000 with request_timeout_ms 500 — unanswered timeout and the hook finishes under 2 s; three in a row trip the breaker: the fourth is unanswered tripped with no request and the counters carry breaker.tripped_until" {
+  ami_on_with_fake FAKE_DELAY_MS=3000
+  ami_daemon_json "$FAKE_PORT" up 1 500
+  t0="$(secs)"
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  t1="$(secs)"
+  python3 -c 'import sys; el=float(sys.argv[2])-float(sys.argv[1]); assert el < 2, el' "$t0" "$t1"
+  run ami_row 1 '(r["question"], r["unanswered"])'; [ "$output" = "('destructive', 'timeout')" ] || { echo "$output"; return 1; }
+  run guard_ami sA 'rm -rf x'; allowed
+  run guard_ami sA 'rm -rf x'; allowed
+  run ami_row 3 'r["unanswered"]'; [ "$output" = timeout ]
+  run guard_ami sA 'rm -rf x'; allowed
+  run ami_row 4 'r["unanswered"]'; [ "$output" = tripped ]
+  python3 -c 'import json,sys,time; c=json.load(open(sys.argv[1])); b=c["breaker"]
+assert b["tripped_until"] > time.time() + 200 and b["trips"] == 1, b
+assert c["unanswered"] == {"timeout": 3, "tripped": 1}, c["unanswered"]' "$(AMI_DIR_OF)/session-sA.json"
+  sleep 3.5                                                           # the three slow requests finish in the fake
+  [ "$(fake_requests)" -eq 3 ]                                        # the fourth call sent nothing
+}
+
+@test "AMI budget: AMI_TEST_DEADLINE_SECS=0.2 — unanswered budget, no request, and the guard's own additionalContext warning for a contested-path command is still emitted" {
+  guard_leases; W="$DAEDALUS_HOME/worktrees/01/thing"
+  ami_on_with_fake FAKE_P=0.4
+  run guard_ami sA 'echo x > hooks/capture.py' "$W"; denied        # the first cross-lease stop
+  [ "$(fake_requests)" -eq 0 ]
+  AMI_TEST_DEADLINE_SECS=0.2 run guard_ami sA 'echo x > hooks/capture.py' "$W"; [ "$status" -eq 0 ]
+  case "$output" in *'"permissionDecision"'*) echo "second must pass: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run ami_row -1 '(r["question"], r["unanswered"], r["guard"] != "allow")'
+  [ "$output" = "('destructive', 'budget', True)" ] || { echo "$output"; return 1; }
+  [ "$(fake_requests)" -eq 0 ]
+}
+
+@test "AMI: two guard hooks at once against FAKE_DELAY_MS=400 do not overlap in the fake's log; the second row's queued_ms is above zero" {
+  ami_on_with_fake FAKE_DELAY_MS=400
+  guard_ami sA 'rm -rf x' > "$BATS_TEST_TMPDIR/o1" 2>&1 3>&- & P1=$!
+  guard_ami sA 'rm -rf y' > "$BATS_TEST_TMPDIR/o2" 2>&1 3>&- & P2=$!
+  wait "$P1" "$P2"
+  [ ! -s "$BATS_TEST_TMPDIR/o1" ] && [ ! -s "$BATS_TEST_TMPDIR/o2" ]
+  run python3 -c 'import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+assert len(rows) == 2, rows
+rows.sort(key=lambda r: r["t0"])
+assert rows[0]["t1"] <= rows[1]["t0"], ("overlap", rows)
+dec = [json.loads(l) for l in open(sys.argv[2]) if l.strip()]
+assert len(dec) == 2 and all(r["unanswered"] is None and r["question"] == "destructive" for r in dec), dec
+q = sorted(r["queued_ms"] for r in dec)
+assert q[1] > 0, q
+print("ok")' "$BATS_TEST_TMPDIR/fake.log" "$(AMI_DIR_OF)/decisions/$(date +%Y-%m-%d).jsonl"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "AMI counters: after six calls asked.destructive is 6, no .tmp is left under state/ami, and the band object from amilib.board_ami reads the same numbers" {
+  ami_on_with_fake FAKE_P=0.5
+  for i in 1 2 3 4 5 6; do run guard_ami sA "rm -rf x$i"; [ "$status" -eq 0 ]; allowed; done
+  [ "$(fake_requests)" -eq 6 ]
+  run python3 -c 'import json, os, sys
+sys.path.insert(0, sys.argv[1]); import amilib as a
+from pathlib import Path
+root = Path(sys.argv[1]).parent
+c = json.load(open(root / "state/ami/session-sA.json"))
+assert c["asked"] == {"destructive": 6, "suite": 0} and c["would_ask"] == 6, c
+assert c["latency_ms"][1] == 6 and c["latency_ms"][0] > 0, c["latency_ms"]
+assert not [f for f in os.listdir(root / "state/ami") if f.endswith(".tmp")]
+b = a.board_ami(root, "sA")
+assert b["asked"] == 6 and b["would_ask"] == 6 and b["unanswered"] == 0 and b["state"] == "on" and b["median_ms"] > 0, b
+print("ok")' "$DAEDALUS_HOME/core"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "AMI: an exception inside amilib (a counters file that is a directory) leaves the guard's decision standing, writes an unanswered error row and one stderr line; the hook exits 0" {
+  ami_on_with_fake FAKE_P=0.4
+  mkdir -p "$(AMI_DIR_OF)/session-sA.json"
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]
+  case "$output" in *'"permissionDecision"'*) echo "the guard's decision must stand: $output"; return 1 ;; esac
+  case "$output" in *"daedalus: the AMI tier could not run"*) : ;; *) echo "stderr must say so: $output"; return 1 ;; esac
+  [ "$(printf '%s' "$output" | grep -c 'the AMI tier could not run')" -eq 1 ]
+  run ami_row -1 '(r["question"], r["unanswered"].startswith("error "))'
+  [ "$output" = "('destructive', True)" ] || { echo "$output"; return 1; }
+}
+
+@test "the operator message is recorded at UserPromptSubmit by lease-board.py with the transcript offset record_prompt computed, only while the sentinel is present" {
+  mkdir -p "$(AMI_DIR_OF)" "$BATS_TEST_TMPDIR/transcripts"
+  printf '{"type":"user","message":{"role":"user","content":"first"}}\n{"type":"assistant","message":{"role":"assistant","content":[]}}\npartial' > "$BATS_TEST_TMPDIR/transcripts/sA.jsonl"
+  prompt_as sA "do the thing"
+  [ ! -e "$(AMI_DIR_OF)/session-sA.json" ]
+  [ -s "$BATS_TEST_TMPDIR/transcripts/sA.jsonl.daedalus-prompts" ]    # record_prompt still ran
+  touch "$(AMI_DIR_OF)/on"
+  prompt_as sA "do the thing"
+  run python3 -c 'import json, sys
+c = json.load(open(sys.argv[1])); o = c["operator"]
+data = open(sys.argv[2], "rb").read(); size = data.rfind(b"\n") + 1
+rec = [json.loads(l) for l in open(sys.argv[2] + ".daedalus-prompts") if l.strip()][-1]
+assert o["text"] == "do the thing" and o["transcript_offset"] == size == rec["size"] and o["transcript_path"] == sys.argv[2], (o, size, rec)
+print("ok")' "$(AMI_DIR_OF)/session-sA.json" "$BATS_TEST_TMPDIR/transcripts/sA.jsonl"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }

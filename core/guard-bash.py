@@ -150,6 +150,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -2713,6 +2714,49 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
     return ll.deletion_confirmed(g.root, g.sid, nn, said)
 
 
+def segments_of(cmd: str, cwd: Path, g: G, depth: int = 0) -> List[List[str]]:
+    """Every segment check_command walks, after `unwrap`, at every depth it walks — $( ) and backtick bodies,
+    `bash -c` strings, `eval` words, `watch` commands, the shell commands a writer runs from its own code —
+    heredoc bodies masked (tokenize strips them), as plain token lists for amilib.classify (frame-jack spec
+    §6.1: one tokenizer, one unwrap). A git alias's expansion is not re-walked here (check_git resolves it
+    against the repository; the segment is classified as the git word it is)."""
+    if depth > 4:
+        return []
+    out: List[List[str]] = []
+    for inner in substitutions(cmd):
+        out += segments_of(inner, cwd, g, depth + 1)
+    try:
+        tokens = tokenize(cmd)
+    except ValueError:
+        return out
+    for raw, _sep in segments_sep(tokens):
+        while raw and raw[0] in KEYWORDS:
+            raw = raw[1:]
+        seg = unwrap(raw)
+        if not seg:
+            continue
+        out.append([str(t) for t in seg])
+        k = exec_index(seg, RUN_HEADS)
+        run = seg[k:]
+        rhead = os.path.basename(run[0])
+        inner = None
+        if rhead in SHELLS:
+            inner = shell_inner(run)
+        elif rhead == "eval" and len(run) > 1:
+            inner = " ".join(run[1:])
+        elif os.path.basename(seg[0]) == "watch":
+            inner = watch_inner(seg)
+        if inner is not None:
+            out += segments_of(inner, cwd, g, depth + 1)
+        try:
+            inner_cmds, _why = embedded_code(seg)
+        except Exception:
+            inner_cmds = []
+        for inner_cmd in inner_cmds:
+            out += segments_of(inner_cmd, cwd, g, depth + 1)
+    return out
+
+
 def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str, here: Path, branch_created: bool,
                   vault: Path, g: G, depth: int) -> Tuple[Optional[str], List[str], Path, bool]:
     """One segment of check_command: (deny reason | None, contexts, the cwd after it, whether a
@@ -2872,7 +2916,24 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
     return None, contexts, here, branch_created
 
 
+AMI_HARD_DEADLINE_SECS = 4.3      # absolute, from the hook's start; the guard's timeout in settings.json is 5
+AMI_MIN_REMAINING_SECS = 0.3      # below this the tier is skipped, row `unanswered: budget`
+
+
+def ami_deadline_secs() -> float:
+    """The tier's absolute budget; AMI_TEST_DEADLINE_SECS shrinks it for a test and can never widen it."""
+    secs = AMI_HARD_DEADLINE_SECS
+    try:
+        knob = float(os.environ.get("AMI_TEST_DEADLINE_SECS") or secs)
+        if 0 < knob < secs:
+            secs = knob
+    except ValueError:
+        pass
+    return secs
+
+
 def main() -> int:
+    started = time.monotonic()       # frame-jack spec §6.0: the AMI tier's deadline is absolute from here
     try:
         payload = json.load(sys.stdin)
         cmd = str(payload["tool_input"]["command"])
@@ -2905,18 +2966,48 @@ def main() -> int:
             refused = r.sentence
         # Unconfigured (config.yaml unreadable) keeps target=None: check_git's
         # target/ rule fails closed there with the config sentence.
+    g = G(root, ctx, target, refused, sid)
     try:
-        reason, contexts = check_command(cmd, cwd, G(root, ctx, target, refused, sid))
+        reason, contexts = check_command(cmd, cwd, g)
     except Exception as e:
         # Task 13 review: an error the guard hits is a command it could not check — denied, not
         # waved through (an empty alias crashed it and let the trunk push after it pass).
         print("daedalus: guard-bash failed: %r" % e, file=sys.stderr)
         reason, contexts = CANNOT_CHECK % cmd[:120], []
+    # The AMI tier (frame-jack spec §6.0): after the deterministic guard, only for a command it did not deny,
+    # never for a visitor; under the absolute deadline; shadow only — it logs, and may add the once-per-session
+    # sentence of §6.4. An exception inside it is a row and a stderr line; the guard's decision stands.
+    ami_out = None
+    if not reason and not os.environ.get("DIRECT_CALL_ID"):
+        try:
+            import amilib
+            ami_out = amilib.before_bash(root, sid, payload, cmd, cwd,
+                                         guard="allow" if not contexts else contexts[0][:80],
+                                         deadline=started + ami_deadline_secs(),
+                                         segments=lambda: segments_of(cmd, cwd, g))
+        except Exception as e:
+            try:
+                amilib.row_unanswered(root, sid, payload, "error %s" % type(e).__name__, "destructive",
+                                      guard="allow" if not contexts else contexts[0][:80], cwd=str(cwd))
+            except Exception:
+                pass
+            print("daedalus: the AMI tier could not run (%r); the command goes on as the guard decided." % e,
+                  file=sys.stderr)
     if reason:
         deny(reason)
-    elif contexts:
-        # Every operand was checked; the warning(s) go through as context with the write (§4.6).
-        v.emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "\n".join(contexts)}})
+        return 0
+    # The one emit: the guard's own warning(s) as context with the write (§4.6), the AMI's once sentence beside
+    # them and, at the top level, as systemMessage — the operator's copy.
+    out: Dict[str, object] = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+    lines = list(contexts)
+    if ami_out and ami_out.get("context"):
+        lines.append(str(ami_out["context"]))
+    if lines:
+        out["hookSpecificOutput"]["additionalContext"] = "\n".join(lines)      # type: ignore[index]
+    if ami_out and ami_out.get("system"):
+        out["systemMessage"] = str(ami_out["system"])
+    if lines or "systemMessage" in out:
+        v.emit(out)
     return 0
 
 

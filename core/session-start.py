@@ -436,7 +436,8 @@ def main() -> int:
             if mem:
                 notes.append(mem)
             cutoff = time.time() - 7 * 86400
-            for old in mp.parent.glob("session-*.json"):
+            # the AMI's per-session counters (state/ami/session-<sid>.json) are pruned with the markers (frame-jack §5.4)
+            for old in list(mp.parent.glob("session-*.json")) + list((mp.parent / "ami").glob("session-*.json")):
                 try:
                     if old.stat().st_mtime < cutoff:
                         old.unlink()

@@ -43,6 +43,14 @@ RECENT_LATENCIES = 50              # the median the band shows is over the last 
 REGION_CAP_BYTES = 2 * 1024 * 1024        # §5.5: the transcript region since the operator, from the end
 BEFORE_OFFSET_BYTES = 256 * 1024          # §5.5: read before the offset when fewer than five calls lie after it
 STATES = ("absent", "off", "unconfigured", "down", "battery", "starting", "tripped", "on")
+DEFAULT_REQUEST_TIMEOUT_MS = 1500  # §3: the daemon.json copy of request_timeout_ms, when the record lacks it
+BREAKER_STRIKES = 3                # §6.5: three consecutive failures trip the breaker
+BREAKER_MINUTES = (5, 10, 20, 60)  # §6.5: 5 → 10 → 20 → 60 min, capped at an hour
+WARN_REASONS = ("down", "supervisor gone")   # §6.4: the two states said once per session in the operator's view
+ONCE_SENTENCES = {
+    "down": "The AMI is on but its daemon is not answering (down) — /frame-jack on starts it again",
+    "supervisor gone": "The AMI is on but its supervisor is gone — /frame-jack off, then /frame-jack on",
+}
 
 # ---------------------------------------------------------------- §5.3 the questions
 CALIBRATION = "ami-lab/calibration 2026-10-15, MPS, 412 gold items, 3,036 questions"   # a label, nothing is read from it
@@ -522,10 +530,40 @@ def _load_counters(root, sid) -> dict:
     return c
 
 
+def _breaker_failure(reason) -> bool:
+    """§6.5: the reasons that count as a strike — a request was made and the daemon failed it."""
+    r = str(reason or "")
+    return r == "timeout" or r.startswith("http 5") or r.startswith("error ")
+
+
+def _breaker_step(c: dict, row: dict) -> None:
+    """§6.5, applied to one question row under the counters' lock: an answer resets the breaker; a strike
+    counts; the third consecutive strike — or any strike on the probe after `tripped_until` passed — trips it
+    for 5, 10, 20, then 60 minutes. Rows that made no request (budget, busy, tripped, down …) leave it alone."""
+    br = dict(c.get("breaker") or {})
+    reason = row.get("unanswered")
+    if reason is None and row.get("p") is not None:
+        c["breaker"] = {"consecutive": 0, "tripped_until": None, "trips": 0}
+        return
+    if not _breaker_failure(reason):
+        return
+    n = int(br.get("consecutive") or 0) + 1
+    probe = br.get("tripped_until") is not None              # the window passed (the switch read `on`): this was the probe
+    if probe or n >= BREAKER_STRIKES:
+        trips = int(br.get("trips") or 0) + 1
+        minutes = BREAKER_MINUTES[min(trips, len(BREAKER_MINUTES)) - 1]
+        c["breaker"] = {"consecutive": 0, "tripped_until": time.time() + minutes * 60, "trips": trips}
+    else:
+        br["consecutive"] = n
+        c["breaker"] = br
+
+
 def _count_row(c: dict, row: dict) -> None:
     q = row.get("question")
     if "outcome" in row and q is None:
         return                                   # Task 5 joins outcome rows; nothing to count yet
+    if q in QUESTIONS:
+        _breaker_step(c, row)
     if row.get("unanswered"):
         reason = str(row["unanswered"])
         c["unanswered"][reason] = c["unanswered"].get(reason, 0) + 1
@@ -749,10 +787,92 @@ def decide(question: str, p: float, certified=(), mode_hint=None, **ctx) -> dict
     return out
 
 
+def _warn_once(root, sid, reason) -> Optional[str]:
+    """§6.4: the once-per-session sentence for `down` / `supervisor gone` — recorded in session-<sid>.json as
+    `warned: {reason: epoch}`; the sentence the first time, None after. With no session every call warns."""
+    sentence = ONCE_SENTENCES.get(reason)
+    if sentence is None:
+        return None
+    if not sid:
+        return sentence
+    with _Locked(lock_path(root)):
+        c = _load_counters(root, sid)
+        warned = dict(c.get("warned") or {})
+        if reason in warned:
+            return None
+        warned[reason] = time.time()
+        c["warned"] = warned
+        _write_json(counters_path(root, sid), c)
+    return sentence
+
+
+def _request_timeout_ms(daemon: Optional[dict]) -> int:
+    try:
+        return int((daemon or {}).get("request_timeout_ms") or DEFAULT_REQUEST_TIMEOUT_MS)
+    except (TypeError, ValueError):
+        return DEFAULT_REQUEST_TIMEOUT_MS
+
+
 def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
-    """The tier inside the guard (§6.0): read the switch, classify, build the state, ask under the deadline,
-    write the row. Filled by plan Task 3; this release of the library ships the signature and adds nothing."""
-    return None
+    """The tier inside the guard (§6.0), after check_command returned no denial: read the switch (one stat when
+    off — `segments` may be a callable, run only past that point so an off deployment pays no segmentation),
+    classify, build the state, ask under the absolute `deadline`, write the row. Shadow only in this release:
+    never a decision. Returns None when there is nothing to add to the guard's emit, else
+    {"context": sentence | None, "system": sentence | None} — the once-per-session sentence of §6.4."""
+    d = switch_detail(root, sid)
+    state = d["state"]
+    if state in ("absent", "off"):
+        return None                                      # §6.4: nothing written, the guard's decision stands
+    segs = segments() if callable(segments) else segments
+    question = classify(segs or [])
+    if question == "none":
+        return None                                      # §6.1: an evidence run, the switch's own commands, a targeted run
+    if question == "suite":
+        row_unanswered(root, sid, payload, "not built", "suite", guard=guard, cwd=str(cwd))   # plan Task 4 fills it
+        return None
+    extra = {"guard": guard, "cwd": str(cwd), "device": d.get("device")}
+    if state != "on":
+        reason = d.get("reason") or state
+        row_unanswered(root, sid, payload, reason, question, **extra)
+        if reason in WARN_REASONS:
+            sentence = _warn_once(root, sid, reason)
+            if sentence:
+                return {"context": sentence, "system": sentence}
+        return None
+    if deadline - time.monotonic() < MIN_REMAINING_SECS:
+        row_unanswered(root, sid, payload, "budget", question, **extra)
+        return None
+    inputs = build_inputs(root, sid, payload, cwd)
+    state_text = state_destructive(inputs)
+    daemon = d.get("daemon") or {}
+    r = ask(d["port"], state_text, question, deadline, _request_timeout_ms(daemon), ask_lock_path(root),
+            max_length=daemon.get("max_length"))
+    row = row_base(root, sid, payload, cwd)
+    row.update(extra)
+    row["question"] = question
+    row["threshold"] = QUESTIONS[question][2]
+    row["state_sha"] = _sha(state_text)
+    row["git_branch"] = inputs.get("git_branch")
+    row["state_inputs"] = inputs.get("state_inputs")
+    if isinstance(r, Unanswered):
+        row["unanswered"] = r.reason
+        append_row(root, sid, row)
+        if r.reason in WARN_REASONS:
+            sentence = _warn_once(root, sid, r.reason)
+            if sentence:
+                return {"context": sentence, "system": sentence}
+        return None
+    dec = decide(question, r.p, certified=CERTIFIED)
+    row["p"] = r.p
+    row["would_ask"] = dec["would_ask"]
+    row["mode"] = dec["mode"]
+    row["acted"] = dec["acted"]
+    row["latency_ms"] = r.latency_ms
+    row["queued_ms"] = r.queued_ms
+    row["input_tokens"] = r.input_tokens
+    row["state_truncated"] = state_truncated(r.input_tokens, r.max_length) if r.max_length else False
+    append_row(root, sid, row)
+    return None                                          # §7: nothing acts in this release (CERTIFIED is empty)
 
 
 # ---------------------------------------------------------------- §9.1 the band's object

@@ -313,9 +313,10 @@ def _digest(text: str) -> str:
     return hashlib.sha256(normalize(text).encode("utf-8")).hexdigest()
 
 
-def record_prompt(transcript_path: str, prompt: str, session_id: str = "") -> None:
+def record_prompt(transcript_path: str, prompt: str, session_id: str = "") -> dict:
     """UserPromptSubmit: record that Claude Code reported `prompt` as submitted into this transcript, with the
-    transcript's size (to its last whole line) and a hash of those bytes, now."""
+    transcript's size (to its last whole line) and a hash of those bytes, now. Returns the row it wrote (its
+    `size` is the transcript offset the AMI's operator record keeps — frame-jack spec §5.5; one read per prompt)."""
     t = Path(transcript_path).expanduser().resolve()
     try:
         data = t.read_bytes()
@@ -326,6 +327,7 @@ def record_prompt(transcript_path: str, prompt: str, session_id: str = "") -> No
            "prefix": hashlib.sha256(data).hexdigest()}
     with prompts_path(t).open("a") as fh:
         fh.write(json.dumps(row) + "\n")
+    return row
 
 
 def _records(path: Path) -> list:

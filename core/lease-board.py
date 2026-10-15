@@ -59,11 +59,22 @@ def main() -> int:
         return 0
     if payload.get("hook_event_name", "UserPromptSubmit") == "UserPromptSubmit" \
             and isinstance(payload.get("transcript_path"), str) and isinstance(payload.get("prompt"), str):
+        row = None
         try:
             import transcriptlib as tl
-            tl.record_prompt(payload["transcript_path"], payload["prompt"], str(payload.get("session_id") or ""))
+            row = tl.record_prompt(payload["transcript_path"], payload["prompt"], str(payload.get("session_id") or ""))
         except Exception as e:     # a prompt not recorded is a yes confirm refuses, never one it accepts
             print("daedalus: the prompt was not recorded: %r" % e, file=sys.stderr)
+        # frame-jack spec §5.5: with the AMI's sentinel present, the operator's words and the transcript offset
+        # record_prompt computed go to the AMI's session file — the Bash hook never scans the transcript for them.
+        # One stat when off; a failure here is its own, never the board's.
+        if row is not None:
+            try:
+                import amilib
+                amilib.record_operator_message(v.ROOT, str(payload.get("session_id") or ""), payload["prompt"],
+                                               payload["transcript_path"], row.get("size"))
+            except Exception as e:
+                print("daedalus: the operator's message was not recorded for the AMI: %r" % e, file=sys.stderr)
     sid = v.export_session(payload)
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     signal.signal(signal.SIGALRM, _on_alarm)

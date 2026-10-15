@@ -884,3 +884,17 @@ open(sys.argv[2], "w").close(); time.sleep(25)' "$DAEDALUS_HOME/state/leases/.lo
   case "$c" in *"Your session log for today is"*) echo "$c"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/state/leases/unwindowed.json" ]
 }
+
+@test "the start's seven-day sweep also prunes state/ami/session-*.json" {
+  mkdir -p "$DAEDALUS_HOME/state/ami/decisions"
+  printf '{}' > "$DAEDALUS_HOME/state/ami/session-old.json"; touch -t 202001010000 "$DAEDALUS_HOME/state/ami/session-old.json"
+  printf '{}' > "$DAEDALUS_HOME/state/ami/session-new.json"
+  printf '{}' > "$DAEDALUS_HOME/state/ami/daemon.json"; touch -t 202001010000 "$DAEDALUS_HOME/state/ami/daemon.json"
+  printf '{}' > "$DAEDALUS_HOME/state/session-old.json"; touch -t 202001010000 "$DAEDALUS_HOME/state/session-old.json"
+  run start sS startup
+  [ "$status" -eq 0 ]
+  [ ! -e "$DAEDALUS_HOME/state/session-old.json" ]
+  [ ! -e "$DAEDALUS_HOME/state/ami/session-old.json" ]
+  [ -e "$DAEDALUS_HOME/state/ami/session-new.json" ]
+  [ -e "$DAEDALUS_HOME/state/ami/daemon.json" ]          # only session files are swept
+}
