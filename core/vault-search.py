@@ -4,6 +4,9 @@ deployment's Chroma engine (spec §2.3).
 
     vault-search.py query "<text>"   -> JSON array (<=8 results) or nothing
     vault-search.py index            -> runs the reindex engine, stamps on proof
+    vault-search.py index --background [--if-stale] [--by <who>]
+                                     -> the same rebuild, detached; one line, exit 0
+    vault-search.py index --log <who> -> the detached run itself (the child; runnable by hand)
     vault-search.py --check          -> doctor NOTE lines (never empty)
     vault-search.py --stale          -> one word: unconfigured | no-store | stale | fresh
 
@@ -35,6 +38,13 @@ CFG_TIMEOUT = 3
 MAX_RESULTS = 8
 STAMP_REL = "state/recall-last-index"
 LOCK_REL = "state/recall-index.lock"
+LOG_REL = "state/recall-index.log"
+RERUN_REL = "state/recall-index.rerun"
+KICKERS = ("vault-commit", "session-start", "operator")
+BG_STARTED = "document index: rebuilding in the background (%s)" % LOG_REL
+BG_RUNNING = "document index: a rebuild is already running; it will run again when done (%s)" % LOG_REL
+BG_UNCONFIGURED = "document index: reindex command unconfigured; nothing started"
+BG_FRESH = "document index: fresh"
 PRIME_ONLY = "The document index is rebuilt by the prime; ask it to reindex"
 COUNT_RE = re.compile(r"^indexed=(\d+) purged=(\d+)$")
 
@@ -223,6 +233,137 @@ def cmd_index(root: Path) -> int:
         os.close(fd)                                  # releases the flock
 
 
+def _try_lock(root: Path, tries: int = 1) -> Optional[int]:
+    """The index lock, non-blocking: the open fd when taken (closing it
+    releases the flock), None when another holder has it. `tries` spaced
+    0.2 s apart let the detached child outwait a --check's momentary probe."""
+    lock_path = root / LOCK_REL
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    for n in range(tries):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            if n + 1 < tries:
+                time.sleep(0.2)
+    os.close(fd)
+    return None
+
+
+def _touch(path: Path) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path), "a"):
+            pass
+    except OSError:
+        pass
+
+
+def _kicker(opts: List[str], flag: str) -> str:
+    try:
+        who = opts[opts.index(flag) + 1]
+    except (ValueError, IndexError):
+        return "operator"
+    return who if who in KICKERS else "operator"
+
+
+def cmd_index_background(root: Path, if_stale: bool, who: str) -> int:
+    """The rebuild, detached (reindex design 2026-10-15, §3.2): one line on
+    stdout, exit 0, and the parent never waits. One implementation for
+    vault-commit.sh and session-start.py (decision 3): the lock, the stamp,
+    the prime-only rule and the log all live here."""
+    if is_clone(root):
+        print(PRIME_ONLY)
+        return 0
+    cmd = read_cfg("recall.vault-index", root)
+    if not cmd or looks_corrupted(cmd):
+        print(BG_UNCONFIGURED)
+        return 0
+    if if_stale and stale_word(root) == "fresh":
+        print(BG_FRESH)
+        return 0
+    fd = _try_lock(root)
+    if fd is None:
+        # the holder honours the flag before it exits (decision 21): a change
+        # made during its run is indexed by it, not left for some later kick
+        _touch(root / RERUN_REL)
+        print(BG_RUNNING)
+        return 0
+    os.close(fd)                                      # the probe only; the child takes it for real
+    # root-resolved paths, never __file__ or a cwd-relative core/…: a caller
+    # whose cwd is not the home still kicks correctly. start_new_session is
+    # setsid; no pipe of the parent is inherited, so a hook that spawned this
+    # finishes at once and Claude Code does not wait on the engine.
+    subprocess.Popen(
+        [sys.executable, str(root / "core" / "vault-search.py"), "index", "--log", who],
+        cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True, close_fds=True,
+        env=dict(os.environ, DAEDALUS_HOME=str(root)),
+    )
+    print(BG_STARTED)
+    return 0
+
+
+def _say(text: str) -> None:
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
+def cmd_index_log(root: Path, who: str) -> int:
+    """The detached run (the child of --background; runnable by hand). Takes
+    the lock as `index` does — held: the holder's log is the record and the
+    parent already said so, so this leaves the rerun flag and exits silently —
+    then owns state/recall-index.log for its whole life: truncated when the
+    lock is taken (one holder per file; two kicks racing for the lock cannot
+    interleave or wipe the winner's record), each run framed by
+    `started <time> by <who>` and `finished <time> indexed=N purged=M` or the
+    engine's last stderr lines as `engine: …` then `failed <time>: <reason>`.
+    A rerun flag left by a kick during the run means one more run before the
+    lock is released (decision 21)."""
+    if is_clone(root):
+        print(PRIME_ONLY)
+        return 0
+    fd = _try_lock(root, tries=5)
+    if fd is None:
+        _touch(root / RERUN_REL)
+        return 0
+    try:
+        log = root / LOG_REL
+        lfd = os.open(str(log), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(lfd, 1)
+        os.dup2(lfd, 2)
+        os.close(lfd)
+        flag = root / RERUN_REL
+        rerun = False
+        while True:
+            try:
+                flag.unlink()
+            except OSError:
+                pass
+            _say("started %s by %s%s" % (time.strftime("%Y-%m-%dT%H:%M:%S"), who,
+                                         " (rerun: the vault changed during the last run)" if rerun else ""))
+            try:
+                ok, line, err = _index_locked(root)
+            except Exception as e:                     # a crash is a failed frame, never a started one
+                ok, line, err = False, "%s: %s" % (type(e).__name__, e), ""
+            now = time.strftime("%Y-%m-%dT%H:%M:%S")
+            if ok:
+                _say("finished %s %s" % (now, line))
+            else:
+                for ln in [x for x in err.splitlines() if x.strip()][-20:]:
+                    _say("engine: " + ln)
+                _say("failed %s: %s" % (now, line))
+            if not flag.exists():
+                break
+            rerun = True
+    finally:
+        os.close(fd)                                  # releases the flock
+    return 0
+
+
 def _index_locked(root: Path) -> Tuple[bool, str, str]:
     """Caller holds the lock. Runs the engine once; returns (ok, line, engine_stderr):
     on success the engine's count line, on failure the one sentence that says
@@ -374,6 +515,11 @@ def main(argv: List[str]) -> int:
         if len(argv) >= 3 and argv[1] == "query":
             return cmd_query(argv[2], root)
         if len(argv) >= 2 and argv[1] == "index":
+            opts = argv[2:]
+            if "--log" in opts:
+                return cmd_index_log(root, _kicker(opts, "--log"))
+            if "--background" in opts:
+                return cmd_index_background(root, "--if-stale" in opts, _kicker(opts, "--by"))
             return cmd_index(root)
     except Exception:
         return 0

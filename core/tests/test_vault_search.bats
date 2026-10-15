@@ -416,3 +416,125 @@ PY
   index_engine 'echo done'
   run bash -c "python3 '$SCRIPT' index 2>&1 >/dev/null"; [ "$output" = "vault-search: no 'indexed=N purged=M' line; stamp untouched" ]
 }
+
+# wait_log <text> — poll up to 6 s for the log's last non-empty line to carry <text>
+wait_log() {
+  local i=0
+  while [ "$i" -lt 60 ]; do
+    if [ -f "$DAEDALUS_HOME/state/recall-index.log" ] && grep -v '^$' "$DAEDALUS_HOME/state/recall-index.log" | tail -1 | grep -qF -- "$1"; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  echo "log never reached '$1':"; cat "$DAEDALUS_HOME/state/recall-index.log" 2>/dev/null; return 1
+}
+# timed_kick <args...> — runs the script with a pipe held open, prints "<exit> <elapsed>": a child that
+# inherited the pipe would hold communicate() until the engine finished
+timed_kick() {
+  python3 -c 'import subprocess,sys,time
+t=time.time(); p=subprocess.run([sys.executable]+sys.argv[1:],capture_output=True,text=True,timeout=20)
+print(p.returncode, round(time.time()-t,2)); sys.stdout.write(p.stdout)' "$SCRIPT" "$@"
+}
+
+@test "index --background returns at once with the rebuilding line while the engine runs detached; the log is framed started … by <who> / finished … indexed=N purged=M and the stamp follows; --by names the kicker" {
+  index_engine 'sleep 1' 'echo "indexed=3 purged=1"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  run timed_kick index --background; [ "$status" -eq 0 ]
+  case "$output" in "0 0."*|"0 1.0"*) : ;; *) echo "exit/elapsed: $output"; return 1 ;; esac
+  case "$output" in *"document index: rebuilding in the background (state/recall-index.log)"*) : ;; *) echo "$output"; return 1 ;; esac
+  wait_log "finished"
+  [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  head -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -Eq '^started [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} by operator$'
+  tail -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -Eq '^finished [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} indexed=3 purged=1$'
+  [ "$(grep -c . "$DAEDALUS_HOME/state/recall-index.log")" -eq 2 ]
+  printf 'earlier holder\n' >> "$DAEDALUS_HOME/state/recall-index.log"   # the new holder truncates it
+  run python3 "$SCRIPT" index --background --by vault-commit; [ "$status" -eq 0 ]
+  wait_log "finished"
+  head -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -q ' by vault-commit$'
+  [ "$(grep -c '^started' "$DAEDALUS_HOME/state/recall-index.log")" -eq 1 ]   # one holder per file: truncated by the new holder
+  [ "$(grep -c 'earlier holder' "$DAEDALUS_HOME/state/recall-index.log")" -eq 0 ]
+  rm -f "$DAEDALUS_HOME/state/recall-index.log"
+  run python3 "$SCRIPT" index --background --by session-start; wait_log "finished"
+  head -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -q ' by session-start$'
+}
+
+@test "index --background --if-stale with a fresh index says so and spawns nothing; stale, it rebuilds" {
+  index_engine 'touch "$DAEDALUS_RECALL_STORE/ran"' 'echo "indexed=1 purged=0"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  mkdir -p "$DAEDALUS_HOME/state/chroma" "$DAEDALUS_HOME/vault/specs"; printf '# x' > "$DAEDALUS_HOME/vault/specs/x.md"
+  sleep 1; printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  run python3 "$SCRIPT" index --background --if-stale --by session-start; [ "$status" -eq 0 ]
+  [ "$output" = "document index: fresh" ]
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/chroma/ran" ]; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  printf '# y' > "$DAEDALUS_HOME/vault/specs/y.md"
+  run python3 "$SCRIPT" index --background --if-stale --by session-start
+  [ "$output" = "document index: rebuilding in the background (state/recall-index.log)" ]
+  wait_log "finished"; [ -f "$DAEDALUS_HOME/state/chroma/ran" ]
+  rm -rf "$DAEDALUS_HOME/state/chroma"                                     # no store: a rebuild too
+  run python3 "$SCRIPT" index --background --if-stale
+  [ "$output" = "document index: rebuilding in the background (state/recall-index.log)" ]
+  wait_log "finished"
+}
+
+@test "a kick that finds the lock held says so, leaves the rerun flag, and touches neither the log nor the stamp" {
+  index_engine 'echo "indexed=1 purged=0"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  python3 -c "import fcntl,os,time; fd=os.open('$DAEDALUS_HOME/state/recall-index.lock',os.O_RDWR|os.O_CREAT); fcntl.flock(fd,fcntl.LOCK_EX); time.sleep(3)" 3>&- </dev/null >/dev/null 2>&1 &
+  sleep 0.5
+  run python3 "$SCRIPT" index --background --by vault-commit; [ "$status" -eq 0 ]
+  [ "$output" = "document index: a rebuild is already running; it will run again when done (state/recall-index.log)" ]
+  [ -f "$DAEDALUS_HOME/state/recall-index.rerun" ]
+  [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]; [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  wait
+}
+
+@test "the rerun flag: a kick during a real run makes the holder run the engine again before it exits — two started frames, the second saying rerun, the engine run twice, the flag gone" {
+  index_engine 'echo run >> "$DAEDALUS_HOME/runs"' 'sleep 2' 'echo "indexed=1 purged=0"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  python3 "$SCRIPT" index --log operator 3>&- </dev/null >/dev/null 2>&1 &
+  i=0; while [ ! -f "$DAEDALUS_HOME/runs" ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -f "$DAEDALUS_HOME/runs" ]
+  run python3 "$SCRIPT" index --background --by vault-commit
+  [ "$output" = "document index: a rebuild is already running; it will run again when done (state/recall-index.log)" ]
+  [ -f "$DAEDALUS_HOME/state/recall-index.rerun" ]
+  wait
+  [ "$(grep -c run "$DAEDALUS_HOME/runs")" -eq 2 ]
+  [ "$(grep -c '^started' "$DAEDALUS_HOME/state/recall-index.log")" -eq 2 ]
+  [ "$(grep -c '^finished' "$DAEDALUS_HOME/state/recall-index.log")" -eq 2 ]
+  sed -n '3p' "$DAEDALUS_HOME/state/recall-index.log" | grep -Eq '^started [0-9T:-]+ by operator \(rerun: the vault changed during the last run\)$'
+  [ ! -f "$DAEDALUS_HOME/state/recall-index.rerun" ]
+}
+
+@test "a failing engine: the log carries its last stderr lines as engine: … then the failed line with the reason; no stamp" {
+  index_engine 'echo "noise on stdout"' 'echo "cannot open store: permission denied" >&2' 'echo "second line" >&2' 'exit 1'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  run python3 "$SCRIPT" index --background --by vault-commit; [ "$status" -eq 0 ]
+  wait_log "failed"
+  [ "$(sed -n '2p' "$DAEDALUS_HOME/state/recall-index.log")" = "engine: cannot open store: permission denied" ]
+  [ "$(sed -n '3p' "$DAEDALUS_HOME/state/recall-index.log")" = "engine: second line" ]
+  tail -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -Eq '^failed [0-9T:-]+: engine failed; stamp untouched$'
+  [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  # no count line: the same frame, the sentence names it
+  index_engine 'echo done'
+  rm -f "$DAEDALUS_HOME/state/recall-index.log"
+  run python3 "$SCRIPT" index --background; wait_log "failed"
+  tail -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -q ": no 'indexed=N purged=M' line; stamp untouched$"
+}
+
+@test "a clone's kick is refused with PRIME_ONLY and spawns nothing; an unconfigured reindex is one line and no log; a kick from another cwd still works" {
+  cp "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  index_engine 'echo "indexed=1 purged=0"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  printf '{"session_id":"sP","history":[]}' > "$DAEDALUS_HOME/state/leases/prime.json"
+  printf '{"lease":"02","session_id":"s2","worktree":"worktrees/02"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  run env DAEDALUS_SESSION_ID=s2 python3 "$SCRIPT" index --background --by session-start; [ "$status" -eq 0 ]
+  [ "$output" = "The document index is rebuilt by the prime; ask it to reindex" ]
+  sleep 0.5; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]; [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "  store: state/chroma"
+  run env DAEDALUS_SESSION_ID=sP python3 "$SCRIPT" index --background --if-stale --by session-start; [ "$status" -eq 0 ]
+  [ "$output" = "document index: reindex command unconfigured; nothing started" ]
+  sleep 0.5; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  run bash -c "cd / && env DAEDALUS_SESSION_ID=sP python3 '$SCRIPT' index --background --by vault-commit"; [ "$status" -eq 0 ]
+  [ "$output" = "document index: rebuilding in the background (state/recall-index.log)" ]
+  wait_log "finished"; [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
