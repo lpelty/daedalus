@@ -41,7 +41,7 @@ install has been done (`lease board on screen`).
 
 ## Versions
 
-Tested with Claude Code 2.1.296 on macOS. Mods need Claude Code 2.1.287 or
+Tested with Claude Code 2.1.300 on macOS. Mods need Claude Code 2.1.287 or
 later in the terminal. The mods API is early access and moves between
 releases; `claude plugin validate mods/lease-board` says what this build reads
 from the module, and `claude plugin test mods/lease-board` runs the tests under
