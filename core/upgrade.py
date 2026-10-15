@@ -2850,10 +2850,57 @@ def _snap_verify(part: Path, manifest: dict) -> None:
         shutil.rmtree(str(vt), ignore_errors=True)
 
 
-def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: bool = False) -> Optional[str]:
+def _clear_pushed_scratch(root: Path, dry: bool) -> List[str]:
+    """Before the safety copy is estimated (update-command Decision 10a): the scratch worktrees of every promotion
+    under state/promote/ whose pushed or announced record exists, removed through promote.remove_scratch, which
+    keeps the records. Its content is on trunk by construction, so the copy need not hold it; removing it first is
+    what keeps it out of the estimate. A promotion whose .confirm.lock is held is being confirmed now and is left
+    alone, unnamed. [] or one line, without the run's head: "removed" ("would remove" in a dry run)."""
+    base = root / "state" / "promote"
+    if not base.is_dir():
+        return []
+    done: List[str] = []
+    pm, tr = None, {}
+    for pdir in sorted(base.iterdir()):
+        if pdir.is_symlink() or not pdir.is_dir() or not ((pdir / "pushed").exists() or (pdir / "announced").exists()):
+            continue
+        if pm is None:         # only once one is found: promote (and what it imports) is read when there is work
+            import promote as pm
+            tr = {key: "" for key, _ in target_repos(root)}
+        if not any(c.name not in pm.RECORDS for c in pdir.iterdir()):
+            continue
+        try:           # the lock confirm_lock takes; a dry run only asks whether it is free, and creates no file
+            fh = open(str(pdir / ".confirm.lock"), "r" if dry else "a")
+        except OSError:
+            if dry and not (pdir / ".confirm.lock").exists():
+                done.append(pdir.name)
+            continue
+        with fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue
+            if dry:
+                done.append(pdir.name)
+                continue
+            pm.remove_scratch(root, pdir, tr)
+        if not any(c.name not in pm.RECORDS for c in pdir.iterdir()):
+            done.append(pdir.name)
+    if not done:
+        return []
+    return ["%s the promote scratch of %d pushed promotion%s (%s); their records are kept."
+            % ("would remove" if dry else "removed", len(done), "" if len(done) == 1 else "s", ", ".join(done))]
+
+
+def ensure_snapshot(root: Path, ver: str, deadline: Optional[float], prefer_bg: bool = False,
+                    said: Optional[List[str]] = None) -> Optional[str]:
     """Before the upgrade's first change in target/: a checked copy of everything there the kept copies do not
     already hold, or a Stop. None when target/ holds no repository, or the kept copies hold all of it. At a session
-    start (a deadline), a copy that will not fit raises _Background."""
+    start (a deadline), a copy that will not fit raises _Background. First, the scratch of every pushed promotion is
+    removed (_clear_pushed_scratch); its line goes into said, which the caller reports whatever follows."""
+    cleared = _clear_pushed_scratch(root, False)
+    if said is not None:
+        said += cleared
     coll: List[dict] = []
     try:
         try:
@@ -2959,7 +3006,12 @@ def background_main(root: Path) -> int:
     try:
         fd = _lock(root, None)
         try:
-            said = ensure_snapshot(root, ver or "", None)
+            first: List[str] = []
+            try:
+                said = ensure_snapshot(root, ver or "", None, said=first)
+            finally:
+                for ln in first:
+                    print("Upgrade to %s: %s" % (ver, ln))
             print("Upgrade to %s: %s" % (ver, said or "the kept safety copies already hold everything in target/."))
             copied = True
         except Stop as e:
@@ -3518,9 +3570,11 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                 # the last start handed a whole copy to a detached run that did not finish it: do not spend this
                 # start's time trying it here again
                 again = bool(rec.get("background")) and rec.get("version") == ver and not _snapshots(root)
+                first: List[str] = []
                 try:
-                    said = ensure_snapshot(root, ver or "", deadline, prefer_bg=again)
+                    said = ensure_snapshot(root, ver or "", deadline, prefer_bg=again, said=first)
                 except _Background as e:
+                    lines += ["%s: %s" % (head, ln) for ln in first]
                     if e.slow and _bg_copied(root, ver):
                         # a run in the background has taken the copy, and reading target/ against it still does not
                         # fit a start: another handoff would find the copy whole and change nothing, at every start
@@ -3528,7 +3582,8 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                         return lines, _stopped(root, ver, n, SNAP_SLOW % ver)
                     return lines, _go_background(root, ver or "")
                 except Stop as e:
-                    return lines, _stopped(root, ver, n, str(e))
+                    return lines + ["%s: %s" % (head, ln) for ln in first], _stopped(root, ver, n, str(e))
+                lines += ["%s: %s" % (head, ln) for ln in first]
                 bare = _uncopied(root)
                 if bare:        # however it was found or missed, no repository is changed without a checked copy
                     return lines, _stopped(root, ver, n, SNAP_FAIL % (ver, "checked", "it holds no copy of %s"
@@ -3581,6 +3636,11 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
 
 
 def _dry_snapshot(root: Path, head: str) -> List[str]:
+    first = ["%s: %s" % (head, ln) for ln in _clear_pushed_scratch(root, True)]
+    return first + _dry_estimate(root, head)
+
+
+def _dry_estimate(root: Path, head: str) -> List[str]:
     coll: List[dict] = []
     try:
         repos = _snap_repos(root)

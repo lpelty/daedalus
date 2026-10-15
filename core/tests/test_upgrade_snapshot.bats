@@ -1096,3 +1096,51 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# pscratch <id> <records...> — a promotion under state/promote/<id>/ with its scratch worktree of target/thing
+# (detached at HEAD, as cut_scratch makes it) and the named record files
+pscratch() {
+  cp "$SRC/promote.py" "$DAEDALUS_HOME/core/"
+  local d="$DAEDALUS_HOME/state/promote/$1"; shift
+  mkdir -p "$d"; git -C "$T" worktree add -q --detach "$d/thing" HEAD
+  printf '{}\n' > "$d/prepared.json"
+  for r in "$@"; do : > "$d/$r"; done
+}
+
+@test "the upgrade removes the scratch of every pushed promotion before it estimates the safety copy, in one line naming them; a prepared-not-pushed one, one whose confirm lock is held, and every record are kept; --dry-run says it would and removes nothing (update-command Decision 10a)" {
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  P="$DAEDALUS_HOME/state/promote"
+  pscratch 01-20261015-125249-d0b pushed
+  pscratch 04-20261015-160828-526 pushed announced
+  pscratch 02-20261015-130000-aaa
+  pscratch 03-20261015-140000-bbb pushed
+  # the two pushed scratches hold 6 MB the copy would otherwise count, over the 2 MB limit
+  head -c 3000000 /dev/urandom > "$P/01-20261015-125249-d0b/thing/gate.out"
+  head -c 3000000 /dev/urandom > "$P/04-20261015-160828-526/thing/gate.out"
+  printf 'upgrade:\n  snapshot_max_mb: 2\n' >> "$DAEDALUS_HOME/config.yaml"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a"); fcntl.flock(f.fileno(), fcntl.LOCK_EX); open(sys.argv[2], "w").close(); time.sleep(120)' \
+    "$P/03-20261015-140000-bbb/.confirm.lock" "$B/held" 3>&- </dev/null >/dev/null 2>&1 &
+  HOLDER=$!
+  for _ in $(seq 50); do [ -e "$B/held" ] && break; python3 -c 'import time; time.sleep(0.1)'; done
+  [ -e "$B/held" ]
+
+  run python3 "$UP" --dry-run
+  case "$output" in *"Upgrade to 0.7.0: would remove the promote scratch of 2 pushed promotions (01-20261015-125249-d0b, 04-20261015-160828-526); their records are kept."*) : ;; *) kill "$HOLDER"; echo "$output"; return 1 ;; esac
+  for id in 01-20261015-125249-d0b 04-20261015-160828-526 02-20261015-130000-aaa 03-20261015-140000-bbb; do
+    [ -d "$P/$id/thing" ] || { kill "$HOLDER"; echo "dry run removed $id"; return 1; }
+  done
+
+  up_done
+  kill "$HOLDER"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: removed the promote scratch of 2 pushed promotions (01-20261015-125249-d0b, 04-20261015-160828-526); their records are kept."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"over the 2 MB limit"*) echo "$output"; return 1 ;; esac
+  [ "$(printf '%s\n' "$output" | grep -c 'promote scratch')" -eq 1 ] || { echo "$output"; return 1; }
+  [ ! -e "$P/01-20261015-125249-d0b/thing" ]; [ ! -e "$P/04-20261015-160828-526/thing" ]
+  [ -f "$P/01-20261015-125249-d0b/prepared.json" ]; [ -f "$P/01-20261015-125249-d0b/pushed" ]
+  [ -f "$P/04-20261015-160828-526/pushed" ]; [ -f "$P/04-20261015-160828-526/announced" ]
+  [ -d "$P/02-20261015-130000-aaa/thing" ]; [ -d "$P/03-20261015-140000-bbb/thing" ]
+  ! git -C "$T" worktree list --porcelain | grep -q -e 01-20261015 -e 04-20261015
+  git -C "$T" worktree list --porcelain | grep -q 02-20261015
+}
