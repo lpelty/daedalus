@@ -1030,3 +1030,108 @@ PY
   printf 'End with a line VERDICT: REFUTED or VERDICT: STANDS.\n' > "$f"; vo "$f"; [ "$status" -eq 2 ]; [ "$output" = NONE ]
   vo "$BATS_TEST_TMPDIR/none.md"; [ "$status" -eq 2 ]
 }
+
+# --- gates_setup: commands that prepare the tree under test before the gates (2026-10-14) ---------
+
+# write_config_setup <setup-lines> <gate-lines> — like write_config, with a gates_setup: list.
+write_config_setup() {
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: https://example.com/thing.git
+  branch: main
+gates_setup:
+$1
+gates:
+$2
+verify:
+  refute: false
+  refute_off_reason: bats fixture — a real claude must never be invoked in tests
+EOF
+}
+# git_thing [ignore-line] — the fixture target as a committed git repo (a real fingerprint).
+git_thing() {
+  cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"
+  [ -z "${1:-}" ] || printf '%s\n' "$1" > "$DAEDALUS_HOME/target/thing/.gitignore"
+  git init -q -b main "$DAEDALUS_HOME/target/thing"; git -C "$DAEDALUS_HOME/target/thing" add -A
+  git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m i
+}
+
+@test "gates_setup: the steps run in the target, in order, before the gates; each is logged, recorded in run.json and the summary, and manifested; a gate that needs their output passes; git-ignored output leaves the run PASS with a real fingerprint" {
+  git_thing "build/"
+  write_config_setup "  - mkdir -p build && printf one > build/x
+  - printf two >> build/x" "  - test \"\$(cat build/x)\" = onetwo"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  R="$DAEDALUS_HOME/state/evidence/$id/run.json"
+  [ "$(grep -c '"result": "PASS"' "$R")" -eq 1 ]
+  [ "$(grep -c '"fingerprint": "null"' "$R")" -eq 0 ]
+  python3 - "$R" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+s = r["setup"]
+assert [x["n"] for x in s] == [1, 2] and all(x["exit"] == 0 for x in s), s
+assert s[0]["command"].startswith("mkdir -p build") and s[1]["command"].startswith("printf two"), s
+assert s[0]["log"].endswith("/setup-1.log") and s[1]["log"].endswith("/setup-2.log"), s
+assert "setup_failed" not in r and "invalid_reason" not in r, r
+print("ok")
+PY
+  [ -f "$DAEDALUS_HOME/state/evidence/$id/setup-1.log" ] && [ -f "$DAEDALUS_HOME/state/evidence/$id/setup-2.log" ]
+  grep -qF "$DAEDALUS_HOME/state/evidence/$id/setup-1.log" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -qF "$DAEDALUS_HOME/state/evidence/$id/setup-2.log" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -q "setup-1.log" "$DAEDALUS_HOME/vault/evidence/$id.md"
+  case "$output" in *"SETUP "*"mkdir -p build"*) : ;; *) echo "no setup line: $output"; return 1 ;; esac
+}
+
+@test "gates_setup: a failing step runs no gate; the run is INVALID naming the step; exit non-zero with run-id and log; no citable run-id is printed" {
+  git_thing
+  # The token is assembled at runtime so it appears only in the step's OUTPUT, never in its
+  # command text (the summary shows the operator-authored command, as it does for gates).
+  write_config_setup "  - printf SETUP_TOKEN\"_abc\"; exit 3" "  - touch gate-ran"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/target/thing/gate-ran" ]
+  case "$output" in *"setup step 1 "*"exit 3"*"no gate ran"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"run-id: "*"log: "*) : ;; *) echo "$output"; return 1 ;; esac
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(printf '%s\n' "$output" | tail -1)" != "$id" ]
+  R="$DAEDALUS_HOME/state/evidence/$id/run.json"
+  [ "$(grep -c '"result": "INVALID"' "$R")" -eq 1 ]
+  [ "$(grep -c '"setup_failed": 1' "$R")" -eq 1 ]
+  [ "$(grep -c '"exit": 3' "$R")" -eq 1 ]
+  [ "$(grep -c '"gates": \[\]' "$R")" -eq 1 ]
+  [ ! -e "$DAEDALUS_HOME/state/evidence/$id/gate-1.log" ]
+  grep -q "^result: INVALID" "$DAEDALUS_HOME/vault/evidence/$id.md"
+  [ "$(grep -c SETUP_TOKEN_abc "$DAEDALUS_HOME/state/evidence/$id/setup-1.log")" -eq 1 ]
+  [ "$(grep -c SETUP_TOKEN_abc "$DAEDALUS_HOME/vault/evidence/$id.md")" -eq 0 ]
+}
+
+@test "gates_setup: a step whose output git can see makes the run INVALID before any gate, saying the output must be ignored" {
+  git_thing
+  write_config_setup "  - printf x > build.txt" "  - touch gate-ran"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/target/thing/gate-ran" ]
+  case "$output" in *"changed the tree under test"*"ignored by git"*) : ;; *) echo "$output"; return 1 ;; esac
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "INVALID"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  [ "$(grep -c '"invalid_reason"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+}
+
+@test "a gate that exits 127 is said to be unable to start, naming gates_setup as the remedy — still a FAIL" {
+  git_thing
+  write_config "  - ./no-such-tool"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"gate 1 could not start (exit 127"*"gates_setup"*) : ;; *) echo "$output"; return 1 ;; esac
+  id="$(printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1)"
+  [ "$(grep -c '"result": "FAIL"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+}
+
+@test "a gates_setup step containing a tab dies before creating a run directory — validation before side effects" {
+  write_config_setup "  - printf 'a	b'" "  - true"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  case "$output" in *"gates_setup"*"tab"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls "$DAEDALUS_HOME/state/evidence")" ]
+}

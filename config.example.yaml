@@ -53,6 +53,19 @@ gates:
   # Run from the target repo root. Green is an exit code.
   - echo "replace me with the target's test suite"
 
+# Optional. Commands run in the tree under test before the gates: a window's
+# worktree, or the scratch copy promote cuts for the merged tree, which holds
+# tracked files only. Build what the gates need here (a virtual environment,
+# say). Same trust as gates:, run from the target root, each logged beside
+# the gate logs and recorded in the evidence. A step that fails ends the run
+# INVALID before any gate — never FAIL, since nothing was tested. What a
+# step leaves behind must be ignored by git: the fingerprinted tree is the
+# commit's tree, so a step that changes what git sees ends the run INVALID
+# too. A gate that exits 127 ("command not found") in a promote scratch is
+# the sign this is missing.
+# gates_setup:
+#   - cd engine && uv sync --frozen
+
 proposals:
   # Maximum open PROPOSED documents. Daedalus must retire one to raise
   # another — this forces prioritization onto Daedalus, not the operator.

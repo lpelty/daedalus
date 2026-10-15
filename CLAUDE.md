@@ -430,7 +430,11 @@ writes the evidence: logs under `state/evidence/<run-id>/`, a summary at
 that says `IMPLEMENTED` cites that run as `evidence-run:`; the session
 cannot end while a claim stands without one, or with one for a different
 tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
-path — the honest state. A fresh-context refuter reviews every PASS — the
+path — the honest state. A gate that exits 127 never ran: the tree under
+test lacks something it needs (promote's scratch holds tracked files only,
+so a virtual environment is not there). The remedy is a `gates_setup:` step
+in `config.yaml` that builds it before the gates — the operator's file, so
+ask them for it; a run whose setup step fails is INVALID, not FAIL. A fresh-context refuter reviews every PASS — the
 diff of the target and of every nested checkout, untracked files included;
 a `REFUTED` verdict is a FAIL with the review as the log, and a green run the
 refuter could not certify (including one with nothing to review) is a FAIL
@@ -485,6 +489,12 @@ the same way (their whole message, after the refuted block), and recorded in
 their words beside the verdict it sets aside. When no review has refuted the
 change, first ask "Promote window 02's work without the review? Tell me why
 in your own words." and pass their answer. The gates always run.
+
+If promote says a gate could not run (exit 127, "command not found"), that
+is not a merge problem: the scratch holds tracked files only. Say so, and
+ask the operator to add a `gates_setup:` step to `config.yaml` that builds
+what the gate needs (for a Python harness, `cd engine && uv sync --frozen`);
+then run promote again.
 
 If the merge conflicts, tell window 02 to bring its work up to date: it runs
 `core/lease.sh rebase 02`, resolves any conflict in its own worktree, re-runs

@@ -90,6 +90,14 @@ while IFS= read -r gate; do
 done <<EOF
 $(cfg_list gates)
 EOF
+while IFS= read -r step; do
+  [ -n "$step" ] || continue
+  case "$step" in
+    *"$(printf '\t')"*) die "config gates_setup: step contains a tab character — refusing (the evidence row format is tab-delimited): $step" ;;
+  esac
+done <<EOF
+$(cfg_list gates_setup)
+EOF
 
 # Zero-gates refusal, also moved ahead of any evidence-directory creation —
 # counted directly off cfg_list's output rather than the gate-count computed
@@ -173,6 +181,43 @@ fp_before="$(fingerprint)"
 fp_secs="$(sed -n 's/^fingerprint_secs=//p' "$ev_state/fingerprint.err" 2>/dev/null | tail -1)"
 [ -n "$fp_secs" ] || fp_secs=0
 
+# gates_setup (2026-10-14): commands that prepare the tree under test — a window's
+# worktree, or promote's scratch, which holds tracked files only — before any gate
+# runs (a build environment, say). Same trust as gates:, same cwd, logged beside
+# the gate logs. Run AFTER the first fingerprint: what a step leaves behind must be
+# invisible to git, because the fingerprinted tree is the tree of the commit promote
+# pushes (Decision 37). A step that fails, or one that changes what git sees, ends
+# the run INVALID before any gate — never FAIL: nothing was tested.
+setup_rows=""; setup_count=0; setup_failed=0; invalid_reason=""; fail_log=""
+while IFS= read -r step; do
+  [ -n "$step" ] || continue
+  setup_count=$((setup_count + 1))
+  log_file="$ev_state/setup-$setup_count.log"
+  t0=$(date +%s)
+  ( cd "$target" && eval "$step" ) </dev/null >"$log_file" 2>&1
+  code=$?
+  dur=$(( $(date +%s) - t0 ))
+  setup_rows="$setup_rows
+$setup_count	$code	$dur	$log_file	$step"
+  if [ "$code" -eq 0 ]; then
+    log "SETUP $step"
+  else
+    log "SETUP FAIL  $step"
+    setup_failed=$setup_count
+    invalid_reason="setup step $setup_count \`$step\` exit $code, so no gate ran: the tree under test could not be prepared"
+    fail_log="$log_file"
+    break
+  fi
+done <<EOF
+$(cfg_list gates_setup)
+EOF
+if [ "$setup_failed" -eq 0 ] && [ "$setup_count" -gt 0 ]; then
+  fp_setup="$(fingerprint)"
+  if [ "$fp_setup" != "$fp_before" ]; then
+    invalid_reason="gates_setup changed the tree under test (fingerprint ${fp_before:0:12} before, ${fp_setup:0:12} after), so no gate ran: what a setup step leaves behind must be ignored by git"
+  fi
+fi
+
 failed=0
 gate_count=0
 rows=""
@@ -192,16 +237,20 @@ while IFS= read -r gate; do
     log "FAIL  $gate"
     failed=1
     fail_log="$log_file"
+    if [ "$code" -eq 127 ] || [ "$code" -eq 126 ]; then
+      log "gate $gate_count could not start (exit $code: command not found or not executable) — the tree under test may lack build output; a gates_setup: step in config.yaml can build it before the gates"
+    fi
   fi
   rows="$rows
 $gate_count	$code	$dur	$log_file	$gate"
 done <<EOF
-$(cfg_list gates)
+$([ -n "$invalid_reason" ] || cfg_list gates)
 EOF
 
 fp_after="$(fingerprint)"
 result=PASS
 [ "$failed" -ne 0 ] && result=FAIL
+[ -n "$invalid_reason" ] && result=INVALID
 if [ "$fp_before" = "null" ] || [ "$fp_after" = "null" ] || [ "$fp_before" != "$fp_after" ]; then
   result=INVALID
 fi
@@ -229,6 +278,14 @@ write_summary() {   # write_summary <path> <result>
       [ -n "$n" ] || continue
       printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
     done
+    if [ -n "$(printf '%s' "$setup_rows" | tr -d '\n')" ]; then
+      printf '\nSetup, before the gates:\n\n| # | command | exit | seconds | log |\n|---|---|---|---|---|\n'
+      printf '%s\n' "$setup_rows" | while IFS="$(printf '\t')" read -r n code dur logf cmd; do
+        [ -n "$n" ] || continue
+        printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
+      done
+    fi
+    [ -z "$invalid_reason" ] || printf '\nINVALID: %s\n' "$invalid_reason"
   } > "$1"
 }
 summary_tmp="$(mktemp)" || die "cannot create a temp file for the evidence summary"
@@ -245,6 +302,7 @@ write_summary "$summary_tmp" "$result"
 # none a file — and the session's own Stop then blocked on its own gate logs.
 {
   [ -f "$ev_state/fingerprint.err" ] && printf '%s\n' "$ev_state/fingerprint.err"
+  printf '%s\n' "$setup_rows" | awk -F'\t' 'NF {print $4}'
   printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}'
 } | python3 "$DAEDALUS_HOME/core/manifest-append.py" - \
   || die "cannot append to the evidence manifest"
@@ -287,20 +345,26 @@ rm -f "$summary_tmp"
 # recorded here.
 rows_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rows" > "$rows_tmp"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" <<'PY'
+printf '\n%s' "$setup_rows" >> "$rows_tmp"     # a blank line parts the gate rows from the setup rows
+python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" <<'PY'
 import json, sys, time
-out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx = sys.argv[1:12]
-gates = []
+out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx, setup_failed, invalid = sys.argv[1:14]
+gates, setup = [], []
 with open(rows_path) as fh:
-    data = fh.read()
-for line in data.splitlines():
-    if not line.strip():
-        continue
-    n, code, dur, log, cmd = line.split("\t", 4)
-    gates.append({"n": int(n), "command": cmd, "exit": int(code), "duration_s": int(dur), "log": log})
+    gate_part, _, setup_part = fh.read().partition("\n\n")
+for part, into in ((gate_part, gates), (setup_part, setup)):
+    for line in part.splitlines():
+        if not line.strip():
+            continue
+        n, code, dur, log, cmd = line.split("\t", 4)
+        into.append({"n": int(n), "command": cmd, "exit": int(code), "duration_s": int(dur), "log": log})
 rec = {"run_id": run_id, "started": started, "fingerprint": fp, "fingerprint_secs": int(fp_secs or 0),
-       "config_sha": config_sha, "gates": gates, "result": result,
+       "config_sha": config_sha, "setup": setup, "gates": gates, "result": result,
        "lease": lease or None, "session_id": sid or None}
+if int(setup_failed or 0):
+    rec["setup_failed"] = int(setup_failed)
+if invalid:
+    rec["invalid_reason"] = invalid
 if ctx:
     c = json.load(open(ctx))
     rec.update({k: c.get(k) for k in ("promote_id", "merge_sha", "trunk_sha_at_prepare", "repo", "nested")})
@@ -318,6 +382,11 @@ if [ "$rj" -ne 0 ]; then
   die "cannot write run.json for run $run_id — do not cite it"
 fi
 
+if [ -n "$invalid_reason" ]; then
+  log "run-id: $run_id"
+  [ -z "$fail_log" ] || log "log: $fail_log"
+  die "run INVALID — $invalid_reason; do not cite it"
+fi
 if [ "$failed" -ne 0 ]; then
   log "run-id: $run_id"
   log "log: $fail_log"

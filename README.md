@@ -569,7 +569,13 @@ is accepted the first time Claude Code opens this directory.
 ### The verify stage
 
 Hooks in the tracked `.claude/settings.json` make a completion claim
-unrecordable without evidence. `core/gates.sh` writes the evidence; the
+unrecordable without evidence. `core/gates.sh` writes the evidence. An
+optional `gates_setup:` list in `config.yaml` runs first in the tree under
+test — a window's worktree or promote's scratch, which holds tracked files
+only — to build what the gates need, such as a virtual environment; a
+setup step that fails, or one whose output git can see, makes the run
+INVALID before any gate, and a gate that exits 127 is reported as unable
+to start rather than as a failing merge. The
 `Stop` hook checks any `IMPLEMENTED`/`completion` document changed this
 session against it; the boundary hook blocks edits to Daedalus's own code,
 the gate definition, and the evidence. Everything is snapshotted at session

@@ -402,12 +402,21 @@ def run_gates(root: Path, pid: str, tree: Path, trunk: str) -> dict:
         return rec
     if result == "FAIL":
         g = next((g for g in rec.get("gates") or [] if g.get("exit") != 0), None)
+        if g and g.get("exit") in (126, 127):
+            # The gate never ran (2026-10-14): a merge is not what failed, and saying so sent an
+            # operator looking for a merge problem that did not exist.
+            raise Stop("Gates could not run on the merged tree (gate %s: `%s` exit %s — %s; log at %s). The scratch "
+                       "holds only tracked files; build output such as a virtual environment is not there. Add a "
+                       "`gates_setup:` step to config.yaml that builds it, or change the gate."
+                       % (g["n"], g["command"], g["exit"],
+                          "command not found" if g["exit"] == 127 else "not executable", rel(root, g["log"])), code=1)
         where = ("gate %s: `%s` exit %s; log at %s" % (g["n"], g["command"], g["exit"], rel(root, g["log"]))
                  if g else "see state/evidence/%s" % rec.get("run_id"))
         raise Stop("Gates FAIL on the merged tree (%s). The lease was green on its own branch; the merge with current "
                    "%s is what fails." % (where, trunk), code=1)
-    reason = ("the fingerprint was null" if rec.get("fingerprint") in (None, "null") else
-              "the tree changed while the gates ran" if result == "INVALID" else "the run never finished (%s)" % result)
+    reason = rec.get("invalid_reason") or (      # a setup step failed or changed the tree: gates.sh names it
+        "the fingerprint was null" if rec.get("fingerprint") in (None, "null") else
+        "the tree changed while the gates ran" if result == "INVALID" else "the run never finished (%s)" % result)
     raise Stop("Gates were INVALID on the merged tree (%s). An invalid run is not a pass." % reason, code=1)
 
 

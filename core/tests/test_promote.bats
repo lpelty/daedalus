@@ -941,3 +941,49 @@ r = json.load(open("%s/state/evidence/%s/run.json" % (home, rid)))["promotion"]
 assert r["operator_said"] == "Yes." and r["transcript_ref"]["uuid"] == said and r["shown_ref"]["uuid"] == shown, r
 PY
 }
+
+@test "a gate that cannot start in the scratch (exit 127) is said so, never as a merge failure; a gates_setup step builds what it needs in the scratch, and the prepare, the review and the confirm go through with the output ignored" {
+  work_on_02
+  printf 'build/\n' >> "$W2/.gitignore"; git -C "$W2" add .gitignore; git -C "$W2" commit -q -m "ignore build output"
+  python3 - "$DAEDALUS_HOME/config.yaml" <<'PY'
+import sys; p = sys.argv[1]; s = open(p).read()
+assert s.count("gates:\n  - true\n") == 1, s
+open(p, "w").write(s.replace("gates:\n  - true\n", "gates:\n  - build/tool\n", 1))
+PY
+  run as_prime bash "$PROMOTE" 02
+  refused "Gates could not run on the merged tree (gate 1: \`build/tool\` exit 127 — command not found; log at state/evidence/" 1
+  case "$output" in *"/gate-1.log). The scratch holds only tracked files; build output such as a virtual environment is not there. Add a \`gates_setup:\` step to config.yaml that builds it, or change the gate."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"merge with current"*) echo "called a merge failure: $output"; return 1 ;; *) : ;; esac
+  python3 - "$DAEDALUS_HOME/config.yaml" <<'PY'
+import sys; p = sys.argv[1]; s = open(p).read()
+setup = "gates_setup:\n  - mkdir -p build && printf '#!/bin/sh\\nexit 0\\n' > build/tool && chmod +x build/tool\n"
+open(p, "w").write(s.replace("gates:\n  - build/tool\n", setup + "gates:\n  - build/tool\n", 1))
+PY
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in "Ready to promote window 02's work onto main."*) : ;; *) echo "$output"; return 1 ;; esac
+  m="$(pj merge_sha)"; rid="$(pj run_id)"
+  [ "$(grep -c '"setup"' "$DAEDALUS_HOME/state/evidence/$rid/run.json")" -ge 1 ]
+  [ -x "$(ls -d "$DAEDALUS_HOME"/state/promote/*/thing | tail -1)/build/tool" ]
+  shown_then_said "yes"
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(origin_main)" = "$m" ]
+  ! git -C "$BATS_TEST_TMPDIR/origin.git" ls-tree -r --name-only main | grep -q '^build/'
+}
+
+@test "a gates_setup step that fails, or one whose output git can see, stops the prepare as INVALID with the step and the reason named — never as 'the tree changed while the gates ran'" {
+  work_on_02
+  python3 - "$DAEDALUS_HOME/config.yaml" <<'PY'
+import sys; p = sys.argv[1]; s = open(p).read()
+assert s.count("gates:\n  - true\n") == 1, s
+open(p, "w").write(s.replace("gates:\n  - true\n", "gates_setup:\n  - echo boom; exit 3\ngates:\n  - true\n", 1))
+PY
+  run as_prime bash "$PROMOTE" 02
+  refused "Gates were INVALID on the merged tree (setup step 1 \`echo boom; exit 3\` exit 3, so no gate ran: the tree under test could not be prepared). An invalid run is not a pass." 1
+  case "$output" in *"the tree changed while the gates ran"*) echo "false reason: $output"; return 1 ;; *) : ;; esac
+  sed -i '' 's/^  - echo boom; exit 3$/  - echo visible > visible.txt/' "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02
+  refused "Gates were INVALID on the merged tree (gates_setup changed the tree under test (fingerprint " 1
+  case "$output" in *"so no gate ran: what a setup step leaves behind must be ignored by git). An invalid run is not a pass."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"the tree changed while the gates ran"*) echo "false reason: $output"; return 1 ;; *) : ;; esac
+}

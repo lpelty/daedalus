@@ -41,6 +41,9 @@ if [ -n "$(cfg_list gates)" ]; then
 else
   note_problem "config: gates (at least one required)"
 fi
+if [ -n "$(cfg_list gates_setup)" ]; then
+  log "OK       config: gates_setup ($(cfg_list gates_setup | wc -l | tr -d ' ') step(s) run before the gates)"
+fi
 
 # target_path() dies (hard exit) if target.repo is unset. Only call it once
 # we've confirmed the key is actually present above — otherwise it would

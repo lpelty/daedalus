@@ -462,12 +462,28 @@ with `!`.
 **Small.** `core/lease.sh` in a home whose upgrade stamp is absent no longer
 prints a shell error about the missing file before its own sentence.
 
-#### Added on trunk after the v0.7.0 tag — 2026-10-14: session logs keep the global counter; the vault commits inside the home repo; the yes may follow a question
+#### Added on trunk after the v0.7.0 tag — 2026-10-14: session logs keep the global counter; the vault commits inside the home repo; the yes may follow a question; a setup step before the gates
 
 **In short.** Session logs go back to one running number per vault,
 `YYYY-MM-DD-NNN.md`. The harness hands the number out. A vault that lives
 inside the Daedalus home repository can be committed again. You may ask
-about a promote before you say yes to it.
+about a promote before you say yes to it. A `gates_setup:` list in
+`config.yaml` builds what the gates need before they run.
+
+- **A setup step before the gates.** Promote tests the merged tree in a
+  scratch copy that holds tracked files only. A gate that needs build
+  output, such as `engine/.venv`, exits 127 there. Promote then said the
+  merge with trunk was what failed, which sent an operator after a merge
+  problem that did not exist (2026-10-14). Now `gates_setup:` in
+  `config.yaml` lists commands run in the tree under test before the gates,
+  in a window's worktree and in the scratch alike. Each is logged and
+  recorded in the evidence. A step that fails ends the run INVALID before
+  any gate, with the step named. What a step leaves behind must be ignored
+  by git, as a virtual environment is. A step that changes what git sees
+  also ends the run INVALID, saying so. A gate that exits 127 is now
+  reported as unable to start, with `gates_setup:` named as the remedy.
+  An example step for a Python harness: `cd engine && uv sync --frozen`.
+  `core/doctor.sh` reports the steps it finds.
 
 - **The yes may follow a question.** The confirm used to take a yes only as
   the first reply to the block itself. Any other reply, even a question,
