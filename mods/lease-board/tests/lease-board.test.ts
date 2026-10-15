@@ -193,7 +193,14 @@ test('every line truncates at the end of the band, sized to bodyColumns', async 
   const texts = await ui.findAll({ type: 'Text' })
   expect(texts.length).toBe(5)
   for (const t of texts) expect(t.props.wrap).toBe('truncate-end')
-  expect((await ui.drawn()).props.width).toBe(24)
+  // the width sits on this mod's own Box, one level down: the root Box holds the mods beneath beside it and
+  // carries no width of its own (the engine's node may not sit under a Box with a width; the last test below)
+  const root = await ui.drawn()
+  expect(root.props.width).toBeUndefined()
+  const sized = (root.children || []).filter((c: any) => c && c.type === 'Box' && c.props && c.props.width !== undefined)
+  expect(sized.length).toBe(1)
+  expect(sized[0].props.width).toBe(24)
+  expect((await windowLines(ui)).length).toBe(5)
 })
 
 test('more windows than rows: maxRows - 1 lines, then "+N more windows"', async ($, on) => {
@@ -425,4 +432,13 @@ test('the engine\'s own node from next(e) is kept, outside any Box that has a wi
   // ... and no Box above it carries a width: the engine refuses that shape on this build
   const sized = found[0].above.filter((b) => b.type === 'Box' && b.props && b.props.width !== undefined)
   expect(sized.length).toBe(0)
+  // ... and this mod's lines still sit under the one Box that carries the band's width
+  const widths = walk(tree).filter((x) => x.node.type === 'Box' && x.node.props && x.node.props.width !== undefined)
+  expect(widths.length).toBe(1)
+  expect(widths[0].node.props.width).toBe(80)
+  await ui.unmount()
+  // the Desktop app gets the same tree
+  const desktop = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(walk(await desktop.drawn()).filter((x) => x.node.type === 'engine').length).toBe(1)
+  expect((await windowLines(desktop)).length).toBe(5)
 })
