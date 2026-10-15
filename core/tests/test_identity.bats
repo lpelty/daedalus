@@ -761,7 +761,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
            '### The switch' '/frame-jack on' '/frame-jack off' '/frame-jack status' '### What shadow means' \
            '0.95' '0.85' '400 ms' '### Weights by hand' 'tar -czf' 'blobs/6c/' 'blobs/47/' 'offline: true' \
            'a laptop behind a corporate proxy' 'not yet run there' '### Doctor' 'frame-jack weights:' \
-           'ask_destructive: false' 'ask_suite: true' 'frame-jack questions:'; do
+           'ask_destructive: false' 'ask_suite: true' 'frame-jack questions:' 'frame-jack: device mps' 'default device'; do
     case "$rsec" in *"$s"*) : ;; *) echo "README's Frame-jack section lacks: $s"; return 1 ;; esac
   done
   # CLAUDE.md: the two operator rows, after "Pick it up", and the paragraph under "Gates and evidence"

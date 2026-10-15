@@ -230,7 +230,11 @@ promote:
 #   # environment it was installed into (README "Frame-jack"). Never on PATH.
 #   command: /abs/path/to/ami-venv/bin/strands-decider
 #   model: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
-#   # mlx (recommended on Apple silicon), mps, or cpu.
+#   # mlx, mps, or cpu. Left out: mlx on Apple silicon, cpu elsewhere.
+#   # mlx needs the strands-decider "mlx" extra (README "Frame-jack": from
+#   # the git clone until the next PyPI release). mps works, but two
+#   # overlapping questions crashed the MPS daemon in the lab (a Metal
+#   # assertion, twice); doctor notes it.
 #   device: mlx
 #   # The daemon's port, 1024..65535. Every window of this deployment shares
 #   # the one daemon. A second deployment on the machine should name the SAME

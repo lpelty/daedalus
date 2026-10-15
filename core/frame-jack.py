@@ -17,6 +17,7 @@ Python 3.9, standard library. Exit codes: 0; 2 a refusal with its sentence; 1 an
 import http.client
 import json
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -31,6 +32,15 @@ import amilib                  # noqa: E402
 DEFAULT_PORT = 8761
 DEFAULT_TIMEOUT_MS = 1500
 DEVICES = ("mlx", "mps", "cpu")
+MPS_NOTE = ("NOTE     frame-jack: device mps — two overlapping questions crashed the MPS daemon in the lab (a Metal "
+            "assertion, twice); MLX queues them, about 27 questions a second in the same 5.2 GB — set ami.device: mlx "
+            "(README \"Frame-jack\" installs the mlx extra)")
+
+
+def default_device():
+    """mlx on Apple silicon — it queues overlapping questions where MPS crashed (Metal assertion, twice in the
+    lab) and measured 2.7 times faster; cpu anywhere else (mlx does not run there)."""
+    return "mlx" if platform.system() == "Darwin" and platform.machine() == "arm64" else "cpu"
 KEYS = ("command", "model", "device", "port", "offline", "weights_cache", "battery_off",
         "request_timeout_ms", "ask_destructive", "ask_suite", "enforce", "shadow")
 ASK_KEYS = (("destructive", "ask_destructive"), ("suite", "ask_suite"))     # question, its ami.* switch
@@ -99,7 +109,7 @@ def read_config(root):
     if not raw:
         return None
     problems = []
-    cfg = {"command": raw.get("command"), "model": raw.get("model"), "device": raw.get("device"),
+    cfg = {"command": raw.get("command"), "model": raw.get("model"), "device": raw.get("device") or default_device(),
            "weights_cache": raw.get("weights_cache") or None}
     if not cfg["command"]:
         problems.append("ami.command is not set — the strands-decider executable inside its virtual environment")
@@ -941,6 +951,8 @@ def doctor_lines(root):
         if not problems:
             lines.append("OK       frame-jack: strands-decider at %s, model %s, device %s, port %s, %s" % (
                 cfg["command"], cfg["model"], cfg["device"], cfg["port"], "offline" if cfg["offline"] else "online"))
+        if cfg["device"] == "mps":
+            lines.append(MPS_NOTE)
         if any(cfg["questions"].values()):
             lines.append("OK       frame-jack questions: " + questions_phrase(cfg["questions"]))
         else:

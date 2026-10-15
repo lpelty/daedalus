@@ -997,11 +997,13 @@ uv pip install --python .venv-mlx/bin/python -e './strands-decider-src[mlx]' 'ml
 
 The `[mlx]` extra exists only in the git clone until the next PyPI release,
 and `mlx-lm` must stay below 0.33 (the backend reaches into its internals).
-MLX is the recommended device on Apple silicon: it measured about 2.7 times
-faster than MPS here, and it survives concurrent questions (below). A
-deployment that installs the PyPI package instead
-(`uv pip install --python .venv/bin/python strands-decider`) must say
-`device: mps`. Where GitHub is blocked, the clone comes by hand too.
+MLX is the default device on Apple silicon (`device` may be left out; it
+is `cpu` elsewhere): it measured about 2.7 times faster than MPS here, and it
+survives concurrent questions, where two overlapping questions crashed the
+MPS daemon (below). A deployment that installs the PyPI package instead
+(`uv pip install --python .venv/bin/python strands-decider`) has no mlx
+extra and must say `device: mps`; doctor then prints a NOTE naming that
+crash. Where GitHub is blocked, the clone comes by hand too.
 
 The first start downloads the weights (about 4.8 GB) into the Hugging Face
 cache. Where Hugging Face is unreachable, copy them by hand (below).
@@ -1117,6 +1119,7 @@ the machine. A block that says something false is a MISSING. For example:
 NOTE     frame-jack: no ami: block in config.yaml — the AMI cannot be switched on (optional; see "Frame-jack" in README.md)
 OK       frame-jack: strands-decider at <path>, model StrandsAgents/strands-decider-2B-qwen3.5-v1-2610, device mlx, port 8761, online
 OK       frame-jack questions: suite asked; destructive not asked (ami.ask_destructive is false — the default)
+NOTE     frame-jack: device mps — two overlapping questions crashed the MPS daemon in the lab (a Metal assertion, twice); MLX queues them, about 27 questions a second in the same 5.2 GB — set ami.device: mlx (README "Frame-jack" installs the mlx extra)
 NOTE     frame-jack questions: none asked (ami.ask_destructive and ami.ask_suite are both false) — switched on, the daemon would hold about 5.2 GB for nothing; leave frame-jack off
 MISSING  frame-jack: ami.command <path> is not an executable file — install strands-decider into a virtual environment and name its strands-decider here
 MISSING  frame-jack: ami.enforce names destructive, which no release has certified to act — remove it; the question stays in shadow mode

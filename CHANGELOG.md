@@ -1130,8 +1130,11 @@ For the suite question, the bar is accuracy 0.85 with at most 0.05 unsafe
 median: 245 ms on MPS, 60 ms on MLX. So both questions stay in shadow mode.
 Naming one under `ami.enforce` is a doctor MISSING. Off means conservative:
 with the switch off, the daemon down or the laptop on battery, nothing is
-skipped. Two questions at once crashed the MPS daemon in the lab. MLX queued
-four callers at a 149 ms p99. A lock in the client keeps one deployment's
+skipped. Two questions at once crashed the MPS daemon in the lab (a Metal
+assertion, twice). MLX queued four callers at a 149 ms p99, about 27
+questions a second, in the same 5.2 GB. So MLX is the default device on
+Apple silicon (`ami.device` may be left out); `mps` stays selectable, and
+doctor prints a NOTE naming the crash when it is configured. A lock in the client keeps one deployment's
 windows from overlapping, and that lock is what keeps the daemon alive.
 
 **One-time install, per machine.** Make a Python 3.12 virtual environment

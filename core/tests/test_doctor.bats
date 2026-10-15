@@ -1713,3 +1713,17 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"NOTE     frame-jack: ami.shadow is no longer read — ami.ask_destructive and ami.ask_suite say which questions are asked; remove the shadow line"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "doctor frame-jack device: no device line defaults to mlx on Apple silicon (cpu elsewhere) and the OK line says so; device mps is a NOTE naming the crash two overlapping questions caused and pointing at mlx; device mlx has no such NOTE" {
+  doctor_fj_fixture
+  P="$(free_port)"
+  if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then want=mlx; else want=cpu; fi
+  fj_config "$P" mlx false
+  sed -i '' '/^  device: /d' "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack: strands-decider at $AMI_FIX/fake-decider, model $MODEL, device $want, port $P,"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"device mps"*) echo "an mps NOTE without mps: $output"; return 1 ;; *) : ;; esac
+  fj_config "$P" mps false
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     frame-jack: device mps — two overlapping questions crashed the MPS daemon in the lab (a Metal assertion, twice); MLX queues them, about 27 questions a second in the same 5.2 GB — set ami.device: mlx (README "Frame-jack" installs the mlx extra)'*) : ;; *) echo "$output"; return 1 ;; esac
+}
