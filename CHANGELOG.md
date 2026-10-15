@@ -1114,28 +1114,29 @@ you about.
 
 **What it does, and what it does not.** The AMI is Strands Decider 2B. It
 answers yes/no questions with a confidence, and it cannot write text. In this
-release it runs in shadow mode only: it asks, logs, and never acts. Before
-a full test-suite run during a build, it asks whether a targeted run would
-do (`ami.ask_suite`, on by default). It can also ask, before each Bash call
-the guard allowed, whether the command is destructive (`ami.ask_destructive`),
-but that question is off by default: its precision measured 0.36, the guard's
-own rules already deny the destructive cases, and an inference on every Bash
-call costs battery and heat for nearly nothing. Off means no inference and no
-row. `/frame-jack status` and doctor name the questions asked. The evidence run, `core/gates.sh`, is never asked. It never grants
-a call and never replaces a deny. Acting was promised only past a bar set in
-advance. For the destructive question, the bar is recall 0.95, precision
-0.60 and Brier 0.15. It measured 1.00, 0.36 and 0.054, on four positives.
-For the suite question, the bar is accuracy 0.85 with at most 0.05 unsafe
-"targeted" answers. It measured 0.78 and 0.068. Latency met its bar of a 400 ms
-median: 245 ms on MPS, 60 ms on MLX. So both questions stay in shadow mode.
-Naming one under `ami.enforce` is a doctor MISSING. Off means conservative:
-with the switch off, the daemon down or the laptop on battery, nothing is
-skipped. Two questions at once crashed the MPS daemon in the lab (a Metal
-assertion, twice). MLX queued four callers at a 149 ms p99, about 27
-questions a second, in the same 5.2 GB. So MLX is the default device on
-Apple silicon (`ami.device` may be left out); `mps` stays selectable, and
-doctor prints a NOTE naming the crash when it is configured. A lock in the client keeps one deployment's
-windows from overlapping, and that lock is what keeps the daemon alive.
+release it runs in shadow mode only: it asks, logs, and never acts. Before a
+full test-suite run during a build, it asks whether a targeted run would do
+(`ami.ask_suite`, on by default). It can also ask, before each Bash call the
+guard allowed, whether the command is destructive (`ami.ask_destructive`), but
+that question is off by default: its precision measured 0.36, the guard's own
+rules already deny the destructive cases, and an inference on every Bash call
+costs battery and heat for nearly nothing. Off means no inference and no row.
+`/frame-jack status` and doctor name the questions asked. The evidence run,
+`core/gates.sh`, is never asked. It never grants a call and never replaces a
+deny. Acting was promised only past a bar set in advance. For the destructive
+question, the bar is recall 0.95, precision 0.60 and Brier 0.15. It measured
+1.00, 0.36 and 0.054, on four positives. For the suite question, the bar is
+accuracy 0.85 with at most 0.05 unsafe "targeted" answers. It measured 0.78
+and 0.068. Latency met its bar of a 400 ms median: 245 ms on MPS, 60 ms on
+MLX. So both questions stay in shadow mode. Naming one under `ami.enforce` is
+a doctor MISSING. Off means conservative: with the switch off, the daemon down
+or the laptop on battery, nothing is skipped. Two questions at once crashed
+the MPS daemon in the lab (a Metal assertion, twice). MLX queued four callers
+at a 149 ms p99, about 27 questions a second, in the same 5.2 GB. So MLX is
+the default device on Apple silicon (`ami.device` may be left out); `mps`
+stays selectable, and doctor prints a NOTE naming the crash when it is
+configured. A lock in the client keeps one deployment's windows from
+overlapping, and that lock is what keeps the daemon alive.
 
 **One-time install, per machine.** Make a Python 3.12 virtual environment
 with `uv venv --python 3.12`. Install the git clone with its `[mlx]` extra

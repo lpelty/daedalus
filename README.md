@@ -981,7 +981,7 @@ knows two questions and **only writes its answers down** (shadow mode):
   no row for it. Set `ask_destructive: true` to collect shadow answers again.
 
 It is optional. Without an `ami:` block nothing changes, and everything
-else in Daedalus works the same. When it is on, it costs about 5.3 GB of
+else in Daedalus works the same. When it is on, it costs about 5.2 GB of
 unified memory while the daemon is up, measured with `footprint`.
 
 ### Install
@@ -1121,11 +1121,12 @@ OK       frame-jack: strands-decider at <path>, model StrandsAgents/strands-deci
 OK       frame-jack questions: suite asked; destructive not asked (ami.ask_destructive is false — the default)
 NOTE     frame-jack: device mps — two overlapping questions crashed the MPS daemon in the lab (a Metal assertion, twice); MLX queues them, about 27 questions a second in the same 5.2 GB — set ami.device: mlx (README "Frame-jack" installs the mlx extra)
 NOTE     frame-jack questions: none asked (ami.ask_destructive and ami.ask_suite are both false) — switched on, the daemon would hold about 5.2 GB for nothing; leave frame-jack off
+NOTE     frame-jack questions: the running daemon asks destructive and suite asked, not what config.yaml now says (suite asked; destructive not asked (ami.ask_destructive is false — the default)) — /frame-jack off, then on, to apply it
 MISSING  frame-jack: ami.command <path> is not an executable file — install strands-decider into a virtual environment and name its strands-decider here
 MISSING  frame-jack: ami.enforce names destructive, which no release has certified to act — remove it; the question stays in shadow mode
 NOTE     frame-jack weights: models--Qwen--Qwen3.5-2B-Base has links into a blob store that is not there — the folders were copied without the blobs; copy with the tarball in README "Weights by hand"
 OK       frame-jack weights: both snapshots present (4.76 GB)
 OK       frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)
 NOTE     frame-jack: on, paused on battery
-NOTE     frame-jack: a second strands-decider serve is running on this machine (pid 70012, port 8762, not this deployment's) — two daemons cost twice 5.3 GB; name the same ami.port in both deployments so one borrows the other
+NOTE     frame-jack: a second strands-decider serve is running on this machine (pid 70012, port 8762, not this deployment's) — two daemons cost twice 5.2 GB; name the same ami.port in both deployments so one borrows the other
 ```

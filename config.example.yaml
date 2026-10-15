@@ -239,7 +239,7 @@ promote:
 #   # The daemon's port, 1024..65535. Every window of this deployment shares
 #   # the one daemon. A second deployment on the machine should name the SAME
 #   # port and borrow it (doctor says when it does not): two ports = two
-#   # daemons = twice 5.3 GB resident.
+#   # daemons = twice 5.2 GB resident.
 #   port: 8761
 #   # true where Hugging Face is unreachable (weights copied by hand, README
 #   # "Weights by hand"): the daemon runs with HF_HUB_OFFLINE=1 and never

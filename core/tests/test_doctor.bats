@@ -1677,7 +1677,7 @@ PY
     "$OWN_PID" "$AMI_FIX/fake-decider" "$MODEL" "$FJ_PORT" "$MODEL" > "$BATS_TEST_TMPDIR/ps.txt"
   fj_daemon "{\"serve_pid\": $OWN_PID}"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"NOTE     frame-jack: a second strands-decider serve is running on this machine (pid 70012, port 8762, not this deployment's) — two daemons cost twice 5.3 GB; name the same ami.port in both deployments so one borrows the other"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     frame-jack: a second strands-decider serve is running on this machine (pid 70012, port 8762, not this deployment's) — two daemons cost twice 5.2 GB; name the same ami.port in both deployments so one borrows the other"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"(pid $OWN_PID,"*|*"(pid 70013,"*) echo "this deployment's serve, or a non-serve line, reported: $output"; return 1 ;; *) : ;; esac
 }
 

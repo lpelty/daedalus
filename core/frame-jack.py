@@ -42,6 +42,8 @@ def default_device():
     """mlx on Apple silicon — it queues overlapping questions where MPS crashed (Metal assertion, twice in the
     lab) and measured 2.7 times faster; cpu anywhere else (mlx does not run there)."""
     return "mlx" if platform.system() == "Darwin" and platform.machine() == "arm64" else "cpu"
+
+
 KEYS = ("command", "model", "device", "port", "offline", "weights_cache", "battery_off",
         "request_timeout_ms", "ask_destructive", "ask_suite", "enforce", "shadow")
 ASK_KEYS = (("destructive", "ask_destructive"), ("suite", "ask_suite"))     # question, its ami.* switch
@@ -1095,7 +1097,7 @@ def doctor_lines(root):
                      "config.yaml" % port)
     for pid, other_port in second_serves(cfg, d):
         lines.append("NOTE     frame-jack: a second strands-decider serve is running on this machine (pid %s, port %s, "
-                     "not this deployment's) — two daemons cost twice 5.3 GB; name the same ami.port in both "
+                     "not this deployment's) — two daemons cost twice 5.2 GB; name the same ami.port in both "
                      "deployments so one borrows the other" % (pid, other_port if other_port is not None else "unknown"))
     return lines
 
