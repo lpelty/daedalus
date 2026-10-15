@@ -4,7 +4,9 @@
     core/promote.sh <NN>                     prepare (§7.1)
     core/promote.sh <NN> --skip-review --reason "..."   prepare without the review, the operator's written reason
                                              recorded (§7.1 step 8; in tty mode the reason is typed at the terminal)
-    core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept)
+    core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept): the
+                                             prime, any promotion; a session holding no window, or a shell,
+                                             pushed promotions only; never one a confirm holds
     core/promote.sh <NN> --confirm [--operator-said "..."] [--id <promote-id>]   confirm and push (§7.2)
     python3 core/promote.py --doctor         doctor's promote lines (§15), one per state
 
@@ -315,13 +317,19 @@ def promote_root(root: Path) -> Path:
     return d
 
 
-def remove_scratch(root: Path, pdir: Path, tr: Dict[str, str]) -> None:
+def remove_scratch(root: Path, pdir: Path, tr: Dict[str, str], strict: bool = False) -> None:
     """One promotion's scratch worktrees — nested first, they sit inside the
-    outer — never its records (prepared.json, context.json, the stamps)."""
+    outer — never its records (prepared.json, context.json, the stamps).
+    strict (the confirm's last step, update-command Decision 7): a scratch
+    still there afterwards raises, naming git's reason, so the caller can
+    say so; every other caller removes what it can and goes on."""
+    failed: List[str] = []
     for repo in sorted(tr, key=len, reverse=True):
         dest = pdir / repo
         if dest.exists():
-            run(["git", "-C", str(root / "target" / repo), "worktree", "remove", "--force", str(dest)])
+            code, _, err = run(["git", "-C", str(root / "target" / repo), "worktree", "remove", "--force", str(dest)])
+            if code != 0:
+                failed.append("%s: %s" % (repo, last_line(err)))
         # only promote's own scratch records: never a worktree the operator made elsewhere (review 3, finding 2)
         ll.prune_under(root / "target" / repo, promote_root(root))
     if pdir.is_dir():
@@ -332,17 +340,40 @@ def remove_scratch(root: Path, pdir: Path, tr: Dict[str, str]) -> None:
                 shutil.rmtree(str(child), ignore_errors=True)
             else:
                 child.unlink()
+    left = [repo for repo in tr if (pdir / repo).exists()]
+    if strict and left:
+        raise RuntimeError("; ".join(failed) or "%s is still there" % ", ".join(rel(root, pdir / r) for r in left))
 
 
-def clean_window(root: Path, nn: str, tr: Dict[str, str]) -> List[str]:
-    """Every scratch of window NN's promotions (plan 4 Decision 22)."""
-    removed = []
+def was_pushed(pdir: Path) -> bool:
+    return (pdir / "pushed").exists() or (pdir / "announced").exists()
+
+
+def clean_window(root: Path, nn: str, tr: Dict[str, str], pushed_only: bool = False) -> Tuple[List[str], List[str]]:
+    """Every scratch of window NN's promotions (plan 4 Decision 22): (removed
+    ids, kept sentences). pushed_only (any caller but the prime, update-command
+    Decision 10b): a promotion with no pushed or announced record is kept and
+    named — its content is not on trunk. Every caller takes each promotion's
+    .confirm.lock (the lock confirm_lock takes) without waiting, and keeps a
+    promotion whose lock is held: a clean never removes a scratch mid-confirm."""
+    removed: List[str] = []
+    kept: List[str] = []
     base = root / "state" / "promote"
     for pdir in sorted(base.glob("%s-*" % nn)) if base.is_dir() else []:
-        if any((pdir / repo).exists() for repo in tr):
+        if not pdir.is_dir() or not any((pdir / repo).exists() for repo in tr):
+            continue
+        if pushed_only and not was_pushed(pdir):
+            kept.append("Kept %s: prepared but not pushed; only the prime removes it." % pdir.name)
+            continue
+        with open(str(pdir / ".confirm.lock"), "a") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                kept.append("Kept %s: being confirmed now." % pdir.name)
+                continue
             remove_scratch(root, pdir, tr)
-            removed.append(pdir.name)
-    return removed
+        removed.append(pdir.name)
+    return removed, kept
 
 
 def cut_scratch(root: Path, pdir: Path, tr: Dict[str, str], shas: Dict[str, str]) -> None:
@@ -689,7 +720,7 @@ def prepare(root: Path, a: dict) -> int:
                    "one at a time." % (nn, " and ".join(names), nn, nested[0], nn, nested[0].split("/", 1)[1]))
     repo = next(iter(by_repo))
     trunk = tr[repo]
-    clean_window(root, nn, tr)
+    clean_window(root, nn, tr)                 # the prime: every earlier scratch of the window but one mid-confirm
     pid = "%s-%s-%s" % (nn, time.strftime("%Y%m%d-%H%M%S"), secrets.token_hex(2)[:3])
     pdir = promote_root(root) / pid
     pdir.mkdir(mode=0o700)
@@ -762,17 +793,65 @@ def prepare(root: Path, a: dict) -> int:
     return 0
 
 
+VISITOR_SENTENCE = ("This is a direct-call session (a visitor): it never runs promote, --clean included. The prime, "
+                    "a session holding no window, or your own shell can.")
+
+
+def who_may_clean(root: Path, leases: Dict[str, dict]) -> str:
+    """Who may run --clean (update-command Decision 10b): 'prime', 'operator' (a
+    shell, as who() decides it) or 'no-window' (a Claude Code session holding
+    no lease and not the pen). A visitor, and a session holding a window that
+    is not the prime, are refused. Removing pushed scratch moves nothing, so it
+    needs no pen — and an upgrade stop, which leaves no window and no pen, can
+    name it."""
+    if os.environ.get("DIRECT_CALL_ID"):
+        raise Stop(VISITOR_SENTENCE)
+    sid = ll.session_id_from_env()
+    claude = os.environ.get("CLAUDECODE") == "1" or bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    if sid is None and not claude:
+        return "operator"
+    if sid is None:
+        who(root, leases)                      # its refusal: a session whose id is not in the environment
+    if (leases.get("prime") or {}).get("session_id") == sid:
+        return "prime"
+    mine, mlease = ll.lease_of_session(leases, sid)
+    if mine:
+        raise Stop("Only the prime window runs promote. You are %s; ask the prime (marked prime on the board), or "
+                   "take the pen first." % ll.window_label(mine, mlease))
+    return "no-window"
+
+
+def clean_target(root: Path, leases: Dict[str, dict], token: str) -> Tuple[str, Dict[str, str]]:
+    """Window NN and its repos for --clean: the trunks its lease file recorded
+    (else the current config's) — never a trunk check: removing scratch moves
+    nothing. A number whose lease file is gone is accepted while
+    state/promote/NN-* exists, with the current config's repos."""
+    try:
+        nn = ll.number_of(leases, token, "promote")
+    except ll.Refused as e:
+        raise Stop(str(e) + ".")
+    lease = leases.get(nn)
+    if nn != "prime" and lease is not None:
+        return nn, lease.get("trunks") or current_trunks(root)
+    base = root / "state" / "promote"
+    if nn == "prime" or not (base.is_dir() and any(base.glob("%s-*" % nn))):
+        raise Stop("No window %s. `core/lease.sh list` shows the live ones." % nn)
+    return nn, current_trunks(root)
+
+
 def clean(root: Path, a: dict) -> int:
-    """`promote <NN> --clean` (§7.1 step 7): every scratch worktree of window NN's
-    promotions goes; prepared.json, context.json and the stamps stay (Decision 22).
-    The repos are the ones the window's lease file recorded (else the current
-    config's) — never a trunk check: removing scratch moves nothing."""
+    """`promote <NN> --clean` (§7.1 step 7): the scratch worktrees of window NN's
+    promotions go; prepared.json, context.json and the stamps stay (Decision 22).
+    The prime removes any promotion's; a session holding no window, or a shell,
+    only a pushed promotion's (update-command Decision 10b); a promotion a
+    confirm holds is kept, for every caller."""
     leases = read_leases(root)
-    who(root, leases)
-    nn, lease = window(leases, a["token"])
-    removed = clean_window(root, nn, lease.get("trunks") or current_trunks(root))
-    print("Removed the promote scratch of window %s (%s); the promotion records are kept." % (nn, ", ".join(removed))
-          if removed else "Window %s has no promote scratch to remove." % nn)
+    kind = who_may_clean(root, leases)
+    nn, tr = clean_target(root, leases, a["token"])
+    removed, kept = clean_window(root, nn, tr, pushed_only=kind != "prime")
+    lines = (["Removed the promote scratch of window %s (%s); the promotion records are kept." % (nn, ", ".join(removed))]
+             if removed else [] if kept else ["Window %s has no promote scratch to remove." % nn])
+    print("\n".join(lines + kept))
     return 0
 
 
@@ -1214,6 +1293,12 @@ def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, y
     notes.extend(step(lambda: tell_marker(root, p, tr),
                       "The prime session's marker could not record the promotion (%s); its next Stop may report the "
                       "trunk as moved.") or [])
+    # Decision 7 (update-command design): the scratch is detached at the merge commit just pushed, so it holds
+    # nothing trunk lacks; left behind, it is copied into every later safety copy. This confirm holds the
+    # promotion's .confirm.lock, so no clean is removing it too. The records stay: a second confirm is refused.
+    step(lambda: remove_scratch(root, pdir, tr, strict=True) or True,
+         "The promote scratch of promotion " + p["promote_id"] + " could not be removed (%s); `core/promote.sh "
+         + nn + " --clean` removes it.")
     if stamped:
         # The stamp is rewritten with how the follow-ups went: the prime's announcement (§4.3) waits for
         # finished_at and repeats these notes, so it never says "brought forward" before or instead of it.
@@ -1380,7 +1465,8 @@ def doctor(root: Path) -> int:
 # --- the command line -----------------------------------------------------------------------------
 
 USAGE = ("Usage: core/promote.sh <NN> [--skip-review [--reason \"...\"]] | <NN> --confirm [--operator-said \"...\"] "
-         "[--id <promote-id>] | <NN> --clean")
+         "[--id <promote-id>] | <NN> --clean (the prime: any promotion; a session holding no window, or a shell: "
+         "pushed promotions only)")
 VALUE_FLAGS: Dict[str, str] = {"--operator-said": "said", "--id": "id", "--reason": "reason"}   # flags with a value
 SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm", "--skip-review": "skip",
                             "--doctor": "doctor"}   # flags without one

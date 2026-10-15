@@ -987,3 +987,102 @@ PY
   case "$output" in *"so no gate ran: what a setup step leaves behind must be ignored by git). An invalid run is not a pass."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"the tree changed while the gates ran"*) echo "false reason: $output"; return 1 ;; *) : ;; esac
 }
+
+# --- the scratch after a push, and --clean with no window (update-command design, Decisions 7 and 10b) ---
+
+# fake_promotion <id> [pushed] — a promotion of window 02 made by hand: a detached scratch of the outer
+# repo at origin/main, its prepared.json, and with "pushed" the pushed stamp a confirm writes.
+fake_promotion() {
+  local d="$DAEDALUS_HOME/state/promote/$1"; mkdir -p "$d"
+  git -C "$T" worktree add -q --detach "$d/thing" origin/main
+  printf '{"lease": "02", "promote_id": "%s", "prepared_ts": 1}\n' "$1" > "$d/prepared.json"
+  if [ "${2:-}" = pushed ]; then printf '{"lease": "02", "merge_sha": "%s"}\n' "$(origin_main)" > "$d/pushed"; fi
+}
+# hold_confirm_lock <id> — another process holds that promotion's .confirm.lock until teardown kills it.
+hold_confirm_lock() {
+  local f="$DAEDALUS_HOME/state/promote/$1/.confirm.lock" ready="$BATS_TEST_TMPDIR/held-$1"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a"); fcntl.flock(f.fileno(), fcntl.LOCK_EX); open(sys.argv[2], "w").close(); time.sleep(300)' \
+    "$f" "$ready" 3>&- </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!" >> "$BATS_TEST_TMPDIR/live-pids"
+  for _ in $(seq 100); do [ -f "$ready" ] && return 0; sleep 0.05; done; return 1
+}
+no_window() { env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sX "$@"; }
+scratch_listed() { git -C "$T" worktree list --porcelain | grep -q "state/promote/$1/"; }
+A=02-20261015-120000-aaa; B=02-20261015-120100-bbb
+
+@test "scratch: a confirm that pushed removes its promotion's scratch worktrees and keeps the records; a second confirm is still refused as already pushed" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  pid="$(pj promote_id)"; m="$(pj merge_sha)"; shown_then_said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"could not be removed"*) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]
+  [ ! -e "$DAEDALUS_HOME/state/promote/$pid/thing" ]
+  ! scratch_listed "$pid"
+  for f in prepared.json context.json pushed; do [ -f "$DAEDALUS_HOME/state/promote/$pid/$f" ] || { echo "no $f"; return 1; }; done
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "was already pushed"
+}
+
+@test "scratch: a scratch the confirm cannot remove is a note naming --clean, never a refusal; the push stands, and --clean removes it afterwards" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; pid="$(pj promote_id)"; m="$(pj merge_sha)"; shown_then_said "yes"
+  S="$DAEDALUS_HOME/state/promote/$pid/thing"
+  run env PROMOTE_TEST_BEFORE_PUSH="chmod 555 '$S'" CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sP bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  chmod 755 "$S"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Nothing was pushed."*|*"Nothing changed on origin."*) echo "$output"; return 1 ;; esac
+  case "$output" in *"The promote scratch of promotion $pid could not be removed ("*"); \`core/promote.sh 02 --clean\` removes it."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Promoted window 02's work to main (merge commit ${m:0:7}"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]; [ -f "$DAEDALUS_HOME/state/promote/$pid/pushed" ]
+  run bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$S" ]; ! scratch_listed "$pid"
+}
+
+@test "clean: from a session holding no window while the upgrade is pending, pushed scratch goes and records stay; a visitor and a window's session are refused; with window 02's lease file gone it still goes" {
+  fake_promotion "$A" pushed
+  printf '9.9.9\n' > "$DAEDALUS_HOME/VERSION"; rm -f "$DAEDALUS_HOME/state/upgraded-to"
+  run env DIRECT_CALL_ID=call-1 CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sV bash "$PROMOTE" 02 --clean
+  refused "This is a direct-call session (a visitor)"
+  run env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sC bash "$PROMOTE" 02 --clean
+  refused "Only the prime window runs promote. You are window 02"
+  [ -d "$DAEDALUS_HOME/state/promote/$A/thing" ]
+  run no_window bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Removed the promote scratch of window 02 ($A); the promotion records are kept." ]
+  [ ! -e "$DAEDALUS_HOME/state/promote/$A/thing" ]; ! scratch_listed "$A"
+  [ -f "$DAEDALUS_HOME/state/promote/$A/prepared.json" ]; [ -f "$DAEDALUS_HOME/state/promote/$A/pushed" ]
+  fake_promotion "$B" pushed
+  rm "$DAEDALUS_HOME/state/leases/02.json"
+  run no_window bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Removed the promote scratch of window 02 ($B); the promotion records are kept." ]
+  [ ! -e "$DAEDALUS_HOME/state/promote/$B/thing" ]; ! scratch_listed "$B"
+  run no_window bash "$PROMOTE" 03 --clean; refused "No window 03."
+}
+
+@test "clean: from a session holding no window or a shell, a pushed promotion's scratch goes and a prepared-not-pushed one is kept and named; from the prime both go" {
+  fake_promotion "$A" pushed; fake_promotion "$B"
+  run no_window bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = "Removed the promote scratch of window 02 ($A); the promotion records are kept." ]
+  [ "${lines[1]}" = "Kept $B: prepared but not pushed; only the prime removes it." ]
+  [ ! -e "$DAEDALUS_HOME/state/promote/$A/thing" ]; [ -d "$DAEDALUS_HOME/state/promote/$B/thing" ]
+  run bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Kept $B: prepared but not pushed; only the prime removes it." ]
+  [ -d "$DAEDALUS_HOME/state/promote/$B/thing" ]
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Removed the promote scratch of window 02 ($B); the promotion records are kept." ]
+  [ ! -e "$DAEDALUS_HOME/state/promote/$B/thing" ]; [ -f "$DAEDALUS_HOME/state/promote/$B/prepared.json" ]
+  [ -z "$(git -C "$T" worktree list --porcelain | grep state/promote)" ]
+}
+
+@test "clean: a promotion whose confirm lock another process holds is skipped and named as being confirmed now, its scratch intact, from the prime and from a shell" {
+  fake_promotion "$A" pushed; hold_confirm_lock "$A"
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Kept $A: being confirmed now." ]
+  [ -d "$DAEDALUS_HOME/state/promote/$A/thing" ]; scratch_listed "$A"
+  run bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Kept $A: being confirmed now." ]
+  [ -d "$DAEDALUS_HOME/state/promote/$A/thing" ]; scratch_listed "$A"
+  teardown_live; sleep 0.2
+  run bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Removed the promote scratch of window 02 ($A); the promotion records are kept." ]
+}
