@@ -424,7 +424,8 @@ _run_scan_in_fixture() {
   for s in '## Upgrading' 'state/upgraded-to' 'core/upgrade.py --dry-run' 'uncommitted changes' 'core/lease.sh adopt <branch>' \
            'cat VERSION' 'makes the window directories' '`adopt <branch>`' 'core.hooksPath' 'the address this checkout records for its branch' \
            'Deleting a window'"'"'s work is report, yes, delete.' 'Bash(core/lease.sh release:*)' 'autoMode.classifyAllShell' \
-           'state/evidence/deletions/'; do
+           'state/evidence/deletions/' '### Letting Daedalus edit its own CLAUDE.md' '"$defaults"' 'the classifier never reads `autoMode` from a project' \
+           'git stash push -m local-changes CLAUDE.md .claude/settings.json && git pull --ff-only && git stash pop'; do
     case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
   done
 }

@@ -35,6 +35,38 @@ your live harness:
 }
 ```
 
+### Letting Daedalus edit its own CLAUDE.md
+
+The distribution denies it (`Edit(/CLAUDE.md)` in `.claude/settings.json`):
+CLAUDE.md is distribution code, and `core/promote.sh`, the direct-call launcher
+and the release pull all refuse a tree whose CLAUDE.md differs from HEAD. A
+deployment that chooses otherwise carries that cost itself. Two things then
+stand in the way. The deny rule: removing it from the tracked file leaves the
+tree modified (see above); a deployment that has already committed local
+changes on its own branch has made that choice. And in auto mode, Claude
+Code's classifier: its "Self-Modification" rule is a soft deny — a message
+from you in the session asking for that edit clears it on its own, and for an
+edit you want allowed without asking each time, add a prose exception to
+**`~/.claude/settings.json`** (user scope; the classifier never reads
+`autoMode` from a project's `.claude/settings*.json`), keeping `"$defaults"`:
+
+```json
+{
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Editing CLAUDE.md in the Daedalus home at /path/to/daedalus when the operator asked for that change in this session: the deployment chose to let Daedalus maintain its own brief."
+    ]
+  }
+}
+```
+
+`core/doctor.sh` prints a NOTE pointing here when no deny rule in the settings
+it reads (project, local, user) covers CLAUDE.md, and OK naming the file that
+does. SOUL.md is different: it is this instance's own journal, is not denied by
+the distribution since 2026-10-15, and no release changes it (a test pins the
+tracked file to its seed).
+
 ## Upgrading
 
 A deployment takes a release by pulling this repository in its home:
@@ -202,6 +234,18 @@ two, then three, windows: at each step it says which terminal, what to say,
 and what you should see, then checks the result. `--rehearse` plays every
 window itself (the suite runs it that way); `--keep` leaves the scratch
 directory to inspect.
+
+**A deployment that modified a tracked file** (`CLAUDE.md`,
+`.claude/settings.json`) cannot fast-forward over a release that changes the
+same file: `git pull --ff-only` refuses with "Your local changes to the
+following files would be overwritten". Keep the local changes on the
+deployment's own branch and bring the release under them: `git stash push -m
+local-changes CLAUDE.md .claude/settings.json && git pull --ff-only && git
+stash pop`, then resolve what conflicts (the 2026-10-15 release rewrites
+CLAUDE.md's "Release window 2" row and the settings file's permissions block)
+and commit the result on the local branch. `core/doctor.sh` keeps naming the
+modified files, and promote and the launcher keep refusing while the tree
+differs from HEAD.
 
 ## Windows (leases)
 

@@ -457,6 +457,56 @@ EOF
   fi
 fi
 
+# CLAUDE.md's deny rule and auto mode's classifyAllShell (agent-runnable design 2026-10-15, §4.6). Read-only.
+# The distribution denies Edit(/CLAUDE.md) in the tracked settings; a deployment that chose to let Daedalus edit
+# its own brief has removed it, and then auto mode's "Self-Modification" soft deny may still refuse the edit —
+# the README says how that is cleared (a user-scope autoMode.allow entry: the classifier never reads autoMode
+# from a project's .claude/settings*.json). Every permissions.deny Edit(...) rule of the project, local and
+# user files is read; a rule covers CLAUDE.md when it names it under any anchor verifylib.home_relative_glob
+# reads (/path, ./path, //<home>/path, bare path) — the line names the file that decided. A user-scope
+# autoMode.classifyAllShell suspends every Bash allow rule in auto mode, the delete's (Bash(core/lease.sh
+# release:*)) included, so the classifier is back in front of it. Managed settings are not read.
+user_settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+cm_state="$(python3 - "$DAEDALUS_HOME" "$user_settings" <<'PY' 2>/dev/null || true
+import json, os, re, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "core"))
+from pathlib import Path
+import verifylib as v
+root = Path(sys.argv[1])
+files = ((root / ".claude" / "settings.json", ".claude/settings.json"),
+         (root / ".claude" / "settings.local.json", ".claude/settings.local.json"),
+         (Path(sys.argv[2]), sys.argv[2]))
+covered = None
+classify_all = False
+for path, label in files:
+    try:
+        d = json.load(open(path))
+    except (OSError, ValueError):
+        continue
+    if not isinstance(d, dict):
+        continue
+    if label == sys.argv[2] and (d.get("autoMode") or {}).get("classifyAllShell") is True:
+        classify_all = True
+    for rule in ((d.get("permissions") or {}).get("deny") or []):
+        m = re.fullmatch(r"Edit\((.+)\)", str(rule))
+        if not m:
+            continue
+        g = v.home_relative_glob(root, m.group(1))
+        if g == "CLAUDE.md" and covered is None:
+            covered = label
+print("covered " + covered if covered else "uncovered")
+print("classifyAllShell" if classify_all else "")
+PY
+)"
+cm_first="$(printf '%s\n' "$cm_state" | sed -n 1p)"
+case "$cm_first" in
+  "covered "*) log "OK       CLAUDE.md: edits denied (${cm_first#covered })" ;;
+  uncovered) log "NOTE     CLAUDE.md: no deny rule covers it in the settings read (project, local, user) — Daedalus may edit its own brief; promote and the launcher refuse while it differs from HEAD, and auto mode's classifier may still refuse the edit (README, \"Letting Daedalus edit its own CLAUDE.md\")" ;;
+esac
+case "$cm_state" in
+  *classifyAllShell*) log "NOTE     auto mode: classifyAllShell is set in $user_settings, so the allow rule for core/lease.sh release is suspended and the classifier judges the delete (README, \"Windows (leases)\")" ;;
+esac
+
 # Promote (spec §15): the confirm mode, each target repo's trunk, the pre-push hook
 # in each (git's own refusal of a trunk push no promotion confirmed), and a
 # promotion prepared but never confirmed. One reader, core/promote.py --doctor;

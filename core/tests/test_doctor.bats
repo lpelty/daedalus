@@ -1377,3 +1377,47 @@ verify:
   PATH=/usr/bin:/bin:/usr/sbin:/sbin run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"NOTE     lease board on screen: claude is not on PATH here, so its version was not checked (mods need 2.1.287 or later)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- CLAUDE.md's deny rule and auto mode's classifyAllShell (agent-runnable design 2026-10-15, §4.6) ----------
+@test "doctor: CLAUDE.md — OK naming the project file when the tracked Edit(/CLAUDE.md) rule is present; OK naming settings.local.json when only it carries Edit(//<home>/CLAUDE.md); the user file is read through CLAUDE_CONFIG_DIR; a NOTE with the README pointer when no deny rule in the three files covers it; doctor stays green" {
+  doctor_upgrade_fixture
+  mkdir -p "$DAEDALUS_HOME/.claude"
+  printf '{"permissions":{"deny":["Edit(/core/**)","Edit(/CLAUDE.md)"]}}\n' > "$DAEDALUS_HOME/.claude/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       CLAUDE.md: edits denied (.claude/settings.json)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"CLAUDE.md: no deny rule covers it"*) echo "a NOTE beside the OK: $output"; return 1 ;; *) : ;; esac
+  printf '{"permissions":{"deny":["Edit(/core/**)"]}}\n' > "$DAEDALUS_HOME/.claude/settings.json"
+  note='NOTE     CLAUDE.md: no deny rule covers it in the settings read (project, local, user) — Daedalus may edit its own brief; promote and the launcher refuse while it differs from HEAD, and auto mode'"'"'s classifier may still refuse the edit (README, "Letting Daedalus edit its own CLAUDE.md")'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"permissions":{"deny":["Edit(//%s/CLAUDE.md)"]}}\n' "$DAEDALUS_HOME" > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       CLAUDE.md: edits denied (.claude/settings.local.json)"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"permissions":{"deny":["Edit(CLAUDE.md)"]}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       CLAUDE.md: edits denied ($CLAUDE_CONFIG_DIR/settings.json)"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a rule for another file, or a file that is not JSON, covers nothing
+  printf '{"permissions":{"deny":["Edit(/SOUL.md)"]}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'not json\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: auto mode — a NOTE when the user settings set autoMode.classifyAllShell (the allow rule for core/lease.sh release is suspended, the classifier judges the delete); absent otherwise, and absent when it is set only in the project files the classifier never reads" {
+  doctor_upgrade_fixture
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"classifyAllShell"*) echo "a NOTE with nothing set: $output"; return 1 ;; *) : ;; esac
+  printf '{"autoMode":{"classifyAllShell":true}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     auto mode: classifyAllShell is set in $CLAUDE_CONFIG_DIR/settings.json, so the allow rule for core/lease.sh release is suspended and the classifier judges the delete (README, \"Windows (leases)\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"autoMode":{"classifyAllShell":false}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"classifyAllShell"*) echo "a NOTE for false: $output"; return 1 ;; *) : ;; esac
+  rm "$CLAUDE_CONFIG_DIR/settings.json"
+  mkdir -p "$DAEDALUS_HOME/.claude"; printf '{"autoMode":{"classifyAllShell":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"classifyAllShell"*) echo "a NOTE for a project file the classifier never reads: $output"; return 1 ;; *) : ;; esac
+}
