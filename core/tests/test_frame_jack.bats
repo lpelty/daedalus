@@ -310,6 +310,33 @@ serve_known() { case "$(dj serve_pid)" in ''|null|0) return 1 ;; *) return 0 ;; 
   kill -0 "$FAKE_PID"
 }
 
+@test "identity is this deployment's: a supervisor-shaped process of another home and an editor open on ami-daemon.py are not this supervisor, a serve on another port is not this serve — off signals none of them and says recycled; on does not say already on" {
+  PORT="$(free_port)"; write_ami_config "$PORT"
+  mkdir -p "$AMI"
+  python3 -c 'import time; time.sleep(300)' ami-daemon.py --home /elsewhere/daedalus 3>&- </dev/null >/dev/null 2>&1 &
+  other=$!; printf '%s\n' "$other" >> "$BATS_TEST_TMPDIR/live-pids"
+  python3 -c 'import time; time.sleep(300)' vim core/ami-daemon.py 3>&- </dev/null >/dev/null 2>&1 &
+  editor=$!; printf '%s\n' "$editor" >> "$BATS_TEST_TMPDIR/live-pids"
+  start_fake "$MODEL"                              # a serve on a port that is not this deployment's
+  printf '{"supervisor_pid": %s, "leash_pid": %s, "serve_pid": %s, "port": %s, "command": "%s", "state": "up", "borrowed": false}\n' \
+    "$other" "$editor" "$FAKE_PID" "$PORT" "$AMI_FIX/fake-decider" > "$AMI/daemon.json"
+  printf '%s session shell\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$AMI/on"
+  run FJ off
+  [ "$status" -eq 0 ]
+  has "$output" "pid $other was recorded as the supervisor but is another process now (recycled)"
+  has "$output" "pid $editor was recorded as the leash but is another process now (recycled)"
+  has "$output" "pid $FAKE_PID was recorded as the AMI"
+  kill -0 "$other"; kill -0 "$editor"; kill -0 "$FAKE_PID"
+  # on: the other home's supervisor is not this deployment's — a supervisor is started, never "already on"
+  set_dj supervisor_pid "$other"
+  run FJ on
+  [ "$status" -eq 0 ]
+  lacks "$output" "already on"
+  wait_state up 15
+  [ "$(dj supervisor_pid)" != "$other" ]
+  FJ off
+}
+
 @test "start path: a fake appearing on the port while the supervisor is in backoff is adopted as borrowed and no second serve is started (one /health per poll in the fake's log, no second fake process)" {
   PORT="$(free_port)"
   cat > "$AMI_FIX/wrapper" <<EOF
@@ -438,7 +465,7 @@ e = json.load(open(sys.argv[1])); print("offline:", e.get("HF_HUB_OFFLINE")); pr
 # decision log. No supervisor runs: status reads, it never starts anything.
 status_home() {
   export DAEDALUS_SESSION_ID=sA
-  start_fake "$MODEL"
+  START_FAKE_PORT="$(free_port)" start_fake "$MODEL"     # an explicit --port, as a real serve has
   write_ami_config "$FAKE_PORT" mlx
   mkdir -p "$AMI/decisions"
   printf '%s session sA\n' "$(date +%Y-%m-%dT09:12:00%z)" > "$AMI/on"

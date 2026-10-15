@@ -287,7 +287,7 @@ class Supervisor:
             if proc.poll() is None:
                 stop_process(proc)
             self.leash_proc = None
-        if serve_pid and self.fj.identified(serve_pid, "serve", self.cfg["command"]):
+        if serve_pid and self.fj.identified(serve_pid, "serve", self.cfg["command"], port=self.cfg["port"]):
             self.fj._stop(serve_pid, grace=2.0)
         self.rec["leash_pid"] = None
         self.rec["serve_pid"] = None
@@ -491,7 +491,7 @@ class Supervisor:
         amilib, fj = self.amilib, self.fj
         cur = amilib._read_json(amilib.daemon_path(self.root)) or {}
         other = cur.get("supervisor_pid")
-        if other and other != os.getpid() and fj.identified(other, "supervisor"):
+        if other and other != os.getpid() and fj.identified(other, "supervisor", root=self.root):
             log("supervisor: ", "another supervisor (pid %s) is alive for this deployment; leaving" % other)
             return 0
         if self.on_battery():

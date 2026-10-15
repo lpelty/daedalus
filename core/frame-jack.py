@@ -18,6 +18,7 @@ import http.client
 import json
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -188,27 +189,51 @@ def proc_command(pid):
         return ""
 
 
-def identified(pid, kind, command=None):
-    """True when the pid is alive AND its command line names what the record says (plan Decision 5):
-    `ami-daemon.py` without `--leash` for the supervisor, with it for the leash, `<basename(command)> serve`
-    for serve. Alive-but-something-else is a recycled pid: False."""
+def _same_path(a, b):
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return str(a) == str(b)
+
+
+def _names_home(line, root):
+    """The command line carries `--home <root>` — the next argument, compared resolved (frame-jack passes the
+    home as it found it, the supervisor passes the leash its resolved form)."""
+    m = re.search(r"(?:^|\s)--home (.+?)(?= --|$)", line)
+    return bool(m) and _same_path(m.group(1).strip(), root)
+
+
+def _names_port(line, port):
+    return re.search(r"(?:^|\s)--port %d(?:\s|$)" % int(port), line) is not None
+
+
+def identified(pid, kind, command=None, root=None, port=None):
+    """True when the pid is alive AND its command line names what the record says (plan Decision 5) — for this
+    deployment, not merely this kind of process: `ami-daemon.py` with `--home <root>` and without `--leash`
+    for the supervisor, with it for the leash; `<basename(command)> serve` with `--port <port>` for serve.
+    root and port narrow the match when given (every caller in frame-jack gives them). Alive-but-something-else
+    is a recycled pid, or another deployment's process: False."""
     if not ll.pid_alive(pid):
         return False
     line = proc_command(pid)
-    if kind == "supervisor":
-        return "ami-daemon.py" in line and "--leash" not in line
-    if kind == "leash":
-        return "ami-daemon.py" in line and "--leash" in line
+    if kind in ("supervisor", "leash"):
+        if not re.search(r"(?:^|[\s/])ami-daemon\.py --", line):
+            return False
+        if root is not None and not _names_home(line, root):
+            return False
+        return ("--leash" in line.split()) == (kind == "leash")
     if kind == "serve":
-        return bool(command) and ("%s serve" % os.path.basename(str(command))) in line
+        if not (bool(command) and ("%s serve" % os.path.basename(str(command))) in line):
+            return False
+        return port is None or _names_port(line, port)
     return False
 
 
-def pid_status(pid, kind, command=None):
+def pid_status(pid, kind, command=None, root=None, port=None):
     """`live` | `dead` | `recycled`."""
     if pid is None or not ll.pid_alive(pid):
         return "dead"
-    return "live" if identified(pid, kind, command) else "recycled"
+    return "live" if identified(pid, kind, command, root, port) else "recycled"
 
 
 def _stop(pid, grace=STOP_GRACE_SECS):
@@ -326,7 +351,7 @@ def cmd_on(root):
     port = cfg["port"]
     with amilib._Locked(amilib.lock_path(root)):
         d = amilib._read_json(amilib.daemon_path(root)) or {}
-        if identified(d.get("supervisor_pid"), "supervisor"):
+        if identified(d.get("supervisor_pid"), "supervisor", root=root):
             _write_sentinel(root)
             print("frame-jack on: already on — %s" % daemon_line(d))
             return 0
@@ -382,12 +407,12 @@ def cmd_off(root):
     port = d.get("port")
     command = d.get("command")
     borrowed = bool(d.get("borrowed"))
-    sup = pid_status(d.get("supervisor_pid"), "supervisor")
-    leash = pid_status(d.get("leash_pid"), "leash")
-    serve = pid_status(d.get("serve_pid"), "serve", command)
+    sup = pid_status(d.get("supervisor_pid"), "supervisor", root=root)
+    leash = pid_status(d.get("leash_pid"), "leash", root=root)
+    serve = pid_status(d.get("serve_pid"), "serve", command, port=port)
     notes = []
     for kind, status, pid in (("supervisor", sup, d.get("supervisor_pid")), ("leash", leash, d.get("leash_pid")),
-                              ("the AMI (%s serve)" % os.path.basename(str(command or "serve")), serve, d.get("serve_pid"))):
+                              ("AMI (%s serve)" % os.path.basename(str(command or "serve")), serve, d.get("serve_pid"))):
         if status == "recycled":
             notes.append("pid %s was recorded as the %s but is another process now (recycled) — nothing was "
                          "sent to it" % (pid, kind))
@@ -408,7 +433,7 @@ def cmd_off(root):
         if not borrowed:
             # the port is no witness while serve is still loading its weights (it binds only when loaded): the
             # supervisor's exit is — it stops the tree before it leaves
-            _wait_identity_gone(d["supervisor_pid"], "supervisor", OFF_SUPERVISOR_WAIT_SECS)
+            _wait_identity_gone(d["supervisor_pid"], "supervisor", root, OFF_SUPERVISOR_WAIT_SECS)
     elif not borrowed:
         if leash == "live":
             _stop(d["leash_pid"])
@@ -439,13 +464,13 @@ def cmd_off(root):
     return 0
 
 
-def _wait_identity_gone(pid, kind, secs):
+def _wait_identity_gone(pid, kind, root, secs):
     end = time.monotonic() + secs
     while time.monotonic() < end:
-        if not identified(pid, kind):
+        if not identified(pid, kind, root=root):
             return True
         time.sleep(0.1)
-    return not identified(pid, kind)
+    return not identified(pid, kind, root=root)
 
 
 def _wait_supervisor_record(root, d, off_by):
@@ -460,13 +485,14 @@ def _wait_supervisor_record(root, d, off_by):
         if not ll.pid_alive(sup):
             break
         time.sleep(0.1)
-    if identified(sup, "supervisor"):
+    if identified(sup, "supervisor", root=root):
         return                                        # still writing; its record will follow
     cur = amilib._read_json(amilib.daemon_path(root)) or d
     if cur and cur.get("state") != "off":
         cur.update({"state": "off", "off_by": cur.get("off_by") or off_by, "heartbeat": time.time(),
-                    "serve_pid": None if not identified(cur.get("serve_pid"), "serve", cur.get("command")) else cur.get("serve_pid"),
-                    "leash_pid": None if not identified(cur.get("leash_pid"), "leash") else cur.get("leash_pid")})
+                    "serve_pid": (cur.get("serve_pid") if identified(cur.get("serve_pid"), "serve", cur.get("command"),
+                                                                     port=cur.get("port")) else None),
+                    "leash_pid": cur.get("leash_pid") if identified(cur.get("leash_pid"), "leash", root=root) else None})
         with amilib._Locked(amilib.lock_path(root)):
             amilib._write_json(amilib.daemon_path(root), cur)
 
@@ -535,7 +561,7 @@ def memory_line(d, command):
     if d.get("borrowed"):
         return "memory: the daemon is borrowed from another deployment — its memory is that deployment's (footprint -p <pid> there)"
     pid = d.get("serve_pid")
-    if pid is None or not identified(pid, "serve", command):
+    if pid is None or not identified(pid, "serve", command, port=d.get("port")):
         return "memory: no serve process of this deployment is running"
     rss_mb = None
     try:
@@ -618,7 +644,7 @@ def _queued(root, sid):
     return n, longest
 
 
-def daemon_status_line(sw, d):
+def daemon_status_line(sw, d, root=None):
     state = sw["state"]
     now = time.time()
     if state == "on":
@@ -641,7 +667,7 @@ def daemon_status_line(sw, d):
         head = state
     hb = d.get("heartbeat")
     sup = "supervisor pid %s" % d.get("supervisor_pid")
-    if pid_status(d.get("supervisor_pid"), "supervisor") != "live":
+    if pid_status(d.get("supervisor_pid"), "supervisor", root=root) != "live":
         sup += " (not running)"
     if isinstance(hb, (int, float)):
         sup += " (heartbeat %s ago)" % _ago(now - hb)
@@ -654,7 +680,7 @@ def daemon_status_line(sw, d):
             if pid is None:
                 parts.append("no %s" % kind)
                 continue
-            st = pid_status(pid, kind, d.get("command"))
+            st = pid_status(pid, kind, d.get("command"), root=root, port=d.get("port"))
             parts.append("%s pid %s%s" % (kind, pid, "" if st == "live" else
                                           " (not running)" if st == "dead" else " (recycled — another process now)"))
     parts.append("port %s" % d.get("port"))
@@ -758,7 +784,7 @@ def cmd_status(root):
             out.append("daemon: no usable record (state/ami/daemon.json is missing or its command is not executable) "
                        "— /frame-jack off, then on")
         else:
-            out.append(daemon_status_line(sw, d))
+            out.append(daemon_status_line(sw, d, root))
             out.append(memory_line(d, d.get("command")))
     # this session
     c = amilib.counters(root, sid) if sid else None
@@ -1012,7 +1038,7 @@ def doctor_lines(root):
                      "its command is not executable) — /frame-jack off, then on")
     elif state == "down" and sw.get("reason") == "supervisor gone":
         serve = d.get("serve_pid")
-        if serve is not None and identified(serve, "serve", d.get("command")):
+        if serve is not None and identified(serve, "serve", d.get("command"), port=d.get("port")):
             tail = "serve pid %s still running" % serve
         else:
             tail = "no serve running"
