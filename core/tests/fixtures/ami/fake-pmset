@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# A stand-in for /usr/bin/pmset (core/tests). `pmset -g batt` prints the power source the way macOS
+# does: "Now drawing from 'AC Power'" or "Now drawing from 'Battery Power'", then the battery line.
+# FAKE_POWER_FILE (a path a test rewrites while a daemon runs) beats FAKE_POWER (a value); the
+# default is AC Power.
+power="$(cat "${FAKE_POWER_FILE:-/nonexistent}" 2>/dev/null)"
+[ -n "$power" ] || power="${FAKE_POWER:-AC Power}"
+printf "Now drawing from '%s'\n" "$power"
+printf " -InternalBattery-0 (id=1)\t100%%; charged; 0:00 remaining present: true\n"
