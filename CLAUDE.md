@@ -105,6 +105,8 @@ it.
 | "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh unpromoted 02` first; it only reports what would be lost — the unpromoted commits and any uncommitted files — and deletes nothing. Repeat that report word for word; it ends with the line `Say yes to delete window 02's work.` End your turn. If they ask something, answer it and end your reply with that one line and nothing after it. When they answer yes, run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` exactly so, from the home, with nothing in front of it (the permission rule matches that command and nothing else). If their reply is more than one plain line, or has a `$`, a backtick or a double quote in it, do not quote it: ask for a one-word yes and carry that. It refuses unless the report was shown and the yes followed it, and it refuses if the window's work changed since the report — then run `unpromoted` again. Never run `release` with `--remove` before that report is repeated and answered; never write a yes the operator did not give. |
 | "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested>` for a nested repo's branch); repeat what it printed — the number, the repo, the commits. |
 | "Pick it up" (after the upgrade said it found unfinished work) | the prime, or a shell | `core/lease.sh adopt --all-unfinished`; repeat each window it made and anything it could not move, with what to do; then say the next session start finishes the upgrade. |
+| "Turn the AMI on / off" / "frame-jack on" / "frame-jack off" | any window | `python3 core/frame-jack.py on` (or `python3 core/frame-jack.py off`); repeat the output word for word. Run it only when the operator said so in this session — the guard refuses it otherwise. `on` takes about half a minute before the AMI answers; the band says when. |
+| "Is frame-jack on?" / "what is the AMI doing?" | any window | Nothing to run: the AMI line on the band above the prompt says it. When there is no AMI line, or they want the long form, `python3 core/frame-jack.py status`, repeated word for word. |
 | (a background clone finished) | — | The board says "04 (spawned) — FINISHED …"; when the operator next asks what is open, repeat it and wait for "promote 4" or "release 4". |
 | "Hand the pen to window 3" | window 03 | `core/lease.sh prime take --reason "<their whole message>"`. Said to the prime instead: "Say that to window 03 — the pen is taken, never given." |
 | "Message window 2 that …" | any window | Send it (below) and repeat the reply word for word when it comes. |
@@ -481,6 +483,16 @@ background — a timeout kills the run mid-review and it must be re-done. The re
 is a receipted call: to ask the reviewer about a finding, run
 `core/call-agent.sh --resume-review <NN> "<the operator's question>"` and repeat
 its answer — advice, never a new verdict.
+
+The AMI (the small local decision model behind `/frame-jack`) may be on.
+In this release it is a logged opinion and changes nothing you do: before a
+Bash call it answers "is this destructive?", and before a full suite run
+"would a targeted run do?", and it only writes the answer down. It never
+asks the operator, never shortens a run, and never touches `core/gates.sh` —
+the evidence run always runs in full. Run the suite as you would without it.
+`state/ami/` is the AMI's record and is not yours to write: the guard denies
+writes and removals there, and `/frame-jack off` is the switch, only on the
+operator's word.
 
 Trunk is reached only through promote (below): commit on your window's
 branch, and never push to trunk or commit on it yourself — the guard and

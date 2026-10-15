@@ -221,3 +221,35 @@ promote:
 #   # Optional turn labels; default User / Assistant.
 #   # user_label: OPERATOR
 #   # assistant_label: Daedalus
+
+# ami:
+#   # Optional — the AMI (Artificial Machine Intelligence): Strands Decider 2B
+#   # through `strands-decider serve`, switched by /frame-jack. Absent, the
+#   # switch refuses with the lines to paste. Comments on their own lines only.
+#   # The strands-decider executable, absolute: the one in the virtual
+#   # environment it was installed into (README "Frame-jack"). Never on PATH.
+#   command: /abs/path/to/ami-venv/bin/strands-decider
+#   model: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+#   # mlx (recommended on Apple silicon), mps, or cpu.
+#   device: mlx
+#   # The daemon's port, 1024..65535. Every window of this deployment shares
+#   # the one daemon. A second deployment on the machine should name the SAME
+#   # port and borrow it (doctor says when it does not): two ports = two
+#   # daemons = twice 5.3 GB resident.
+#   port: 8761
+#   # true where Hugging Face is unreachable (weights copied by hand, README
+#   # "Weights by hand"): the daemon runs with HF_HUB_OFFLINE=1 and never
+#   # tries the network.
+#   offline: false
+#   # Optional. Where the weights cache is, when not ~/.cache/huggingface.
+#   # weights_cache: /abs/path
+#   # Stop the daemon on battery and start it again on AC power. Default true.
+#   battery_off: true
+#   # Per-question request timeout, milliseconds; past it the question is
+#   # unanswered. Default 1500 (measured single-caller p99 441 ms).
+#   request_timeout_ms: 1500
+#   # The questions asked in shadow mode, comma separated. Default both.
+#   shadow: destructive, suite
+#   # Questions allowed to act. NONE is certified in this release; naming one
+#   # here is a doctor MISSING and the question stays in shadow mode.
+#   # enforce:

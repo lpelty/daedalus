@@ -748,3 +748,53 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara|smartsheet' || { echo "names an agent or employer"; return 1; }
   ! printf '%s\n' "$sec" | grep -qE 'PROP-[0-9]|EX-[0-9]|\bB[0-9]\b|\bA[0-9]\b' || { echo "names a proposal number or step code"; return 1; }
 }
+
+@test "frame-jack is documented: README has the Frame-jack section with the install, the config paste, weights by hand and the doctor lines; CLAUDE.md has the two operator rows and the gates paragraph; config.example.yaml has the ami: block with every key; CHANGELOG has the dated part saying shadow and naming the bar; none names the company or a section code" {
+  H="$DAEDALUS_HOME"
+  # README: the section, after "Direct calls", with its parts
+  grep -qF '## Frame-jack (the AMI)' "$H/README.md" || { echo "README lacks the Frame-jack section"; return 1; }
+  dc="$(grep -n '^## Direct calls' "$H/README.md" | head -1 | cut -d: -f1)"
+  fj="$(grep -n '^## Frame-jack (the AMI)' "$H/README.md" | head -1 | cut -d: -f1)"
+  [ "$fj" -gt "$dc" ] || { echo "the Frame-jack section is not after Direct calls"; return 1; }
+  rsec="$(awk '/^## Frame-jack \(the AMI\)/{f=1; print; next} f&&/^## /{exit} f' "$H/README.md")"
+  for s in '### Install' 'uv venv --python 3.12' "[mlx]" 'mlx-lm<0.33' '### The config paste' 'ami:' \
+           '### The switch' '/frame-jack on' '/frame-jack off' '/frame-jack status' '### What shadow means' \
+           '0.95' '0.85' '400 ms' '### Weights by hand' 'tar -czf' 'blobs/6c/' 'blobs/47/' 'offline: true' \
+           'a laptop behind a corporate proxy' 'not yet run there' '### Doctor' 'frame-jack weights:'; do
+    case "$rsec" in *"$s"*) : ;; *) echo "README's Frame-jack section lacks: $s"; return 1 ;; esac
+  done
+  # CLAUDE.md: the two operator rows, after "Pick it up", and the paragraph under "Gates and evidence"
+  grep -qF '| "Turn the AMI on / off"' "$H/CLAUDE.md" || { echo "CLAUDE.md lacks the on/off row"; return 1; }
+  grep -qF '| "Is frame-jack on?"' "$H/CLAUDE.md" || { echo "CLAUDE.md lacks the is-it-on row"; return 1; }
+  pk="$(grep -n '^| "Pick it up"' "$H/CLAUDE.md" | cut -d: -f1)"
+  ro="$(grep -n '^| "Turn the AMI on / off"' "$H/CLAUDE.md" | cut -d: -f1)"
+  [ "$ro" -gt "$pk" ] || { echo "the AMI rows are not after Pick it up"; return 1; }
+  rows="$(grep -E '^\| "(Turn the AMI on / off|Is frame-jack on\?)"' "$H/CLAUDE.md")"
+  for s in 'python3 core/frame-jack.py on' 'python3 core/frame-jack.py off' 'word for word' 'status'; do
+    case "$rows" in *"$s"*) : ;; *) echo "the CLAUDE.md rows lack: $s"; return 1 ;; esac
+  done
+  gsec="$(awk '/^## Gates and evidence/{f=1; next} f&&/^## /{exit} f' "$H/CLAUDE.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in 'logged opinion' 'changes nothing you do' 'state/ami/' 'not yours to write'; do
+    case "$gsec" in *"$s"*) : ;; *) echo "CLAUDE.md's Gates and evidence lacks: $s"; return 1 ;; esac
+  done
+  # config.example.yaml: the block with every key, comments on their own lines, enforce commented out
+  csec="$(awk '/^# ami:/{f=1} f' "$H/config.example.yaml")"
+  [ -n "$csec" ] || { echo "config.example.yaml lacks the ami: block"; return 1; }
+  for k in command model device port offline weights_cache battery_off request_timeout_ms shadow enforce; do
+    printf '%s\n' "$csec" | grep -qE "^#   (# )?$k:" || { echo "the ami: block lacks: $k"; return 1; }
+  done
+  printf '%s\n' "$csec" | grep -qE '^#   # enforce:' || { echo "enforce is not commented out"; return 1; }
+  printf '%s\n' "$csec" | grep -qE '^#   command: /' || { echo "command is not an absolute placeholder"; return 1; }
+  # CHANGELOG: the dated part, its shadow sentence and the bar
+  grep -qF '#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack, a switch for the AMI' "$H/CHANGELOG.md" \
+    || { echo "CHANGELOG lacks the dated part"; return 1; }
+  ch="$(awk '/^#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack/{f=1; print; next} f&&/^#{2,4} /{exit} f' "$H/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in 'shadow' 'never acts' '0.95' '0.60' '0.15' '0.85' '0.05' '400 ms' 'VERSION stays 0.7.0' 'git pull --ff-only'; do
+    case "$ch" in *"$s"*) : ;; *) echo "the CHANGELOG part lacks: $s"; return 1 ;; esac
+  done
+  # none of the four names the company, and none carries a spec section code
+  for t in "$rsec" "$rows" "$gsec" "$csec" "$ch"; do
+    ! printf '%s' "$t" | grep -qi 'smartsheet' || { echo "the company is named"; return 1; }
+    ! printf '%s' "$t" | grep -qE '§[0-9]' || { echo "a section code in operator-facing text: $(printf '%s' "$t" | grep -oE '.{30}§[0-9]+.{0,10}' | head -1)"; return 1; }
+  done
+}

@@ -960,3 +960,161 @@ line alone. `--resume <call-id>` continues a call. Every call is read-only:
 is a discussion, not a work order. With a `memory:` block, the launcher
 captures the call afterwards with the caller and the callee as the speakers;
 the called session's own capture stands down.
+
+## Frame-jack (the AMI)
+
+Frame-jack is an on/off switch for the AMI (Artificial Machine Intelligence):
+a small local decision model, Strands Decider 2B, run by
+`strands-decider serve` on this machine. It answers yes/no questions with a
+calibrated confidence. It cannot write text or reason. In this release it
+asks two questions and **only writes its answers down** (shadow mode):
+
+- before every Bash call the guard did not deny: "is this command
+  destructive or irreversible?";
+- before a full-suite run during a build: "given the files edited since the
+  last run, would a targeted run do?". The evidence run, `core/gates.sh`,
+  is never asked; it always runs in full.
+
+It is optional. Without an `ami:` block nothing changes, and everything
+else in Daedalus works the same. When it is on, it costs about 5.3 GB of
+unified memory while the daemon is up, measured with `footprint`.
+
+### Install
+
+Once per machine, into a virtual environment of its own (Python 3.12):
+
+```bash
+mkdir -p ~/ami && cd ~/ami
+uv venv --python 3.12 .venv-mlx
+git clone --depth 1 https://github.com/strands-labs/strands-decider strands-decider-src
+uv pip install --python .venv-mlx/bin/python -e './strands-decider-src[mlx]' 'mlx-lm<0.33'
+```
+
+The `[mlx]` extra exists only in the git clone until the next PyPI release,
+and `mlx-lm` must stay below 0.33 (the backend reaches into its internals).
+MLX is the recommended device on Apple silicon: it measured about 2.7 times
+faster than MPS here, and it survives concurrent questions (below). A
+deployment that installs the PyPI package instead
+(`uv pip install --python .venv/bin/python strands-decider`) must say
+`device: mps`. Where GitHub is blocked, the clone comes by hand too.
+
+The first start downloads the weights (about 4.8 GB) into the Hugging Face
+cache. Where Hugging Face is unreachable, copy them by hand (below).
+
+### The config paste
+
+Paste the block into `config.yaml` and fill in `command` with the absolute
+path of the `strands-decider` executable inside the virtual environment —
+never a bare name on `PATH`. `config.example.yaml` carries the same block,
+commented, with a line on each key. `/frame-jack on` without a block refuses
+and prints these lines to paste.
+
+```yaml
+ami:
+  command: /abs/path/to/ami/.venv-mlx/bin/strands-decider
+  model: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  device: mlx
+  port: 8761
+  offline: false
+  battery_off: true
+  request_timeout_ms: 1500
+  shadow: destructive, suite
+```
+
+Every window of this deployment shares one daemon. A second deployment on
+the same machine should name the same `port`: it then borrows the daemon
+instead of starting a second one, and never stops it. Thresholds are not
+config; they are the output of a measurement and live in `core/amilib.py`.
+A config edit takes effect at the next `/frame-jack on`.
+
+### The switch
+
+- `/frame-jack on` writes the sentinel `state/ami/on` and starts a
+  supervisor that keeps `strands-decider serve` running. The AMI answers in
+  about 30 seconds. The band above the prompt shows `AMI starting (…)`, then
+  `AMI on`.
+- `/frame-jack off` removes the sentinel and stops the daemon. It says
+  "freed" only once the port is closed.
+- `/frame-jack status` prints the long form: the daemon's pid and memory,
+  the decisions this session, the commands it would have asked you about,
+  and how often its call was overruled. That last count is the calibration
+  meter.
+- On battery the daemon stops by itself, and on AC power it starts again
+  (`battery_off: false` turns this off). The band says `AMI paused on
+  battery`.
+
+The agent may run `core/frame-jack.py on` or `off` only after you said so in
+the session; the guard refuses it otherwise. The agent may not write or
+delete anything under `state/ami/`, which is the AMI's record. From a plain
+shell, `python3 core/frame-jack.py on|off|status` is yours, unrestricted.
+
+Off means conservative, never "skip the check": with the sentinel absent,
+the port dead, or the machine on battery, every consumer takes the branch it
+would take without the AMI. A sentinel present with a dead daemon warns
+once per session.
+
+### What shadow means
+
+Shadow mode asks the question, writes the answer, its confidence and its
+latency to `state/ami/decisions.jsonl`, and acts on nothing. The real
+outcome of the command is written beside it. The AMI never grants a call,
+never replaces a deny, never asks you, and never shortens a test run in
+this release. Acting (enforce mode) was offered only if the AMI met a bar
+fixed before it was measured:
+
+| Question | Bar | Measured (in-sample, MPS) |
+|---|---|---|
+| Destructive or irreversible | recall ≥ 0.95, precision ≥ 0.60, Brier ≤ 0.15 | 1.00 / 0.36 / 0.054, on 4 positives |
+| Would a targeted run do | accuracy ≥ 0.85, "targeted" when full was needed ≤ 0.05 | 0.78 / 0.068 |
+| Latency | median ≤ 400 ms per question | 245 ms on MPS, 60 ms on MLX |
+
+Neither question met its bar, so both ship in shadow mode only. Naming a
+question under `ami.enforce` is a doctor MISSING, and the question stays in
+shadow mode. The shadow log is what the next measurement is built from.
+
+Numbers. Concurrent questions: two at once crashed the MPS daemon (a Metal
+assertion), while MLX queued four callers at a 149 ms p99. The client
+therefore holds a lock, so one deployment's windows never overlap.
+
+### Weights by hand
+
+On a laptop behind a corporate proxy, Hugging Face is likely unreachable.
+The weights are two snapshots in the Hugging Face cache, and the large files
+sit in a shared blob store the snapshot folders only link into. Copying the
+two model folders alone copies links to nothing. Copy the folders and the
+two blobs together (4.76 GB, nothing stored twice):
+
+```bash
+# on a machine that has them
+cd ~/.cache/huggingface/hub && tar -czf ~/strands-decider-weights.tgz \
+  models--Qwen--Qwen3.5-2B-Base models--StrandsAgents--strands-decider-2B-qwen3.5-v1-2610 \
+  blobs/6c/6cb808828f2829da873eb9e83ef220d632e340d54272f0ebdd1a31bd8ee0ded2 \
+  blobs/47/47ee46d5ecca77fec40d7d7cbe4e5d2044b44984f34b09092ac9c6b5cdb78144
+# on the laptop: the same layout, links resolving into the same store
+mkdir -p ~/.cache/huggingface/hub && tar -xzf ~/strands-decider-weights.tgz -C ~/.cache/huggingface/hub
+```
+
+Then set `offline: true` in the `ami:` block, so the daemon runs with
+`HF_HUB_OFFLINE=1` and never tries the network. The two blob names are
+pinned for this model version. The expected snapshots are base `b1485b2f…`
+and decider `216d1ccb…`. This procedure is written down but
+not yet run there; the first copy on that laptop is its test.
+
+### Doctor
+
+`core/doctor.sh` prints a `frame-jack` block from one reader,
+`python3 core/frame-jack.py --doctor`. Anything the deployment works without
+is a NOTE: no block, the weights absent, the daemon down, a second daemon on
+the machine. A block that says something false is a MISSING. For example:
+
+```
+NOTE     frame-jack: no ami: block in config.yaml — the AMI cannot be switched on (optional; see "Frame-jack" in README.md)
+OK       frame-jack: strands-decider at <path>, model StrandsAgents/strands-decider-2B-qwen3.5-v1-2610, device mlx, port 8761, online
+MISSING  frame-jack: ami.command <path> is not an executable file — install strands-decider into a virtual environment and name its strands-decider here
+MISSING  frame-jack: ami.enforce names destructive, which no release has certified to act — remove it; the question stays in shadow mode
+NOTE     frame-jack weights: models--Qwen--Qwen3.5-2B-Base has links into a blob store that is not there — the folders were copied without the blobs; copy with the tarball in README "Weights by hand"
+OK       frame-jack weights: both snapshots present (4.76 GB)
+OK       frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)
+NOTE     frame-jack: on, paused on battery
+NOTE     frame-jack: a second strands-decider serve is running on this machine (pid 70012, port 8762, not this deployment's) — two daemons cost twice 5.3 GB; name the same ami.port in both deployments so one borrows the other
+```
