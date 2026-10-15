@@ -521,6 +521,117 @@ about a promote before you say yes to it. A `gates_setup:` list in
 - Tests: `core/tests/test_session_log.bats` (new), two nested-vault cases in
   `test_vault_commit.bats`, and the `test_identity` pin on the naming.
 
+#### Added on trunk after the v0.7.0 tag — 2026-10-15: the routine steps run by the agent, not the operator
+
+**In short.** Deleting a window's work no longer ends with a shell line for
+you to run: the agent repeats the report, you say yes, the agent runs the
+delete. SOUL.md is yours again — the distribution stops denying edits to it
+and will never change it. A deployment that chose to let Daedalus edit its
+own CLAUDE.md is told exactly where auto mode's exception goes, and doctor
+says when that choice is in force. The vault commit at every close was
+already fixed on 2026-10-14. A deployment with local changes to the tracked
+files gets a recipe for taking this release.
+
+Taken the same way as v0.7.0: `git pull --ff-only` in the Daedalus home,
+then a new session. VERSION stays 0.7.0, so no upgrade step runs.
+
+**What you will see.**
+- "Release window 2 and delete its work" is report, yes, delete. The window
+  runs `core/lease.sh unpromoted 02`, which now ends with one line: "Say yes
+  to delete window 02's work." You may ask about it first; the window answers
+  and ends its answer with that line. When you say yes, the window runs
+  `core/lease.sh release 02 --remove --force --operator-said "<your reply>"`
+  itself. That command is allowed in the tracked `.claude/settings.json`
+  (`Bash(core/lease.sh release:*)`). Claude Code resolves such a rule before
+  auto mode's classifier (permissions and permission-modes docs, read
+  2026-10-15 on 2.1.300). So the classifier's "[Interfere With Workloads]"
+  refusal of 2026-10-14 no longer stands in the way. What decides is now
+  Daedalus's own check, in every permission mode. `core/guard-bash.py`
+  refuses the command before it runs unless three things hold. The report
+  was shown in this session. Your yes followed its line in the session's own
+  transcript (the same recorded-yes machinery promote uses). And the window's
+  work is still what the report named: a fingerprint of its commits and
+  files, so a change since the report means asking again. The guard sees the
+  command behind any wrapper (`timeout`, `nice`, `sudo`, `bash -c` …) and
+  from any path, and refuses it outright through `xargs`. `core/leaselib.py`
+  refuses the same for every form the guard cannot read (`python3
+  core/leaselib.py release …`, a copied script). A reply of several lines or
+  with a `$` in it cannot ride on the command: the window asks for a one-word
+  yes. What authorised a deletion is written to `state/evidence/deletions/`
+  first. Your own shell is unchanged. In `promote.confirm: tty` mode the
+  window hands you the line to paste, as promote does there. The sentence
+  "If the permission system refuses that command, say so and give the
+  operator the line to run" is gone from CLAUDE.md.
+- One caveat: a user-scope `autoMode.classifyAllShell: true` suspends every
+  Bash allow rule in auto mode, so on such a deployment the classifier is
+  back in front of the delete; `core/doctor.sh` prints a NOTE when it finds
+  that set.
+- SOUL.md leaves the tracked deny list. It is this instance's own journal:
+  `core/distcheck.py` does not cover it, and promote does not read it. The
+  distribution will not change it in any later release; a test pins the
+  tracked file to its seed. A release that touched it would make `git pull
+  --ff-only` refuse on every deployment whose instance has written in it. The identity leak scan reads it from HEAD, never the working file.
+  CLAUDE.md stays denied: it is distribution code, and promote and the
+  launcher refuse a tree whose CLAUDE.md differs from HEAD.
+- A deployment that chooses to let Daedalus edit its own CLAUDE.md met auto
+  mode's "[Self-Modification]" refusal on 2026-10-14. The distribution cannot
+  give it the exception: the classifier reads `autoMode` only from
+  `~/.claude/settings.json`, managed settings or `--settings`. It never reads
+  it from a project's `.claude/settings*.json`. README, "Letting Daedalus
+  edit its own CLAUDE.md", gives the one-off `autoMode.allow` entry for the
+  user file (keeping `"$defaults"`). It also notes that a message asking for
+  the edit in the session clears the soft deny on its own. `core/doctor.sh` prints `OK       CLAUDE.md: edits denied (<file>)`
+  naming the project, local or user file whose rule covers it, and a NOTE
+  pointing at that README section when none does.
+- The vault commit at every close was shipped on 2026-10-14 (e1b349e):
+  `core/close.sh --commit` runs `core/vault-commit.sh` after a successful
+  capture (`core/tests/test_close.bats:211`), and `vault-commit.sh` commits
+  a vault the home repository tracks (`core/tests/test_vault_commit.bats:90`,
+  `:114`, `:140`). Nothing new here.
+- **Taking this release on a deployment with local changes.** This release
+  edits `CLAUDE.md` (the "Release window 2" row) and `.claude/settings.json`
+  (the permissions block). The deployment this work is for carries local
+  changes to both. There `git pull --ff-only` refuses with "Your local
+  changes to the following files would be overwritten". Keep the local changes on the deployment's own branch and
+  bring the release under them: `git stash push -m local-changes CLAUDE.md
+  .claude/settings.json && git pull --ff-only && git stash pop`, resolve what
+  conflicts (expect the "Release window 2" row), and commit the result on
+  the local branch. README, "Upgrading", says the same.
+- One fact the check below turned up, worth knowing on a deployment: a
+  project's `permissions.allow` rules apply only in a folder whose workspace
+  trust dialog was accepted, and `claude -p` never shows that dialog
+  (permissions doc, "Project allow rules and workspace trust"). The Daedalus
+  home is such a folder once its first interactive session opened there, so
+  the tracked rule applies in every window. A scratch folder a script made
+  is not. So the check carries the rule through `--settings` (the same scope
+  as `~/.claude/settings.json`). One run keeps the rule in the scratch
+  project file instead, to show the difference (run 2a).
+- The headless check of the allow rule (`core/tests/automode-allow-rule.sh`,
+  run once in validation on 2026-10-15 from the real config home, whose
+  user-scope rules name no `lease.sh`; not part of the suite, since it needs
+  a logged-in `claude`, the network and a model call), verbatim:
+
+  $ core/tests/automode-allow-rule.sh   (claude 2.1.300, 2026-10-15)
+  config home: the real one (~/.claude) — a scratch CLAUDE_CONFIG_DIR is not logged in; the user-scope settings there (permissions.allow, autoMode) were in effect
+  effective auto-mode config saved: <scratch>/auto-mode-config.json (81974 bytes); lease.sh named in it: 0 line(s)
+  run1-default-no-rule: exit 0 — ran: no — denied: no — stdout: The command to release window 02 needs your approval before it can run. I ran it once as the project instructions specify, and the harness blocked it pending permission.  Nothing was changed. Approve 
+  run2a-default-project-rule-untrusted: exit 0 — ran: no — denied: no — stdout: The release command for window 02 was blocked pending approval, so it did not run. Approve `core/lease.sh release 02 --remove --force` and I will run it once as instructed. 
+  run2b-default-settings-rule: exit 0 — ran: yes (release 02 --remove --force ) — denied: no — stdout: Window 02 released. Its worktree and branch are deleted. 
+  run3-auto-rule-and-soft-deny: exit 0 — ran: yes (release 02 --remove --force ) — denied: no — stdout: Window 02 released. Its worktree and branch are deleted. 
+  run4-auto-soft-deny-alone: exit 0 — ran: no — denied: yes ({"command": "core/lease.sh release 02 --remove --force", "reason": "The server-side auto mode classifier judged this action dangerous (it gave no explanation)"} ) — stdout: The release command was blocked by the auto mode permission classifier, so window 02 was not tidied.  The project CLAUDE.md specifies running exactly this once with nothing else, so I did not attempt 
+  results: <scratch>
+  claude -p processes left: none
+  RESULT: the allow rule is resolved before the classifier (runs 2b and 3 ran, run 4 was denied, run 1 did not run)
+  exit 0
+
+- Tests: `test_boundary.bats` (the exact allow list, the deny members),
+  `test_distribution_integrity.bats` (the SOUL.md seed pin),
+  `test_identity.bats` (both scans over HEAD; the CLAUDE.md and README
+  pins), `test_lease.bats` (the report, the witness marker, the fingerprint,
+  the gate and the record), `test_guard_bash.bats` (the early refusal behind
+  every wrapper; the docs' wrapper list pinned), `test_doctor.bats` (the
+  CLAUDE.md and classifyAllShell lines).
+
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
 Prompted by a live defect on a deployment whose GitLab trunk is named

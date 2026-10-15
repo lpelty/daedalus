@@ -333,7 +333,10 @@ since the report. The tracked `.claude/settings.json` allows that one command
 (`Bash(core/lease.sh release:*)`) ahead of auto mode's classifier, because
 `core/guard-bash.py` and `core/leaselib.py` check the yes first, in every
 permission mode (the guard behind any wrapper, leaselib for every form); what
-authorised a deletion is written to `state/evidence/deletions/`. A user-scope
+authorised a deletion is written to `state/evidence/deletions/`. A project's
+allow rules apply only in a folder whose workspace trust dialog you accepted
+— the home is one from its first interactive session on (a `claude -p` run
+never shows the dialog). A user-scope
 `autoMode.classifyAllShell: true` in `~/.claude/settings.json` suspends every
 Bash allow rule in auto mode, so on such a deployment the classifier is back in
 front of the delete and may refuse it as it did before 2026-10-15;
