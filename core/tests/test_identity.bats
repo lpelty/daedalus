@@ -412,12 +412,19 @@ _run_scan_in_fixture() {
            'This is window 02. My work is ready to promote' 'The operator asked you to take the pen' 'will hit it when you run the gates' \
            'core.hooksPath' 'the address this checkout records for its branch' \
            'run `core/lease.sh unpromoted 02` first' 'the unpromoted commits and any uncommitted files' \
-           'only after a yes run `core/lease.sh release 02 --remove --force`' 'Never run `release` with `--remove`' \
-           'If the permission system refuses that command' '! core/lease.sh release 02 --remove --force'; do
+           'it ends with the line `Say yes to delete window 02'"'"'s work.`' 'Never run `release` with `--remove`' \
+           'run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` exactly so' \
+           'ask for a one-word yes and carry that' 'never write a yes the operator did not give'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
+  # 2026-10-15: the agent runs the delete after the yes; the "give the operator the line to run" fallback is gone
+  for s in 'give the operator the line to run' '! core/lease.sh release 02 --remove --force' 'If the permission system refuses'; do
+    case "$CM" in *"$s"*) echo "CLAUDE.md still hands the operator a shell line: $s"; return 1 ;; *) : ;; esac
+  done
   for s in '## Upgrading' 'state/upgraded-to' 'core/upgrade.py --dry-run' 'uncommitted changes' 'core/lease.sh adopt <branch>' \
-           'cat VERSION' 'makes the window directories' '`adopt <branch>`' 'core.hooksPath' 'the address this checkout records for its branch'; do
+           'cat VERSION' 'makes the window directories' '`adopt <branch>`' 'core.hooksPath' 'the address this checkout records for its branch' \
+           'Deleting a window'"'"'s work is report, yes, delete.' 'Bash(core/lease.sh release:*)' 'autoMode.classifyAllShell' \
+           'state/evidence/deletions/'; do
     case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
   done
 }

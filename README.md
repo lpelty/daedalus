@@ -277,6 +277,24 @@ path, and the window number is in the log's frontmatter.
 windows, swept numbers with work still waiting, and the session registry
 Claude Code keeps under `~/.claude/sessions/` (liveness reads it).
 
+Deleting a window's work is report, yes, delete. `core/lease.sh unpromoted 02`
+reports what would be lost and ends with the line `Say yes to delete window
+02's work.`; the agent repeats the report and asks. The yes is found in the
+window's own transcript the way promote's is — your first reply to a turn
+carrying that line, and a reply of the agent's that ends with the line re-arms
+it, so you may ask first — and `core/lease.sh release 02 --remove --force
+--operator-said "<your reply>"` runs only after it: refused when the report was
+not shown, when the yes did not follow it, and when the window's work changed
+since the report. The tracked `.claude/settings.json` allows that one command
+(`Bash(core/lease.sh release:*)`) ahead of auto mode's classifier, because
+`core/guard-bash.py` and `core/leaselib.py` check the yes first, in every
+permission mode (the guard behind any wrapper, leaselib for every form); what
+authorised a deletion is written to `state/evidence/deletions/`. A user-scope
+`autoMode.classifyAllShell: true` in `~/.claude/settings.json` suspends every
+Bash allow rule in auto mode, so on such a deployment the classifier is back in
+front of the delete and may refuse it as it did before 2026-10-15;
+`core/doctor.sh` says so.
+
 ## Promote (`core/promote.sh`)
 
 Trunk moves only through promote. The window holding the pen runs
