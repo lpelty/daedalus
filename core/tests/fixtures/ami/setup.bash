@@ -58,7 +58,6 @@ ami:
   offline: $offline
   battery_off: true
   request_timeout_ms: 1500
-  shadow: destructive, suite
 EOF
 }
 

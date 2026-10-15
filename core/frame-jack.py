@@ -32,7 +32,8 @@ DEFAULT_PORT = 8761
 DEFAULT_TIMEOUT_MS = 1500
 DEVICES = ("mlx", "mps", "cpu")
 KEYS = ("command", "model", "device", "port", "offline", "weights_cache", "battery_off",
-        "request_timeout_ms", "shadow", "enforce")
+        "request_timeout_ms", "ask_destructive", "ask_suite", "enforce", "shadow")
+ASK_KEYS = (("destructive", "ask_destructive"), ("suite", "ask_suite"))     # question, its ami.* switch
 HEALTH_TIMEOUT_SECS = 1.0          # the probe's GET /health
 FIRST_WRITE_SECS = 2.0             # `on` waits this long for the supervisor's first daemon.json (§4.3)
 OFF_PORT_WAIT_SECS = 12.0          # `off` waits this long for the port to go dead before it says freed (§8.2)
@@ -47,7 +48,8 @@ PASTE = (
     "  offline: false",
     "  battery_off: true",
     "  request_timeout_ms: 1500",
-    "  shadow: destructive, suite",
+    "  ask_destructive: false",
+    "  ask_suite: true",
 )
 DROP_PREFIXES = ("CLAUDE", "DAEDALUS_")
 DROP_VARS = ("DIRECT_CALL_ID",)
@@ -125,8 +127,8 @@ def read_config(root):
         problems.append("ami.request_timeout_ms must be a whole number of milliseconds (got %s)"
                         % raw.get("request_timeout_ms"))
         cfg["request_timeout_ms"] = DEFAULT_TIMEOUT_MS
-    shadow = _list(raw.get("shadow"), "shadow", problems)
-    cfg["shadow"] = list(amilib.QUESTIONS) if shadow is None else shadow
+    cfg["questions"] = {q: _bool(raw.get(k), k, problems, amilib.ASKED_DEFAULT[q]) for q, k in ASK_KEYS}
+    cfg["shadow_leftover"] = raw.get("shadow") is not None      # the key this release replaced; doctor says so
     cfg["enforce"] = _list(raw.get("enforce"), "enforce", problems) or []
     cfg["problems"] = problems
     return cfg
@@ -636,6 +638,32 @@ def daemon_status_line(sw, d):
     return "daemon: %s — %s" % (head, ", ".join(parts))
 
 
+def questions_phrase(asked):
+    """`destructive and suite asked` | `suite asked; destructive not asked (ami.ask_destructive is false — the
+    default)` | `none asked (…)` — which questions the guard asks, from {question: bool}."""
+    on = [q for q, _ in ASK_KEYS if asked.get(q)]
+    off = [(q, k) for q, k in ASK_KEYS if not asked.get(q)]
+    if not on:
+        return "none asked (%s are both false)" % " and ".join("ami.%s" % k for _, k in off)
+    if not off:
+        return "%s asked" % " and ".join(on)
+    why = "; ".join("%s not asked (ami.%s is false%s)" % (
+        q, k, " — the default" if amilib.ASKED_DEFAULT[q] is False else "") for q, k in off)
+    return "%s asked; %s" % (" and ".join(on), why)
+
+
+def questions_line(cfg, d):
+    """What the guard asks: the daemon's record when there is one (that is what the guard reads), else the
+    config, else the defaults."""
+    if d and d.get("command"):
+        asked = amilib.asked_questions(d)
+    elif cfg is not None:
+        asked = cfg["questions"]
+    else:
+        asked = dict(amilib.ASKED_DEFAULT)
+    return "questions: " + questions_phrase(asked)
+
+
 def config_line(cfg, d):
     if cfg is None:
         return "config: no ami: block in config.yaml — frame-jack on will refuse until one is pasted"
@@ -643,12 +671,16 @@ def config_line(cfg, d):
     if not d or not d.get("command"):
         return "config: %s (no daemon on record to compare with)" % now_desc
     changed = []
-    for k in ("command", "model", "device", "port", "offline", "battery_off", "request_timeout_ms", "shadow", "enforce"):
+    then_asked = amilib.asked_questions(d)
+    for k in ("command", "model", "device", "port", "offline", "battery_off", "request_timeout_ms",
+              "ask_destructive", "ask_suite", "enforce"):
         then, now_v = d.get(k), cfg.get(k)
-        if k in ("shadow", "enforce"):
+        if k.startswith("ask_"):
+            then, now_v = then_asked[k[4:]], cfg["questions"][k[4:]]
+        if k == "enforce":
             same = sorted(then or []) == sorted(now_v or [])
             fmt = lambda x: ", ".join(x) if x else "nothing"          # noqa: E731
-        elif k in ("offline", "battery_off"):
+        elif k in ("offline", "battery_off") or k.startswith("ask_"):
             same = bool(then) == bool(now_v)
             fmt = lambda x: "true" if x else "false"                  # noqa: E731
         else:
@@ -671,6 +703,7 @@ def cmd_status(root):
         cfg = None
     if not base.is_dir():
         print("frame-jack: off — never switched on in this deployment (/frame-jack on starts the AMI)")
+        print(questions_line(cfg, None))
         print(config_line(cfg, None))
         return 0
     d = amilib._read_json(amilib.daemon_path(root)) or {}
@@ -693,6 +726,7 @@ def cmd_status(root):
         if asked_for:
             mode += " (ami.enforce names %s, which no release has certified to act)" % ", ".join(asked_for)
         out.append("frame-jack: %s (%s), %s" % (since, by, mode))
+        out.append(questions_line(cfg, d))
         if sw["state"] == "unconfigured":
             out.append("daemon: no usable record (state/ami/daemon.json is missing or its command is not executable) "
                        "— /frame-jack off, then on")
@@ -907,6 +941,14 @@ def doctor_lines(root):
         if not problems:
             lines.append("OK       frame-jack: strands-decider at %s, model %s, device %s, port %s, %s" % (
                 cfg["command"], cfg["model"], cfg["device"], cfg["port"], "offline" if cfg["offline"] else "online"))
+        if any(cfg["questions"].values()):
+            lines.append("OK       frame-jack questions: " + questions_phrase(cfg["questions"]))
+        else:
+            lines.append("NOTE     frame-jack questions: %s — switched on, the daemon would hold about 5.2 GB for "
+                         "nothing; leave frame-jack off" % questions_phrase(cfg["questions"]))
+        if cfg["shadow_leftover"]:
+            lines.append("NOTE     frame-jack: ami.shadow is no longer read — ami.ask_destructive and ami.ask_suite "
+                         "say which questions are asked; remove the shadow line")
         # the weights
         hub = hub_dir(cfg)
         total, states = 0, {}

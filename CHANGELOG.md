@@ -1115,9 +1115,13 @@ you about.
 **What it does, and what it does not.** The AMI is Strands Decider 2B. It
 answers yes/no questions with a confidence, and it cannot write text. In this
 release it runs in shadow mode only: it asks, logs, and never acts. Before
-each Bash call the guard allowed, it asks whether the command is destructive.
-Before a full test-suite run during a build, it asks whether a targeted run
-would do. The evidence run, `core/gates.sh`, is never asked. It never grants
+a full test-suite run during a build, it asks whether a targeted run would
+do (`ami.ask_suite`, on by default). It can also ask, before each Bash call
+the guard allowed, whether the command is destructive (`ami.ask_destructive`),
+but that question is off by default: its precision measured 0.36, the guard's
+own rules already deny the destructive cases, and an inference on every Bash
+call costs battery and heat for nearly nothing. Off means no inference and no
+row. `/frame-jack status` and doctor name the questions asked. The evidence run, `core/gates.sh`, is never asked. It never grants
 a call and never replaces a deny. Acting was promised only past a bar set in
 advance. For the destructive question, the bar is recall 0.95, precision
 0.60 and Brier 0.15. It measured 1.00, 0.36 and 0.054, on four positives.

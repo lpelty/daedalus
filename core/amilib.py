@@ -65,6 +65,11 @@ QUESTIONS = {
     "suite":       ("Given the files edited since the last run, is a targeted test run sufficient?",
                     "inverted", 0.391, "P(full run needed) = 1 - P(true)"),   # suite-1: accuracy 0.777, unsafe 0.027 of all / 0.068 of gold-full
 }
+# Which questions are asked at all: ami.ask_destructive / ami.ask_suite, copied by the supervisor into daemon.json's
+# `questions`. The destructive question is off by default: precision 0.36 in calibration, the real destructive
+# cases are already denied by guard-bash's deterministic rules, and an inference on every Bash call costs battery
+# and heat for nearly nothing. Off means no inference and no row for that question.
+ASKED_DEFAULT = {"destructive": False, "suite": True}
 CERTIFIED = ()   # questions whose bar was met on held-out data by a fresh agent; empty at this release (§7). No environment variable, flag or file widens it.
 
 # §6.3 and §6.2: the only two sentences the tier may ever emit, descriptor first, no single-letter code.
@@ -831,6 +836,14 @@ def decide(question: str, p: float, certified=(), mode_hint=None, **ctx) -> dict
     return out
 
 
+def asked_questions(daemon) -> dict:
+    """{question: asked?} from a daemon.json record's `questions` — ASKED_DEFAULT for any question the record does
+    not name (no record, an older record, a non-boolean value)."""
+    q = (daemon or {}).get("questions")
+    q = q if isinstance(q, dict) else {}
+    return {k: q[k] if isinstance(q.get(k), bool) else v for k, v in ASKED_DEFAULT.items()}
+
+
 def enforce_requested(root) -> list:
     """The questions `ami.enforce` names, as the supervisor copied them into daemon.json. A request, never a grant:
     the consumers act only on a question that is also in CERTIFIED (§7), and nothing at runtime widens that."""
@@ -1134,14 +1147,20 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     state = d["state"]
     if state in ("absent", "off"):
         return None                                      # §6.4: nothing written, the guard's decision stands
+    asked = asked_questions(d.get("daemon"))
+    if not any(asked.values()):
+        return None                                      # no question is asked: no segmentation, no row
     segs = segments() if callable(segments) else segments
     question = classify(segs or [])
     extra = {"guard": guard, "cwd": str(cwd), "device": d.get("device")}
     if question == "suite":
+        if not asked["suite"]:
+            return None                                  # ami.ask_suite false: no snapshot, no inference, no row
         return _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline)
-    _bump_calls(root, sid)                               # §6.2: every other Bash call the tier sees
-    if question == "none":
-        return None                                      # §6.1: an evidence run, the switch's own commands, a targeted run
+    if asked["suite"]:
+        _bump_calls(root, sid)                           # §6.2: every other Bash call counts toward the next suite run
+    if question == "none" or not asked.get(question, False):
+        return None                                      # §6.1 none, or ami.ask_destructive false: no inference, no row
     if state != "on":
         return _not_on(root, sid, payload, question, d, extra)
     if deadline - time.monotonic() < MIN_REMAINING_SECS:

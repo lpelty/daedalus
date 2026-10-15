@@ -1572,7 +1572,7 @@ p, cmd, model, port, extra = sys.argv[1:]
 d = {"supervisor_pid": None, "leash_pid": None, "serve_pid": None, "borrowed": False, "port": int(port),
      "device": "mlx", "state": "up", "terminal": False, "since": time.time() - 600, "heartbeat": time.time() - 4,
      "ready_ms": 31000, "restarts": 0, "last_error": None, "off_by": None, "command": cmd, "model": model,
-     "offline": False, "battery_off": True, "request_timeout_ms": 1500, "shadow": ["destructive", "suite"],
+     "offline": False, "battery_off": True, "request_timeout_ms": 1500, "questions": {"destructive": True, "suite": True},
      "enforce": []}
 for k, v in json.loads(extra).items():
     d[k] = time.time() - v if k == "heartbeat_age" else v
@@ -1695,4 +1695,21 @@ EOF
   cp "$SRC/frame-jack.py" "$SRC/amilib.py" "$DAEDALUS_HOME/core/"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
   case "$output" in *"MISSING  frame-jack: ami.device must be mlx, mps or cpu (got cuda)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor frame-jack questions: no ask_ keys is OK naming suite asked and the destructive question off by default; ask_destructive true names both; both false is a NOTE saying the daemon would hold its memory for nothing; a leftover ami.shadow line is a NOTE saying it is no longer read" {
+  doctor_fj_fixture
+  P="$(free_port)"
+  fj_config "$P" mlx false
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack questions: suite asked; destructive not asked (ami.ask_destructive is false — the default)"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_config "$P" mlx false "ask_destructive: true"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack questions: destructive and suite asked"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_config "$P" mlx false "ask_destructive: false" "ask_suite: false"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack questions: none asked (ami.ask_destructive and ami.ask_suite are both false) — switched on, the daemon would hold about 5.2 GB for nothing; leave frame-jack off"*) : ;; *) echo "$output"; return 1 ;; esac
+  fj_config "$P" mlx false "shadow: destructive, suite"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     frame-jack: ami.shadow is no longer read — ami.ask_destructive and ami.ask_suite say which questions are asked; remove the shadow line"*) : ;; *) echo "$output"; return 1 ;; esac
 }

@@ -248,8 +248,15 @@ promote:
 #   # Per-question request timeout, milliseconds; past it the question is
 #   # unanswered. Default 1500 (measured single-caller p99 441 ms).
 #   request_timeout_ms: 1500
-#   # The questions asked in shadow mode, comma separated. Default both.
-#   shadow: destructive, suite
+#   # Which questions the guard asks, each true or false. Off means no
+#   # inference and no decision row for that question.
+#   # "Is this Bash command destructive", on every Bash call the guard
+#   # allowed. Default false: precision 0.36 in calibration, the guard's own
+#   # rules already deny the destructive cases, and an inference per Bash
+#   # call costs battery and heat for nearly nothing.
+#   ask_destructive: false
+#   # "Would a targeted test run do", before a full-suite run. Default true.
+#   ask_suite: true
 #   # Questions allowed to act. NONE is certified in this release; naming one
 #   # here is a doctor MISSING and the question stays in shadow mode.
 #   # enforce:

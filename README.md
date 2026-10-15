@@ -967,13 +967,18 @@ Frame-jack is an on/off switch for the AMI (Artificial Machine Intelligence):
 a small local decision model, Strands Decider 2B, run by
 `strands-decider serve` on this machine. It answers yes/no questions with a
 calibrated confidence. It cannot write text or reason. In this release it
-asks two questions and **only writes its answers down** (shadow mode):
+knows two questions and **only writes its answers down** (shadow mode):
 
-- before every Bash call the guard did not deny: "is this command
-  destructive or irreversible?";
 - before a full-suite run during a build: "given the files edited since the
   last run, would a targeted run do?". The evidence run, `core/gates.sh`,
-  is never asked; it always runs in full.
+  is never asked; it always runs in full. Asked by default
+  (`ask_suite: true`).
+- before every Bash call the guard did not deny: "is this command
+  destructive or irreversible?". **Off by default** (`ask_destructive:
+  false`). Its precision measured 0.36, the destructive cases that matter
+  are already denied by the guard's own rules, and a question on every Bash
+  call costs battery and heat for nearly nothing. Off means no inference and
+  no row for it. Set `ask_destructive: true` to collect shadow answers again.
 
 It is optional. Without an `ami:` block nothing changes, and everything
 else in Daedalus works the same. When it is on, it costs about 5.3 GB of
@@ -1018,7 +1023,8 @@ ami:
   offline: false
   battery_off: true
   request_timeout_ms: 1500
-  shadow: destructive, suite
+  ask_destructive: false
+  ask_suite: true
 ```
 
 Every window of this deployment shares one daemon. A second deployment on
@@ -1110,6 +1116,8 @@ the machine. A block that says something false is a MISSING. For example:
 ```
 NOTE     frame-jack: no ami: block in config.yaml — the AMI cannot be switched on (optional; see "Frame-jack" in README.md)
 OK       frame-jack: strands-decider at <path>, model StrandsAgents/strands-decider-2B-qwen3.5-v1-2610, device mlx, port 8761, online
+OK       frame-jack questions: suite asked; destructive not asked (ami.ask_destructive is false — the default)
+NOTE     frame-jack questions: none asked (ami.ask_destructive and ami.ask_suite are both false) — switched on, the daemon would hold about 5.2 GB for nothing; leave frame-jack off
 MISSING  frame-jack: ami.command <path> is not an executable file — install strands-decider into a virtual environment and name its strands-decider here
 MISSING  frame-jack: ami.enforce names destructive, which no release has certified to act — remove it; the question stays in shadow mode
 NOTE     frame-jack weights: models--Qwen--Qwen3.5-2B-Base has links into a blob store that is not there — the folders were copied without the blobs; copy with the tarball in README "Weights by hand"

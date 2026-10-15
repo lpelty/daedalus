@@ -182,7 +182,7 @@ class Supervisor:
             "since": time.time(), "heartbeat": time.time(), "ready_ms": None, "restarts": 0, "last_error": None,
             "off_by": None, "command": cfg["command"], "model": cfg["model"], "offline": cfg["offline"],
             "battery_off": cfg["battery_off"], "request_timeout_ms": cfg["request_timeout_ms"],
-            "shadow": list(cfg["shadow"]), "enforce": list(cfg["enforce"]),
+            "questions": dict(cfg["questions"]), "enforce": list(cfg["enforce"]),
         }
         self.warm_state = amilib.state_destructive({
             "git_branch": "main", "cwd": str(root), "worktree_line": amilib.worktree_line(root),
@@ -477,7 +477,7 @@ def supervise(args):
                 "port": None, "device": None, "state": "down", "terminal": True, "since": time.time(),
                 "heartbeat": time.time(), "ready_ms": None, "restarts": 0, "last_error": why, "off_by": None,
                 "command": None, "model": None, "offline": None, "battery_off": None, "request_timeout_ms": None,
-                "shadow": [], "enforce": []})
+                "enforce": []})
         return 2
     return Supervisor(root, args.borrowed, cfg, fj, amilib).run()
 

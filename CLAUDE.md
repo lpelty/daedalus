@@ -486,8 +486,9 @@ its answer — advice, never a new verdict.
 
 The AMI (the small local decision model behind `/frame-jack`) may be on.
 In this release it is a logged opinion and changes nothing you do: before a
-Bash call it answers "is this destructive?", and before a full suite run
-"would a targeted run do?", and it only writes the answer down. It never
+full suite run it answers "would a targeted run do?" (and, only where the
+operator set `ami.ask_destructive: true`, "is this destructive?" before a
+Bash call), and it only writes the answer down. It never
 asks the operator, never shortens a run, and never touches `core/gates.sh` —
 the evidence run always runs in full. Run the suite as you would without it.
 `state/ami/` is the AMI's record and is not yours to write: the guard denies

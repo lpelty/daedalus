@@ -760,7 +760,8 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   for s in '### Install' 'uv venv --python 3.12' "[mlx]" 'mlx-lm<0.33' '### The config paste' 'ami:' \
            '### The switch' '/frame-jack on' '/frame-jack off' '/frame-jack status' '### What shadow means' \
            '0.95' '0.85' '400 ms' '### Weights by hand' 'tar -czf' 'blobs/6c/' 'blobs/47/' 'offline: true' \
-           'a laptop behind a corporate proxy' 'not yet run there' '### Doctor' 'frame-jack weights:'; do
+           'a laptop behind a corporate proxy' 'not yet run there' '### Doctor' 'frame-jack weights:' \
+           'ask_destructive: false' 'ask_suite: true' 'frame-jack questions:'; do
     case "$rsec" in *"$s"*) : ;; *) echo "README's Frame-jack section lacks: $s"; return 1 ;; esac
   done
   # CLAUDE.md: the two operator rows, after "Pick it up", and the paragraph under "Gates and evidence"
@@ -780,7 +781,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   # config.example.yaml: the block with every key, comments on their own lines, enforce commented out
   csec="$(awk '/^# ami:/{f=1} f' "$H/config.example.yaml")"
   [ -n "$csec" ] || { echo "config.example.yaml lacks the ami: block"; return 1; }
-  for k in command model device port offline weights_cache battery_off request_timeout_ms shadow enforce; do
+  for k in command model device port offline weights_cache battery_off request_timeout_ms ask_destructive ask_suite enforce; do
     printf '%s\n' "$csec" | grep -qE "^#   (# )?$k:" || { echo "the ami: block lacks: $k"; return 1; }
   done
   printf '%s\n' "$csec" | grep -qE '^#   # enforce:' || { echo "enforce is not commented out"; return 1; }
@@ -789,7 +790,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   grep -qF '#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack, a switch for the AMI' "$H/CHANGELOG.md" \
     || { echo "CHANGELOG lacks the dated part"; return 1; }
   ch="$(awk '/^#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack/{f=1; print; next} f&&/^#{2,4} /{exit} f' "$H/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
-  for s in 'shadow' 'never acts' '0.95' '0.60' '0.15' '0.85' '0.05' '400 ms' 'VERSION stays 0.7.0' 'git pull --ff-only'; do
+  for s in 'shadow' 'never acts' '0.95' '0.60' '0.15' '0.85' '0.05' '400 ms' 'VERSION stays 0.7.0' 'git pull --ff-only' 'ask_destructive' 'off by default'; do
     case "$ch" in *"$s"*) : ;; *) echo "the CHANGELOG part lacks: $s"; return 1 ;; esac
   done
   # none of the four names the company, and none carries a spec section code

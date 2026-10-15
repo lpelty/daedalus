@@ -1293,7 +1293,7 @@ import json, sys, time
 d = {"supervisor_pid": 1, "leash_pid": 1, "serve_pid": 1, "borrowed": False, "port": int(sys.argv[3]), "device": "mps",
      "state": sys.argv[4], "terminal": False, "since": time.time() - 12, "heartbeat": time.time() - float(sys.argv[5]),
      "ready_ms": 31000, "restarts": 0, "last_error": None, "off_by": None, "command": sys.argv[2], "model": "m",
-     "offline": False, "battery_off": True, "request_timeout_ms": int(sys.argv[6]), "shadow": ["destructive", "suite"], "enforce": []}
+     "offline": False, "battery_off": True, "request_timeout_ms": int(sys.argv[6]), "questions": {"destructive": True, "suite": True}, "enforce": []}
 open(sys.argv[1], "w").write(json.dumps(d))
 PY
 }
@@ -1699,4 +1699,57 @@ print(a.enforce_requested(pathlib.Path(sys.argv[1]).parent), a.CERTIFIED)' "$DAE
   run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
   run ami_row 1 '(r["question"], r["p"], r["would_ask"], r["mode"], r["acted"])'
   [ "$output" = "('destructive', 0.9, True, 'shadow', None)" ] || { echo "$output"; return 1; }
+}
+
+ami_questions() {  # ami_questions <python literal or DROP> — set or remove daemon.json's questions key
+  python3 - "$(AMI_DIR_OF)/daemon.json" "$1" <<'PY'
+import ast, json, sys
+p = sys.argv[1]; d = json.load(open(p))
+if sys.argv[2] == "DROP":
+    d.pop("questions", None)
+else:
+    d["questions"] = ast.literal_eval(sys.argv[2])
+open(p, "w").write(json.dumps(d))
+PY
+}
+
+@test "AMI destructive question off: daemon.json questions.destructive false — rm -rf x and git status make no request and write no row (no inference, nothing logged), the calls still count toward the next suite run; a full-suite run still takes the suite path and is asked after an edit" {
+  suite_repo; suite_transcript sA fix/suite
+  ami_on_with_fake FAKE_P=0.8
+  ami_questions '{"destructive": False, "suite": True}'
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed
+  for c in 'rm -rf x' 'git status'; do run guard_ami sA "$c" "$R"; [ "$status" -eq 0 ]; allowed; done
+  [ "$(fake_requests)" -eq 0 ]
+  [ "$(ami_rows_count)" -eq 0 ]
+  run ami_counters sA '(c["asked"]["destructive"], c["suite"]["bash_calls_since_run"])'
+  [ "$output" = "(0, 2)" ] || { echo "$output"; return 1; }
+  printf 'a2\n' > "$R/core/a.py"
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  [ "$(fake_requests)" -eq 1 ]
+  run ami_row 1 'r["question"]'; [ "$output" = suite ]
+}
+
+@test "AMI destructive question off: a daemon.json with no questions key is the default — the destructive question is not asked and no row is written, even with the daemon down (no once sentence for a question nobody asks); questions.suite false skips the suite gate too: no snapshot, no row" {
+  ami_on_with_fake FAKE_P=0.8
+  ami_questions DROP
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  [ "$(fake_requests)" -eq 0 ]
+  [ "$(ami_rows_count)" -eq 0 ]
+  ami_daemon_json "$(free_port)" up
+  ami_questions DROP
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]
+  case "$output" in *systemMessage*) echo "a sentence for an unasked question: $output"; return 1 ;; esac
+  [ "$(ami_rows_count)" -eq 0 ]
+  suite_repo
+  ami_on_with_fake FAKE_P=0.8
+  ami_questions '{"destructive": False, "suite": False}'
+  run guard_ami sB 'bats core/tests' "$R"; allowed
+  printf 'a2\n' > "$R/core/a.py"
+  run guard_ami sB 'bats core/tests' "$R"; allowed
+  [ "$(fake_requests)" -eq 0 ]
+  [ "$(ami_rows_count)" -eq 0 ]
+  if [ -e "$(AMI_DIR_OF)/session-sB.json" ]; then
+    run ami_counters sB '(c.get("suite") or {}).get("last_run")'
+    [ "$output" = None ] || { echo "$output"; return 1; }
+  fi
 }

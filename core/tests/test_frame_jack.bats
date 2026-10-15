@@ -47,7 +47,7 @@ health_gets() { grep -c '"path": "/health"' "$FAKE_LOG" 2>/dev/null || echo 0; }
   [ "$status" -eq 2 ]
   has "$output" "no ami: block in config.yaml"
   has "$output" "paste these into config.yaml, fill them in, then say frame-jack on again"
-  for k in command model device port offline battery_off request_timeout_ms shadow; do
+  for k in command model device port offline battery_off request_timeout_ms ask_destructive ask_suite; do
     case "$output" in *"PASTE    "*"$k:"*) ;; *) echo "no PASTE line for $k in: $output"; return 1 ;; esac
   done
   [ ! -e "$AMI/on" ]
@@ -91,7 +91,7 @@ EOF
   [ "$(dj offline)" = false ]
   [ "$(dj battery_off)" = true ]
   [ "$(dj request_timeout_ms)" = 1500 ]
-  [ "$(dj shadow)" = '["destructive", "suite"]' ]
+  [ "$(dj questions)" = '{"destructive": false, "suite": true}' ]
   [ "$(dj enforce)" = '[]' ]
   [ "$(dj terminal)" = false ]
   [ "$(dj restarts)" = 0 ]
@@ -412,7 +412,7 @@ json.dump({"supervisor_pid": int(sup), "leash_pid": int(leash), "serve_pid": int
            "port": int(port), "device": "mlx", "state": "up", "terminal": False, "since": now - 8070,
            "heartbeat": now - 4, "ready_ms": 31000, "restarts": 0, "last_error": None, "off_by": None,
            "command": cmd, "model": model, "offline": False, "battery_off": True, "request_timeout_ms": 1500,
-           "shadow": ["destructive", "suite"], "enforce": []}, open(ami + "/daemon.json", "w"))
+           "questions": {"destructive": False, "suite": True}, "enforce": []}, open(ami + "/daemon.json", "w"))
 cmds = ["rm -f state/one.lock", "git checkout -- core/two.py", "rm -rf build/three", "git reset --hard four",
         "git clean -fdx five", "rm six.txt", "git branch -D seven"]
 json.dump({"asked": {"destructive": 206, "suite": 6}, "would_ask": 7, "would_shorten": 2,
@@ -453,6 +453,7 @@ SH
   PATH="$shim:$PATH" run FJ status
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   has "$output" "frame-jack: on since 09:12 (this session, by the operator), shadow mode — the AMI logs, never acts"
+  has "$output" "questions: suite asked; destructive not asked (ami.ask_destructive is false — the default)"
   has "$output" "daemon: up 2 h 14 min — supervisor pid $SUP (heartbeat "
   has "$output" " s ago), leash pid $LEASH, serve pid $FAKE_PID, port $FAKE_PORT, device mlx, ready in 31 s, 0 restarts"
   has "$output" "memory: 5,336 MB resident (footprint; 4,618 MB of it in Metal buffers) — ps shows "
@@ -487,12 +488,13 @@ c["unanswered"] = {"down": 2, "timeout": 1}
 json.dump(c, open(p, "w"))
 PY
   sed -i '' 's/^  device: mlx$/  device: cpu/' "$DAEDALUS_HOME/config.yaml"
+  printf '  ask_destructive: true\n' >> "$DAEDALUS_HOME/config.yaml"
   PATH="$shim:$PATH" run FJ status
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   has "$output" "breaker: tripped (slow or wedged) — retrying at "
   has "$output" "the second trip this session"
   has "$output" "unanswered this session: 3 (down 2, timeout 1)"
-  has "$output" "config: changed since the daemon started — ami.device is cpu now, mlx when it started; /frame-jack off, then on, applies it"
+  has "$output" "config: changed since the daemon started — ami.device is cpu now, mlx when it started; ami.ask_destructive is true now, false when it started; /frame-jack off, then on, applies it"
   # a shell, not a session: no session counts, the header names who switched it on
   unset DAEDALUS_SESSION_ID
   PATH="$shim:$PATH" run FJ status
@@ -505,8 +507,26 @@ PY
   run FJ status
   [ "$status" -eq 0 ]
   has "$output" "frame-jack: off — never switched on in this deployment (/frame-jack on starts the AMI)"
+  has "$output" "questions: suite asked; destructive not asked (ami.ask_destructive is false — the default)"
   mkdir -p "$AMI"
   run FJ status
   [ "$status" -eq 0 ]
   has "$output" "frame-jack: off (the sentinel is absent; /frame-jack on starts the AMI)"
+}
+
+@test "on with ask_destructive true and ask_suite false: daemon.json records the questions as configured; a value that is not true or false refuses naming the key" {
+  PORT="$(free_port)"; write_ami_config "$PORT"
+  printf '  ask_destructive: true\n  ask_suite: false\n' >> "$DAEDALUS_HOME/config.yaml"
+  run FJ on
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  wait_state up 15
+  [ "$(dj questions)" = '{"destructive": true, "suite": false}' ]
+  run FJ status
+  has "$output" "questions: destructive asked; suite not asked (ami.ask_suite is false)"
+  run FJ off
+  [ "$status" -eq 0 ]
+  sed -i '' 's/^  ask_suite: false$/  ask_suite: sometimes/' "$DAEDALUS_HOME/config.yaml"
+  run FJ on
+  [ "$status" -eq 2 ]
+  has "$output" "ami.ask_suite must be true or false (got sometimes)"
 }

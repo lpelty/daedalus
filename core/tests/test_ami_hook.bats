@@ -21,7 +21,7 @@ d = {"supervisor_pid": 1, "leash_pid": 1, "serve_pid": 1, "borrowed": False, "po
      "device": "mps", "state": sys.argv[5], "terminal": False, "since": time.time() - 12,
      "heartbeat": time.time() - float(sys.argv[6]), "ready_ms": 31000, "restarts": 0, "last_error": None,
      "off_by": None, "command": sys.argv[3], "model": "m", "offline": False, "battery_off": True,
-     "request_timeout_ms": 1500, "shadow": ["destructive", "suite"], "enforce": []}
+     "request_timeout_ms": 1500, "questions": {"destructive": True, "suite": True}, "enforce": []}
 (ROOT / "state/ami/daemon.json").write_text(json.dumps(d))' "$1" "$2" "$3" "$4"
 }
 sw() { ami_py 'print(a.switch(ROOT, SID))'; }
