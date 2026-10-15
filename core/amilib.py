@@ -21,7 +21,9 @@ import http.client
 import json
 import os
 import re
+import signal
 import socket
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -44,6 +46,8 @@ REGION_CAP_BYTES = 2 * 1024 * 1024        # §5.5: the transcript region since t
 BEFORE_OFFSET_BYTES = 256 * 1024          # §5.5: read before the offset when fewer than five calls lie after it
 STATES = ("absent", "off", "unconfigured", "down", "battery", "starting", "tripped", "on")
 DEFAULT_REQUEST_TIMEOUT_MS = 1500  # §3: the daemon.json copy of request_timeout_ms, when the record lacks it
+SUITE_CAP = 200                    # §6.2: past this many status entries the snapshot is not taken
+EDITED_CAP = 50                    # §6.2: the row names at most this many edited paths
 BREAKER_STRIKES = 3                # §6.5: three consecutive failures trip the breaker
 BREAKER_MINUTES = (5, 10, 20, 60)  # §6.5: 5 → 10 → 20 → 60 min, capped at an hour
 WARN_REASONS = ("down", "supervisor gone")   # §6.4: the two states said once per session in the operator's view
@@ -813,32 +817,258 @@ def _request_timeout_ms(daemon: Optional[dict]) -> int:
         return DEFAULT_REQUEST_TIMEOUT_MS
 
 
+# ---------------------------------------------------------------- §6.2 the suite gate
+def _git(args: List[str], deadline: float):
+    """`git <args>` bounded by the absolute deadline, leaving MIN_REMAINING_SECS for what follows: (code, stdout
+    bytes), or None when the time ran out (the process group is killed — a wrapper's own children with it — so
+    no pipe outlives the hook). Never raises on a missing git: (127, b"")."""
+    timeout = deadline - time.monotonic() - MIN_REMAINING_SECS
+    if timeout <= 0:
+        return None
+    try:
+        proc = subprocess.Popen(["git"] + args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return 127, b""
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        return None
+    return proc.returncode, out
+
+
+def _under(path: Path, top: Path) -> bool:
+    try:
+        path.relative_to(top)
+        return True
+    except ValueError:
+        return False
+
+
+def suite_tree(root, cwd, sid, deadline):
+    """§6.2: the tree a full-suite run runs in — the git toplevel of the payload's cwd, cached per cwd in
+    session-<sid>.json `suite.trees`. A Path, or Unanswered: `target tree` (the cwd or its toplevel is under the
+    home's target/ — refused before any git when the cwd is), `budget` (git ran out of time), `not a git tree`."""
+    target = Path(root).resolve() / "target"
+    here = Path(cwd).resolve()
+    if _under(here, target):
+        return Unanswered("target tree")
+    cached = (((counters(root, sid) or {}).get("suite") or {}).get("trees") or {}).get(str(here)) if sid else None
+    if isinstance(cached, str) and cached:
+        top = Path(cached)
+    else:
+        r = _git(["-C", str(here), "rev-parse", "--show-toplevel"], deadline)
+        if r is None:
+            return Unanswered("budget")
+        code, out = r
+        line = out.decode("utf-8", "replace").strip()
+        if code != 0 or not line:
+            return Unanswered("not a git tree")
+        top = Path(line).resolve()
+    if _under(top, target):
+        return Unanswered("target tree")
+    return top
+
+
+def _hash_path(p: Path) -> str:
+    if p.is_symlink():
+        return "link:" + hashlib.sha256(os.readlink(str(p)).encode("utf-8", "replace")).hexdigest()
+    if p.is_file():
+        h = hashlib.sha256()
+        with open(str(p), "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    if p.is_dir():
+        return "dir"                                     # a nested repository or submodule: listed, not walked
+    return "deleted"
+
+
+def suite_snapshot(tree, deadline):
+    """§6.2: `git status --porcelain --untracked-files=all` in the tree, each listed path's content sha256
+    ({path: sha}; `deleted` for a path gone from disk). Unanswered `too many files` past SUITE_CAP entries —
+    counted before any hashing — or `budget` when git or the hashing runs past the deadline."""
+    r = _git(["-C", str(tree), "status", "--porcelain", "-z", "--untracked-files=all"], deadline)
+    if r is None:
+        return Unanswered("budget")
+    code, out = r
+    if code != 0:
+        return Unanswered("not a git tree")
+    parts = out.decode("utf-8", "surrogateescape").split("\0")
+    paths: List[str] = []
+    i = 0
+    while i < len(parts):
+        e = parts[i]
+        i += 1
+        if len(e) < 4:
+            continue
+        xy, path = e[:2], e[3:]
+        if "R" in xy or "C" in xy:
+            i += 1                                       # -z: a rename's or copy's source follows as its own field
+        paths.append(path)
+    if len(paths) > SUITE_CAP:
+        return Unanswered("too many files")
+    snap: Dict[str, str] = {}
+    for path in paths:
+        if time.monotonic() > deadline - MIN_REMAINING_SECS:
+            return Unanswered("budget")
+        try:
+            snap[path] = _hash_path(Path(tree) / path)
+        except OSError:
+            snap[path] = "unreadable"
+    return snap
+
+
+def edited_since(prev: dict, now: dict) -> List[str]:
+    """Paths new or changed against the stored snapshot, plus paths that left the status listing (committed or
+    reverted since: a change of state the gate counts as an edit — the conservative direction). Sorted."""
+    prev = prev or {}
+    now = now or {}
+    out = {p for p, sha in now.items() if prev.get(p) != sha}
+    out |= {p for p in prev if p not in now}
+    return sorted(out)
+
+
+def _bump_calls(root, sid) -> None:
+    """§6.2: `bash_calls_since_run` counts every Bash call the tier sees between two full runs."""
+    if not sid:
+        return
+    with _Locked(lock_path(root)):
+        c = _load_counters(root, sid)
+        suite = dict(c.get("suite") or {})
+        suite["bash_calls_since_run"] = int(suite.get("bash_calls_since_run") or 0) + 1
+        c["suite"] = suite
+        _write_json(counters_path(root, sid), c)
+
+
+def _suite_record(root, sid, cmd, cwd, tree, snapshot) -> Optional[dict]:
+    """The full run goes: it becomes the session's last run (its snapshot, or None when none could be taken),
+    the call count resets, the cwd's toplevel is cached. Returns what was there before — the previous run and
+    the calls since it."""
+    if not sid:
+        return None
+    with _Locked(lock_path(root)):
+        c = _load_counters(root, sid)
+        suite = dict(c.get("suite") or {})
+        before = {"last_run": suite.get("last_run"), "calls": int(suite.get("bash_calls_since_run") or 0)}
+        suite["last_run"] = {"epoch": time.time(), "command": cmd, "tree": str(tree), "snapshot": snapshot}
+        suite["bash_calls_since_run"] = 0
+        trees = dict(suite.get("trees") or {})
+        trees[str(Path(cwd).resolve())] = str(tree)
+        suite["trees"] = trees
+        if snapshot is None:
+            many = list(suite.get("too_many_files") or [])
+            if str(tree) not in many:
+                many.append(str(tree))                   # status names the tree once
+            suite["too_many_files"] = many
+        c["suite"] = suite
+        _write_json(counters_path(root, sid), c)
+    return before
+
+
+def _not_on(root, sid, payload, question, d, extra):
+    """§6.4: the switch reads present-but-not-on — a row with the reason, and the once sentence for the two
+    states that need the operator's hand."""
+    reason = d.get("reason") or d["state"]
+    row_unanswered(root, sid, payload, reason, question, **extra)
+    if reason in WARN_REASONS:
+        sentence = _warn_once(root, sid, reason)
+        if sentence:
+            return {"context": sentence, "system": sentence}
+    return None
+
+
+def _unanswered_out(root, sid, r):
+    if r.reason in WARN_REASONS:
+        sentence = _warn_once(root, sid, r.reason)
+        if sentence:
+            return {"context": sentence, "system": sentence}
+    return None
+
+
+def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
+    """§6.2 in shadow: the tree, the snapshot, the first run as the baseline, the question on every later full
+    run with the files edited since the previous one; the full run always goes."""
+    if d["state"] != "on":
+        return _not_on(root, sid, payload, "suite", d, extra)
+    if deadline - time.monotonic() < MIN_REMAINING_SECS:
+        row_unanswered(root, sid, payload, "budget", "suite", **extra)
+        return None
+    tree = suite_tree(root, cwd, sid, deadline)
+    if isinstance(tree, Unanswered):
+        row_unanswered(root, sid, payload, tree.reason, "suite", **extra)
+        return None
+    extra = dict(extra, tree=str(tree))
+    snap = suite_snapshot(tree, deadline)
+    if isinstance(snap, Unanswered):
+        if snap.reason == "too many files":
+            _suite_record(root, sid, cmd, cwd, tree, None)
+        row_unanswered(root, sid, payload, snap.reason, "suite", **extra)
+        return None
+    before = _suite_record(root, sid, cmd, cwd, tree, snap) or {}
+    prev = before.get("last_run") or {}
+    if prev.get("tree") != str(tree) or not isinstance(prev.get("snapshot"), dict):
+        return None                                      # the first full run in this tree: the baseline, not asked
+    edited = edited_since(prev["snapshot"], snap)
+    inputs = build_inputs(root, sid, payload, cwd)
+    inputs["files_edited_since_previous_run"] = edited
+    inputs["previous_suite_run_command"] = prev.get("command")
+    inputs["tool_calls_since_previous_run"] = before.get("calls", 0)
+    state_text = state_suite(inputs)
+    daemon = d.get("daemon") or {}
+    r = ask(d["port"], state_text, "suite", deadline, _request_timeout_ms(daemon), ask_lock_path(root),
+            max_length=daemon.get("max_length"))
+    row = row_base(root, sid, payload, cwd)
+    row.update(extra)
+    row["question"] = "suite"
+    row["threshold"] = QUESTIONS["suite"][2]
+    row["state_sha"] = _sha(state_text)
+    row["git_branch"] = inputs.get("git_branch")
+    row["state_inputs"] = inputs.get("state_inputs")
+    row["edited_since_run"] = edited[:EDITED_CAP]
+    if isinstance(r, Unanswered):
+        row["unanswered"] = r.reason
+        append_row(root, sid, row)
+        return _unanswered_out(root, sid, r)
+    dec = decide("suite", r.p, certified=CERTIFIED, edited=edited)
+    row["p"] = r.p
+    row["would_shorten"] = dec["would_shorten"]
+    row["mode"] = dec["mode"]
+    row["acted"] = dec["acted"]
+    row["latency_ms"] = r.latency_ms
+    row["queued_ms"] = r.queued_ms
+    row["input_tokens"] = r.input_tokens
+    row["state_truncated"] = state_truncated(r.input_tokens, r.max_length) if r.max_length else False
+    append_row(root, sid, row)
+    return None                                          # §7: the full run goes (CERTIFIED is empty)
+
+
 def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     """The tier inside the guard (§6.0), after check_command returned no denial: read the switch (one stat when
     off — `segments` may be a callable, run only past that point so an off deployment pays no segmentation),
-    classify, build the state, ask under the absolute `deadline`, write the row. Shadow only in this release:
-    never a decision. Returns None when there is nothing to add to the guard's emit, else
-    {"context": sentence | None, "system": sentence | None} — the once-per-session sentence of §6.4."""
+    classify, count the call, and either run the suite gate (§6.2) or ask the destructive question, under the
+    absolute `deadline`, writing the row. Shadow only in this release: never a decision. Returns None when there
+    is nothing to add to the guard's emit, else {"context": sentence | None, "system": sentence | None} — the
+    once-per-session sentence of §6.4."""
     d = switch_detail(root, sid)
     state = d["state"]
     if state in ("absent", "off"):
         return None                                      # §6.4: nothing written, the guard's decision stands
     segs = segments() if callable(segments) else segments
     question = classify(segs or [])
+    extra = {"guard": guard, "cwd": str(cwd), "device": d.get("device")}
+    if question == "suite":
+        return _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline)
+    _bump_calls(root, sid)                               # §6.2: every other Bash call the tier sees
     if question == "none":
         return None                                      # §6.1: an evidence run, the switch's own commands, a targeted run
-    if question == "suite":
-        row_unanswered(root, sid, payload, "not built", "suite", guard=guard, cwd=str(cwd))   # plan Task 4 fills it
-        return None
-    extra = {"guard": guard, "cwd": str(cwd), "device": d.get("device")}
     if state != "on":
-        reason = d.get("reason") or state
-        row_unanswered(root, sid, payload, reason, question, **extra)
-        if reason in WARN_REASONS:
-            sentence = _warn_once(root, sid, reason)
-            if sentence:
-                return {"context": sentence, "system": sentence}
-        return None
+        return _not_on(root, sid, payload, question, d, extra)
     if deadline - time.monotonic() < MIN_REMAINING_SECS:
         row_unanswered(root, sid, payload, "budget", question, **extra)
         return None
@@ -857,11 +1087,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     if isinstance(r, Unanswered):
         row["unanswered"] = r.reason
         append_row(root, sid, row)
-        if r.reason in WARN_REASONS:
-            sentence = _warn_once(root, sid, r.reason)
-            if sentence:
-                return {"context": sentence, "system": sentence}
-        return None
+        return _unanswered_out(root, sid, r)
     dec = decide(question, r.p, certified=CERTIFIED)
     row["p"] = r.p
     row["would_ask"] = dec["would_ask"]

@@ -1486,3 +1486,154 @@ assert o["text"] == "do the thing" and o["transcript_offset"] == size == rec["si
 print("ok")' "$(AMI_DIR_OF)/session-sA.json" "$BATS_TEST_TMPDIR/transcripts/sA.jsonl"
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
+
+# ---------------------------------------------------------------------------------------------------------
+# The suite gate (frame-jack spec §6.1, §6.2; §13.2 item 4): a full-suite run in the tree the command runs in
+# (the toplevel of the payload's cwd, never target/), judged on a git-status content snapshot capped at 200
+# entries; the first run of a session is the baseline; an evidence run is never asked. Shadow only.
+suite_repo() {  # a scratch git repo as the cwd — not the lease worktree; R names it
+  R="$BATS_TEST_TMPDIR/repo"
+  git init -q -b main "$R"; mkdir -p "$R/core/tests"
+  printf 'a\n' > "$R/core/a.py"; printf 'b\n' > "$R/core/tests/test_a.bats"
+  git -C "$R" add -A; git -C "$R" -c user.email=t@x -c user.name=t commit -q -m i
+  R="$(cd "$R" && pwd -P)"
+}
+suite_transcript() {  # suite_transcript <sid> <branch> — a transcript whose last entry carries gitBranch
+  mkdir -p "$BATS_TEST_TMPDIR/transcripts"
+  printf '{"type":"user","cwd":"%s","gitBranch":"%s","message":{"role":"user","content":"build it"}}\n' "$R" "$2" \
+    > "$BATS_TEST_TMPDIR/transcripts/$1.jsonl"
+}
+ami_counters() {  # ami_counters <sid> <python expression over c>
+  python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$(AMI_DIR_OF)/session-$1.json" "$2"
+}
+fake_posts() {  # fake_posts <python expression over the list of POST entries q>
+  python3 -c 'import json, sys
+q = [json.loads(l) for l in open(sys.argv[1]) if l.strip()] if __import__("os").path.exists(sys.argv[1]) else []
+q = [e for e in q if e.get("method") == "POST"]
+print(eval(sys.argv[2]))' "${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" "$1"
+}
+
+@test "suite classification through the live hook: core/gates.sh, bash -c 'core/gates.sh', \$(core/promote.py --doctor) and python3 core/frame-jack.py status write no row; timeout 600 bats core/tests and /opt/homebrew/bin/bats core/tests take the suite path; bats core/tests/test_x.bats and pytest -k x take no question (spec §6.1: already targeted)" {
+  suite_repo
+  ami_on_with_fake FAKE_P=0.5
+  for c in 'core/gates.sh' "bash -c 'core/gates.sh'" 'echo $(core/promote.py --doctor)' 'python3 core/frame-jack.py status' \
+           'bats core/tests/test_x.bats' 'pytest -k x'; do
+    run guard_ami sN "$c" "$R"; [ "$status" -eq 0 ]; allowed || { echo "$c: $output"; return 1; }
+  done
+  [ "$(ami_rows_count)" -eq 0 ] || { ami_rows; return 1; }
+  [ "$(fake_requests)" -eq 0 ]
+  [ -z "$(ami_counters sN 'c["suite"].get("last_run")' 2>/dev/null | grep -v None)" ]
+  run guard_ami sT1 'timeout 600 bats core/tests' "$R"; allowed
+  run ami_counters sT1 '(c["suite"]["last_run"]["command"], c["suite"]["last_run"]["tree"])'
+  [ "$output" = "('timeout 600 bats core/tests', '$R')" ] || { echo "$output"; return 1; }
+  run guard_ami sT2 '/opt/homebrew/bin/bats core/tests' "$R"; allowed
+  run ami_counters sT2 'c["suite"]["last_run"]["command"]'
+  [ "$output" = "/opt/homebrew/bin/bats core/tests" ] || { echo "$output"; return 1; }
+  [ "$(ami_rows_count)" -eq 0 ]
+}
+
+@test "suite gate: the first full run of a session is not asked and a snapshot of the toplevel of the payload's cwd is taken (a scratch repo, not the lease worktree); after an edit a second bats core/tests writes question suite with p, would_shorten by the 0.391 cut, edited_since_run naming the file, git_branch from the transcript's gitBranch, and the full run goes (nothing emitted)" {
+  suite_repo; suite_transcript sA fix/suite
+  ami_on_with_fake FAKE_P=0.8
+  mkdir -p "$R/core/tests/sub"
+  run guard_ami sA 'bats core/tests' "$R/core/tests/sub"; [ "$status" -eq 0 ]; allowed
+  [ "$(ami_rows_count)" -eq 0 ]
+  [ "$(fake_requests)" -eq 0 ]
+  run ami_counters sA '(c["suite"]["last_run"]["tree"], c["suite"]["last_run"]["snapshot"], c["suite"]["bash_calls_since_run"])'
+  [ "$output" = "('$R', {}, 0)" ] || { echo "$output"; return 1; }
+  printf 'a2\n' > "$R/core/a.py"
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed
+  [ "$(fake_requests)" -eq 1 ]
+  run ami_row 1 '(r["question"], r["p"], r["threshold"], r["would_shorten"], r["mode"], r["acted"], r["unanswered"], r["edited_since_run"], r["git_branch"], r["tree"], r["cwd"], r["command_head"])'
+  [ "$output" = "('suite', 0.8, 0.391, True, 'shadow', None, None, ['core/a.py'], 'fix/suite', '$R', '$R', 'bats core/tests')" ] || { echo "$output"; return 1; }
+  run fake_posts 'q[-1]["question"]'
+  [ "$output" = "Given the files edited since the last run, is a targeted test run sufficient?" ]
+  run fake_posts '"  - core/a.py" in q[-1]["state"] and "branch fix/suite" in q[-1]["state"]'
+  [ "$output" = True ]
+  run ami_counters sA '(c["asked"]["suite"], c["would_shorten"], list(c["suite"]["last_run"]["snapshot"]))'
+  [ "$output" = "(1, 1, ['core/a.py'])" ] || { echo "$output"; return 1; }
+  FAKE_LOG="$BATS_TEST_TMPDIR/low.log" ami_on_with_fake FAKE_P=0.2       # 1 − 0.2 = 0.8 ≥ 0.391: full run needed
+  printf 'a3\n' > "$R/core/a.py"
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  run ami_row 2 '(r["p"], r["would_shorten"], r["edited_since_run"])'
+  [ "$output" = "(0.2, False, ['core/a.py'])" ] || { echo "$output"; return 1; }
+}
+
+@test "suite gate: a cwd under target/ is refused — edited_since_run null, reason target tree, no git status run in target/" {
+  mkdir -p "$BATS_TEST_TMPDIR/gitlog"
+  real_git="$(command -v git)"
+  printf '#!/bin/bash\nprintf "%%s | %%s\\n" "$PWD" "$*" >> "%s/gitlog/calls"\nexec "%s" "$@"\n' "$BATS_TEST_TMPDIR" "$real_git" > "$BATS_TEST_TMPDIR/gitlog/git"
+  chmod +x "$BATS_TEST_TMPDIR/gitlog/git"
+  ami_on_with_fake FAKE_P=0.8
+  PATH="$BATS_TEST_TMPDIR/gitlog:$PATH" run guard_ami sA 'bats core/tests' "$T"; [ "$status" -eq 0 ]; allowed
+  PATH="$BATS_TEST_TMPDIR/gitlog:$PATH" run guard_ami sA 'bats core/tests' "$T"; allowed
+  run ami_row 1 '(r["question"], r["unanswered"], r["edited_since_run"], r["p"])'
+  [ "$output" = "('suite', 'target tree', None, None)" ] || { echo "$output"; return 1; }
+  run ami_row 2 'r["unanswered"]'; [ "$output" = "target tree" ]
+  [ "$(fake_requests)" -eq 0 ]
+  ! grep -q 'status' "$BATS_TEST_TMPDIR/gitlog/calls" 2>/dev/null || { cat "$BATS_TEST_TMPDIR/gitlog/calls"; return 1; }
+  ! grep -q 'show-toplevel' "$BATS_TEST_TMPDIR/gitlog/calls" 2>/dev/null || { cat "$BATS_TEST_TMPDIR/gitlog/calls"; return 1; }
+}
+
+@test "suite gate: 201 untracked files — unanswered too many files, edited_since_run null, no hashing; the counters say the tree once" {
+  suite_repo
+  ami_on_with_fake FAKE_P=0.8
+  run guard_ami sA 'bats core/tests' "$R"; allowed                    # the baseline, under the cap
+  mkdir -p "$R/junk"; for i in $(seq 1 201); do printf '%s\n' "$i" > "$R/junk/f$i"; done
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  run ami_row 1 '(r["question"], r["unanswered"], r["edited_since_run"], r["tree"])'
+  [ "$output" = "('suite', 'too many files', None, '$R')" ] || { echo "$output"; return 1; }
+  run ami_row 2 'r["unanswered"]'; [ "$output" = "too many files" ]
+  [ "$(fake_requests)" -eq 0 ]
+  run ami_counters sA '(c["suite"]["too_many_files"], c["suite"]["last_run"]["snapshot"], c["unanswered"])'
+  [ "$output" = "(['$R'], None, {'too many files': 2})" ] || { echo "$output"; return 1; }
+}
+
+@test "suite gate: a command mixing python3 fix.py && bats core/tests gets the suite question only; one with an evidence-run segment anywhere gets none" {
+  suite_repo
+  ami_on_with_fake FAKE_P=0.8
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  printf 'x\n' > "$R/fix.py"
+  run guard_ami sA 'python3 fix.py && bats core/tests' "$R"; allowed
+  [ "$(ami_rows_count)" -eq 1 ]
+  run ami_row 1 '(r["question"], r["edited_since_run"])'
+  [ "$output" = "('suite', ['fix.py'])" ] || { echo "$output"; return 1; }
+  run guard_ami sA 'python3 fix.py && bats core/tests && core/gates.sh' "$R"; allowed
+  run guard_ami sA "bash -c 'bats core/tests; core/promote.py --doctor'" "$R"; allowed
+  [ "$(ami_rows_count)" -eq 1 ]
+  [ "$(fake_requests)" -eq 1 ]
+}
+
+@test "suite gate: bash_calls_since_run counts every Bash call between two full runs and resets after one; the state text carries that count and the previous run's command" {
+  suite_repo
+  ami_on_with_fake FAKE_P=0.8
+  run guard_ami sA 'timeout 600 bats core/tests' "$R"; allowed
+  for c in 'ls' 'echo hi' 'bats core/tests/test_a.bats'; do run guard_ami sA "$c" "$R"; allowed; done
+  run ami_counters sA 'c["suite"]["bash_calls_since_run"]'; [ "$output" = 3 ]
+  printf 'a2\n' > "$R/core/a.py"
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  run fake_posts '[l for l in q[-1]["state"].splitlines() if l.startswith(("Previous suite run", "Tool calls since"))]'
+  [ "$output" = "['Previous suite run in this session: timeout 600 bats core/tests', 'Tool calls since that run: 3']" ] || { echo "$output"; return 1; }
+  run ami_counters sA '(c["suite"]["bash_calls_since_run"], c["suite"]["last_run"]["command"])'
+  [ "$output" = "(0, 'bats core/tests')" ] || { echo "$output"; return 1; }
+  run guard_ami sA 'ls' "$R"; allowed
+  run ami_counters sA 'c["suite"]["bash_calls_since_run"]'; [ "$output" = 1 ]
+}
+
+@test "suite gate: the git call is bounded by the deadline — a slow git first on PATH (fixtures/leases/fake-git-slow) under AMI_TEST_DEADLINE_SECS=1 gives unanswered budget and the hook returns inside the deadline" {
+  suite_repo
+  ami_on_with_fake FAKE_P=0.8
+  mkdir -p "$BATS_TEST_TMPDIR/slowgit"
+  real_git="$(command -v git)"
+  # the fixture's fake-git-slow sleeps on `worktree add` only; this one sleeps on the gate's two calls
+  printf '#!/bin/bash\ncase " $* " in *" --show-toplevel "*|*" status "*) sleep 5 ;; esac\nexec "%s" "$@"\n' "$real_git" > "$BATS_TEST_TMPDIR/slowgit/git"
+  chmod +x "$BATS_TEST_TMPDIR/slowgit/git"
+  t0="$(secs)"
+  PATH="$BATS_TEST_TMPDIR/slowgit:$PATH" AMI_TEST_DEADLINE_SECS=1 run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed
+  t1="$(secs)"
+  python3 -c 'import sys; el=float(sys.argv[2])-float(sys.argv[1]); assert el < 1.6, el' "$t0" "$t1"
+  run ami_row 1 '(r["question"], r["unanswered"], r["edited_since_run"])'
+  [ "$output" = "('suite', 'budget', None)" ] || { echo "$output"; return 1; }
+  [ "$(fake_requests)" -eq 0 ]
+}

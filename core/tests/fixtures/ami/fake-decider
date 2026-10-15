@@ -12,7 +12,7 @@ Environment:
   FAKE_P            P for every question (default 0.5)
   FAKE_P_MAP        "destructive=0.4,suite=0.7" — P keyed on a word found in the question text
   FAKE_DELAY_MS     sleep this long before each /v1/systemone answer
-  FAKE_LOG          one JSON line per request: {path, method, question, t0, t1}
+  FAKE_LOG          one JSON line per request: {path, method, question, t0, t1, state (POST only)}
   FAKE_STATUS       answer /v1/systemone with this HTTP status and an error body (e.g. 500)
   FAKE_BAD_ANSWER   =1: answer /v1/systemone with a body that carries no float ("bad answer")
   FAKE_EXIT_WEIGHTS =1: print 'LocalEntryNotFoundError: not found in cache' and exit 1 before binding
@@ -111,7 +111,8 @@ def make_handler(checkpoint, device):
                     self._send(200, {"model": os.path.basename(checkpoint), "answers": answers,
                                      "usage": {"input_tokens": max(1, len(state) // 4), "output_tokens": len(answers)},
                                      "latency_ms": round((time.time() - t0) * 1000, 2)})
-            log({"path": self.path, "method": "POST", "question": qtext, "t0": t0, "t1": time.time()})
+            log({"path": self.path, "method": "POST", "question": qtext, "t0": t0, "t1": time.time(),
+                 "state": req.get("state")})
     return H
 
 
