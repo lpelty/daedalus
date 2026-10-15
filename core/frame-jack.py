@@ -355,6 +355,15 @@ def cmd_on(root):
             _write_sentinel(root)
             print("frame-jack on: already on — %s" % daemon_line(d))
             return 0
+        # this deployment's own serve, left running when its supervisor and leash were both killed: it is ours
+        # to stop, never another deployment's AMI to borrow (that would leave 5 GB nobody's to free)
+        own = d.get("serve_pid")
+        if own and not d.get("borrowed") and identified(own, "serve", d.get("command") or cfg["command"],
+                                                        port=d.get("port") or port):
+            _stop(own)
+            _wait_port_closed(d.get("port") or port, OFF_PORT_WAIT_SECS)
+            print("frame-jack on: stopped this deployment's own serve (pid %s), left running without its "
+                  "supervisor; starting a fresh one" % own)
         borrowed = False
         if amilib._port_open(port):
             if is_ami(port, cfg["model"]):

@@ -337,6 +337,27 @@ serve_known() { case "$(dj serve_pid)" in ''|null|0) return 1 ;; *) return 0 ;; 
   FJ off
 }
 
+@test "on after the supervisor and the leash were both SIGKILLed: this deployment's own orphaned serve is stopped and replaced, never borrowed — borrowed false, a new serve pid, the old one gone, and off then frees it" {
+  PORT="$(free_port)"; write_ami_config "$PORT"
+  FJ on; wait_state up 15
+  sup="$(dj supervisor_pid)"; leash="$(dj leash_pid)"; serve="$(dj serve_pid)"
+  kill -STOP "$sup"; kill -9 "$leash"; kill -9 "$sup"
+  wait_gone "$sup" 2; wait_gone "$leash" 2
+  kill -0 "$serve"
+  port_open "$PORT"
+  run FJ on
+  [ "$status" -eq 0 ]
+  lacks "$output" "using the AMI already running"
+  has "$output" "stopped this deployment's own serve (pid $serve)"
+  wait_gone "$serve" 2
+  wait_state up 15
+  [ "$(dj borrowed)" = false ]
+  [ "$(dj serve_pid)" != "$serve" ]
+  run FJ off
+  [ "$status" -eq 0 ]
+  has "$output" "freed"
+}
+
 @test "start path: a fake appearing on the port while the supervisor is in backoff is adopted as borrowed and no second serve is started (one /health per poll in the fake's log, no second fake process)" {
   PORT="$(free_port)"
   cat > "$AMI_FIX/wrapper" <<EOF
