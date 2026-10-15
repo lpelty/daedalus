@@ -17,6 +17,7 @@ Environment:
   FAKE_BAD_ANSWER   =1: answer /v1/systemone with a body that carries no float ("bad answer")
   FAKE_EXIT_WEIGHTS =1: print 'LocalEntryNotFoundError: not found in cache' and exit 1 before binding
   FAKE_ENV_DUMP     write os.environ as JSON to this path at start
+  FAKE_BIND_DELAY_MS  sleep this long before binding the port (a cold start still loading its weights)
 
 --port 0 binds a free port. The first stdout line is the port. Exits on SIGTERM. The server is
 threaded, as the real one is (its endpoints run in a threadpool), so two requests at once overlap in
@@ -138,6 +139,9 @@ def main(argv):
         print("huggingface_hub.errors.LocalEntryNotFoundError: not found in cache", file=sys.stderr)
         sys.stderr.flush()
         return 1
+    bind_delay = float(os.environ.get("FAKE_BIND_DELAY_MS", "0") or 0)
+    if bind_delay:
+        time.sleep(bind_delay / 1000.0)
     srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(model, device))
     srv.daemon_threads = True
     print(srv.server_address[1], flush=True)

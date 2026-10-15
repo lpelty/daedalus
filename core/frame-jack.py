@@ -48,6 +48,7 @@ HEALTH_TIMEOUT_SECS = 1.0          # the probe's GET /health
 FIRST_WRITE_SECS = 2.0             # `on` waits this long for the supervisor's first daemon.json (§4.3)
 OFF_PORT_WAIT_SECS = 12.0          # `off` waits this long for the port to go dead before it says freed (§8.2)
 OFF_RECORD_WAIT_SECS = 5.0         # then for the supervisor's final record
+OFF_SUPERVISOR_WAIT_SECS = 15.0    # `off` waits this long for a live supervisor to stop its tree and exit
 STOP_GRACE_SECS = 10.0             # SIGTERM, this long, SIGKILL
 PASTE = (
     "ami:",
@@ -400,7 +401,14 @@ def cmd_off(root):
         print("frame-jack off: already off")
         return 0
     if sup == "live":
-        os.kill(int(d["supervisor_pid"]), signal.SIGHUP)        # the supervisor stops the leash, which stops serve
+        try:
+            os.kill(int(d["supervisor_pid"]), signal.SIGHUP)    # the supervisor stops the leash, which stops serve
+        except OSError:
+            pass                                                # it exited between the identity check and now
+        if not borrowed:
+            # the port is no witness while serve is still loading its weights (it binds only when loaded): the
+            # supervisor's exit is — it stops the tree before it leaves
+            _wait_identity_gone(d["supervisor_pid"], "supervisor", OFF_SUPERVISOR_WAIT_SECS)
     elif not borrowed:
         if leash == "live":
             _stop(d["leash_pid"])
@@ -429,6 +437,15 @@ def cmd_off(root):
         return 0
     print("frame-jack off: the AMI is stopped and its 5 GB freed (port %s is closed)" % port)
     return 0
+
+
+def _wait_identity_gone(pid, kind, secs):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if not identified(pid, kind):
+            return True
+        time.sleep(0.1)
+    return not identified(pid, kind)
 
 
 def _wait_supervisor_record(root, d, off_by):

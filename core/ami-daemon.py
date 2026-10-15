@@ -15,6 +15,10 @@ one warm-up question and writes `up`; serve running gets one /health per pass (t
 and every tenth pass one bounded inference probe (two past the bound restart it). A terminal exit —
 weights missing, or the port held by something that is not the AMI — is `down`, `terminal: true`, no
 retry until the next `frame-jack on`. Every pass rewrites daemon.json (tmp + rename) with the heartbeat.
+Starting serve is watched too: leash_pid and serve_pid are written as soon as they are known, the heartbeat
+once per poll while the weights load, and the sentinel gone during the readiness wait or the warm-up stops
+the tree at once (StopRequested) — `off` waits for this supervisor's exit, since the port is no witness
+before serve has bound it.
 
 The leash: a child of the supervisor with the supervisor's pipe on its stdin; it starts serve with a
 clean environment and waits on its stdin and on serve's exit. EOF (the supervisor is gone, however it
@@ -32,6 +36,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -158,6 +163,10 @@ def leash(args):
 
 
 # ---------------------------------------------------------------- the supervisor
+class StopRequested(Exception):
+    """The sentinel went while launch() was waiting on serve: unwind to run(), which stops the tree."""
+
+
 class Supervisor:
     def __init__(self, root, borrowed, cfg, fj, amilib):
         self.root = root
@@ -176,6 +185,7 @@ class Supervisor:
         self.health_fails = 0
         self.probe_fails = 0
         self.pass_no = 0
+        self.last_beat = 0.0
         self.rec = {
             "supervisor_pid": os.getpid(), "leash_pid": None, "serve_pid": None, "borrowed": bool(borrowed),
             "port": cfg["port"], "device": cfg["device"], "state": "starting", "terminal": False,
@@ -192,12 +202,53 @@ class Supervisor:
     # -- the record
     def write(self, first=False):
         self.rec["heartbeat"] = time.time()
+        self.last_beat = time.monotonic()
         p = self.amilib.daemon_path(self.root)
         if first:
             self.amilib._write_json(p, self.rec)          # under the lock `frame-jack on` holds (plan Decision 4)
             return
         with self.amilib._Locked(self.amilib.lock_path(self.root)):
+            # `off` removes the sentinel and records off_by under this lock; a heartbeat written before this
+            # supervisor noticed must not erase who switched it off
+            if self.rec.get("off_by") is None and not self.amilib.sentinel_path(self.root).exists():
+                cur = self.amilib._read_json(p) or {}
+                if cur.get("off_by"):
+                    self.rec["off_by"] = cur["off_by"]
             self.amilib._write_json(p, self.rec)
+
+    # -- inside launch's long waits
+    def checkpoint(self):
+        """Called throughout launch()'s waits (the pid line, readiness up to 120 s, the warm-up up to 30 s): the
+        sentinel gone raises StopRequested, so `off` during a cold start stops the tree at once instead of after
+        the weights load; the heartbeat is rewritten once per poll, so a slow cold start never reads as a
+        supervisor gone."""
+        if not self.amilib.sentinel_path(self.root).exists():
+            raise StopRequested()
+        if time.monotonic() - self.last_beat >= self.poll:
+            self.write()
+
+    def nap(self, secs):
+        end = time.monotonic() + secs
+        while True:
+            self.checkpoint()
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(0.1, left))
+
+    def ask_watching(self, question, state, bound_secs):
+        """amilib.ask on a worker thread, the checkpoint every 0.1 s while it waits; the answer, or None."""
+        box = []
+        amilib = self.amilib
+        t = threading.Thread(target=lambda: box.append(amilib.ask(
+            self.cfg["port"], state, question, time.monotonic() + bound_secs, int(bound_secs * 1000),
+            amilib.ask_lock_path(self.root))), daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(0.1)
+            if t.is_alive():
+                self.checkpoint()
+        return box[0] if box else None
 
     # -- probes
     def on_battery(self):
@@ -269,6 +320,7 @@ class Supervisor:
         serve_pid = None
         end = time.monotonic() + PID_LINE_WAIT_SECS
         while time.monotonic() < end and proc.poll() is None:
+            self.checkpoint()
             ready, _, _ = select.select([proc.stdout], [], [], 0.2)
             if ready:
                 line = proc.stdout.readline().decode("utf-8", "replace").strip()
@@ -279,23 +331,23 @@ class Supervisor:
                         serve_pid = None
                 break
         self.rec["serve_pid"] = serve_pid
+        self.write()                                      # the pids on record now: `off` can always find the tree
         # readiness
         end = time.monotonic() + self.ready_max
         h = None
         while time.monotonic() < end:
+            self.checkpoint()
             if proc.poll() is not None:
                 return self.launch_failed("serve exited with code %s before it answered" % proc.returncode)
             h = self.health()
             if h:
                 break
-            time.sleep(self.ready_poll)
+            self.nap(self.ready_poll)
         if not h:
             self.stop_tree()
             return self.launch_failed("serve did not answer /health within %d s" % int(self.ready_max))
         # the warm-up question pays the cold first call here
-        ans = self.amilib.ask(self.cfg["port"], self.warm_state, "destructive",
-                              time.monotonic() + WARMUP_BOUND_SECS, int(WARMUP_BOUND_SECS * 1000),
-                              self.amilib.ask_lock_path(self.root))
+        ans = self.ask_watching("destructive", self.warm_state, WARMUP_BOUND_SECS)
         self.rec["ready_ms"] = int((time.monotonic() - t0) * 1000)
         self.rec["device"] = h.get("device") or self.cfg["device"]
         self.rec["state"] = "up"
@@ -339,13 +391,7 @@ class Supervisor:
         amilib = self.amilib
         # 1. the sentinel gone
         if not amilib.sentinel_path(self.root).exists():
-            cur = amilib._read_json(amilib.daemon_path(self.root)) or {}
-            self.stop_tree()
-            self.rec["state"] = "off"
-            self.rec["off_by"] = cur.get("off_by") or "sentinel removed by hand"
-            self.write()
-            log("supervisor: ", "off (%s)" % self.rec["off_by"])
-            return True
+            return self.go_off()
         # 2. battery
         if self.on_battery():
             if self.serve_running():
@@ -382,9 +428,7 @@ class Supervisor:
                     self.write()
                     return False
             if h and self.pass_no % PROBE_EVERY_PASSES == 0:
-                ans = amilib.ask(self.cfg["port"], self.warm_state, "destructive",
-                                 time.monotonic() + PROBE_BOUND_SECS, int(PROBE_BOUND_SECS * 1000),
-                                 amilib.ask_lock_path(self.root))
+                ans = self.ask_watching("destructive", self.warm_state, PROBE_BOUND_SECS)
                 if isinstance(ans, amilib.Answer):
                     self.probe_fails = 0
                 elif ans.reason == "timeout":
@@ -427,6 +471,16 @@ class Supervisor:
         self.write()
         return False
 
+    def go_off(self):
+        amilib = self.amilib
+        cur = amilib._read_json(amilib.daemon_path(self.root)) or {}
+        self.stop_tree()
+        self.rec["state"] = "off"
+        self.rec["off_by"] = self.rec.get("off_by") or cur.get("off_by") or "sentinel removed by hand"
+        self.write()
+        log("supervisor: ", "off (%s)" % self.rec["off_by"])
+        return True
+
     def sleep_until_next(self):
         end = time.monotonic() + self.poll
         while time.monotonic() < end and not self.wake:
@@ -452,7 +506,12 @@ class Supervisor:
         signal.signal(signal.SIGHUP, wake)
         try:
             while True:
-                if self.tick():
+                try:
+                    if self.tick():
+                        return 0
+                except StopRequested:
+                    log("supervisor: ", "the sentinel went while serve was starting — stopping it")
+                    self.go_off()
                     return 0
                 self.sleep_until_next()
         finally:

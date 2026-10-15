@@ -141,6 +141,49 @@ EOF
   [ ! -e "$AMI/on" ]
 }
 
+serve_known() { case "$(dj serve_pid)" in ''|null|0) return 1 ;; *) return 0 ;; esac; }
+
+@test "off while serve is still loading its weights: daemon.json names leash_pid and serve_pid while starting and the heartbeat keeps moving; off waits for the supervisor, so when it says freed the serve and the leash are already gone and the record says off" {
+  PORT="$(free_port)"; write_ami_config "$PORT"
+  export FAKE_BIND_DELAY_MS=8000
+  FJ on
+  wait_for 5 serve_known
+  [ "$(dj state)" = starting ]
+  serve="$(dj serve_pid)"; leash="$(dj leash_pid)"; sup="$(dj supervisor_pid)"
+  kill -0 "$serve"; kill -0 "$leash"
+  port_closed "$PORT"
+  hb1="$(dj heartbeat)"; sleep 2.5; hb2="$(dj heartbeat)"
+  python3 -c 'import sys; sys.exit(0 if float(sys.argv[2]) > float(sys.argv[1]) else 1)' "$hb1" "$hb2"
+  t0="$(date +%s)"
+  run FJ off
+  [ "$status" -eq 0 ]
+  has "$output" "the AMI is stopped and its 5 GB freed"
+  ! kill -0 "$serve" 2>/dev/null
+  ! kill -0 "$leash" 2>/dev/null
+  wait_gone "$sup" 2
+  [ "$(( $(date +%s) - t0 ))" -le 5 ]
+  [ "$(dj state)" = off ]
+  [ "$(dj serve_pid)" = null ]
+}
+
+@test "off during the warm-up question: a serve that has bound its port but answers slowly is stopped at once, the supervisor exits and the sentence says freed with the serve already gone" {
+  PORT="$(free_port)"; write_ami_config "$PORT"
+  export FAKE_DELAY_MS=20000
+  FJ on
+  wait_for 10 port_open "$PORT"
+  sleep 1                     # the readiness poll answers within 0.2 s of the bind; the warm-up question follows
+  [ "$(dj state)" = starting ]
+  serve="$(dj serve_pid)"; sup="$(dj supervisor_pid)"
+  t0="$(date +%s)"
+  run FJ off
+  [ "$status" -eq 0 ]
+  has "$output" "the AMI is stopped and its 5 GB freed"
+  ! kill -0 "$serve" 2>/dev/null
+  wait_gone "$sup" 2
+  [ "$(( $(date +%s) - t0 ))" -le 8 ]
+  [ "$(dj state)" = off ]
+}
+
 @test "borrowed: a fake already on the port whose checkpoint is the configured model — on writes the sentinel, borrowed true, serve_pid null, a supervisor in borrowed mode; off removes the sentinel, stops the supervisor and leaves the fake running, saying so; a fake answering model as the basename only still borrows" {
   PORT="$(free_port)"
   START_FAKE_PORT="$PORT" start_fake "$MODEL"
