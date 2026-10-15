@@ -562,10 +562,43 @@ def _breaker_step(c: dict, row: dict) -> None:
         c["breaker"] = br
 
 
+PENDING_CAP = 50                   # question rows awaiting their outcome row, per session (the oldest dropped)
+
+
+def _count_outcome(c: dict, row: dict) -> None:
+    """§6.2, §6.3: an outcome row joins the question row for the same tool_use_id (kept in `pending` when it said
+    would_ask, would_shorten or acted ask): a failure after a would-ask or a would-shorten is the automatic miss
+    signal; an `ask` followed by any outcome means the operator approved it — an override, inferred."""
+    pending = c.get("pending") if isinstance(c.get("pending"), dict) else {}
+    seen = pending.pop(str(row.get("tool_use_id")), None) if row.get("tool_use_id") else None
+    c["pending"] = pending
+    if not isinstance(seen, dict):
+        return
+    if row.get("outcome") == "failed":
+        if seen.get("would_ask"):
+            c["would_ask_then_failed"] = int(c.get("would_ask_then_failed") or 0) + 1
+        if seen.get("would_shorten"):
+            c["shortened_then_failed"] = int(c.get("shortened_then_failed") or 0) + 1
+    if seen.get("acted") == "ask":
+        c["overrides"] = int(c.get("overrides") or 0) + 1
+
+
+def _remember_pending(c: dict, row: dict) -> None:
+    flags = {k: row.get(k) for k in ("would_ask", "would_shorten", "acted") if row.get(k)}
+    if not flags or not row.get("tool_use_id"):
+        return
+    pending = c.get("pending") if isinstance(c.get("pending"), dict) else {}
+    pending[str(row["tool_use_id"])] = flags
+    while len(pending) > PENDING_CAP:
+        pending.pop(next(iter(pending)))
+    c["pending"] = pending
+
+
 def _count_row(c: dict, row: dict) -> None:
     q = row.get("question")
     if "outcome" in row and q is None:
-        return                                   # Task 5 joins outcome rows; nothing to count yet
+        _count_outcome(c, row)
+        return
     if q in QUESTIONS:
         _breaker_step(c, row)
     if row.get("unanswered"):
@@ -590,6 +623,7 @@ def _count_row(c: dict, row: dict) -> None:
         c["would_shorten"] += 1
     if row.get("acted") == "ask":
         c["asks"] += 1
+    _remember_pending(c, row)
 
 
 def append_row(root, sid, row: dict) -> None:
@@ -641,11 +675,17 @@ def row_unanswered(root, sid, payload: dict, reason: str, question: Optional[str
 
 
 # ---------------------------------------------------------------- §5.5 the inputs
+SWITCH_ON_WORDS = re.compile(r"(?<![\w-])/?frame-jack\s+on\b", re.IGNORECASE)
+
+
 def record_operator_message(root, sid, prompt, transcript_path, offset) -> None:
     """UserPromptSubmit: with the sentinel present, the operator's words (capped as the calibration capped
     them), the moment, and the transcript's size at that moment go into session-<sid>.json. One stat when
-    off; nothing is written then."""
-    if not sid or not sentinel_path(root).exists():
+    off; nothing is written then — except a prompt that says `frame-jack on`, which the guard's switch rule
+    (§6.6) must be able to read before the sentinel exists."""
+    if not sid:
+        return
+    if not sentinel_path(root).exists() and not SWITCH_ON_WORDS.search(str(prompt or "")):
         return
     with _Locked(lock_path(root)):
         c = _load_counters(root, sid)
@@ -789,6 +829,41 @@ def decide(question: str, p: float, certified=(), mode_hint=None, **ctx) -> dict
                                               "permissionDecisionReason": SHORTEN_REASON % (
                                                   ", ".join(edited), _targeted_command(targeted))}}
     return out
+
+
+def enforce_requested(root) -> list:
+    """The questions `ami.enforce` names, as the supervisor copied them into daemon.json. A request, never a grant:
+    the consumers act only on a question that is also in CERTIFIED (§7), and nothing at runtime widens that."""
+    d = _read_json(daemon_path(root)) or {}
+    e = d.get("enforce")
+    return [str(q) for q in e if str(q) in QUESTIONS] if isinstance(e, list) else []
+
+
+def _certified(root) -> tuple:
+    return tuple(q for q in enforce_requested(root) if q in CERTIFIED)
+
+
+def outcome_row(root, sid, payload: dict) -> Optional[dict]:
+    """`core/ami-hook.py outcome` (§5.4, §6.3): with the sentinel present, the real outcome of one Bash call keyed
+    on its tool_use_id — `ran` (PostToolUse), `interrupted` (PostToolUse with tool_response.interrupted true),
+    `failed` (PostToolUseFailure; error_head is the first line of its error, `Exit code N` for a command that ran
+    and exited). One stat and nothing written when the sentinel is absent."""
+    if not sentinel_path(root).exists():
+        return None
+    payload = payload or {}
+    if payload.get("hook_event_name") == "PostToolUseFailure":
+        outcome = "failed"
+        err = str(payload.get("error") or "")
+        error_head = err.splitlines()[0][:200] if err.strip() else None
+    else:
+        resp = payload.get("tool_response")
+        outcome = "interrupted" if isinstance(resp, dict) and resp.get("interrupted") is True else "ran"
+        error_head = None
+    dur = payload.get("duration_ms")
+    row = {"t": time.time(), "session": sid, "tool_use_id": payload.get("tool_use_id"), "outcome": outcome,
+           "error_head": error_head, "duration_ms": dur if isinstance(dur, (int, float)) else None}
+    append_row(root, sid, row)
+    return row
 
 
 def _warn_once(root, sid, reason) -> Optional[str]:
@@ -1035,7 +1110,7 @@ def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
         row["unanswered"] = r.reason
         append_row(root, sid, row)
         return _unanswered_out(root, sid, r)
-    dec = decide("suite", r.p, certified=CERTIFIED, edited=edited)
+    dec = decide("suite", r.p, certified=_certified(root), edited=edited)
     row["p"] = r.p
     row["would_shorten"] = dec["would_shorten"]
     row["mode"] = dec["mode"]
@@ -1088,7 +1163,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
         row["unanswered"] = r.reason
         append_row(root, sid, row)
         return _unanswered_out(root, sid, r)
-    dec = decide(question, r.p, certified=CERTIFIED)
+    dec = decide(question, r.p, certified=_certified(root))
     row["p"] = r.p
     row["would_ask"] = dec["would_ask"]
     row["mode"] = dec["mode"]

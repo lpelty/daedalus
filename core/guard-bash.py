@@ -264,6 +264,12 @@ WORKTREE_PROMOTE_WAITS = ("Removing or pruning worktrees under state/promote/ wa
                           "copy protects target/.")
 TOO_DEEP = "This command nests shells too deeply for the guard to check; run the inner command directly."
 HOME_TREES = ("target", "worktrees", "state/promote")
+# frame-jack spec §6.6: the observed agent cannot switch off its observer. state/ is already protected as a
+# whole (verifylib EXTRA_PROTECTED); these name the AMI's record with its own sentence, reach the heredoc bodies an
+# interpreter or a shell reads, and hold the switch's two verbs to the operator's recorded words.
+AMI_STATE = "state/ami"
+AMI_STATE_DENY = "state/ami/ is the AMI's record; /frame-jack off is the switch"
+SWITCH_DENY = "the operator has not said /frame-jack %s in this session; the AMI stays %s"
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 INTERPRETERS = {"python3", "python", "perl", "ruby", "node"}
 PREFIX_CMDS = {"command", "exec", "nohup", "time"}
@@ -2596,6 +2602,8 @@ def glob_matches(op: str, here: Path, cmd: str) -> List[Path]:
 def literal_write(p: Path, op: str, g: G) -> Tuple[Optional[str], Optional[str]]:
     """(deny reason, context) for one resolved write path: git's hooks, the lease-era write_check (the transcript,
     git's configuration, the trees, the cross-lease warning), distribution code."""
+    if ami_state_hit(g.root, p):
+        return AMI_STATE_DENY, None
     if hooks_path(p):
         return HOOKS_WRITE % op, None
     reason, context = bh.write_check(g.root, g.ctx, p, g.sid, g.refused)
@@ -2604,6 +2612,71 @@ def literal_write(p: Path, op: str, g: G) -> Tuple[Optional[str], Optional[str]]
     if v.is_protected(g.root, p):
         return "%s is distribution code (or evidence); write a proposal instead of editing it." % p, None
     return None, context
+
+
+def ami_state_hit(root: Path, p: Path) -> bool:
+    """§6.6: p is state/ami, lies under it, or is state/ itself (removing it takes the record with it)."""
+    rr = Path(root).resolve()
+    rp = Path(p).resolve()
+    return under(rp, rr / AMI_STATE) or rp == rr / "state"
+
+
+def ami_body_write(rhead: str, body: str, here: Path, g: G) -> bool:
+    """§6.6: a heredoc or here-string body an interpreter or a shell reads writes or removes under state/ami — the
+    literal paths Python's code writes, the write operands of a shell body's commands, or (code whose targets
+    cannot be read, perl, ruby, node) a write shape beside a mention of state/ami."""
+    mentions = AMI_STATE in body or (("'ami'" in body or '"ami"' in body) and "state" in body)
+    if rhead in SHELLS:
+        try:
+            tokens = tokenize(body)
+        except ValueError:
+            return mentions
+        for raw in segments(tokens):
+            while raw and raw[0] in KEYWORDS:
+                raw = raw[1:]
+            seg = unwrap(raw)
+            if not seg:
+                continue
+            ops = write_operands(seg) + tree_operands(seg)[0]
+            if any(ami_state_hit(g.root, resolve(here, op)) for op in ops):
+                return True
+        return False
+    lits, why = code_write(rhead, body)
+    if any(ami_state_hit(g.root, resolve(here, op)) for op in lits):
+        return True
+    return bool(why) and mentions
+
+
+def switch_verb_denied(seg: List[str], g: G) -> Optional[str]:
+    """§6.6: `frame-jack.py on|off` from the Bash tool runs only when the operator's last recorded message in this
+    session (amilib's session file, operator.text) says `frame-jack on` / `frame-jack off`, with or without the
+    slash, in any case. Other verbs (status, --doctor) are free."""
+    if not any("frame-jack.py" in t for t in seg):
+        return None
+    import amilib
+    hs = amilib.head(seg)
+    if not hs:
+        return None
+    rest = hs[1:]
+    if os.path.basename(hs[0]) in amilib._PY:
+        rest = [t for t in hs[1:] if not t.startswith("-")]
+        if not rest:
+            return None
+        script, rest = rest[0], rest[1:]
+    else:
+        script = hs[0]
+    if os.path.basename(script) != "frame-jack.py":
+        return None
+    verb = next((t for t in rest if not t.startswith("-")), None)
+    if verb not in ("on", "off"):
+        return None
+    text = ""
+    if g.sid:
+        c = amilib.counters(g.root, g.sid) or {}
+        text = str((c.get("operator") or {}).get("text") or "")
+    if re.search(r"(?<![\w-])/?frame-jack\s+%s\b" % verb, text, re.IGNORECASE):
+        return None
+    return SWITCH_DENY % (verb, "on" if verb == "off" else "off")
 
 
 CD_FLAGS = "LPe@"      # bash's cd options (zsh's -q and -s too): none moves the directory elsewhere
@@ -2801,6 +2874,9 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
         seg = seg[1:]                                                   # `builtin cd …` is cd
     if seg[0] in ("cd", "pushd", "popd"):
         return None, [], cd_target(seg, here, cmd), branch_created
+    reason = switch_verb_denied(seg, g)
+    if reason:
+        return reason, [], here, branch_created
     k = exec_index(seg, RUN_HEADS)
     run = seg[k:]
     rhead = os.path.basename(run[0])
@@ -2893,6 +2969,12 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
             if reason:
                 return reason, [], here, branch_created
             contexts += more
+    if rhead in INTERPRETERS or rhead in SHELLS:
+        fed = herestrings(run)
+        if any(t.startswith("<<") and not t.startswith("<<<") for t in run):
+            fed += bodies
+        if any(ami_body_write(rhead, b, here, g) for b in fed):
+            return AMI_STATE_DENY, [], here, branch_created
     if os.path.basename(seg[0]) == "patch" and any(t.startswith("<") for t in seg[1:]):
         ops.append(".")        # patch < file writes its cwd (§7.3)
     if rhead in INTERPRETERS:

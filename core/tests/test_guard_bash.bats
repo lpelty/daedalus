@@ -1637,3 +1637,66 @@ print(eval(sys.argv[2]))' "${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" "$1"
   [ "$output" = "('suite', 'budget', None)" ] || { echo "$output"; return 1; }
   [ "$(fake_requests)" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------------------------------------
+# The observer and its subject (frame-jack spec §6.6, §7; §13.2 items 13–14): two additive deterministic rules,
+# and no runtime seam that lets the live hook act.
+said() { case "$output" in *"$1"*) : ;; *) echo "expected \"$1\" in: $output"; return 1 ;; esac; }
+AMI_STATE_SENTENCE="state/ami/ is the AMI's record; /frame-jack off is the switch"
+
+@test "the observer cannot be switched off by its subject: rm state/ami/on, echo > state/ami/daemon.json, sed -i on the counters file, python - <<EOF writing under state/ami, and python3 core/frame-jack.py off with no operator record are denied with the §6.6 sentences; the same off after a prompt saying /frame-jack off is allowed; frame-jack on likewise; cat state/ami/daemon.json and python3 core/frame-jack.py status are allowed" {
+  mkdir -p "$(AMI_DIR_OF)/decisions"; touch "$(AMI_DIR_OF)/on"
+  printf '{}' > "$(AMI_DIR_OF)/daemon.json"; printf '{}' > "$(AMI_DIR_OF)/session-sA.json"
+  run guard_ami sA 'rm state/ami/on'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA 'rm -rf state/ami/decisions'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA 'rm -rf state'; denied; said "$AMI_STATE_SENTENCE"                 # an ancestor takes the record with it
+  run guard_ami sA 'echo > state/ami/daemon.json'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA "sed -i '' s/a/b/ state/ami/session-sA.json"; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA 'cd state && mv ami/on ami/off'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA 'printf x | tee state/ami/on'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA 'truncate -s 0 state/ami/decisions/x.jsonl'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA 'python3 -c "open(\"state/ami/on\",\"w\").write(\"x\")"'; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA "$(printf 'python3 - <<%sEOF%s\nimport pathlib\npathlib.Path(\"state/ami/on\").unlink()\nEOF' "'" "'")"; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA "$(printf 'python3 - <<%sEOF%s\nimport pathlib\n(pathlib.Path(\"state\") / \"ami\" / \"on\").write_text(\"x\")  # state/ami\nEOF' "'" "'")"; denied; said "$AMI_STATE_SENTENCE"
+  run guard_ami sA "$(printf 'bash <<%sEOF%s\nrm -f state/ami/on\nEOF' "'" "'")"; denied; said "$AMI_STATE_SENTENCE"
+  # reads are free
+  run guard_ami sA 'cat state/ami/daemon.json'; allowed
+  run guard_ami sA "$(printf 'python3 - <<%sEOF%s\nimport json\nprint(json.load(open(\"state/ami/daemon.json\")))\nEOF' "'" "'")"; allowed
+  run guard_ami sA 'python3 core/frame-jack.py status'; allowed
+  # the switch's own verbs: only after the operator said so
+  run guard_ami sA 'python3 core/frame-jack.py off'; denied
+  said "the operator has not said /frame-jack off in this session; the AMI stays on"
+  run guard_ami sA 'cd core && ./frame-jack.py off'; denied
+  run guard_ami sA 'bash -c "python3 core/frame-jack.py off"'; denied
+  prompt_as sA "please do the thing"
+  run guard_ami sA 'python3 core/frame-jack.py off'; denied
+  prompt_as sA "/Frame-Jack OFF please"
+  run guard_ami sA 'python3 core/frame-jack.py off'; allowed
+  run guard_ami sA 'python3 core/frame-jack.py on'; denied
+  said "the operator has not said /frame-jack on in this session; the AMI stays off"
+  run guard_ami sB 'python3 core/frame-jack.py off'; denied                            # another session's words are not this one's
+  # on, from a deployment where the switch is off (the sentinel absent): the operator's words are still recorded
+  rm -f "$(AMI_DIR_OF)/on"
+  prompt_as sC "something else"
+  run guard_ami sC 'python3 core/frame-jack.py on'; denied
+  said "the operator has not said /frame-jack on in this session; the AMI stays off"
+  prompt_as sC "frame-jack on"
+  run guard_ami sC 'python3 core/frame-jack.py on'; allowed
+  rm -rf "$(AMI_DIR_OF)"
+  prompt_as sD "/frame-jack on"
+  run guard_ami sD 'python3 core/frame-jack.py on'; allowed
+}
+
+@test "enforce stays behind the gate through the live hook: ami.enforce naming destructive in daemon.json with a p above the cut still writes mode shadow, acted null, and emits nothing" {
+  ami_on_with_fake FAKE_P=0.9
+  python3 - "$(AMI_DIR_OF)/daemon.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["enforce"] = ["destructive", "suite"]; open(sys.argv[1], "w").write(json.dumps(d))
+PY
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import amilib as a, pathlib
+print(a.enforce_requested(pathlib.Path(sys.argv[1]).parent), a.CERTIFIED)' "$DAEDALUS_HOME/core"
+  [ "$output" = "['destructive', 'suite'] ()" ] || { echo "$output"; return 1; }
+  run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  run ami_row 1 '(r["question"], r["p"], r["would_ask"], r["mode"], r["acted"])'
+  [ "$output" = "('destructive', 0.9, True, 'shadow', None)" ] || { echo "$output"; return 1; }
+}

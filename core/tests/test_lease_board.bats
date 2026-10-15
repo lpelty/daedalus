@@ -178,6 +178,13 @@ ss=[h["command"] for g in d["hooks"]["SessionStart"] for h in g["hooks"]]
 assert len(ss)==1 and "session-start.py" in ss[0], ss      # hooks of one event run in parallel: the board rides inside session-start.py
 ups=[h for g in d["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
 assert any("lease-board.py" in h["command"] and h["timeout"]==5 for h in ups), ups
+# frame-jack spec §6.3: the AMI's outcome row on both Bash completion events, timeout 5, beside boundary-hook's leg
+post=[(g.get("matcher"), h) for g in d["hooks"]["PostToolUse"] for h in g["hooks"]]
+assert any(m=="Bash" and "boundary-hook.py" in h["command"] and h["timeout"]==10 for m, h in post), post
+outs=[h for m, h in post if m=="Bash" and h["command"].endswith("core/ami-hook.py outcome")]
+assert len(outs)==1 and outs[0]["timeout"]==5, post
+fail=[(g.get("matcher"), h) for g in d["hooks"]["PostToolUseFailure"] for h in g["hooks"]]
+assert len(fail)==1 and fail[0][0]=="Bash" and fail[0][1]["command"].endswith("core/ami-hook.py outcome") and fail[0][1]["timeout"]==5, fail
 PY
 }
 

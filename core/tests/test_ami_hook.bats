@@ -417,3 +417,59 @@ print(r["answers"]["q"]["noul"], r["usage"]["input_tokens"] >= 1)' "$FAKE_PORT"
   run env FAKE_POWER='Battery Power' FAKE_POWER_FILE="$BATS_TEST_TMPDIR/power" pmset -g batt
   [ "${lines[0]}" = "Now drawing from 'AC Power'" ]
 }
+
+# outcome <event> <tool_use_id> [extra json fields] — core/ami-hook.py outcome on a Bash completion payload
+outcome() {
+  printf '{"hook_event_name":"%s","session_id":"sA","tool_name":"Bash","tool_use_id":"%s","cwd":"%s","tool_input":{"command":"ls"}%s}' \
+    "$1" "$2" "$DAEDALUS_HOME" "${3:+,$3}" | python3 "$DAEDALUS_HOME/core/ami-hook.py" outcome
+}
+
+@test "outcome: PostToolUse writes ran; interrupted true writes interrupted; PostToolUseFailure writes failed with error_head = the Exit code N line; the sentinel absent writes nothing; a would_ask row for the same tool_use_id followed by failed bumps would_ask_then_failed, a would_shorten one shortened_then_failed, and an ask the operator let run counts as an override" {
+  [ -f "$DAEDALUS_HOME/core/ami-hook.py" ] || { echo "core/ami-hook.py is missing"; return 1; }
+  # the sentinel absent (and then state/ami absent too): nothing written, nothing printed, exit 0
+  mkdir -p "$AMI"
+  run outcome PostToolUse toolu_0 '"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$(ls -A "$AMI")" = "" ]
+  rmdir "$AMI"
+  run outcome PostToolUseFailure toolu_0 '"error":"Exit code 1\nboom"'
+  [ "$status" -eq 0 ] && [ -z "$output" ] && [ ! -e "$AMI" ]
+  mkdir -p "$AMI"; touch "$AMI/on"
+  run outcome PostToolUse toolu_1 '"tool_response":{"stdout":"x","stderr":"","interrupted":false,"isImage":false}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  run outcome PostToolUse toolu_2 '"tool_response":{"stdout":"","stderr":"","interrupted":true,"isImage":false}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  run outcome PostToolUseFailure toolu_3 '"error":"Exit code 2\nrm: x: No such file or directory"'
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  # the question rows the guard would have written, then their outcomes
+  ami_py 'import time
+base = {"session": SID, "window": None, "device": "mps", "threshold": 0.326, "mode": "shadow", "unanswered": None,
+        "latency_ms": 100, "input_tokens": 400, "state_truncated": False, "guard": "allow", "command_sha": "x",
+        "command_head": "rm -rf x", "state_sha": "y", "cwd": "/w", "tree": None, "git_branch": None,
+        "state_inputs": None, "edited_since_run": None}
+a.append_row(ROOT, SID, dict(base, t=time.time(), tool_use_id="toolu_4", question="destructive", p=0.5, would_ask=True, acted=None))
+a.append_row(ROOT, SID, dict(base, t=time.time(), tool_use_id="toolu_5", question="destructive", p=0.1, would_ask=False, acted=None))
+a.append_row(ROOT, SID, dict(base, t=time.time(), tool_use_id="toolu_6", question="suite", p=0.9, would_shorten=True, acted=None, threshold=0.391))
+a.append_row(ROOT, SID, dict(base, t=time.time(), tool_use_id="toolu_7", question="destructive", p=0.6, would_ask=True, acted="ask"))'
+  run outcome PostToolUseFailure toolu_4 '"error":"Exit code 1"'; [ "$status" -eq 0 ]
+  run outcome PostToolUseFailure toolu_5 '"error":"Exit code 1"'; [ "$status" -eq 0 ]
+  run outcome PostToolUseFailure toolu_6 '"error":"Exit code 1"'; [ "$status" -eq 0 ]
+  run outcome PostToolUse toolu_7 '"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false}'; [ "$status" -eq 0 ]
+  run outcome PostToolUseFailure toolu_4 '"error":"Exit code 1"'; [ "$status" -eq 0 ]     # a duplicate is not counted twice
+  run ami_py 'import json, time
+rows = [json.loads(l) for l in (ROOT / "state/ami/decisions" / (time.strftime("%Y-%m-%d") + ".jsonl")).read_text().splitlines()]
+outs = [r for r in rows if "outcome" in r]
+assert [(r["tool_use_id"], r["outcome"]) for r in outs[:3]] == [("toolu_1", "ran"), ("toolu_2", "interrupted"), ("toolu_3", "failed")], outs
+assert outs[2]["error_head"] == "Exit code 2", outs[2]
+assert outs[0]["error_head"] is None and outs[1]["error_head"] is None
+for r in outs:
+    assert sorted(r) == ["duration_ms", "error_head", "outcome", "session", "t", "tool_use_id"], sorted(r)
+    assert r["session"] == SID and r["t"] > 0
+c = a.counters(ROOT, SID)
+assert c["would_ask_then_failed"] == 1, c
+assert c["shortened_then_failed"] == 1, c
+assert c["overrides"] == 1, c
+assert c["asked"] == {"destructive": 3, "suite": 1}, c["asked"]
+print("ok")'
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}

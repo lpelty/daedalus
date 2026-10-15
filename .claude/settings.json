@@ -26,7 +26,11 @@
       {"matcher": "Bash|Edit|Write|NotebookEdit", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py", "timeout": 5}]},
       {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/code-context.py", "timeout": 5}]}
     ],
-    "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]}],
+    "PostToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]},
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/ami-hook.py outcome", "timeout": 5}]}
+    ],
+    "PostToolUseFailure": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/ami-hook.py outcome", "timeout": 5}]}],
     "Stop": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/boundary-hook.py", "timeout": 10}]},
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/verify-hook.py", "timeout": 60}]},
