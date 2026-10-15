@@ -41,8 +41,8 @@ upgraded() {
   run bash "$H/core/lease.sh" adopt --all-unfinished </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
-  case "$output" in *"Upgrade to 0.7.0: complete."*"You are window 02"*) : ;; *) echo "$output"; return 1 ;; esac
-  [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]
+  case "$output" in *"Upgrade to $CUR: complete."*"You are window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$H/state/upgraded-to")" = "$CUR" ]
   [ -x "$T/.git/hooks/pre-push" ]
   [ "$(sed -n 3p "$H/vault/hot.md")" = "leases: (see the board; prime's copy at its last write)" ]
   W="$H/worktrees/02/thing"
@@ -166,7 +166,7 @@ upgraded() {
   [ ! -e "$T/.git/hooks/pre-push" ]; [ ! -e "$H/state/upgraded-to" ]
   # forward again: the upgrade completes, window 01's worktree is made again, claim 02 makes window 02's
   run start_session s3
-  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   [ -f "$H/worktrees/01/thing/d.txt" ]; [ -d "$H/worktrees/01/thing/sub" ]
   p="$(live_pid)"; registry_entry "$p" s4 interactive cli daedalus-xx
   run env DAEDALUS_SESSION_ID=s4 bash "$H/core/lease.sh" claim 02 </dev/null
@@ -187,7 +187,7 @@ upgraded() {
   case "$output" in *"marked window 01 and window 02 in state/leases/ as having no worktree"*) : ;; *) echo "$output"; return 1 ;; esac
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("worktree_ready") is False else 1)' "$H/state/leases/02.json"
   run start_session s3
-  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   p="$(live_pid)"; registry_entry "$p" s4 interactive cli daedalus-xx
   run env DAEDALUS_SESSION_ID=s4 bash "$H/core/lease.sh" claim 02 </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -200,8 +200,8 @@ upgraded() {
   run python3 "$H/core/upgrade.py" --rollback
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
   run start_session s3
-  case "$output" in *"window 01, adopted from target/thing, now has its worktree (worktrees/01/thing)"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
-  [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]; [ -x "$T/.git/hooks/pre-push" ]; [ -f "$H/worktrees/01/thing/f.txt" ]
+  case "$output" in *"window 01, adopted from target/thing, now has its worktree (worktrees/01/thing)"*"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$H/state/upgraded-to")" = "$CUR" ]; [ -x "$T/.git/hooks/pre-push" ]; [ -f "$H/worktrees/01/thing/f.txt" ]
   [ "$(sed -n 3p "$H/vault/hot.md")" = "leases: (see the board; prime's copy at its last write)" ]
   [ "$(git -C "$T" show lease/02:new.txt)" = new ]
   # the name given back is the window's again, as at the first upgrade: target/thing on main, fix/in-flight gone
@@ -222,7 +222,7 @@ upgraded() {
   git -C "$T" checkout -q main
   printf 'on main\n' > "$T/m.txt"; git -C "$T" add -A; cmt "$T" -m "on main"; git -C "$T" push -q origin main
   run start_session s3
-  case "$output" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$T" branch --show-current)" = main ]
   end_sessions || :     # the first sessions are gone already
   run python3 "$H/core/upgrade.py" --rollback

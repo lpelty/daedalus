@@ -42,7 +42,7 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   run --separate-stderr prompt_s0
   [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
   case "$stderr" in *Traceback*) echo "$stderr"; return 1 ;; esac
-  [ "$(ctx_of "$output" | head -1)" = "upgrade to 0.7.0 has not run yet — it runs at the next session start in this home" ] || { echo "$output"; return 1; }
+  [ "$(ctx_of "$output" | head -1)" = "upgrade to $CUR has not run yet — it runs at the next session start in this home" ] || { echo "$output"; return 1; }
   [ ! -d "$H/state/leases" ]
   run --separate-stderr stop_s0
   [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
@@ -55,7 +55,7 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   c="$(ctx_of "$output")"
   s="Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin). $TAIL"
   case "$c" in *"$s"*"This session has no window yet: windows open once the upgrade finishes"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"Upgrade to 0.7.0: complete."*|*"installed the pre-push hook"*|*"You are window"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*|*"installed the pre-push hook"*|*"You are window"*) echo "$c"; return 1 ;; esac
   [ ! -e "$H/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   [ "$(git -C "$T" rev-parse fix/in-flight)" = "$tip" ]
   run --separate-stderr prompt_s0
@@ -68,9 +68,9 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   run start_session s2
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*"You are window 02 and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
   # VERSION and the stamp
-  [ "$(cat "$H/VERSION")" = 0.7.0 ]; [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]
+  [ "$(cat "$H/VERSION")" = "$CUR" ]; [ "$(cat "$H/state/upgraded-to")" = "$CUR" ]
   # the in-flight branch is window 01; target/thing is the trunk mirror with no ahead
   [ "$(lease_json 01 adopted_from)" = fix/in-flight ]
   [ "$(git -C "$T" branch --show-current)" = main ]
@@ -89,7 +89,7 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   [ "$(sed -n 3p "$H/vault/hot.md")" = "leases: (see the board; prime's copy at its last write)" ]
   # doctor: the version line and the upgrade stamp, and nothing MISSING about VERSION, leases or hooks
   run bash "$H/core/doctor.sh"
-  case "$output" in *"OK       version: 0.7.0"*"OK       upgrade: state/upgraded-to 0.7.0"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       version: $CUR"*"OK       upgrade: state/upgraded-to $CUR"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"MISSING  VERSION"*|*"MISSING  state/"*|*"MISSING  worktrees/"*|*"MISSING  pre-push hook"*) echo "$output"; return 1 ;; esac
   # the old session's Stop after the upgrade blocks (exit 2, reasons on stderr) with only the reasons the spec gives
   # a session left open through an upgrade: config.yaml changed under it (the memory: block; Decision 11 — the
@@ -98,7 +98,7 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   run --separate-stderr stop_s0
   case "$status" in 0|2) : ;; *) echo "status $status: $output $stderr"; return 1 ;; esac
   case "$stderr" in *Traceback*) echo "$stderr"; return 1 ;; esac
-  case "$stderr" in *"config.yaml changed under this session, by the upgrade to 0.7.0 — not by this session. Do not restore it"*"tell the operator to close it and start a new session."*) : ;; *) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"config.yaml changed under this session, by the upgrade to $CUR — not by this session. Do not restore it"*"tell the operator to close it and start a new session."*) : ;; *) echo "$stderr"; return 1 ;; esac
   case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac
   [ -z "$(printf '%s\n' "$stderr" | grep -v -e '^$' -e '^config.yaml changed under this session, by the upgrade' -e '^Promotion check')" ] \
     || { echo "an unexpected Stop reason for the old session: $stderr"; return 1; }
@@ -145,7 +145,7 @@ target_bytes() {    # every file under target/, git's own included, by content (
   for cmd in "create" "adopt feat/unshipped" "spawn task" "claim 01"; do
     run --separate-stderr env DAEDALUS_SESSION_ID=s1 bash "$H/core/lease.sh" $cmd </dev/null
     [ "$status" -eq 1 ] || { echo "$cmd: status $status: $output $stderr"; return 1; }
-    [ "$stderr" = "daedalus: no window opens until the upgrade to 0.7.0 finishes, so \`core/lease.sh ${cmd%% *}\` is refused. $s" ] \
+    [ "$stderr" = "daedalus: no window opens until the upgrade to $CUR finishes, so \`core/lease.sh ${cmd%% *}\` is refused. $s" ] \
       || { echo "$cmd: $stderr"; return 1; }
   done
   [ "$(target_bytes)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_bytes); return 1; }
@@ -156,9 +156,9 @@ target_bytes() {    # every file under target/, git's own included, by content (
   case "$output" in *"now holds feat/unshipped from target/thing"*"Everything unfinished in target/ is in windows now. Start a new session and the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 0"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*"You are window 0"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"windows open once the upgrade finishes"*) echo "$c"; return 1 ;; esac
-  [ "$(cat "$H/state/upgraded-to")" = 0.7.0 ]
+  [ "$(cat "$H/state/upgraded-to")" = "$CUR" ]
 }
 
 @test "v0.6.1, pulled, with an uncommitted edit hidden from git status by skip-worktree on the in-flight checkout: the first new session stops the upgrade naming the file — no stamp, no window, the edit where it was; doctor names it with how to clear the mark (release-candidate review 2, finding 6)" {
@@ -169,7 +169,7 @@ target_bytes() {    # every file under target/, git's own included, by content (
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
   case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin), and 1 changed file git status does not show (thing.txt). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) echo "$c"; return 1 ;; esac
   [ ! -e "$H/state/upgraded-to" ]; ! grep -qs adopted_from "$H"/state/leases/*.json
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(cat "$T/thing.txt")" = "MY UNCOMMITTED EDIT" ]
   run bash "$H/core/doctor.sh"
@@ -196,7 +196,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   pick_it_up
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
-  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(ctx_of "$output")" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   W="$H/worktrees/$(win_of fix/in-flight)/.upgrade-carry"
   [ "$(git -C "$W" branch --show-current)" = "lease/$(win_of fix/in-flight)" ]; [ "$(cat "$W/f.txt")" = f ]
   [ "$(cat "$W/notes.md")" = "MY NOTES" ]; [ "$(cat "$W/draft/a.md")" = "A DRAFT" ]; [ -z "$(git -C "$W" status --porcelain)" ]
@@ -314,7 +314,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   pull_current
   mkdir -p "$H/state/leases"; : > "$H/state/leases/01.json"; : > "$H/state/leases/prime.json"
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*"You are window 0"*"and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*"You are window 0"*"and you hold the pen"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"could not be rendered"*|*"cannot be bound"*) echo "$c"; return 1 ;; esac
   run bash "$H/core/lease.sh" sweep
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -333,7 +333,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   [ "$(git -C "$H/worktrees/01/thing" branch --show-current)" = lease/01 ]; [ "$(cat "$H/worktrees/01/thing/f.txt")" = f ]
   ! git -C "$T" rev-parse -q --verify refs/heads/fix/in-flight >/dev/null
   run start_session s2
-  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(ctx_of "$output")" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "v0.6.1, pulled, where a git command was cut off part-way — the checkout on a branch that no longer exists, or lock files left: the upgrade stops naming the branch's commit or the files, never 'commit them'; put right and picked up, the next start finishes (release-candidate review 3, finding 9)" {
@@ -341,14 +341,14 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   git -C "$T" update-ref -d refs/heads/fix/in-flight
   pull_current
   s1_ctx
-  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing is on branch fix/in-flight, which does not exist — a git command was cut off part-way; the branch's last commit is ${sha:0:7} (from HEAD's reflog). Put the branch back with git -C target/thing branch fix/in-flight ${sha:0:7}"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"commit them"*|*"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"upgrade to $CUR incomplete: target/thing is on branch fix/in-flight, which does not exist — a git command was cut off part-way; the branch's last commit is ${sha:0:7} (from HEAD's reflog). Put the branch back with git -C target/thing branch fix/in-flight ${sha:0:7}"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"commit them"*|*"Upgrade to $CUR: complete."*) echo "$c"; return 1 ;; esac
   git -C "$T" branch fix/in-flight "${sha:0:7}"
   : > "$T/.git/packed-refs.lock"; : > "$T/.git/refs/heads/fix/in-flight.lock"
   touch -t 202001010000 "$T/.git/packed-refs.lock" "$T/.git/refs/heads/fix/in-flight.lock"
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing holds lock files a git command left when it was cut off (target/thing/.git/packed-refs.lock, target/thing/.git/refs/heads/fix/in-flight.lock) — if no git command is running there, remove them"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"upgrade to $CUR incomplete: target/thing holds lock files a git command left when it was cut off (target/thing/.git/packed-refs.lock, target/thing/.git/refs/heads/fix/in-flight.lock) — if no git command is running there, remove them"*) : ;; *) echo "$c"; return 1 ;; esac
   rm "$T/.git/packed-refs.lock" "$T/.git/refs/heads/fix/in-flight.lock"
   # s1 and s2 have no window (none opens until the upgrade finishes); a window branch's own lock file, left by a
   # cut-off add, is cleared, not a stop
@@ -360,7 +360,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   pick_it_up
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s4
-  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(ctx_of "$output")" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$T" rev-parse "lease/$(win_of fix/in-flight)")" = "$sha" ]
 }
 
@@ -385,7 +385,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Nothing unfinished in target/ to pick up."*) : ;; *) echo "$output"; return 1 ;; esac
   run start_session s2
-  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(ctx_of "$output")" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(cat "$H/worktrees/$(win_of fix/in-flight)/thing/f.txt")" = f ]
   run bash "$H/core/doctor.sh"
   case "$output" in *"in no window"*) echo "$output"; return 1 ;; esac
@@ -405,7 +405,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   case "$refs" in *"refs/heads/Wip $c1"*"refs/heads/wip $c2"*) : ;; *) echo "$refs"; return 1 ;; esac
   pull_current
   s1_ctx
-  case "$c" in *"upgrade to 0.7.0 incomplete: target/thing has branches whose names differ only in case (Wip, wip)"*"git -C target/thing pack-refs --all, then git -C target/thing branch -m Wip <new name>"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"upgrade to $CUR incomplete: target/thing has branches whose names differ only in case (Wip, wip)"*"git -C target/thing pack-refs --all, then git -C target/thing branch -m Wip <new name>"*) : ;; *) echo "$c"; return 1 ;; esac
   [ ! -e "$H/state/upgraded-to" ]; ! grep -qs adopted_from "$H"/state/leases/*.json
   [ "$(git -C "$T" for-each-ref --format='%(refname) %(objectname)' refs/heads/ | grep -i '/wip ')" = "$(printf '%s\n' "$refs" | grep -i '/wip ')" ]
   run bash "$H/core/doctor.sh"
@@ -415,7 +415,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ -n "$(git -C "$T" for-each-ref --contains "$c1" refs/heads/lease/)" ] || { git -C "$T" for-each-ref; return 1; }
   [ -n "$(git -C "$T" for-each-ref --contains "$c2" refs/heads/lease/)" ] || { git -C "$T" for-each-ref; return 1; }
 }
@@ -433,7 +433,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   pick_it_up
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
-  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(ctx_of "$output")" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(cat "$H/worktrees/$(win_of feat/x)/thing/x-work.txt")" = X ]
   git -C "$T" rev-parse -q --verify refs/tags/feat/x >/dev/null; git -C "$T" rev-parse -q --verify refs/tags/main >/dev/null
   ! git -C "$T" rev-parse -q --verify refs/heads/feat/x >/dev/null
@@ -478,7 +478,7 @@ origin_moves() {    # someone else pushes one commit to origin's main; target/th
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"target/thing's submodule lib holds work no window has: uncommitted or untracked files (lib.txt, notes.md); branch wip/lib, 1 commit its origin lacks (\"lib wip commit\"); 1 stash entry (stash@{0}:"*"the upgrade leaves it there"*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$L/notes.md")" = "MY LIB NOTES" ]; [ "$(git -C "$L" log -1 --format=%s wip/lib)" = "lib wip commit" ]
   [ -n "$(git -C "$L" stash list)" ]; grep -q edit "$L/lib.txt"
@@ -530,7 +530,7 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   case "$output" in *"target/thing main is 1 commit ahead of origin/main, but window"*"already holds it"*) : ;; *) echo "$output"; return 1 ;; esac
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"commit them"*|*"Upgrade to 0.7.0: complete."*|*"unsaved file"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"commit them"*|*"Upgrade to $CUR: complete."*|*"unsaved file"*) echo "$c"; return 1 ;; esac
   case "$c" in *"a git command Daedalus ran in target/thing (resetting main to origin/main) was cut off part-way, or is still running"*"do not commit anything there"*) : ;; *) echo "$c"; return 1 ;; esac
   # "pick it up" again: it finishes the cut-off reset — the half-reset tree is never saved as work
   old_locks
@@ -541,7 +541,7 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   run start_session s3
   c="$(ctx_of "$output")"
   case "$c" in *"commit them"*|*"unsaved file"*) echo "$c"; return 1 ;; esac
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   n="$(git -C "$T" for-each-ref --contains "$sha" --format='%(refname)' refs/heads/lease/)"
   [ "$(printf '%s\n' "$n" | grep -c .)" = 1 ] || { echo "$n"; return 1; }
   nn="${n#refs/heads/lease/}"
@@ -563,13 +563,13 @@ old_locks() { find "$T/.git" -name '*.lock' -exec touch -t 202001010000 {} +; }
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"commit them"*|*"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"commit them"*|*"Upgrade to $CUR: complete."*) echo "$c"; return 1 ;; esac
   case "$c" in *"a git command Daedalus ran in target/thing (putting it back on main) was cut off part-way, or is still running"*) : ;; *) echo "$c"; return 1 ;; esac
   old_locks
   run start_session s3
   c="$(ctx_of "$output")"
   case "$c" in *"commit them"*|*"whose work is already on origin/main"*) echo "$c"; return 1 ;; esac
-  case "$c" in *"a git command Daedalus ran in target/thing (putting it back on main) was cut off part-way; it is finished now"*"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"a git command Daedalus ran in target/thing (putting it back on main) was cut off part-way; it is finished now"*"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   nn="$(win_of fix/in-flight)"
   git -C "$T" merge-base --is-ancestor "$sha" "lease/$nn"; [ "$(git -C "$T" branch --show-current)" = main ]
   [ -z "$(git -C "$T" status --porcelain)" ] || { git -C "$T" status --porcelain; return 1; }
@@ -608,7 +608,7 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(cat "$L/lib.txt")" = "LIB UNCOMMITTED EDIT" ] || { echo "the edit in lib is gone: $(cat "$L/lib.txt")"; return 1; }
   [ "$(cat "$L/libu.txt")" = u ]
   [ "$(git -C "$T" rev-parse refs/heads/main)" = "$(git -C "$T" rev-parse refs/remotes/origin/main)" ]
@@ -631,7 +631,7 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(shasum "$L/lib.txt")" = "$sum" ] || { echo "the edit in lib is gone: $(cat "$L/lib.txt")"; return 1; }
   [ "$(git -C "$T" branch --show-current)" = main ]
 }
@@ -653,7 +653,7 @@ mk_moves() {        # one more commit on origin's main, made from the scratch cl
   rm "$T/moved.txt"
   run --separate-stderr start_session s2
   c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(tags)" = "exp/keep exp/light " ] || { echo "tags after the run that completed: [$(tags)]"; return 1; }
   [ "$(git -C "$T" rev-parse exp/light)" = "$exp" ]
   git -C "$T" branch side main; git -C "$T" checkout -q side
@@ -691,7 +691,7 @@ SH
   more="$(git -C "$T" rev-parse HEAD)"
   run --separate-stderr start_session s2
   c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
-  case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) echo "$c"; return 1 ;; esac
   case "$c" in *"Daedalus has unfinished work in target/thing: the branch fix/in-flight (2 commits not on origin)."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(git -C "$T" rev-parse "refs/heads/lease/$nn")" = "$first" ]
   pick_it_up
@@ -703,7 +703,7 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run --separate-stderr start_session s3
   c="$(ctx_of "$output")" || { echo "$output $stderr"; return 1; }
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   [ "$(git -C "$T" branch --show-current)" = main ]
   [ -n "$(git -C "$T" for-each-ref --contains "$more" refs/heads/lease/)" ]
 }
@@ -717,7 +717,7 @@ SH
   [ -z "$(git -C "$T" status --porcelain)" ]
   pull_current
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) echo "$c"; return 1 ;; esac
   case "$c" in *"1 changed file git status does not show (c.txt). $TAIL"*) : ;; *) echo "$c"; return 1 ;; esac
   cmp "$T/c.txt" "$B/c-crlf"; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
 }
@@ -743,7 +743,7 @@ SH
   [ -z "$(git -C "$T" status --porcelain)" ]; grep -q $'\r' "$T/run.bat"
   pull_current
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"git status does not show"*) echo "$c"; return 1 ;; esac
 }
 
@@ -758,7 +758,7 @@ SH
   [ -z "$(git -C "$T" status --porcelain)" ]
   pull_current
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"git status does not show"*) echo "$c"; return 1 ;; esac
   git -C "$T" branch side2 refs/heads/main; git -C "$T" checkout -q side2
   printf 's2\n' > "$T/side2.txt"; git -C "$T" add side2.txt; cmt "$T" -m "side 2"; git -C "$T" checkout -q main
@@ -836,7 +836,7 @@ PY
   pull_current
   mv "$B/lfs-server" "$B/lfs-server.offline"; : > "$LFSLOG"
   s1_ctx
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
   # the session's own window is a checkout, which smudges as any checkout does; the check never runs one
   ! grep -e cat-file -e checkout-index "$LFSLOG" || { echo "the check ran a smudge:"; cat "$LFSLOG"; return 1; }
   [ "$(ls "$T/.git/lfs-cache")" = "$cache" ]
@@ -864,7 +864,7 @@ bundles_have() {    # bundles_have <commit> — the safety copy's bundles hold <
   done
   git -C "$r" cat-file -e "$1^{commit}"
 }
-not_complete() { case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return 1 ;; esac; [ ! -e "$H/state/upgraded-to" ]; }
+not_complete() { case "$c" in *"Upgrade to $CUR: complete."*) echo "$c"; return 1 ;; esac; [ ! -e "$H/state/upgraded-to" ]; }
 
 @test "v0.6.1, pulled, on a branch where thing.txt became a gitlink with no .gitmodules whose directory holds plain files and no .git (a submodule vendored by removing its .git): the upgrade stops on the branch before anything there moves, so the checkout back to main never deletes the directory — no stamp, the file stays; the safety copy holds it; lease.sh adopt refuses too (release-candidate red team 3, finding 1)" {
   git -C "$T" rm -q thing.txt
@@ -879,9 +879,9 @@ not_complete() { case "$c" in *"Upgrade to 0.7.0: complete."*) echo "$c"; return
   tars_have "MY WORK INSIDE THE GITLINK DIR"
   run bash "$H/core/lease.sh" adopt fix/in-flight          # no window opens while the upgrade is not stamped
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"no window opens until the upgrade to 0.7.0 finishes, so \`core/lease.sh adopt\` is refused. Daedalus has unfinished work in target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"no window opens until the upgrade to $CUR finishes, so \`core/lease.sh adopt\` is refused. Daedalus has unfinished work in target/thing"*) : ;; *) echo "$output"; return 1 ;; esac
   # adopt's own refusal, in a home whose upgrade is stamped
-  printf '0.7.0\n' > "$H/state/upgraded-to"
+  printf '%s\n' "$CUR" > "$H/state/upgraded-to"
   run bash "$H/core/lease.sh" adopt fix/in-flight
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   case "$output" in *"(thing.txt)"*"nothing was adopted"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -953,7 +953,7 @@ fsm_kept() {
   pick_it_up
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
-  case "$(ctx_of "$output")" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(ctx_of "$output")" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$output"; return 1 ;; esac
   bundles_have "$A" || { echo "the copy lacks the old reflog commit"; return 1; }
   run python3 "$H/core/upgrade.py" --restore-help
   case "$output" in *"${A:0:7}"*"old experiment"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -990,5 +990,5 @@ fsm_kept() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run start_session s2
   c="$(ctx_of "$output")"
-  case "$c" in *"Upgrade to 0.7.0: complete."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Upgrade to $CUR: complete."*) : ;; *) echo "$c"; return 1 ;; esac
 }

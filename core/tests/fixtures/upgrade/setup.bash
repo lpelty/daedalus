@@ -101,8 +101,10 @@ for rel in sys.stdin.read().split("\0"):
         continue
     os.makedirs(os.path.dirname(os.path.join(dst, rel)) or dst, exist_ok=True)
     shutil.copy2(os.path.join(src, rel), os.path.join(dst, rel))' "$REPO" "$H"
-  git -C "$H" add -A; cmt "$H" -m "v0.7.0"
-  [ "$(cat "$H/VERSION")" = 0.7.0 ]
+  # CUR — the release under test, read from the tree's VERSION, so a release bump never rewrites these tests
+  CUR="$(sed -n 1p "$H/VERSION")"; export CUR
+  [ "$CUR" = "$(sed -n 1p "$REPO/VERSION")" ] && printf '%s' "$CUR" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'
+  git -C "$H" add -A; cmt "$H" -m "v$CUR"
 }
 
 # target_listing — everything under target/ a change there would show, for each target repo: every ref with its
