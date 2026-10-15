@@ -26,6 +26,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -97,6 +98,45 @@ def upgrade_pending(root: Path) -> bool:
 
 MEMORY_ABSENT = ("memory: block absent from config.yaml — Stop-cadence capture is off; "
                  "a SessionEnd capture wired in .claude/settings.local.json still runs")
+REINDEX_NOTE = ("The document index is older than the vault; rebuilding it in the background "
+                "(state/recall-index.log).")
+REINDEX_MIN_LEFT_SECS = 4
+
+
+def kick_reindex(root: Path, started_at: float) -> Optional[str]:
+    """The document index follows the vault (reindex design 2026-10-15, §3.5):
+    the window that holds the pen rebuilds a stale index at its start, so a
+    vault that changed outside a commit — an operator's edit, a pull, a failed
+    earlier rebuild — is not left unindexed until the next commit. One bounded
+    subprocess, `vault-search.py index --background --if-stale`, which answers
+    "fresh" from a stat and otherwise spawns the detached rebuild; its lock
+    dedups a kick that races a commit's. Run only inside what the budget has
+    left after the bind and the marker's tail; a start that spent its budget on
+    worktree adds skips the kick rather than overrunning. A timeout or a crash
+    ends it silently. The note is said when a rebuild started, or when one is
+    already running (the script's own line); "fresh", "unconfigured" (recall is
+    optional; doctor names it) and PRIME_ONLY say nothing."""
+    script = root / "core" / "vault-search.py"
+    if not script.is_file():
+        return None
+    left = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - (time.time() - started_at)
+    if left < REINDEX_MIN_LEFT_SECS:
+        return None
+    try:
+        r = subprocess.run(
+            [sys.executable, str(script), "index", "--background", "--if-stale", "--by", "session-start"],
+            cwd=str(root), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=min(5, left - 1),
+        )
+    except Exception:
+        return None
+    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    line = lines[0] if lines else ""
+    if line.startswith("document index: rebuilding in the background"):
+        return REINDEX_NOTE
+    if line.startswith("document index: a rebuild is already running"):
+        return line
+    return None
 
 
 def _hook_commands(path: Path) -> list:
@@ -201,6 +241,7 @@ def main() -> int:
                 except Exception:
                     pass
     lease_nn = None
+    holds_pen = False
     try:
         import leaselib as ll
     except Exception:  # pragma: no cover
@@ -211,6 +252,8 @@ def main() -> int:
             b = ll.session_start_bind(root, sid, deadline=started_at + ADD_BUDGET_SECS,
                                       new_day=str(payload.get("source", "")).lower() not in ("compact", "clear"))
             lease_nn = b["lease"]
+            # the bind's own answer, never a second locked read (decision 26): the kick below rests on it
+            holds_pen = bool(b.get("prime"))
             bind_notes.extend(b["notes"])
             if b["numbered"]:
                 line = "You are window %s." % lease_nn
@@ -362,6 +405,16 @@ def main() -> int:
                     pass
     except Exception:
         pass
+    # The document index follows the vault: for the window that holds the pen, at a startup or a
+    # resume (a compaction is not a start and the vault did not change with it), one bounded call.
+    if holds_pen and not visitor and not skip_bind \
+            and str(payload.get("source", "")).lower() in ("startup", "resume"):
+        try:
+            line = kick_reindex(root, started_at)
+        except Exception:
+            line = None
+        if line:
+            notes.append(line)
     # Emit ALWAYS, even with nothing to say: the orientation line is the
     # contract §8.2 greps for.
     try:

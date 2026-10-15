@@ -4,6 +4,111 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.7.1 — the lease board appears again on Claude Code 2.1.300
+
+**In short.** On Claude Code 2.1.300 the lease board never appeared above
+the prompt. The mod drew it every 2 seconds, and Claude Code refused the
+drawing every time. It appears again. Nothing else changes.
+
+**What went wrong.** The band the mod draws has to hold Claude Code's own
+drawing too: the spinner and the notices. So the mod asks Claude Code for
+that drawing and puts it in the tree it returns. It put the drawing inside
+the same Box it then sized to the band's width. The width is there so that
+each window's line cuts off at the band's edge, not at the terminal's.
+Claude Code 2.1.300 refuses that shape. In `claude --debug`, every draw
+said: `ui.render (AbovePrompt): a hook returned a tree that does not validate
+(engine node under a Box with prop "width"); drawing the engine's own`. So
+Claude Code drew its own band, and the board was never on screen. The mod's
+tests had not caught it. They answered the mod's request for Claude Code's
+drawing with a plain line of text, not the reference
+(`{ type: 'engine', ref }`) Claude Code really hands back, so nothing
+exercised the real shape. A Daedalus deployment on a second machine found
+this on 2026-10-15 with `claude --debug`. On 2.1.296, which the board was
+built against, the shape was accepted.
+
+**What changed.** The window lines now sit in an inner Box that carries the
+width. Claude Code's own drawing sits beside that Box, inside an outer Box
+with no width. That is the shape the mods interface page sanctions: "place
+it in a Box beside elements of your own". The lines still cut off at the
+band's edge. The mod's tests now answer with the reference Claude Code really
+hands back. They check that exactly one Box carries the width, that the
+reference is not under it, and that the tree validates on 2.1.300. `claude
+plugin validate` and `claude plugin test` pass (24 tests). In a live
+`claude --debug` session on 2.1.300, every draw was accepted where every one
+was refused before. The mod's own version is 0.1.1, and its README says it is
+tested with 2.1.300. Two board reads at startup that exited 1 on the laptop
+where this was found did not reproduce here and are not changed.
+
+**What you will see.** The board above the prompt in every window: one line
+per window, yours first, refreshed every 2 seconds, as the 2026-10-11 entry
+under v0.7.0 describes. On 2.1.300 you saw Claude Code's plain band and no
+board; now you see the board. The first session after the pull says one
+line, "Upgrade to 0.7.1: complete.", and that is all the upgrade does. No
+state changes shape, no file moves, and no target checkout is touched. It
+first takes its usual safety copy of anything new in `target/` and runs its
+usual check for unfinished work there. If that check stops it, the board
+says why and what to do, as for v0.7.0.
+
+**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
+session. The mod loads in place from `mods/lease-board/`, so there is no
+`claude plugin install` to run again. A window that is already open keeps
+the old drawing until it is restarted or runs `/reload-plugins`. A
+deployment that never installed the board runs the two install commands
+from the 2026-10-11 entry under v0.7.0, once. Mods need Claude Code 2.1.287
+or later; this is tested with 2.1.300.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.1`. `git describe
+--tags --abbrev=0` prints `v0.7.1`. `core/doctor.sh` prints `OK       version:
+0.7.1` and `OK       upgrade: state/upgraded-to 0.7.1`. And the board is on
+screen.
+
+#### Added on trunk after the v0.7.1 tag — 2026-10-15: the document index rebuilds itself
+
+**In short.** The document index — what `recall.vault-index` builds for
+document recall — waited for someone to run `python3 core/vault-search.py
+index`. Nothing in Daedalus ran it, so recall drifted behind the vault until
+the prime remembered. The prime was told only when someone ran doctor (a
+deployment on another machine, 2026-10-14). Now the index follows the vault
+by itself, and doctor says when it last ran.
+
+**What you will see.**
+- After every vault commit the prime makes — each close with `--commit`, and
+  `core/vault-commit.sh` by hand — one line: "document index: rebuilding in
+  the background (state/recall-index.log)". The commit never waits for the
+  rebuild, and a rebuild that fails never fails the commit: the line says
+  so, and `python3 core/vault-search.py index` runs one by hand.
+- At the start of the window that holds the pen, when the index is older
+  than the vault: "The document index is older than the vault; rebuilding it
+  in the background (state/recall-index.log)." A fresh index, another
+  window, a visitor and a compaction say nothing. A start that spent its
+  time on worktree checkouts skips the rebuild rather than running late; the
+  next commit kicks it.
+- A rebuild kicked while one is running: "a rebuild is already running; it
+  will run again when done". It does, once, so a document changed during a
+  run is indexed by the run that follows.
+- `state/recall-index.log` holds the last run: `started <time> by
+  vault-commit`, then `finished <time> indexed=N purged=M`, or the engine's
+  last lines and `failed <time>: <reason>`.
+- `core/doctor.sh` prints one more line under document recall: "last
+  automatic index <time> by <who>: indexed=N purged=M"; or that it FAILED
+  and where the engine's output is; or that a run is still going; or that
+  one started and did not finish (killed, or the machine slept), and that
+  the next vault commit or the prime's next session start runs it again.
+- A reindex engine that runs past two minutes is stopped as a whole, so
+  nothing of it keeps writing the store after the lock is released.
+
+A deployment without a `recall:` block sees none of this; `core/doctor.sh`
+still says "document recall: reindex command unconfigured".
+
+**How to take it.** `git pull --ff-only` in the Daedalus home, then a new
+session. No upgrade step runs and `VERSION` stays `0.7.1`; a session already
+open keeps the old hooks until it is restarted. A deployment whose tracked
+`CLAUDE.md` or `.claude/settings.json` carry local changes pulls the same
+way until a release touches those files; the part for the routine steps the
+agent runs (the same day's work, on its own branch) carries the
+stash–pull–pop recipe for that case.
+
+
 ## v0.7.0 — numbered windows, promote, the direct-call launcher, incremental capture, and an upgrade that runs itself
 
 **In short.** Several Daedalus sessions can now work on one target at the

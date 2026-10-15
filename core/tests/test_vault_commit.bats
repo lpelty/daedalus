@@ -152,3 +152,54 @@ EOF
   run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "accents"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(git -C "$DAEDALUS_HOME" -c core.quotepath=false show --name-only --format= HEAD | sort | tr '\n' ' ')" = "vault/proposals/café.md vault/proposals/note.md " ]
 }
+
+# --- the document index follows the vault (reindex design 2026-10-15, §3.4) ---
+# recall_engine <body...> — a recall: block naming a fake index engine that creates the store, then runs the body
+recall_engine() {
+  cp "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
+  { printf '#!/bin/bash\nmkdir -p "$DAEDALUS_RECALL_STORE"\n'; printf '%s\n' "$@"; } > "$BATS_TEST_TMPDIR/eng.sh"
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  printf "recall:\n  vault-query: 'echo []'\n  vault-index: '%s'\n  store: state/chroma\n" "$BATS_TEST_TMPDIR/eng.sh" >> "$DAEDALUS_HOME/config.yaml"
+}
+wait_log() {   # wait_log <text> — up to 6 s for the log's last line to carry <text>
+  local i=0
+  while [ "$i" -lt 60 ]; do
+    if [ -f "$DAEDALUS_HOME/state/recall-index.log" ] && tail -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -qF -- "$1"; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  echo "log never reached '$1':"; cat "$DAEDALUS_HOME/state/recall-index.log" 2>/dev/null; return 1
+}
+
+@test "after a commit it made, vault-commit.sh kicks the document index in the background and says so; the stamp and the log follow; nothing to commit kicks nothing" {
+  recall_engine 'sleep 1' 'echo "indexed=3 purged=1"'
+  doc proposals/PROP-5.md PROPOSED 01
+  t0="$(date +%s)"
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "with index"; t1="$(date +%s)"; [ "$status" -eq 0 ]
+  case "$output" in *"committed: with index"*"document index: rebuilding in the background (state/recall-index.log)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ $((t1 - t0)) -lt 2 ] || { echo "the commit waited for the engine: $((t1 - t0)) s"; return 1; }   # the engine sleeps 1 s; the script returned before it finished
+  wait_log "finished"
+  head -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -q ' by vault-commit$'
+  tail -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -q 'indexed=3 purged=1$'
+  [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  rm -f "$DAEDALUS_HOME/state/recall-index.log" "$DAEDALUS_HOME/state/recall-last-index"
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "again"; [ "$status" -eq 0 ]
+  case "$output" in *"nothing to commit"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"document index"*) echo "a kick with nothing committed: $output"; return 1 ;; *) : ;; esac
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]; [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
+
+@test "an index engine that fails leaves the commit made and the exit 0, the log saying failed; a vault-search.py that cannot run is one line, never a failed commit" {
+  recall_engine 'echo "store is read-only" >&2' 'exit 1'
+  doc proposals/PROP-6.md PROPOSED 01
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "engine fails"; [ "$status" -eq 0 ]
+  case "$output" in *"committed: engine fails"*"document index: rebuilding in the background"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/vault" log -1 --format=%s)" = "engine fails" ]
+  wait_log "failed"
+  grep -q '^engine: store is read-only$' "$DAEDALUS_HOME/state/recall-index.log"
+  [ ! -f "$DAEDALUS_HOME/state/recall-last-index" ]
+  printf '#!/usr/bin/env python3\nimport sys; sys.exit(3)\n' > "$DAEDALUS_HOME/core/vault-search.py"   # the runner itself broken
+  doc proposals/PROP-7.md PROPOSED 01
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "runner broken"; [ "$status" -eq 0 ]
+  case "$output" in *"committed: runner broken"*"document index: not started (core/vault-search.py exited 3); run it with python3 core/vault-search.py index"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/vault" log -1 --format=%s)" = "runner broken" ]
+}

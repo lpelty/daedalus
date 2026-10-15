@@ -8,7 +8,9 @@
 # unverified claim stops the commit (the prime answers for it), two files with
 # one EX/PROP number stop it (a number is never renumbered by another
 # session); 5. commit with the given message or "vault: prime commit <date>
-# (leases: …)"; 6. --push pushes a vault that has an origin.
+# (leases: …)", then kick the document index rebuild in the background
+# (core/vault-search.py index --background — a line, never a failed commit);
+# 6. --push pushes a vault that has an origin.
 # guard-bash.py denies raw git add/commit/stash under vault/ from every
 # session so that this check is never skipped; an operator at a shell is
 # free to type git commit there.
@@ -145,6 +147,18 @@ else
   # shellcheck disable=SC2086
   retry_git $ident commit -q -m "$msg" >/dev/null || die "commit failed in the vault"
   log "committed: $msg"
+  # 5b. The document index follows the vault (reindex design 2026-10-15): kicked after a commit it
+  # made, in the background, never holding this turn; a failure is a line, never a failed commit.
+  # The kick's cwd is the home, so a close.sh run from a worktree still resolves the right script.
+  if [ -f "$DAEDALUS_HOME/core/vault-search.py" ]; then
+    if idx="$(cd "$DAEDALUS_HOME" && python3 "$DAEDALUS_HOME/core/vault-search.py" index --background --by vault-commit 2>&1)"; then
+      [ -n "$idx" ] || idx="document index: not started (core/vault-search.py said nothing); run it with python3 core/vault-search.py index"
+      log "$idx"
+    else
+      rc=$?
+      log "document index: not started (core/vault-search.py exited $rc); run it with python3 core/vault-search.py index"
+    fi
+  fi
 fi
 
 # 6. --push (also with nothing new to commit: an earlier commit may still be unpushed)

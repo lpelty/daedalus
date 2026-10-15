@@ -597,6 +597,21 @@ deliberately conservative: prompts shorter than four words are skipped, and
 at most ten memories are surfaced. Those numbers are a starting position,
 and a recorded miss is what argues for loosening them.
 
+**The document index** is separate from the memory bank, and optional: the
+`recall:` block in `config.yaml` names a deployment-owned engine that indexes the vault into
+`recall.store`, and `core/vault-search.py` is its only runner. Since
+2026-10-15 the index follows the vault by itself. It is rebuilt after every
+vault commit `core/vault-commit.sh` makes (each close with `--commit`), and
+at the start of the window that holds the pen when the index is older than
+the vault — in the background, never holding the turn, one run at a time
+under `state/recall-index.lock`; a vault change during a run makes the run go
+once more. Each run is framed in `state/recall-index.log`: `started <time> by
+vault-commit|session-start|operator`, then `finished <time> indexed=N
+purged=M`, or the engine's last output lines and `failed <time>: <reason>`.
+`core/doctor.sh` says when the index last rebuilt and how it went.
+`python3 core/vault-search.py index` runs one by hand, in the foreground; a
+clone is refused, because the prime rebuilds it.
+
 ### Pitfall triggers
 
 A pitfall in `vault/pitfalls/` can declare what it applies to, and the hook in
