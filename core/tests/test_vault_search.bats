@@ -345,3 +345,51 @@ EOF
   # an operator shell: none of the session variables (the Bash tool that runs this suite injects CLAUDE_CODE_SESSION_ID)
   run env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID python3 "$SCRIPT" --check; case "$output" in *"document recall: index run older than newest vault change"*) : ;; *) echo "operator shell keeps the plain line: $output"; return 1 ;; esac
 }
+
+# --- the index rebuilds itself (reindex design 2026-10-15) ------------------
+# A query engine the --check probe accepts, and an index engine that creates
+# the store and prints the count line; both configured, so the fixture is
+# never "unconfigured" by accident.
+write_recall_config() {   # write_recall_config <index-engine-path>
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "$(printf "  vault-index: '%s'\n  store: state/chroma" "$1")"
+}
+index_engine() {   # index_engine <body...> — a vault-index engine that creates the store, then runs the body
+  { printf '#!/bin/bash\nmkdir -p "$DAEDALUS_RECALL_STORE"\n'; printf '%s\n' "$@"; } > "$BATS_TEST_TMPDIR/eng.sh"
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+}
+
+@test "--stale answers in one word without running an engine: unconfigured, no-store, stale (no stamp; a document newer than the stamp), fresh; evidence/ never makes it stale" {
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "  store: state/chroma"
+  run python3 "$SCRIPT" --stale; [ "$status" -eq 0 ]; [ "$output" = "unconfigured" ]
+  write_config "  vault-query: '$FIXQ \"\$1\"'" "$(printf "  vault-index: \"%s\" \n  store: state/chroma" "$BATS_TEST_TMPDIR/eng.sh")"   # trailing space: the cfg mangle
+  run python3 "$SCRIPT" --stale; [ "$output" = "unconfigured" ]
+  index_engine 'echo "indexed=1 purged=0"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  run python3 "$SCRIPT" --stale; [ "$status" -eq 0 ]; [ "$output" = "no-store" ]
+  mkdir -p "$DAEDALUS_HOME/state/chroma"
+  run python3 "$SCRIPT" --stale; [ "$output" = "stale" ]            # a store but no stamp
+  mkdir -p "$DAEDALUS_HOME/vault/specs" "$DAEDALUS_HOME/vault/evidence"
+  printf '# x' > "$DAEDALUS_HOME/vault/specs/x.md"
+  sleep 1; printf 'now' > "$DAEDALUS_HOME/state/recall-last-index"
+  run python3 "$SCRIPT" --stale; [ "$output" = "fresh" ]
+  sleep 1; printf '# e' > "$DAEDALUS_HOME/vault/evidence/e.md"       # gates.sh churn is not a vault change
+  run python3 "$SCRIPT" --stale; [ "$output" = "fresh" ]
+  printf '# y' > "$DAEDALUS_HOME/vault/specs/y.md"
+  run python3 "$SCRIPT" --stale; [ "$output" = "stale" ]
+  [ ! -f "$REPORT" ]                                                  # no engine ran for any answer
+}
+
+@test "the stamp carries the engine's START time: a document written while the engine runs is stale after it" {
+  index_engine 'sleep 1' "printf '# during' > \"$DAEDALUS_HOME/vault/specs/during.md\"" 'echo "indexed=2 purged=0"'
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  mkdir -p "$DAEDALUS_HOME/vault/specs"
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run python3 "$SCRIPT" index; [ "$status" -eq 0 ]; [ "$(count 'indexed=2 purged=0')" -eq 1 ]
+  python3 - "$DAEDALUS_HOME/state/recall-last-index" "$t0" "$DAEDALUS_HOME/vault/specs/during.md" <<'PY'
+import os, sys
+stamp, t0, during = os.path.getmtime(sys.argv[1]), float(sys.argv[2]), os.path.getmtime(sys.argv[3])
+assert t0 - 0.5 <= stamp <= t0 + 0.9, (stamp, t0)       # the start, not the finish a second later
+assert during > stamp, (during, stamp)
+PY
+  run python3 "$SCRIPT" --stale; [ "$output" = "stale" ]
+}

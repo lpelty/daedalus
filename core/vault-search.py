@@ -5,6 +5,7 @@ deployment's Chroma engine (spec §2.3).
     vault-search.py query "<text>"   -> JSON array (<=8 results) or nothing
     vault-search.py index            -> runs the reindex engine, stamps on proof
     vault-search.py --check          -> doctor NOTE lines (never empty)
+    vault-search.py --stale          -> one word: unconfigured | no-store | stale | fresh
 
 The engine commands live in config.yaml (recall.vault-query /
 recall.vault-index), run as `bash -c "<cmd>" _ <args...>` with
@@ -195,6 +196,7 @@ def _index_locked(root: Path) -> int:
     if store is None:
         sys.stderr.write("vault-search: recall.store rejected\n")
         return 0
+    start = time.time()
     r = run_engine(cmd, [], store, INDEX_TIMEOUT)
     if r is None or r.returncode != 0:
         sys.stderr.write("vault-search: engine failed; stamp untouched\n")
@@ -207,11 +209,20 @@ def _index_locked(root: Path) -> int:
     if not store.is_dir():
         sys.stderr.write("vault-search: store dir absent after engine run; stamp untouched\n")
         return 0
-    stamp = root / STAMP_REL
-    stamp.parent.mkdir(parents=True, exist_ok=True)   # state/, not the store
-    stamp.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
+    write_stamp(root, start)
     sys.stdout.write(lines[-1].strip() + "\n")
     return 0
+
+
+def write_stamp(root: Path, start: float) -> None:
+    """The stamp's mtime is the engine's START time (reindex design 2026-10-15,
+    decision 21): a document changed while the engine ran is newer than the
+    stamp and so stale after the run, instead of being marked fresh and left
+    unindexed until some later kick. The text is the same instant."""
+    stamp = root / STAMP_REL
+    stamp.parent.mkdir(parents=True, exist_ok=True)   # state/, not the store
+    stamp.write_text(time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(start)))
+    os.utime(str(stamp), (start, start))
 
 
 def _newest_vault_md(root: Path) -> float:
@@ -231,6 +242,32 @@ def _newest_vault_md(root: Path) -> float:
                 except OSError:
                     pass
     return newest
+
+
+def stale_word(root: Path) -> str:
+    """The cheap staleness answer (reindex design 2026-10-15, decision 6): a
+    stat of the stamp against the newest vault document, never an engine run,
+    so session-start can ask inside its budget. `no-store` is told apart from
+    `stale` for the tests; both mean "rebuild"."""
+    cmd = read_cfg("recall.vault-index", root)
+    if not cmd or looks_corrupted(cmd):
+        return "unconfigured"
+    store = store_path(root)
+    if store is None:
+        return "unconfigured"
+    if not store.is_dir():
+        return "no-store"
+    stamp = root / STAMP_REL
+    if not stamp.is_file():
+        return "stale"
+    if _newest_vault_md(root) > stamp.stat().st_mtime:
+        return "stale"
+    return "fresh"
+
+
+def cmd_stale(root: Path) -> int:
+    print(stale_word(root))
+    return 0
 
 
 def cmd_check(root: Path) -> int:
@@ -290,6 +327,12 @@ def main(argv: List[str]) -> int:
             return cmd_check(root)
         except Exception:
             print("document recall: check crashed")   # red, never silently green
+            return 0
+    if len(argv) >= 2 and argv[1] == "--stale":
+        try:
+            return cmd_stale(root)
+        except Exception:
+            print("stale")                             # a caller rebuilds on doubt
             return 0
     try:
         if len(argv) >= 3 and argv[1] == "query":
