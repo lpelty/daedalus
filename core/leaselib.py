@@ -1668,7 +1668,13 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
     from anywhere, and an operator shell (sid None) may release anything.
     --remove deletes worktree and branch, refusing unpromoted commits and
     uncommitted changes without --force and naming them (subjects, file
-    paths) before deleting them (§4.2, §4.5)."""
+    paths) before deleting them (§4.2, §4.5). From a session (sid), --remove
+    runs only after the window's unpromoted report was shown and the
+    operator's yes followed the delete line in this session's transcript
+    (deletion_confirmed_locked; `said` is --operator-said), and what
+    authorised it is recorded first (record_deletion). An operator shell
+    (sid None) is unchanged — whatever form ran it, this is the backstop
+    behind the guard's early refusal (design 2026-10-15, decision 13)."""
     with lock(root):
         leases = read_all(root)
         nn = number_of(leases, token, "release")
@@ -1682,10 +1688,13 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
             lease["released"] = now_stamp()
             write_lease(root, nn, lease)
             return "Window %s released; this window is done — close it." % nn
+        authorised = deletion_confirmed_locked(root, sid, nn, lease, said) if sid is not None else None
         trunks = lease.get("trunks") or {}
         subjects, dirty, problems = unpromoted_work(root, nn, lease)
         if problems and not force:
             raise Refused("Window %s %s. Add --force to delete them." % (nn, ", and ".join(problems)))
+        if authorised is not None:
+            record_deletion(root, nn, str(sid), str(said), authorised)
         out = []
         if subjects:
             out.append("Deleting window %s's unpromoted commits: %s" % (nn, _quoted(subjects)))
@@ -1712,7 +1721,11 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
             for ref in split_refs.split():
                 _git(src, "update-ref", "-d", ref)
         _remove_lease_files(root, nn)
-        out.append("Window %s released; its worktree and branch are deleted." % nn)
+        if authorised is not None:
+            out.append("Window %s released; its worktree and branch are deleted (after the operator said: \"%s\")."
+                       % (nn, authorised["text"]))
+        else:
+            out.append("Window %s released; its worktree and branch are deleted." % nn)
         return "\n".join(out)
 
 
@@ -1806,6 +1819,125 @@ def lease_epochs(lease: dict) -> float:
         except (ValueError, OverflowError):
             continue
     return best
+
+
+def _read_json(p: Path) -> Optional[dict]:
+    try:
+        d = json.loads(p.read_text())
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+ASK_FIRST = ("Run core/lease.sh unpromoted %s first, repeat its report to the operator word for word, and ask; the "
+             "delete runs only after their yes.")
+
+
+def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: dict, said: Optional[str]) -> dict:
+    """Whether a session may delete window nn's work now (agent-runnable design 2026-10-15, §4.2). Caller holds
+    the lock, shared or exclusive; this never calls lock(). Returns what authorised it — transcript_ref,
+    shown_ref, cutoff, fingerprint, text — or raises Refused with one sentence:
+      1. the witness: `unpromoted nn` ran in THIS session (state/release-asked/<nn>.json names sid and nn), and
+         not before this window existed (lease_epochs) — a witness, not a trust root;
+      2. tty mode: the deployment confirms at a terminal, so the delete is pasted there;
+      3. the words: --operator-said carries one plain line beginning with yes (a reply of several lines, or with
+         a $ or a backtick, cannot ride on the command — ask for a one-word yes);
+      4. the work is what the report named (work_fingerprint unchanged since the ask);
+      5. the yes is in this session's transcript as the operator's first reply to an assistant turn carrying the
+         constant DELETE_INVITATION line, after a cut-off that is the latest of the ask and the lease's own times
+         — the recorded-yes machinery promote uses (transcriptlib.find_operator_words; the line re-arms)."""
+    import transcriptlib as tl
+    marker = _read_json(release_asked_path(root, nn))
+    if marker is None or marker.get("session_id") != sid or marker.get("lease") != nn:
+        raise Refused(ASK_FIRST % nn)
+    try:
+        asked_at = float(marker.get("at"))      # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise Refused(ASK_FIRST % nn)
+    epochs = lease_epochs(lease)
+    if asked_at < epochs:
+        raise Refused(ASK_FIRST % nn)           # the report predates this window: stale, or not this window's
+    try:
+        mode = tl.confirm_mode(root)
+    except ValueError as e:
+        raise Refused(str(e))
+    if mode == "tty":
+        raise Refused("This deployment confirms at the terminal (promote.confirm: tty). Paste this line in your "
+                      "own shell: cd %s && core/lease.sh release %s --remove --force" % (root, nn))
+    if not (said or "").strip():
+        raise Refused("Record what the operator said: add --operator-said \"<their whole reply>\". The yes is "
+                      "evidence; an empty one is not a yes.")
+    said = str(said)
+    if not tl.is_yes(said):
+        raise Refused("The operator's words do not begin with yes (got: \"%s\"). Record the operator's whole reply; "
+                      "a yes begins with yes." % said.strip())
+    if "\n" in said or "$" in said or "`" in said:
+        raise Refused("Ask the operator for a one-word yes and record that; a reply with several lines or shell "
+                      "characters cannot be carried on the command.")
+    if work_fingerprint(root, nn, lease) != marker.get("fingerprint"):
+        raise Refused("Window %s's work changed since the report (a commit, an amended commit, or a changed or added "
+                      "file); run core/lease.sh unpromoted %s again and ask again." % (nn, nn))
+    cutoff = max(asked_at, epochs)
+    line = DELETE_INVITATION % nn
+    shell = "set `promote.confirm: tty` and run the delete in your own shell"
+    try:
+        found = tl.find_operator_words(tl.transcript_for(root, str(sid)), said, cutoff, require_shown=True,
+                                       shown_text=line, shown_end=line)
+    except tl.Unprotected as e:
+        raise Refused("This session's transcript (%s) is outside every directory nothing may write, so it is not "
+                      "evidence of the operator's words. Nothing was deleted. Set memory.transcript_dir in "
+                      "config.yaml, or %s." % (e, shell))
+    except tl.Missing as e:
+        raise Refused("I cannot find this session's transcript (%s), so the operator's yes cannot be checked. Nothing "
+                      "was deleted. If it lives elsewhere, set memory.transcript_dir in config.yaml; or %s." % (e, shell))
+    except tl.Unreadable as e:
+        d = tl.DRIFT[:1].upper() + tl.DRIFT[1:]
+        cut = d.index(";")
+        raise Refused("%s (%s)%s. Nothing was deleted. Until then, %s." % (d[:cut], e, d[cut:], shell))
+    except tl.NotShown:
+        raise Refused("The delete line was not shown to the operator before that yes: the report was not repeated, "
+                      "the operator's reply to it came before that yes, or your last words before it were not the "
+                      "line. Nothing was deleted. Show the report once (core/lease.sh unpromoted %s); after that, end "
+                      "every reply of yours with the line \"%s.\" and nothing after it, then ask again." % (nn, line))
+    except tl.NotSubmitted as e:
+        raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; show the report to "
+                      "the operator and ask again." % str(e).replace("the words are", "they are", 1))
+    except tl.NotWritten:
+        raise Refused("Those words are in this session's transcript, but not as a turn Claude Code wrote there: "
+                      "nothing in the conversation follows from them, so they were added to the file afterwards. "
+                      "Nothing was deleted; show the report to the operator and ask again.")
+    except tl.NotFound:
+        raise Refused("I could not find those words as something the operator typed after the delete line was "
+                      "shown. Nothing was deleted.")
+    return {"transcript_ref": found["transcript_ref"], "shown_ref": found["shown_ref"], "cutoff": cutoff,
+            "fingerprint": marker.get("fingerprint"), "text": found["text"], "problems": marker.get("problems")}
+
+
+def deletion_confirmed(root: Path, sid: str, nn: str, said: Optional[str]) -> Optional[str]:
+    """The guard's entry (core/guard-bash.py): the refusal sentence for `core/lease.sh release nn --remove …` from
+    session sid, or None when the delete may run. A shared lock, one read of the lease; transcriptlib is imported
+    only inside the check."""
+    try:
+        with lock(root, shared=True):
+            lease = read_lease(root, nn)
+            if lease is None:
+                return "There is no window %s." % nn
+            deletion_confirmed_locked(root, sid, nn, lease, said)
+    except Refused as e:
+        return str(e)
+    return None
+
+
+def record_deletion(root: Path, nn: str, sid: str, said: str, ok: dict) -> Path:
+    """What authorised a deletion, written before anything is deleted (design decision 23): the witness marker goes
+    with the lease files, so this is the one record naming the transcript entry the deletion rested on."""
+    d = root / "state" / "evidence" / "deletions"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / ("%s-%s.json" % (nn, time.strftime("%Y%m%d-%H%M%S")))
+    p.write_text(json.dumps({"lease": nn, "session_id": sid, "said": said, "transcript_ref": ok["transcript_ref"],
+                             "shown_ref": ok["shown_ref"], "cutoff": ok["cutoff"], "fingerprint": ok["fingerprint"],
+                             "problems": ok.get("problems"), "at": now_stamp()}, indent=2))
+    return p
 
 
 def unpromoted_report(root: Path, token: str, sid: Optional[str] = None) -> str:

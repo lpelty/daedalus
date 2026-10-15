@@ -509,17 +509,23 @@ PY
   [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
   W="$DAEDALUS_HOME/worktrees/02/thing"; printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
   python3 "$LL" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
-  CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove
+  # From a SESSION (sB), --remove is gated since 2026-10-15: without the unpromoted report shown and the operator's
+  # yes in sB's transcript it is refused before any other check, and nothing is deleted. The --force rule below is
+  # proved from an operator shell, which is not gated (it needs no transcript).
+  CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove --force
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, repeat its report to the operator word for word, and ask; the delete runs only after their yes."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  run LS release 02 --remove
   [ "$status" -ne 0 ]; case "$output" in *"unmerged work"*"--force"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
   # Uncommitted work (a modified tracked file and an untracked one) is refused
   # the same way, named by path — git's own refusal is never bypassed silently
   # (§4.5: work is never deleted by a cleanup; --remove is the explicit path).
   printf 'd\n' >> "$W/a.txt"; printf 'u\n' > "$W/untracked.txt"
-  CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove
+  run LS release 02 --remove
   [ "$status" -ne 0 ]; case "$output" in *"unmerged work"*"has uncommitted changes in worktrees/02/thing (2 files: a.txt, untracked.txt)"*"Add --force to delete them."*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]; [ -f "$W/untracked.txt" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
-  CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove --force
+  run LS release 02 --remove --force
   [ "$status" -eq 0 ]; case "$output" in *"unmerged work"*) : ;; *) echo "must repeat the subjects: $output"; return 1 ;; esac
   case "$output" in *"Deleting window 02's uncommitted changes in worktrees/02/thing: a.txt, untracked.txt"*) : ;; *) echo "must name the files being deleted: $output"; return 1 ;; esac
   [ ! -d "$W" ]; run git -C "$T" rev-parse --verify -q lease/02; [ "$status" -ne 0 ]
@@ -1765,4 +1771,132 @@ marker() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d.get(
   printf 'u2\n' > "$W/untracked.txt"; h="$(fp 01)"; [ "$h" != "$g" ]   # the untracked file's CONTENT, not only its name
   printf 'n2\n' >> "$W/sub/n.txt"; i="$(fp 01)"; [ "$i" != "$h" ]
   [ "$(fp 01)" = "$i" ]
+}
+
+# delete_fixture — window 01 is held by session sA (live; it will run the delete), window 02 is stale (a dead
+# recorded process) with one unpromoted commit; sA's transcript lives where transcriptlib looks (tx_path) and its
+# SessionStart marker names it, as the promote fixture does. W is window 02's worktree, M the delete witness.
+delete_fixture() {
+  LS create >/dev/null; LS create >/dev/null
+  pidA="$(live_pid)"; registry_entry "$pidA" sA interactive cli daedalus-01
+  CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
+  W="$DAEDALUS_HOME/worktrees/02/thing"
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
+  python3 "$LL" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  TX="$(tx_path sA)"; : > "$TX"
+  python3 - "$DAEDALUS_HOME/state/session-sA.json" "$TX" <<'PY'
+import json, sys, time
+json.dump({"session_id": "sA", "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "started_epoch": time.time(),
+           "transcript_path": sys.argv[2], "lease": "01"}, open(sys.argv[1], "w"), indent=2)
+PY
+  M="$DAEDALUS_HOME/state/release-asked/02.json"
+  export W TX M
+}
+asked() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02; }
+delete_as_sA() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" release 02 --remove --force "$@"; }
+LINE02="Say yes to delete window 02's work."
+
+@test "release --remove from a session (2026-10-15): refused without the report (nothing deleted); with no --operator-said, a reply not beginning with yes, a reply of several lines or with a \$; refused when the work changed since the report; in tty mode with the paste line — and an operator shell is not gated" {
+  delete_fixture
+  run delete_as_sA --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, repeat its report to the operator word for word, and ask; the delete runs only after their yes."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
+  R="$(asked)"; [ -f "$M" ]
+  [ "${R##*$'\n'}" = "$LINE02" ]
+  run delete_as_sA
+  [ "$status" -ne 0 ]; case "$output" in *'Record what the operator said: add --operator-said "<their whole reply>". The yes is evidence; an empty one is not a yes.'*) : ;; *) echo "$output"; return 1 ;; esac
+  run delete_as_sA --operator-said "ok"
+  [ "$status" -ne 0 ]; case "$output" in *'The operator'"'"'s words do not begin with yes (got: "ok"). Record the operator'"'"'s whole reply; a yes begins with yes.'*) : ;; *) echo "$output"; return 1 ;; esac
+  for bad in $'yes\nplease' 'yes $HOME' 'yes `date`'; do
+    run delete_as_sA --operator-said "$bad"
+    [ "$status" -ne 0 ]; case "$output" in *"Ask the operator for a one-word yes and record that; a reply with several lines or shell characters cannot be carried on the command."*) : ;; *) echo "$output"; return 1 ;; esac
+  done
+  [ -d "$W" ]
+  # the yes is in the transcript, but the work changed since the report: a commit the operator did not see named
+  P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "$R" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$P" 3)" >/dev/null
+  printf 'more\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "more work"
+  run delete_as_sA --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Window 02's work changed since the report (a commit, an amended commit, or a changed or added file); run core/lease.sh unpromoted 02 again and ask again."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ "$(git -C "$W" log -1 --format=%s)" = "more work" ]
+  # tty mode: the deployment chose typing in a shell for promote and gets the same for the delete
+  printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
+  asked >/dev/null
+  run delete_as_sA --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"This deployment confirms at the terminal (promote.confirm: tty). Paste this line in your own shell: cd $DAEDALUS_HOME && core/lease.sh release 02 --remove --force"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+  # an operator shell (no session) is unchanged: it deletes with --force and needs no transcript
+  run LS release 02 --remove --force; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -d "$W" ]; [ ! -e "$M" ]
+  case "$output" in *"after the operator said"*) echo "an operator shell has no recorded yes: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "release --remove from a session after the yes: the report shown and the operator's first reply a yes deletes the window and records what authorised it under state/evidence/deletions/; a reply carrying only the first sentence, a yes before the line, and a later question that cleared the line are refused naming the line; the operator may ask first" {
+  delete_fixture
+  R="$(asked)"; P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "${R%%$'\n'*}" "$(plus "$P" 2)" >/dev/null      # the first sentence only, not the line
+  tx "$TX" operator "yes" "$(plus "$P" 3)" >/dev/null
+  run delete_as_sA --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"The delete line was not shown to the operator before that yes"*"end every reply of yours with the line \"$LINE02\" and nothing after it"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+  # the line shown, the operator asks first, the answer ends with the line, then a yes — pushed through
+  tx "$TX" assistant "$R" "$(plus "$P" 4)" >/dev/null
+  tx "$TX" operator "What is in that commit?" "$(plus "$P" 5)" >/dev/null
+  tx "$TX" assistant "A one-line change to a.txt. $LINE02" "$(plus "$P" 6)" >/dev/null
+  tx "$TX" operator "Which file again?" "$(plus "$P" 7)" >/dev/null
+  tx "$TX" assistant "a.txt — do you mean the one in the nested repo?" "$(plus "$P" 8)" >/dev/null   # no line: cleared
+  tx "$TX" operator "yes" "$(plus "$P" 9)" >/dev/null                        # a yes to THAT question, not to the delete
+  run delete_as_sA --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+  shown="$(tx "$TX" assistant "a.txt. $LINE02" "$(plus "$P" 10)")"
+  said="$(tx "$TX" operator "Yes." "$(plus "$P" 11)")"
+  run --separate-stderr delete_as_sA --operator-said "Yes."
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"Deleting window 02's unpromoted commits: \"unmerged work\""*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Window 02 released; its worktree and branch are deleted (after the operator said: \"Yes.\")."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$W" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]; [ ! -e "$M" ]
+  run git -C "$T" rev-parse --verify -q lease/02; [ "$status" -ne 0 ]
+  rec="$(ls "$DAEDALUS_HOME"/state/evidence/deletions/02-*.json)"; [ -f "$rec" ]
+  python3 - "$rec" "$said" "$shown" <<'PY'
+import json, re, sys
+r = json.load(open(sys.argv[1]))
+assert r["lease"] == "02" and r["session_id"] == "sA" and r["said"] == "Yes.", r
+assert r["transcript_ref"]["uuid"] == sys.argv[2] and r["shown_ref"]["uuid"] == sys.argv[3], r
+assert re.fullmatch(r"[0-9a-f]{64}", r["fingerprint"]) and isinstance(r["cutoff"], float), r
+assert r["problems"] == ['has 1 unpromoted commit: "unmerged work"'], r
+assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", r["at"]), r
+PY
+}
+
+@test "release --remove is gated in leaselib itself: python3 core/leaselib.py release 02 --remove --force from a session is refused the same as core/lease.sh (the guard judges only the shell forms it can read); a forged witness older than the window, or a yes typed before the window existed, never counts" {
+  delete_fixture
+  DAEDALUS_SESSION_ID=sA run python3 "$LL" release 02 --remove --force --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+  # a yes typed BEFORE this window existed, and a marker whose time is forged to 0 so the cut-off would admit it:
+  # the lease file's own created/bound_at times hold the cut-off, so it is refused
+  R="$(asked)"
+  created="$(python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])); print(time.mktime(time.strptime(d["created"], "%Y-%m-%dT%H:%M:%S")))' "$DAEDALUS_HOME/state/leases/02.json")"
+  tx "$TX" assistant "$R" "$(plus "$created" -20)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$created" -10)" >/dev/null
+  python3 - "$M" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["at"] = 0.0; json.dump(d, open(sys.argv[1], "w"))
+PY
+  DAEDALUS_SESSION_ID=sA run python3 "$LL" release 02 --remove --force --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+  # a marker for another session, or for another number, is no witness for sA's delete of 02
+  asked >/dev/null
+  python3 - "$M" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["session_id"] = "sB"; json.dump(d, open(sys.argv[1], "w"))
+PY
+  DAEDALUS_SESSION_ID=sA run python3 "$LL" release 02 --remove --force --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
 }
