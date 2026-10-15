@@ -1421,3 +1421,13 @@ verify:
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"classifyAllShell"*) echo "a NOTE for a project file the classifier never reads: $output"; return 1 ;; *) : ;; esac
 }
+
+@test "the scripts the operator and the agent run by path keep the executable bit in git (mode 100755): doctor.sh, every core/*.sh, guard-bash.py and the headless auto-mode check — a mode change ships to every deployment that pulls" {
+  REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  bad=""
+  for f in core/*.sh core/guard-bash.py core/tests/automode-allow-rule.sh; do
+    mode="$(git -C "$REPO" ls-files -s -- "$f" | cut -c1-6)"
+    [ "$mode" = "100755" ] || bad="$bad $f($mode)"
+  done
+  [ -z "$bad" ] || { echo "not executable in git:$bad"; return 1; }
+}
