@@ -719,3 +719,95 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   p5="$(live_pid)"; registry_entry "$p5" sC interactive cli daedalus-01
   run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 01, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
 }
+
+# --- the document index follows the vault (reindex design 2026-10-15, §3.5) ---
+# recall_engine <body...> — vault-search.py in the home and a recall: block naming a fake index
+# engine that creates the store, then runs the body. Only these tests have the script: every other
+# start in this file finds no core/vault-search.py and kicks nothing.
+recall_engine() {
+  cp "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
+  { printf '#!/bin/bash\nmkdir -p "$DAEDALUS_RECALL_STORE"\n'; printf '%s\n' "$@"; } > "$BATS_TEST_TMPDIR/eng.sh"
+  chmod +x "$BATS_TEST_TMPDIR/eng.sh"
+  printf "recall:\n  vault-query: 'echo []'\n  vault-index: '%s'\n  store: state/chroma\n" "$BATS_TEST_TMPDIR/eng.sh" >> "$DAEDALUS_HOME/config.yaml"
+}
+REINDEX_NOTE="The document index is older than the vault; rebuilding it in the background (state/recall-index.log)."
+ctx() { printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+wait_log() {   # wait_log <text> — up to 8 s for the log's last line to carry <text>
+  local i=0
+  while [ "$i" -lt 80 ]; do
+    if [ -f "$DAEDALUS_HOME/state/recall-index.log" ] && tail -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -qF -- "$1"; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  echo "log never reached '$1':"; cat "$DAEDALUS_HOME/state/recall-index.log" 2>/dev/null; return 1
+}
+
+@test "the window that takes the pen at startup with a stale document index is told it is rebuilding, and the log and stamp appear; the hook returns while the engine still sleeps" {
+  recall_engine 'sleep 2' 'echo "indexed=5 purged=0"'
+  pid="$(live_pid)"; registry_entry "$pid" sN interactive cli daedalus-01
+  t0="$(date +%s)"; run start sN startup; t1="$(date +%s)"; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
+  case "$(ctx)" in *"$REINDEX_NOTE"*) : ;; *) ctx; return 1 ;; esac
+  [ $((t1 - t0)) -lt 5 ] || { echo "the hook waited for the engine: $((t1 - t0)) s"; return 1; }
+  wait_log "finished"
+  head -1 "$DAEDALUS_HOME/state/recall-index.log" | grep -q ' by session-start$'
+  [ -f "$DAEDALUS_HOME/state/recall-last-index" ]
+}
+
+@test "a second window (no pen) kicks nothing and is not told; a fresh index, a compaction and a visitor are silent too" {
+  recall_engine 'echo "indexed=5 purged=0"'
+  p1="$(live_pid)"; registry_entry "$p1" sA interactive cli daedalus-01; run start sA startup
+  case "$(ctx)" in *"$REINDEX_NOTE"*) : ;; *) ctx; return 1 ;; esac
+  wait_log "finished"; rm -f "$DAEDALUS_HOME/state/recall-index.log"
+  p2="$(live_pid)"; registry_entry "$p2" sB interactive cli daedalus-02; run start sB startup
+  [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ]
+  case "$(ctx)" in *"document index"*) ctx; return 1 ;; *) : ;; esac
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  run start sA resume                                   # the prime again, the index fresh now: nothing to say
+  case "$(ctx)" in *"document index"*) ctx; return 1 ;; *) : ;; esac
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  mkdir -p "$DAEDALUS_HOME/vault/specs"; sleep 1; printf '# new' > "$DAEDALUS_HOME/vault/specs/new.md"   # stale again
+  run start sA compact                                  # a compaction is not a start
+  case "$(ctx)" in *"document index"*) ctx; return 1 ;; *) : ;; esac
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  DIRECT_CALL_ID=call-1 run start sV startup            # a visitor binds nothing and kicks nothing
+  case "$(ctx)" in *"document index"*) ctx; return 1 ;; *) : ;; esac
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  run start sA resume                                   # the prime's resume with a stale index: the note
+  case "$(ctx)" in *"$REINDEX_NOTE"*) : ;; *) ctx; return 1 ;; esac
+  wait_log "finished"
+}
+
+@test "an unconfigured recall block says nothing at start (recall is optional; doctor names it); a rebuild already running is reported in the script's own words" {
+  cp "$SRC/vault-search.py" "$DAEDALUS_HOME/core/"
+  pid="$(live_pid)"; registry_entry "$pid" sN interactive cli daedalus-01
+  run start sN startup; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
+  case "$(ctx)" in *"document index"*) ctx; return 1 ;; *) : ;; esac
+  printf "recall:\n  vault-query: 'echo []'\n  vault-index: 'true'\n  store: state/chroma\n" >> "$DAEDALUS_HOME/config.yaml"
+  python3 -c "import fcntl,os,time; fd=os.open('$DAEDALUS_HOME/state/recall-index.lock',os.O_RDWR|os.O_CREAT); fcntl.flock(fd,fcntl.LOCK_EX); time.sleep(4)" 3>&- </dev/null >/dev/null 2>&1 &
+  sleep 0.5
+  run start sN resume
+  case "$(ctx)" in *"document index: a rebuild is already running; it will run again when done (state/recall-index.log)"*) : ;; *) ctx; return 1 ;; esac
+  [ -f "$DAEDALUS_HOME/state/recall-index.rerun" ]
+  wait
+}
+
+@test "a start whose budget is nearly spent after the bind kicks nothing and still emits its context; the lease lock held exclusively for the whole run: the hook returns inside its budget" {
+  recall_engine 'echo "indexed=5 purged=0"'
+  pid="$(live_pid)"; registry_entry "$pid" sN interactive cli daedalus-01
+  LEASE_TEST_HOOK_BUDGET=9 run start sN startup; [ "$status" -eq 0 ]    # 9 - 5 (marker tail) leaves under 4 s: no kick
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
+  [ "$(lease_json prime session_id)" = "sN" ]                             # the pen was taken: the budget is the only reason
+  case "$(ctx)" in *"document index"*) ctx; return 1 ;; *) : ;; esac
+  sleep 1; [ ! -f "$DAEDALUS_HOME/state/recall-index.log" ]
+  holder="$(python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close(); time.sleep(20)' "$DAEDALUS_HOME/state/leases/.lock" "$BATS_TEST_TMPDIR/held" 3>&- </dev/null >/dev/null 2>&1 & echo "$!")"
+  printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
+  i=0; while [ ! -e "$BATS_TEST_TMPDIR/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  t0="$(date +%s)"
+  LEASE_TEST_HOOK_BUDGET=16 run start sN resume
+  t1="$(date +%s)"; [ "$status" -eq 0 ]
+  [ $((t1 - t0)) -lt 16 ] || { echo "the hook took $((t1 - t0)) s"; return 1; }
+  case "$(first_line)" in "Daedalus session orientation: "*) : ;; *) first_line; return 1 ;; esac
+}
