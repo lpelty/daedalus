@@ -5222,7 +5222,7 @@ def _band_text(value: object) -> Optional[str]:
 
 # The `ami` key of board-json (frame-jack spec §9.1): every sub-key, always — the mod relies on every key being present.
 BOARD_AMI_KEYS = ("state", "mode", "port_alive", "device", "asked", "would_ask", "would_shorten", "unanswered",
-                  "median_ms", "asks", "overrides", "since_epoch", "retry_epoch")
+                  "median_ms", "asks", "overrides", "since_epoch", "retry_epoch", "questions")
 
 
 def board_ami(root: Path, sid: Optional[str]) -> dict:

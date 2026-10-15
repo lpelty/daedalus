@@ -262,7 +262,8 @@ assert sorted(os.listdir(ROOT / "state/ami")) == [".lock", "decisions", "on", "s
 b = a.board_ami(ROOT, SID)
 assert b["asked"] == 6 and b["would_ask"] == 3 and b["unanswered"] == 3 and b["median_ms"] == 103, b
 assert b["state"] == "unconfigured" and b["mode"] == "shadow" and b["port_alive"] is False, b
-assert sorted(b) == sorted(["state", "mode", "port_alive", "device", "asked", "would_ask", "would_shorten", "unanswered", "median_ms", "asks", "overrides", "since_epoch", "retry_epoch"]), sorted(b)
+assert sorted(b) == sorted(["state", "mode", "port_alive", "device", "asked", "would_ask", "would_shorten", "unanswered", "median_ms", "asks", "overrides", "since_epoch", "retry_epoch", "questions"]), sorted(b)
+assert b["questions"] == {"destructive": False, "suite": True}, b["questions"]     # no record: the defaults
 b2 = a.board_ami(ROOT, "sNone")
 assert b2["asked"] is None and b2["would_ask"] is None and b2["median_ms"] is None and b2["state"] == "unconfigured", b2
 print("ok")'

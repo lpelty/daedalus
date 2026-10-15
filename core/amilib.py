@@ -1200,14 +1200,16 @@ def board_ami(root, sid) -> dict:
     """The `ami` key of `leaselib.py board-json`: the switch's word plus the session's counts, every key
     always present; counts None for a shell or a missing counters file. No config, no bash, no inference.
     One word differs from switch(): `down` whose reason is a stale heartbeat is `supervisor gone`, the
-    band's own line (§9.2) — the key set stays the thirteen §9.1 names."""
+    band's own line (§9.2). Past the thirteen §9.1 names, `questions` ({question: asked?} from daemon.json, the
+    defaults without one) lets the band say a switched-off question is off instead of showing it as zero."""
     d = switch_detail(root, sid)
     c = counters(root, sid) if sid else None
     # the band names a gone supervisor apart from a dead daemon (§5.1 step 4, §9.2): the remedy differs
     state = "supervisor gone" if d["state"] == "down" and d["reason"] == "supervisor gone" else d["state"]
     out = {"state": state, "mode": "shadow", "port_alive": d["state"] == "on", "device": d["device"],
            "asked": None, "would_ask": None, "would_shorten": None, "unanswered": None, "median_ms": None,
-           "asks": None, "overrides": None, "since_epoch": d["since_epoch"], "retry_epoch": d["retry_epoch"]}
+           "asks": None, "overrides": None, "since_epoch": d["since_epoch"], "retry_epoch": d["retry_epoch"],
+           "questions": asked_questions(_read_json(daemon_path(root)))}
     if not c:
         return out
     try:

@@ -476,6 +476,20 @@ test('the AMI line when on: the counts in words, plain colour, after the window 
   expect(await ui.find({ type: 'Text', text: AMI_ON + ' · 3 overruled' })).toBeDefined()
 })
 
+test('a question switched off reads as off on the AMI line, never as a zero count: destructive off with no would-ask says "destructive question off"; suite off with nothing shortened says "suite question off"; an older board-json without questions keeps the counts', async ($, on) => {
+  let ami: Record<string, unknown> = { questions: { destructive: false, suite: true }, would_ask: 0 }
+  const { clock } = stubs(on, () => ok(withAmi(ami)), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'AMI on · shadow (logs, never acts) · 212 asked · destructive question off · would have shortened 2 · 171 ms' })).toBeDefined()
+  ami = { questions: { destructive: true, suite: false }, would_ask: 0, would_shorten: 0 }
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: 'AMI on · shadow (logs, never acts) · 212 asked · would have asked you 0 times · suite question off · 171 ms' })).toBeDefined()
+  ami = { would_ask: 0 }
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: 'AMI on · shadow (logs, never acts) · 212 asked · would have asked you 0 times · would have shortened 2 · 171 ms' })).toBeDefined()
+})
+
 test('the AMI line when off is dim; down, supervisor gone, battery, tripped and not configured are in the warning colour with their remedies', async ($, on) => {
   let ami: Record<string, unknown> = { state: 'off' }
   const { clock } = stubs(on, () => ok(withAmi(ami)))

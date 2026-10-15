@@ -31,6 +31,7 @@ session's counts and one port check bounded at 100 ms; no config, no bash, no
 git, no question asked of the model.
 
 ```
+AMI on · shadow (logs, never acts) · 6 asked · destructive question off · would have shortened 2 · 171 ms
 AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms
 AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms · 3 overruled
 AMI off
@@ -44,6 +45,9 @@ AMI on but not configured — /frame-jack status
 
 Plain when on, dim when off, the warning colour for every line that needs you.
 `· N overruled` appears only when the AMI's call was overruled at least once.
+A question switched off in config.yaml (`ami.ask_destructive`, off by default;
+`ami.ask_suite`) reads `destructive question off` or `suite question off` in
+place of its count, so a zero never looks like a measurement.
 The line counts in the band's rows, so it never pushes a window line off; with
 no windows it sits between the "no windows" line and the tail. It is left out
 entirely when `board-json` has no `ami` key (an older Daedalus) or frame-jack was
@@ -66,7 +70,10 @@ a = json.load(sys.stdin).get("ami") or {}
 s = a.get("state")
 n = lambda k: a.get(k) or 0
 if s == "on":
-    line = "AMI on · shadow (logs, never acts) · %d asked · would have asked you %d times · would have shortened %d" % (n("asked"), n("would_ask"), n("would_shorten"))
+    q = a.get("questions") or {}
+    wa = "destructive question off" if q.get("destructive") is False and not n("would_ask") else "would have asked you %d times" % n("would_ask")
+    ws = "suite question off" if q.get("suite") is False and not n("would_shorten") else "would have shortened %d" % n("would_shorten")
+    line = "AMI on · shadow (logs, never acts) · %d asked · %s · %s" % (n("asked"), wa, ws)
     line += " · %d ms" % a["median_ms"] if a.get("median_ms") is not None else ""
     line += " · %d overruled" % n("overrides") if n("overrides") else ""
     print(line)

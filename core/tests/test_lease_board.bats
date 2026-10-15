@@ -375,7 +375,7 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
 # --- board-json: the ami key (frame-jack spec §9.1) ---------------------------------------------------------------
 # One more top-level key, always present with every sub-key: the switch's word and this session's counts. Read from
 # state/ami/ only — the sentinel, daemon.json, the counters file and one bounded port probe; no config, no bash, no git.
-AMI_KEYS='["asked", "asks", "device", "median_ms", "mode", "overrides", "port_alive", "retry_epoch", "since_epoch", "state", "unanswered", "would_ask", "would_shorten"]'
+AMI_KEYS='["asked", "asks", "device", "median_ms", "mode", "overrides", "port_alive", "questions", "retry_epoch", "since_epoch", "state", "unanswered", "would_ask", "would_shorten"]'
 # ami_state_files <sid> <port> <daemon state> [heartbeat age s] — the sentinel, a daemon.json naming an executable
 # command, and a counters file for <sid> (6 asked, 2 would ask, 1 would shorten, 1 unanswered, 3 overruled)
 ami_state_files() {
@@ -409,6 +409,7 @@ json.dump({"asked": {"destructive": 5, "suite": 1}, "would_ask": 2, "would_short
   bj_check 'o["ami"]["asked"] == 6 and o["ami"]["would_ask"] == 2 and o["ami"]["would_shorten"] == 1 and o["ami"]["unanswered"] == 1'
   bj_check 'o["ami"]["median_ms"] == 140 and o["ami"]["asks"] == 0 and o["ami"]["overrides"] == 3 and o["ami"]["retry_epoch"] is None'
   bj_check 'isinstance(o["ami"]["since_epoch"], float) and o["ami"]["since_epoch"] > 1.7e9'
+  bj_check 'o["ami"]["questions"] == {"destructive": False, "suite": True}'       # the record's, defaults for keys it lacks
   run --separate-stderr BJ --session sNobody; [ "$status" -eq 0 ]      # no counters file for this session: counts null
   bj_check 'o["ami"]["state"] == "on" and all(o["ami"][k] is None for k in ("asked", "would_ask", "would_shorten", "unanswered", "median_ms", "asks", "overrides"))'
   run --separate-stderr BJ; [ "$status" -eq 0 ]                         # an operator shell: no session, counts null

@@ -113,12 +113,19 @@ function count(n) {
 function amiText(a, nowMs) {
   switch (a.state) {
     case 'on': {
+      // a question switched off (board-json's `questions`) reads as off, never as a zero count that looks
+      // measured; an older board-json without the key keeps the counts
+      const q = a.questions && typeof a.questions === 'object' ? a.questions : {}
       const parts = [
         'AMI on',
         'shadow (logs, never acts)',
         count(a.asked) + ' asked',
-        'would have asked you ' + count(a.would_ask) + ' times',
-        'would have shortened ' + count(a.would_shorten),
+        q.destructive === false && count(a.would_ask) === 0
+          ? 'destructive question off'
+          : 'would have asked you ' + count(a.would_ask) + ' times',
+        q.suite === false && count(a.would_shorten) === 0
+          ? 'suite question off'
+          : 'would have shortened ' + count(a.would_shorten),
       ]
       if (typeof a.median_ms === 'number') parts.push(a.median_ms + ' ms')
       if (count(a.overrides) > 0) parts.push(a.overrides + ' overruled')
