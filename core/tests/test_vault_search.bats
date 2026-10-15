@@ -393,3 +393,26 @@ assert during > stamp, (during, stamp)
 PY
   run python3 "$SCRIPT" --stale; [ "$output" = "stale" ]
 }
+
+@test "a timed-out engine is killed as a whole process group — no indexer of its keeps writing after the lock is released — and index says what it said before" {
+  marker="vault-search-timeout-marker-$(basename "$BATS_TEST_TMPDIR")"
+  # the engine's grandchild: the sleeping python outlives bash -c unless the GROUP is killed
+  index_engine "python3 -c 'import time; time.sleep(30)' $marker & wait"
+  write_recall_config "$BATS_TEST_TMPDIR/eng.sh"
+  printf 'old' > "$DAEDALUS_HOME/state/recall-last-index"
+  t0="$(date +%s)"
+  run bash -c "DAEDALUS_TEST_INDEX_TIMEOUT=1 python3 '$SCRIPT' index 2>&1"
+  t1="$(date +%s)"
+  [ "$status" -eq 0 ]; [ "$output" = "vault-search: engine failed; stamp untouched" ]
+  [ $((t1 - t0)) -lt 5 ] || { echo "index took $((t1 - t0)) s"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/recall-last-index")" = "old" ]
+  i=0; while pgrep -f "$marker" >/dev/null 2>&1 && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
+  if pgrep -fl "$marker"; then pkill -f "$marker"; echo "the engine's sleeper survived the timeout"; return 1; fi
+  # the foreground form's words are unchanged: the count line on stdout, a failure sentence on stderr
+  index_engine 'echo "indexed=4 purged=2"'
+  run bash -c "python3 '$SCRIPT' index 2>/dev/null"; [ "$output" = "indexed=4 purged=2" ]
+  index_engine 'echo "engine: cannot open store" >&2' 'exit 1'
+  run bash -c "python3 '$SCRIPT' index 2>&1 >/dev/null"; [ "$output" = "vault-search: engine failed; stamp untouched" ]
+  index_engine 'echo done'
+  run bash -c "python3 '$SCRIPT' index 2>&1 >/dev/null"; [ "$output" = "vault-search: no 'indexed=N purged=M' line; stamp untouched" ]
+}

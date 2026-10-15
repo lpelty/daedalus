@@ -18,17 +18,19 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 
 QUERY_TIMEOUT = 10
-INDEX_TIMEOUT = 120
+# DAEDALUS_TEST_INDEX_TIMEOUT is a test knob and can only shrink the timeout.
+INDEX_TIMEOUT = min(120, int(os.environ.get("DAEDALUS_TEST_INDEX_TIMEOUT") or 120))
 CFG_TIMEOUT = 3
 MAX_RESULTS = 8
 STAMP_REL = "state/recall-last-index"
@@ -90,15 +92,44 @@ def store_path(root: Path) -> Optional[Path]:
 def run_engine(cmd: str, args: List[str], store: Path,
                timeout: int) -> Optional[subprocess.CompletedProcess]:
     """bash -c "<cmd>" _ <args...> with the store exported. The command string
-    references "$1" itself; nothing is ever spliced or appended (spec §2.2)."""
+    references "$1" itself; nothing is ever spliced or appended (spec §2.2).
+
+    The engine runs in its own session (process group), and a timeout kills
+    the whole group: subprocess.run's timeout killed `bash -c` and not the
+    indexer it started, so a lock released over a still-writing indexer was
+    the "database is locked" case the lock exists for (reindex design
+    2026-10-15, decision 22; the shape of leaselib._run_bounded, kept local
+    because this script does not import leaselib). None on a timeout or an
+    OS failure; otherwise the completed process with its stdout and stderr."""
     try:
-        return subprocess.run(
+        p = subprocess.Popen(
             ["bash", "-c", cmd, "_"] + args,
-            capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=dict(os.environ, DAEDALUS_RECALL_STORE=str(store)),
+            start_new_session=True,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(p)
+        return None
+    except BaseException:
+        _kill_group(p)
+        raise
+    return subprocess.CompletedProcess(p.args, p.returncode, out, err)
+
+
+def _kill_group(p: "subprocess.Popen") -> None:
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        p.communicate(timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        pass
 
 
 def _valid_rel(path: str) -> bool:
@@ -182,36 +213,41 @@ def cmd_index(root: Path) -> int:
         except OSError:
             print("index already running")
             return 0
-        return _index_locked(root)
+        ok, line, _ = _index_locked(root)
+        if ok:
+            sys.stdout.write(line + "\n")
+        else:
+            sys.stderr.write("vault-search: %s\n" % line)
+        return 0
     finally:
         os.close(fd)                                  # releases the flock
 
 
-def _index_locked(root: Path) -> int:
+def _index_locked(root: Path) -> Tuple[bool, str, str]:
+    """Caller holds the lock. Runs the engine once; returns (ok, line, engine_stderr):
+    on success the engine's count line, on failure the one sentence that says
+    why (the stamp is untouched in every failure). The engine's stderr comes
+    back so a log can carry it (decision 4); the foreground form discards it."""
     cmd = read_cfg("recall.vault-index", root)
     if not cmd or looks_corrupted(cmd):
-        sys.stderr.write("vault-search: recall.vault-index unset or corrupted\n")
-        return 0
+        return False, "recall.vault-index unset or corrupted", ""
     store = store_path(root)
     if store is None:
-        sys.stderr.write("vault-search: recall.store rejected\n")
-        return 0
+        return False, "recall.store rejected", ""
     start = time.time()
     r = run_engine(cmd, [], store, INDEX_TIMEOUT)
-    if r is None or r.returncode != 0:
-        sys.stderr.write("vault-search: engine failed; stamp untouched\n")
-        return 0
+    if r is None:
+        return False, "engine failed; stamp untouched", ""
+    if r.returncode != 0:
+        return False, "engine failed; stamp untouched", r.stderr or ""
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     m = COUNT_RE.match(lines[-1].strip()) if lines else None
     if not m:
-        sys.stderr.write("vault-search: no 'indexed=N purged=M' line; stamp untouched\n")
-        return 0
+        return False, "no 'indexed=N purged=M' line; stamp untouched", r.stderr or ""
     if not store.is_dir():
-        sys.stderr.write("vault-search: store dir absent after engine run; stamp untouched\n")
-        return 0
+        return False, "store dir absent after engine run; stamp untouched", r.stderr or ""
     write_stamp(root, start)
-    sys.stdout.write(lines[-1].strip() + "\n")
-    return 0
+    return True, lines[-1].strip(), r.stderr or ""
 
 
 def write_stamp(root: Path, start: float) -> None:
