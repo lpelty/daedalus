@@ -96,7 +96,9 @@ EOF
   [ "$(dj terminal)" = false ]
   [ "$(dj restarts)" = 0 ]
   case "$(dj ready_ms)" in ''|null) echo "no ready_ms"; return 1 ;; esac
-  grep -q '"question": "Would running this command destroy or permanently lose data' "$FAKE_LOG"
+  # the warm-up asks the question that is switched on (the suite question by default), never one that is off
+  grep -q '"question": "Given the files edited since the last run, is a targeted test run sufficient?"' "$FAKE_LOG"
+  run ! grep -q '"question": "Would running this command destroy' "$FAKE_LOG"
   leash="$(dj leash_pid)"; serve="$(dj serve_pid)"; sup="$(dj supervisor_pid)"
   kill -0 "$leash"; kill -0 "$serve"; kill -0 "$sup"
   has "$(ps -o command= -p "$leash")" "ami-daemon.py --leash"
@@ -158,8 +160,8 @@ serve_known() { case "$(dj serve_pid)" in ''|null|0) return 1 ;; *) return 0 ;; 
   run FJ off
   [ "$status" -eq 0 ]
   has "$output" "the AMI is stopped and its 5 GB freed"
-  ! kill -0 "$serve" 2>/dev/null
-  ! kill -0 "$leash" 2>/dev/null
+  run ! kill -0 "$serve" 2>/dev/null
+  run ! kill -0 "$leash" 2>/dev/null
   wait_gone "$sup" 2
   [ "$(( $(date +%s) - t0 ))" -le 5 ]
   [ "$(dj state)" = off ]
@@ -178,7 +180,7 @@ serve_known() { case "$(dj serve_pid)" in ''|null|0) return 1 ;; *) return 0 ;; 
   run FJ off
   [ "$status" -eq 0 ]
   has "$output" "the AMI is stopped and its 5 GB freed"
-  ! kill -0 "$serve" 2>/dev/null
+  run ! kill -0 "$serve" 2>/dev/null
   wait_gone "$sup" 2
   [ "$(( $(date +%s) - t0 ))" -le 8 ]
   [ "$(dj state)" = off ]
@@ -475,9 +477,9 @@ e = json.load(open(sys.argv[1])); print("offline:", e.get("HF_HUB_OFFLINE")); pr
   grep -q '^user-invocable: true$' "$f"
   grep -q 'python3 core/frame-jack.py' "$f"
   grep -q 'half a minute' "$f"
-  ! grep -q 'state/ami' "$f"
-  ! grep -qi 'pmset' "$f"
-  ! grep -qw 'port' "$f"
+  run ! grep -q 'state/ami' "$f"
+  run ! grep -qi 'pmset' "$f"
+  run ! grep -qw 'port' "$f"
 }
 
 # status_home — a prepared, running-looking deployment for the status test: the fake serve on its own port
@@ -612,6 +614,8 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   wait_state up 15
   [ "$(dj questions)" = '{"destructive": true, "suite": false}' ]
+  grep -q '"question": "Would running this command destroy' "$FAKE_LOG"
+  run ! grep -q '"question": "Given the files edited' "$FAKE_LOG"
   run FJ status
   has "$output" "questions: destructive asked; suite not asked (ami.ask_suite is false)"
   run FJ off
@@ -620,4 +624,16 @@ PY
   run FJ on
   [ "$status" -eq 2 ]
   has "$output" "ami.ask_suite must be true or false (got sometimes)"
+}
+
+@test "with both questions switched off the supervisor never sends one: no warm-up question and no inference probe reach serve across eleven polls, and it still comes up" {
+  PORT="$(free_port)"; write_ami_config "$PORT"
+  printf '  ask_destructive: false\n  ask_suite: false\n' >> "$DAEDALUS_HOME/config.yaml"
+  FJ on
+  wait_state up 15
+  sleep 11                       # past the tenth pass, where the inference probe runs
+  grep -q '"path": "/health"' "$FAKE_LOG"              # serve was reached (the log is the fake's)
+  run ! grep -q '"method": "POST"' "$FAKE_LOG"
+  [ "$(dj state)" = up ]
+  FJ off
 }

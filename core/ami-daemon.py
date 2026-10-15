@@ -12,7 +12,8 @@ stops everything and exits; battery (pmset -g batt, when ami.battery_off) stops 
 `battery`; on AC with nothing running it re-probes the port first (an AMI there is adopted as borrowed,
 never retried as a bind), else starts the leash, polls /health to readiness, pays the cold first call with
 one warm-up question and writes `up`; serve running gets one /health per pass (three failures restart it)
-and every tenth pass one bounded inference probe (two past the bound restart it). A terminal exit —
+and every tenth pass one bounded inference probe (two past the bound restart it). The warm-up and the probe
+ask a question that is switched on (ami.ask_suite, ami.ask_destructive); with both off, neither runs. A terminal exit —
 weights missing, or the port held by something that is not the AMI — is `down`, `terminal: true`, no
 retry until the next `frame-jack on`. Every pass rewrites daemon.json (tmp + rename) with the heartbeat.
 Starting serve is watched too: leash_pid and serve_pid are written as soon as they are known, the heartbeat
@@ -194,10 +195,18 @@ class Supervisor:
             "battery_off": cfg["battery_off"], "request_timeout_ms": cfg["request_timeout_ms"],
             "questions": dict(cfg["questions"]), "enforce": list(cfg["enforce"]),
         }
-        self.warm_state = amilib.state_destructive({
-            "git_branch": "main", "cwd": str(root), "worktree_line": amilib.worktree_line(root),
-            "last_operator_message": "warm up the AMI", "previous_tool_calls": [],
-            "description": "list the files in the home", "command": "ls -la"})
+        # the warm-up and the liveness probe ask a question that is switched on — none when both are off, so a
+        # question the operator switched off costs no inference here either (decision 1: battery and heat)
+        self.warm_question = next((q for q in ("suite", "destructive") if cfg["questions"].get(q)), None)
+        warm = {"git_branch": "main", "cwd": str(root), "worktree_line": amilib.worktree_line(root),
+                "last_operator_message": "warm up the AMI", "previous_tool_calls": []}
+        if self.warm_question == "destructive":
+            self.warm_state = amilib.state_destructive(dict(warm, description="list the files in the home",
+                                                            command="ls -la"))
+        else:
+            self.warm_state = amilib.state_suite(dict(warm, description="run the suite", command="core/tests/run.sh",
+                                                      files_edited_since_previous_run=["README.md"],
+                                                      tool_calls_since_previous_run=1))
 
     # -- the record
     def write(self, first=False):
@@ -347,7 +356,8 @@ class Supervisor:
             self.stop_tree()
             return self.launch_failed("serve did not answer /health within %d s" % int(self.ready_max))
         # the warm-up question pays the cold first call here
-        ans = self.ask_watching("destructive", self.warm_state, WARMUP_BOUND_SECS)
+        ans = (self.ask_watching(self.warm_question, self.warm_state, WARMUP_BOUND_SECS)
+               if self.warm_question else "skipped, no question is switched on")
         self.rec["ready_ms"] = int((time.monotonic() - t0) * 1000)
         self.rec["device"] = h.get("device") or self.cfg["device"]
         self.rec["state"] = "up"
@@ -427,8 +437,8 @@ class Supervisor:
                     self.launch()
                     self.write()
                     return False
-            if h and self.pass_no % PROBE_EVERY_PASSES == 0:
-                ans = self.ask_watching("destructive", self.warm_state, PROBE_BOUND_SECS)
+            if h and self.warm_question and self.pass_no % PROBE_EVERY_PASSES == 0:
+                ans = self.ask_watching(self.warm_question, self.warm_state, PROBE_BOUND_SECS)
                 if isinstance(ans, amilib.Answer):
                     self.probe_fails = 0
                 elif ans.reason == "timeout":
