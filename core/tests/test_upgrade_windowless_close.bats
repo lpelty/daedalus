@@ -67,3 +67,72 @@ PY
   done
   [ "$(manifest)" = "$before" ]
 }
+
+start() { printf '{"hook_event_name":"SessionStart","session_id":"%s","source":"startup","transcript_path":"%s/transcripts/%s.jsonl"}' "$1" "$BATS_TEST_TMPDIR" "$1" | python3 "$DAEDALUS_HOME/core/session-start.py"; }
+stop() { printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":%s}' "$1" "${2:-false}" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+write_as() { printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"Write","tool_input":{"file_path":"%s"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+guard_as() { printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"%s","cwd":"%s","tool_input":{"command":%s}}' \
+    "$1" "$3" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2")" | python3 "$DAEDALUS_HOME/core/guard-bash.py"; }
+tp() { env DAEDALUS_SESSION_ID="$1" bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"; }
+# the session that pulled: the upgrade stopped on an in-flight branch at its start, so it holds no window; it takes the pen
+windowless_prime() {
+  cp "$SRC/promote.py" "$SRC/promote.sh" "$SRC/sync-target.sh" "$DAEDALUS_HOME/core/"
+  git -C "$DAEDALUS_HOME" add -A core; cmt "$DAEDALUS_HOME" -m "promote"
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A; cmt "$T" -m "in flight"
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -d "$DAEDALUS_HOME/state/leases" ] && [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/lease.sh" prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+promotion() {   # promotion <id> [pushed] — a promotion of window 01 with its scratch worktree
+  local d="$DAEDALUS_HOME/state/promote/$1"; mkdir -p "$d"
+  git -C "$T" worktree add -q --detach "$d/thing" origin/main
+  printf '{"lease": "01", "promote_id": "%s", "prepared_ts": 1}\n' "$1" > "$d/prepared.json"
+  [ -z "${2:-}" ] || printf '{"lease": "01"}\n' > "$d/pushed"
+}
+
+@test "while the upgrade is pending the pen gives a session holding no window the vault, not a tree: target_path and sync-target refuse, a write in target/ is denied and hot.md allowed, worktree surgery in target/ is denied, promote waits, --clean removes only pushed scratch" {
+  windowless_prime
+  run --separate-stderr tp s1; [ "$status" -ne 0 ]
+  case "$stderr" in *"started before the upgrade to 0.7.0 finished"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]; case "$output" in *"started before the upgrade to 0.7.0 finished"*) : ;; *) echo "$output"; return 1 ;; esac
+  run write_as s1 "$T/new.txt"; case "$output" in *'"deny"'*) : ;; *) echo "target/ write allowed: $output"; return 1 ;; esac
+  run write_as s1 "$DAEDALUS_HOME/vault/hot.md"; case "$output" in *'"deny"'*) echo "hot.md denied: $output"; return 1 ;; *) : ;; esac
+  run guard_as s1 "git worktree prune" "$T"; case "$output" in *'"deny"'*) : ;; *) echo "prune allowed: $output"; return 1 ;; esac
+  run env DAEDALUS_SESSION_ID=s1 CLAUDECODE=1 bash "$DAEDALUS_HOME/core/promote.sh" 01
+  [ "$status" -ne 0 ]
+  case "$output" in *"This session holds the pen but no window, and the upgrade to 0.7.0 has not finished: promote changes target/, which the upgrade's safety copy protects, so it waits until the upgrade finishes. hot.md and \`core/vault-commit.sh\` work now."*) : ;; *) echo "$output"; return 1 ;; esac
+  promotion 01-20261016-100000-aaa
+  run env DAEDALUS_SESSION_ID=s1 CLAUDECODE=1 bash "$DAEDALUS_HOME/core/promote.sh" 01 --clean
+  [ -d "$DAEDALUS_HOME/state/promote/01-20261016-100000-aaa/thing" ] || { echo "unpushed scratch removed: $output"; return 1; }
+  promotion 01-20261016-110000-bbb pushed
+  run env DAEDALUS_SESSION_ID=s1 CLAUDECODE=1 bash "$DAEDALUS_HOME/core/promote.sh" 01 --clean
+  [ ! -d "$DAEDALUS_HOME/state/promote/01-20261016-110000-bbb/thing" ] || { echo "pushed scratch kept: $output"; return 1; }
+  [ -d "$DAEDALUS_HOME/state/promote/01-20261016-100000-aaa/thing" ]
+}
+
+@test "after the stamp a session that took the pen without a window still builds in no tree until it claims one: target_path names claim and says it holds the pen, target/ stays denied, hot.md allowed, its Stop never reaches the trunk comparison; once it claims, it builds in its worktree and keeps the pen" {
+  windowless_prime
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"; git -C "$T" checkout -q main
+  run --separate-stderr tp s1; [ "$status" -ne 0 ]
+  case "$stderr" in *"This session holds no window"*"It holds the pen: hot.md and \`core/vault-commit.sh\` are its"*"core/lease.sh create"*"claim <NN>"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run write_as s1 "$T/new.txt"; case "$output" in *'"deny"'*) : ;; *) echo "target/ write allowed: $output"; return 1 ;; esac
+  run write_as s1 "$DAEDALUS_HOME/vault/hot.md"; case "$output" in *'"deny"'*) echo "hot.md denied: $output"; return 1 ;; *) : ;; esac
+  run --separate-stderr stop s1
+  case "$output$stderr" in *"does not apply in a lease worktree"*|*"origin/main moved"*|*"commits on"*) echo "$output $stderr"; return 1 ;; esac
+  case "$stderr" in *"It holds the pen"*"claim"*) : ;; *) echo "status $status: $output $stderr"; return 1 ;; esac
+  run bash "$DAEDALUS_HOME/core/lease.sh" create; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/lease.sh" claim 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run tp s1; [ "$status" -eq 0 ]; [ "$output" = "$DAEDALUS_HOME/worktrees/01/thing" ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = s1 ]
+}
+
+@test "a session that kept the pen after releasing its window: while the upgrade is pending it builds in no tree either; after the stamp it resolves target/<name> as before" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sP","history":[]}'
+  run --separate-stderr tp sP; [ "$status" -ne 0 ]
+  case "$stderr" in *"started before the upgrade to 0.7.0 finished"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  run tp sP; [ "$status" -eq 0 ]; [ "$output" = "$T" ] || { echo "$output"; return 1; }
+}

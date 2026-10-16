@@ -180,6 +180,11 @@ def read_leases(root: Path) -> Dict[str, dict]:
         return ll.read_all(root)
 
 
+PROMOTE_WAITS = ("This session holds the pen but no window, and the upgrade to %s has not finished: promote changes "
+                 "target/, which the upgrade's safety copy protects, so it waits until the upgrade finishes. hot.md "
+                 "and `core/vault-commit.sh` work now.")
+
+
 def who(root: Path, leases: Dict[str, dict]) -> dict:
     """§7.1 step 1. On one POSIX user every one of these is a claim; the check
     stops the honest mistake (a clone that forgot it is not prime). The gate an
@@ -197,6 +202,8 @@ def who(root: Path, leases: Dict[str, dict]) -> dict:
         me = ll.window_label(mine, mlease) if mine else "a session that holds no window"
         raise Stop("Only the prime window runs promote. You are %s; ask the prime (marked prime on the board), "
                    "or take the pen first." % me)
+    if mine is None and ll.pending_version(root):
+        raise Stop(PROMOTE_WAITS % ll.pending_version(root))
     hint = os.environ.get("DAEDALUS_LEASE", "").strip()
     if hint and hint != (mine or ""):
         raise Stop("`DAEDALUS_LEASE=%s`, but this session is %s (the lease files are the truth). Unset the "
@@ -812,9 +819,10 @@ def who_may_clean(root: Path, leases: Dict[str, dict]) -> str:
         return "operator"
     if sid is None:
         who(root, leases)                      # its refusal: a session whose id is not in the environment
-    if (leases.get("prime") or {}).get("session_id") == sid:
-        return "prime"
     mine, mlease = ll.lease_of_session(leases, sid)
+    if (leases.get("prime") or {}).get("session_id") == sid:
+        # a pen with no window while the upgrade is pending removes only what a session holding no window may
+        return "no-window" if mine is None and ll.pending_version(root) else "prime"
     if mine:
         raise Stop("Only the prime window runs promote. You are %s; ask the prime (marked prime on the board), or "
                    "take the pen first." % ll.window_label(mine, mlease))

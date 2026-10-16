@@ -408,6 +408,24 @@ def no_window_pending(pending) -> str:
     return NO_WINDOW_STOPPED % (ver, body + ".")
 
 
+def pen_without_tree(leases: Dict[str, dict], sid: Optional[str], pending=None) -> bool:
+    """The pen gives this session the vault, not a tree: it holds the pen and no
+    numbered lease, and either the upgrade is pending (`pending`, as
+    resolve_lease takes it — the safety copy protects target/) or it took the
+    pen without a window (prime.json's taken_without_window) and has not
+    claimed one since. Pure over the lease read. A session that kept the pen
+    after releasing its window, once nothing is pending, is not one: it builds
+    in target/<name> as before."""
+    prime = leases.get("prime") or {}
+    if not sid or prime.get("session_id") != sid or lease_of_session(leases, sid)[0] is not None:
+        return False
+    return bool(pending) or prime.get("taken_without_window") == sid
+
+
+PEN_NO_TREE = ("This session holds no window: no lease names it. It holds the pen: hot.md and `core/vault-commit.sh` "
+               "are its; to build, run `core/lease.sh create` and then `claim <NN>`.")
+
+
 def resolve_lease(leases: Dict[str, dict], sid: str,
                   pending=None) -> Tuple[Optional[str], Optional[dict]]:
     """§4.4 steps 2–3 over an already-read lease dict. Pure: no I/O, no lock.
@@ -442,13 +460,16 @@ def resolve_lease(leases: Dict[str, dict], sid: str,
         if lease.get("worktree_ready") is False:
             raise Refused("window %s's worktree was not finished at start; run `core/lease.sh claim %s` to finish it" % (nn, nn))
         return nn, lease
-    if leases.get("prime", {}).get("session_id") == sid:
+    holds_pen = leases.get("prime", {}).get("session_id") == sid
+    if holds_pen and not pen_without_tree(leases, sid, pending):
         return None, None
     # Said whenever a session holds no window while lease files exist — whatever
     # the number of live sessions. The old sentence blamed "several sessions";
     # the window of 2026-10-10 repeated that to the operator as its cause (§4.4).
     if pending:
         raise Refused(no_window_pending(pending))
+    if holds_pen:
+        raise Refused(PEN_NO_TREE)
     raise Refused("This session holds no window: no lease names it and it does not hold the pen. "
                   "Run `core/lease.sh create` and then `claim <NN>`.")
 

@@ -1038,8 +1038,10 @@ def push_positionals(rest: List[str]) -> List[str]:
 
 def check_worktree_promote(rest: List[str], repo: Path, root: Path, ctx: dict) -> Optional[str]:
     """§7.3: `git worktree remove <state/promote/…>` and `git worktree prune` in a repo
-    under the home are the prime's; a non-prime window is denied."""
-    if not ctx["leases"] or ctx["prime"] or not rest or home_tree(root, repo) is None:
+    under the home are the prime's; a non-prime window is denied, and so is a prime
+    that can be given no tree (it holds no window while the upgrade is pending, or took
+    the pen without one: `refused` is set for it) — target/'s repositories are not its."""
+    if not ctx["leases"] or (ctx["prime"] and not ctx.get("refused")) or not rest or home_tree(root, repo) is None:
         return None
     who = ctx["mine"] or "none"
     if rest[0] == "prune":

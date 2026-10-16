@@ -711,7 +711,9 @@ def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[s
         return reason, None
     rroot = root.resolve()
     is_hot = p == rroot / "vault" / "hot.md"
-    if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees") or is_hot):
+    # hot.md stays the pen holder's even when it can be given no tree (leaselib.pen_without_tree): the vault is not
+    # what the upgrade's safety copy protects.
+    if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees") or (is_hot and not ctx["prime"])):
         return refused, None
     if not ctx["leases"]:
         return None, None
