@@ -147,12 +147,12 @@ sparse() {
   mkdir -p "$(dirname "$1")"
   python3 -c 'import sys; open(sys.argv[1], "wb").truncate(int(sys.argv[2]) << 20)' "$1" "$2"
 }
-# smartsheet_shape [noclone] — the shape a second machine's deployment reported (update-command Decision 8):
+# second_machine_shape [noclone] — the shape a second machine's deployment reported (update-command Decision 8):
 # target/thing as its product, with engine/pyproject.toml + engine/uv.lock and an ignored engine/.venv of 1800 MB
 # in the checkout, two window worktrees (worktrees/01, worktrees/04) and two pushed promote scratches;
 # extensions/open-design with pnpm-lock.yaml and an ignored 1900 MB node_modules/.pnpm; and, unless noclone,
 # extensions/open-design/open-design-plainclone-unused holding 3840 MB of untracked files. All sparse.
-smartsheet_shape() {
+second_machine_shape() {
   local d id n
   cp "$SRC/promote.py" "$DAEDALUS_HOME/core/"
   mkdir -p "$T/engine" "$T/extensions/open-design" "$DAEDALUS_HOME/worktrees"

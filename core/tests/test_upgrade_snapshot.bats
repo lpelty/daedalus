@@ -1148,8 +1148,8 @@ f = open(sys.argv[1], "a"); fcntl.flock(f.fileno(), fcntl.LOCK_EX); open(sys.arg
 # est — the MB figure of the dry run's "would keep a safety copy ... (about N MB ...)" line; 0 for "under 1 MB"
 est() { printf '%s\n' "$1" | sed -n 's/.*would keep a safety copy of .* (about \([0-9]*\) MB, in state.*/\1/p; s/.*would keep a safety copy of .* (about under 1 MB, in state.*/0/p'; }
 
-@test "the Smartsheet shape: 9+ GB of venvs and node_modules a lockfile rebuilds are not counted; with the leftover clone the estimate is 3840-3904 MB and the stop names the clone first among the largest; without it, under 64 MB (update-command Decision 8)" {
-  smartsheet_shape
+@test "the second machine's shape: 9+ GB of venvs and node_modules a lockfile rebuilds are not counted; with the leftover clone the estimate is 3840-3904 MB and the stop names the clone first among the largest; without it, under 64 MB (update-command Decision 8)" {
+  second_machine_shape
   printf 'upgrade:\n  snapshot_max_mb: 2048\n' >> "$DAEDALUS_HOME/config.yaml"
   run python3 "$UP" --dry-run
   n="$(est "$output")"
