@@ -26,7 +26,10 @@ step is idempotent — the second run changes nothing — and says one line the 
      cut-off git left, a checkout on a branch that is gone, branch names that differ only in case, a local branch
      named origin/<trunk>, and an untracked or ignored file where the checkout back to the trunk would write each
      stop too, naming what to do; a checkout or reset `lease.sh adopt` began and was cut off is finished.
-  7. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
+  7. the daedalus command: ~/.local/bin/daedalus for this home (core/update.py --install-shim's rules — never over
+     a file it did not write, nor over one serving another home still there), and how to reach it from the login
+     shell; it never stops the upgrade (update-command design §4.7). FULL = len(STEPS) is the whole run
+  8. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
 Before step 2, the first that can touch target/, every run takes a safety copy of everything in target/ into
 state/upgrade-snapshot/<stamp>/ and checks it, or stops before changing anything (see "the safety copy" below):
@@ -3722,12 +3725,29 @@ def _snap_doctor(root: Path) -> None:
               "core/upgrade.py --forget-snapshot removes it once nothing is" % (s, _mb(size)))
 
 
+def step_command(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
+    """Step 7 (update-command design §4.7): the daedalus command in ~/.local/bin for this home, by core/update.py's
+    own install (never over a file it did not write), with how to reach it from the login shell. It never stops the
+    upgrade: what it cannot do is a line. The login-shell check takes at most 5 s, less near a start's deadline."""
+    if not (root / "core" / "update.py").is_file():
+        return []
+    timeout = 5.0 if deadline is None else min(5.0, deadline - time.time() - 0.5)
+    try:
+        import update as upd
+        said = upd.install_shim(root, dry=dry, timeout=max(0.0, timeout))
+    except Exception as e:          # never a stop: the command is a convenience, the upgrade is not
+        said = ["the daedalus command was not installed (%s: %s); core/setup.sh installs it" % (type(e).__name__, e)]
+    return ["%s: %s" % (head, ln) for ln in said]
+
+
 STEPS = ((1, "creating the window directories", step_dirs),
          (2, "installing the pre-push hook", step_hooks),
          (3, "removing the old shared reminder files", step_dedup),
          (4, "renaming hot.md's session line", step_hot),
          (5, "moving capture's settings into config.yaml", step_memory),
-         (6, "putting target/ back on its trunk", step_trunk))
+         (6, "putting target/ back on its trunk", step_trunk),
+         (7, "installing the daedalus command", step_command))
+FULL = len(STEPS)       # "the whole run": every step, then the stamp (Decision 18); --setup runs steps 1-3
 
 
 def _lock(root: Path, deadline: Optional[float]) -> Optional[int]:
@@ -3748,18 +3768,18 @@ def _lock(root: Path, deadline: Optional[float]) -> Optional[int]:
 
 
 def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
-        upto: int = 6) -> Tuple[List[str], Optional[str]]:
-    """Steps 1..upto in order, then (upto 6, not dry) the stamp. Returns (the lines of the steps that acted, the
+        upto: int = FULL) -> Tuple[List[str], Optional[str]]:
+    """Steps 1..upto in order, then (upto FULL, not dry) the stamp. Returns (the lines of the steps that acted, the
     stop sentence or None). A stop is recorded in state/upgrade-stopped.json (not in a dry run) and the stamp is
     not written, so the next run starts again from the top. Before step 2, the first that can touch target/, a
-    full run (upto 6, not dry) takes the safety copy of target/ or stops; at a session start (a deadline) a copy
+    full run (upto FULL, not dry) takes the safety copy of target/ or stops; at a session start (a deadline) a copy
     that will not fit in it is taken by a detached run, and a start while that run is going leaves it alone; the
     start after it finds the copy taken and makes the upgrade's changes itself."""
     ver = version(root)
-    if ver is None and upto == 6:
+    if ver is None and upto == FULL:
         return [], None
-    head = "Upgrade to %s" % ver if upto == 6 else "Setup"
-    if not dry and upto == 6 and _bg_running(root):
+    head = "Upgrade to %s" % ver if upto == FULL else "Setup"
+    if not dry and upto == FULL and _bg_running(root):
         return [], None              # a detached run holds the upgrade; the board says so
     fd = None
     if not dry:
@@ -3767,7 +3787,7 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
         if fd is None:
             return [], None
     try:
-        if fd is not None and upto == 6 and stamped(root) == ver:
+        if fd is not None and upto == FULL and stamped(root) == ver:
             return [], None          # the run that held the lock finished it while this one waited
         lines: List[str] = []
         for n, what, fn in STEPS:
@@ -3775,7 +3795,7 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                 break
             if not dry and deadline is not None and time.time() >= deadline:
                 return lines, _stopped(root, ver, n, STOPPED_TIME % (ver, what))
-            if n == 2 and upto == 6 and not dry:
+            if n == 2 and upto == FULL and not dry:
                 rec = _read_json(root / STOPPED) or {}
                 # the last start handed a whole copy to a detached run that did not finish it: do not spend this
                 # start's time trying it here again
@@ -3800,12 +3820,12 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
                                                                       % ", ".join(bare)))
                 if said:
                     lines.append("%s: %s" % (head, said))
-            elif n == 2 and upto == 6 and dry:
+            elif n == 2 and upto == FULL and dry:
                 try:
                     lines += _dry_snapshot(root, head)
                 except Stop as e:
                     return lines + getattr(e, "lines", []), str(e)
-            if n == 2 and upto == 6:
+            if n == 2 and upto == FULL:
                 # unfinished work in target/ stops here, before step 2 — the first that changes anything there —
                 # and after the safety copy; recorded as step 6's, whose work it is
                 try:
@@ -3827,7 +3847,7 @@ def run(root: Path, dry: bool = False, deadline: Optional[float] = None,
             except Exception as e:      # a step that crashed is a stop with its reason, never a silent pass
                 sentence = STOPPED_WHILE % (ver, what, "%s: %s" % (type(e).__name__, e))
                 return lines, (sentence if dry else _stopped(root, ver, n, sentence))
-        if upto == 6:
+        if upto == FULL:
             if dry:
                 lines.append("%s: would write state/upgraded-to last." % head)
             else:
@@ -4800,16 +4820,16 @@ def main(argv: List[str]) -> int:
         sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] [--progress] [--caller update] | --doctor | "
                          "--restore-help | --forget-snapshot | --rollback [--dry-run] [--force]\n")
         return 2
-    dry, upto = "--dry-run" in args, (3 if "--setup" in args else 6)
+    dry, upto = "--dry-run" in args, (3 if "--setup" in args else FULL)
     _PROGRESS["on"] = 1 if "--progress" in args else 0
     ver = version(root)
-    if upto == 6 and ver is None:
+    if upto == FULL and ver is None:
         sys.stderr.write("daedalus: this checkout has no VERSION file, so there is nothing to upgrade to\n")
         return 1
-    if upto == 6 and not dry and stamped(root) == ver:
+    if upto == FULL and not dry and stamped(root) == ver:
         print("Already upgraded to %s; nothing to do." % ver)
         return 0
-    if upto == 6 and not dry and _bg_running(root):
+    if upto == FULL and not dry and _bg_running(root):
         print("The upgrade to %s is taking its safety copy of target/ in the background (state/upgrade.log); the "
               "board says when it is done." % ver)
         return 0

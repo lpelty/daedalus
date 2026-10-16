@@ -38,6 +38,14 @@ only; the home's own core/upgrade.py is imported for one thing, its liveness che
 Exit 0: updated or up to date; 1: refused (nothing changed) or restored; 2: updated, but the upgrade or doctor names
 something.
 
+Two more forms are not verbs of the command; setup, the upgrade and doctor run them:
+    python3 core/update.py --install-shim --home <home>   writes ~/.local/bin/daedalus for this home (never over a
+        file it did not write, nor over one serving another home that is still there) and says how to reach it
+        from the login shell; one line per thing to say, exit 0 always
+    python3 core/update.py --doctor --home <home>         doctor's lines: local edits in tracked files, a stale
+        auto-mode line, the command
+DAEDALUS_NO_COMMAND set (the test suite sets it, core/tests/setup_suite.bash) writes and checks no shim.
+
 Tests replace the upgrade and doctor with DAEDALUS_UPDATE_UPGRADE / DAEDALUS_UPDATE_DOCTOR (a command, split as a
 shell would, given the same arguments).
 """
@@ -400,11 +408,11 @@ def tree(home: Path, rev: str) -> Dict[str, str]:
     return d
 
 
-def history(home: Path, ref: str) -> Dict[str, Set[str]]:
+def history(home: Path, ref: str, paths: Tuple[str, ...] = ()) -> Dict[str, Set[str]]:
     """path → every blob that path has held on `ref`'s history (ZERO among them when it was ever absent): what came
-    from a release at some time, so is never a local edit."""
+    from a release at some time, so is never a local edit. `paths` limits it to those."""
     code, out, err = git(home, "log", "-m", "--root", "--raw", "-z", "--no-abbrev", "--no-renames", "--format=", ref,
-                         timeout=600)
+                         *(("--",) + paths if paths else ()), timeout=600)
     if code != 0:
         raise Unmovable("git could not read the release's history (%s)" % _last(err))
     hist: Dict[str, Set[str]] = {}
@@ -1114,6 +1122,231 @@ def finish(home: Path, head: str, done: str = "", notes: Optional[List[str]] = N
     return line, code
 
 
+# --- the command on PATH: the shim (Decision 1, §4.1) and doctor's lines (§4.5) --------------------------------------
+
+SHIM_MARKER = "# daedalus shim — installed by core/setup.sh for the home below; safe to delete"
+NO_COMMAND = "DAEDALUS_NO_COMMAND"      # set (the test suite sets it): no shim is written and none is checked
+LOGIN_TIMEOUT = 5.0
+_END = "__daedalus_login_end__"
+
+
+def shim_path() -> Path:
+    """~/.local/bin/daedalus, ~ from the environment's HOME (tests point it at scratch)."""
+    return Path(os.path.expanduser("~")) / ".local" / "bin" / "daedalus"
+
+
+def _tilde(p: Any) -> str:
+    s, user = str(p), os.path.expanduser("~")
+    return "~" + s[len(user):] if user not in ("", "/") and (s == user or s.startswith(user + os.sep)) else s
+
+
+def shim_text(home: Path) -> str:
+    return '#!/usr/bin/env bash\n%s\nexec python3 "%s/core/update.py" "$@" --home "%s"\n' % (SHIM_MARKER, home, home)
+
+
+def _full_path(home: Path) -> str:
+    return "python3 %s/core/update.py update --home %s" % (home, home)
+
+
+def shim_owner(path: Path) -> Tuple[str, Optional[str]]:
+    """What ~/.local/bin/daedalus is: ("absent", None), ("foreign", None) — not a file this install wrote — or
+    ("shim", the home its exec line names)."""
+    if not os.path.lexists(str(path)):
+        return "absent", None
+    if path.is_symlink() or not path.is_file():
+        return "foreign", None
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return "foreign", None
+    if len(lines) < 3 or lines[1] != SHIM_MARKER:
+        return "foreign", None
+    m = re.match(r'^exec python3 "(.+)/core/update\.py" "\$@" --home "(.+)"$', lines[2])
+    return ("shim", m.group(2)) if m else ("foreign", None)
+
+
+def _same(a: str, b: str) -> bool:
+    return a == b or os.path.realpath(a) == os.path.realpath(b)
+
+
+def login_lookup(timeout: float) -> Tuple[bool, str]:
+    """(answered, what `command -v daedalus` says) in the operator's login shell — the PATH a new terminal has, not
+    this process's (a SessionStart hook runs with Claude Code's). A shell that fails, times out or is not there falls
+    back to this process's PATH, answered False."""
+    sh = os.environ.get("SHELL") or ""
+    if sh and timeout > 0 and os.access(sh, os.X_OK):
+        try:
+            r = subprocess.run([sh, "-l", "-c", "command -v daedalus; echo %s" % _END], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=timeout, env=_env())
+            lines = r.stdout.splitlines()
+            if _END in lines:
+                said = [ln.strip() for ln in lines[:lines.index(_END)] if ln.strip()]
+                return True, (said[-1] if said else "")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return False, shutil.which("daedalus") or ""
+
+
+def path_sentence(path: Path, timeout: float) -> Optional[str]:
+    """None when the login shell finds this shim as `daedalus`; else what to do, worded for the operator's shell."""
+    _, found = login_lookup(timeout)
+    if found and _same(found, str(path)):
+        return None
+    if found:
+        return "Another daedalus (%s) comes first on PATH; use %s update." % (found, _tilde(path))
+    shell = os.path.basename(os.environ.get("SHELL") or "")
+    if shell == "zsh":
+        add = "echo 'path+=~/.local/bin' >> ~/.zshrc (new terminals)"
+    elif shell == "bash":
+        add = "echo 'PATH=~/.local/bin:$PATH' >> ~/.bash_profile (new terminals)"
+    else:
+        add = "add it in your shell's startup file (new terminals)"
+    return "Add ~/.local/bin to PATH: %s; until then type %s update." % (add, _tilde(path))
+
+
+def install_shim(home: Path, dry: bool = False, timeout: float = LOGIN_TIMEOUT) -> List[str]:
+    """Install ~/.local/bin/daedalus for this home and say how to reach it, never over a file this install did not
+    write or one serving another home that is still there. [] when it is in place and the login shell finds it.
+    Never raises: every refusal is a line (setup and the upgrade go on)."""
+    if os.environ.get(NO_COMMAND):
+        return []
+    path = shim_path()
+    want = shim_text(home)
+    kind, other = shim_owner(path)
+    lines: List[str] = []
+    if kind == "foreign":
+        return ["%s is not a shim daedalus wrote, so it was left as it is; type %s instead."
+                % (_tilde(path), _full_path(home))]
+    if kind == "shim" and other != str(home) and (Path(other) / SELF).is_file():
+        return ["%s serves %s; this home is not on the command, so type %s here." % (_tilde(path), other,
+                                                                                      _full_path(home))]
+    current = _read(path) if kind == "shim" else None
+    if current != want:
+        if kind == "absent":
+            said = ("Installed the daedalus command at %s; type daedalus update in a terminal (or %s update)."
+                    % (_tilde(path), _tilde(path)))
+            would = "would install the daedalus command at %s." % _tilde(path)
+        elif other != str(home):
+            said = "%s served %s, which has no core/update.py any more; it now serves this home." % (_tilde(path), other)
+            would = "would rewrite %s, which serves %s (gone), for this home." % (_tilde(path), other)
+        else:
+            said = "Rewrote %s for this home (its text was an older shim's)." % _tilde(path)
+            would = "would rewrite %s for this home (its text is an older shim's)." % _tilde(path)
+        if dry:
+            return [would]
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".daedalus.")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(want)
+                os.chmod(tmp, 0o755)
+                os.replace(tmp, str(path))
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError as e:      # a ~/.local left root-owned by an installer run with sudo, say
+            return ["%s could not be %s (%s); the daedalus command was not installed, so type %s instead."
+                    % (_tilde(path.parent), "written" if path.parent.is_dir() else "made", e.strerror or e,
+                       _full_path(home))]
+        lines.append(said)
+    elif dry:
+        return []
+    advice = path_sentence(path, timeout)
+    if advice:
+        lines.append(advice)
+    return lines
+
+
+def command_line(home: Path) -> Optional[str]:
+    """Doctor's command line: OK when the login shell finds this home's shim; else a NOTE with the install rule's
+    sentence. None while DAEDALUS_NO_COMMAND is set."""
+    if os.environ.get(NO_COMMAND):
+        return None
+    path = shim_path()
+    kind, other = shim_owner(path)
+    if kind == "absent":
+        return ("NOTE     command: %s is absent; core/setup.sh installs it (until then type %s)"
+                % (_tilde(path), _full_path(home)))
+    if kind == "foreign":
+        return ("NOTE     command: %s is not a shim daedalus wrote; type %s instead" % (_tilde(path), _full_path(home)))
+    if other != str(home):
+        if not (Path(other) / SELF).is_file():
+            return ("NOTE     command: %s names %s, which has no core/update.py; core/setup.sh rewrites it for this "
+                    "home" % (_tilde(path), other))
+        return ("NOTE     command: %s serves %s; this home is not on the command (type %s)"
+                % (_tilde(path), other, _full_path(home)))
+    advice = path_sentence(path, LOGIN_TIMEOUT)
+    if advice:
+        return "NOTE     command: " + advice.rstrip(".")
+    return "OK       command: daedalus on PATH (%s)" % _tilde(path)
+
+
+def _offline_trunk(home: Path) -> Optional[str]:
+    """The release's trunk as this home last fetched it, without the network: refs/remotes/<r>/HEAD, the branch's
+    tracking ref on that remote, or <r>/main. None when no remote has the release's address or none is there."""
+    branch = current_branch(home)
+    try:
+        remote, _ = pick_remote(home, branch)
+    except Refuse:
+        return None
+    cands = []
+    code, out, _ = git(home, "symbolic-ref", "--quiet", "refs/remotes/%s/HEAD" % remote)
+    if code == 0 and out.strip():
+        cands.append(out.strip())
+    if branch and _cfg_lines(home, "--local", "--get", "branch.%s.remote" % branch) == [remote]:
+        merge = (_cfg_lines(home, "--local", "--get", "branch.%s.merge" % branch) or [""])[0]
+        if merge.startswith("refs/heads/"):
+            cands.append("refs/remotes/%s/%s" % (remote, merge[len("refs/heads/"):]))
+    cands.append("refs/remotes/%s/main" % remote)
+    for ref in cands:
+        if git(home, "rev-parse", "--verify", "--quiet", ref + "^{commit}")[0] == 0:
+            return ref
+    return None
+
+
+def tracked_local_edits(home: Path) -> Optional[List[str]]:
+    """The migratable tracked files (CLAUDE.md, .claude/settings.json) carrying a local edit: changed in the working
+    tree, or holding at HEAD a copy no release on the last-fetched trunk ever had. None when this is not a git
+    checkout."""
+    if git(home, "rev-parse", "--verify", "--quiet", "HEAD")[0] != 0:
+        return None
+    code, out, _ = git(home, "diff", "--name-only", "-z", "HEAD", "--", *MIGRATABLE)
+    found = set(p for p in out.split("\0") if p) if code == 0 else set()
+    ref = _offline_trunk(home)
+    if ref:
+        try:
+            hist = history(home, ref, MIGRATABLE)
+        except Unmovable:
+            hist = None
+        if hist is not None:
+            for p in MIGRATABLE:
+                code, blob, _ = git(home, "rev-parse", "--verify", "--quiet", "HEAD:" + p)
+                if code == 0 and blob.strip() and blob.strip() not in hist.get(p, set()):
+                    found.add(p)
+    return [p for p in MIGRATABLE if p in found]
+
+
+def doctor_lines(home: Path) -> List[str]:
+    lines = []
+    edits = tracked_local_edits(home)
+    if edits:
+        lines.append("MISSING  local edits in tracked files: %s — run daedalus update, which moves them into the local "
+                     "layer" % ", ".join(edits))
+    elif edits is not None:
+        lines.append("OK       tracked files: CLAUDE.md and .claude/settings.json carry no local edits")
+    if auto_mode_note(home):
+        lines.append("NOTE     brief: ~/.claude/settings.json's autoMode.allow names CLAUDE.md in this home; reword it "
+                     "to CLAUDE.local.md (README, \"Letting Daedalus edit its own brief\")")
+    cmd = command_line(home)
+    if cmd:
+        lines.append(cmd)
+    return lines
+
+
 # --- the verbs -----------------------------------------------------------------------------------------------------
 
 def update(home: Path, handed_off: bool = False, lock_fd: Optional[int] = None) -> int:
@@ -1254,6 +1487,18 @@ def main(argv: List[str]) -> int:
             return 2
         home_arg = args[i + 1]
         args = args[:i] + args[i + 2:]
+    if home_arg is not None and os.path.isabs(home_arg) and args in (["--install-shim"], ["--doctor"]):
+        home = Path(home_arg).resolve()
+        if not (home / SELF).is_file():
+            print("%s is not a Daedalus home with core/update.py. %s" % (home, NOTHING))
+            return 1
+        try:
+            out = install_shim(home) if args == ["--install-shim"] else doctor_lines(home)
+        except Exception as e:      # setup and doctor go on: a line, never a traceback
+            out = ["the daedalus command could not be checked (%s: %s)" % (type(e).__name__, e)]
+        for ln in out:
+            print(ln)
+        return 0
     if home_arg is None or len(args) != 1 or args[0] not in ("update", "version") or not os.path.isabs(home_arg):
         sys.stderr.write(USAGE + "\n")
         return 2

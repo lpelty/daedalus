@@ -1371,9 +1371,30 @@ def confirm(root: Path, a: dict) -> int:
 
 # --- doctor (§15) -----------------------------------------------------------------------------------
 
+def leftover_scratch(root: Path) -> List[str]:
+    """The ids of pushed (or announced) promotions whose directory still holds
+    anything but its records: scratch a confirm or the upgrade should have
+    removed (update-command Decisions 7, 10a). Read-only."""
+    base = root / "state" / "promote"
+    held: List[str] = []
+    try:
+        for pdir in sorted(base.iterdir()) if base.is_dir() else []:
+            if pdir.is_dir() and not pdir.is_symlink() and was_pushed(pdir) \
+                    and any(c.name not in RECORDS for c in pdir.iterdir()):
+                held.append(pdir.name)
+    except OSError:
+        return held
+    return held
+
+
 def doctor(root: Path) -> int:
     """The §15 lines for promote, one per state; doctor.sh counts the MISSING
     ones. Never fails on its own: a line it cannot compute is not printed."""
+    held = leftover_scratch(root)
+    if held:
+        print("NOTE     promote scratch: %d pushed promotion%s still hold%s scratch (%s) — core/promote.sh NN --clean "
+              "removes it (NN its window: %s)" % (len(held), "" if len(held) == 1 else "s", "s" if len(held) == 1 else "",
+                                                  ", ".join(held), ", ".join(sorted({h[:2] for h in held}))))
     try:
         mode = tl.confirm_mode(root)
         print("OK       promote: the operator's yes is transcribed and checked against the session transcript"

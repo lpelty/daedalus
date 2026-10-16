@@ -368,3 +368,27 @@ plugin install lease-board@daedalus-mods --scope local" ] || { echo "calls: $(ca
   case "$output" in *"lease board: already installed for this deployment ($CLAUDE_CONFIG_DIR/settings.json names lease-board@daedalus-mods)"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -e "$CALLS" ] || { echo "claude was run: $(cat "$CALLS")"; return 1; }
 }
+
+# --- the daedalus command (update-command design Decision 1, §4.1, §4.7) -----------------------------------------
+@test "setup: the daedalus command — installed in ~/.local/bin (a scratch HOME) before doctor, with the marker naming this home; a second run leaves it and says nothing about it; a file there it did not write is left, with a line, and setup still finishes" {
+  setup_board_fixture
+  cp "$SRC/update.py" "$DAEDALUS_HOME/core/"
+  S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S"; DH="$(cd "$DAEDALUS_HOME" && pwd -P)"
+  printf '#!/bin/sh\nPATH="%s/.local/bin:/usr/bin:/bin" exec /bin/sh -c "$3"\n' "$S" > "$BATS_TEST_TMPDIR/zsh"; chmod +x "$BATS_TEST_TMPDIR/zsh"
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(sed -n 2p "$S/.local/bin/daedalus")" = "# daedalus shim — installed by core/setup.sh for the home below; safe to delete" ]
+  grep -q -- "--home \"$DH\"" "$S/.local/bin/daedalus"
+  [ "$(stat -f %Lp "$S/.local/bin/daedalus")" = 755 ]
+  cmd="$(printf '%s\n' "$output" | grep -n 'daedalus: command: Installed the daedalus command at ~/.local/bin/daedalus' | cut -d: -f1)"
+  doc="$(printf '%s\n' "$output" | grep -n 'phase 5/5: doctor' | cut -d: -f1)"
+  [ -n "$cmd" ] && [ "$cmd" -lt "$doc" ] || { echo "$output"; return 1; }
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"command: Installed"*|*"command: Rewrote"*) echo "$output"; return 1 ;; esac
+  printf '#!/bin/sh\necho mine\n' > "$S/.local/bin/daedalus"
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"command: ~/.local/bin/daedalus is not a shim daedalus wrote, so it was left as it is; type python3 $DH/core/update.py update --home $DH instead."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(sed -n 2p "$S/.local/bin/daedalus")" = "echo mine" ]
+}

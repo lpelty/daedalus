@@ -43,6 +43,7 @@ EOF
   git init -q -b main "$DAEDALUS_HOME"; git -C "$DAEDALUS_HOME" add -A
   git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m i
   export DAEDALUS_HOME CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR"
+  export DAEDALUS_NO_COMMAND=1      # never a shim in the real ~/.local/bin (setup_suite.bash sets it too)
   unset DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID DAEDALUS_LEASE DIRECT_CALL_ID
 }
 

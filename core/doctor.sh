@@ -501,8 +501,41 @@ PY
 cm_first="$(printf '%s\n' "$cm_state" | sed -n 1p)"
 case "$cm_first" in
   "covered "*) log "OK       CLAUDE.md: edits denied (${cm_first#covered })" ;;
-  uncovered) log "NOTE     CLAUDE.md: no deny rule covers it in the settings read (project, local, user) — Daedalus may edit its own brief; promote and the launcher refuse while it differs from HEAD, and auto mode's classifier may still refuse the edit (README, \"Letting Daedalus edit its own CLAUDE.md\")" ;;
+  uncovered) log "NOTE     CLAUDE.md: no deny rule covers it in the settings read (project, local, user) — the release denies it, and local brief text belongs in CLAUDE.local.md; run daedalus update, which puts the rule back and keeps the choice as boundary.edit_brief: true (README, \"Letting Daedalus edit its own brief\")" ;;
 esac
+
+# The brief's local layer (update-command design §4.4, §4.5). Read-only. CLAUDE.md is distribution code, always
+# denied; the deployment's own brief text is CLAUDE.local.md (gitignored, loaded after CLAUDE.md), and
+# config.yaml's boundary.edit_brief decides whether Daedalus may write it (true only for the word true, as the
+# boundary hook reads it).
+if [ "$(cfg boundary.edit_brief 2>/dev/null || true)" = "true" ]; then
+  log "NOTE     brief: boundary.edit_brief true — Daedalus may edit CLAUDE.local.md"
+else
+  if [ -f "$DAEDALUS_HOME/CLAUDE.local.md" ]; then lb=present; else lb=absent; fi
+  log "OK       brief: boundary.edit_brief false — CLAUDE.local.md is the operator's ($lb)"
+fi
+
+# core/update.py --doctor (update-command design §4.5): local edits in the tracked CLAUDE.md or
+# .claude/settings.json (MISSING, counted: daedalus update moves them into the local layer), an auto-mode line in
+# the user settings that still names CLAUDE.md, and the daedalus command — whether the login shell finds this
+# home's ~/.local/bin/daedalus. Here-string loop so the MISSING count survives. Skipped when update.py is absent.
+if [ -f "$DAEDALUS_HOME/core/update.py" ]; then
+  up_out="$(python3 "$DAEDALUS_HOME/core/update.py" --doctor --home "$DAEDALUS_HOME" </dev/null 2>/dev/null)"
+  up_rc=$?
+  if [ "$up_rc" -ne 0 ]; then
+    note_problem "update: check failed (core/update.py --doctor exited $up_rc)"
+  else
+    while IFS= read -r line; do
+      case "$line" in
+        "") ;;
+        "MISSING  "*) note_problem "${line#MISSING  }" ;;
+        *) log "$line" ;;
+      esac
+    done <<EOF
+$up_out
+EOF
+  fi
+fi
 case "$cm_state" in
   *classifyAllShell*) log "NOTE     auto mode: classifyAllShell is set in $user_settings, so the allow rule for core/lease.sh release is suspended and the classifier judges the delete (README, \"Windows (leases)\")" ;;
 esac

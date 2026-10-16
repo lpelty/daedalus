@@ -1379,7 +1379,7 @@ verify:
 }
 
 # --- CLAUDE.md's deny rule and auto mode's classifyAllShell (agent-runnable design 2026-10-15, §4.6) ----------
-@test "doctor: CLAUDE.md — OK naming the project file when the tracked Edit(/CLAUDE.md) rule is present; OK naming settings.local.json when only it carries Edit(//<home>/CLAUDE.md); the user file is read through CLAUDE_CONFIG_DIR; a NOTE with the README pointer when no deny rule in the three files covers it; doctor stays green" {
+@test "doctor: CLAUDE.md — OK naming the project file when the tracked Edit(/CLAUDE.md) rule is present; OK naming settings.local.json when only it carries Edit(//<home>/CLAUDE.md); the user file is read through CLAUDE_CONFIG_DIR; a NOTE pointing at daedalus update and the README's brief section when no deny rule in the three files covers it; doctor stays green" {
   doctor_upgrade_fixture
   mkdir -p "$DAEDALUS_HOME/.claude"
   printf '{"permissions":{"deny":["Edit(/core/**)","Edit(/CLAUDE.md)"]}}\n' > "$DAEDALUS_HOME/.claude/settings.json"
@@ -1387,7 +1387,7 @@ verify:
   case "$output" in *"OK       CLAUDE.md: edits denied (.claude/settings.json)"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"CLAUDE.md: no deny rule covers it"*) echo "a NOTE beside the OK: $output"; return 1 ;; *) : ;; esac
   printf '{"permissions":{"deny":["Edit(/core/**)"]}}\n' > "$DAEDALUS_HOME/.claude/settings.json"
-  note='NOTE     CLAUDE.md: no deny rule covers it in the settings read (project, local, user) — Daedalus may edit its own brief; promote and the launcher refuse while it differs from HEAD, and auto mode'"'"'s classifier may still refuse the edit (README, "Letting Daedalus edit its own CLAUDE.md")'
+  note='NOTE     CLAUDE.md: no deny rule covers it in the settings read (project, local, user) — the release denies it, and local brief text belongs in CLAUDE.local.md; run daedalus update, which puts the rule back and keeps the choice as boundary.edit_brief: true (README, "Letting Daedalus edit its own brief")'
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
   printf '{"permissions":{"deny":["Edit(//%s/CLAUDE.md)"]}}\n' "$DAEDALUS_HOME" > "$DAEDALUS_HOME/.claude/settings.local.json"
@@ -1422,10 +1422,10 @@ verify:
   case "$output" in *"classifyAllShell"*) echo "a NOTE for a project file the classifier never reads: $output"; return 1 ;; *) : ;; esac
 }
 
-@test "the scripts the operator and the agent run by path keep the executable bit in git (mode 100755): doctor.sh, every core/*.sh, guard-bash.py and the headless auto-mode check — a mode change ships to every deployment that pulls" {
+@test "the scripts the operator and the agent run by path keep the executable bit in git (mode 100755): doctor.sh, every core/*.sh, guard-bash.py, update.py (the shim runs it), upgrade.py and the headless auto-mode check — a mode change ships to every deployment that pulls" {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   bad=""
-  for f in core/*.sh core/guard-bash.py core/tests/automode-allow-rule.sh; do
+  for f in core/*.sh core/guard-bash.py core/update.py core/upgrade.py core/tests/automode-allow-rule.sh; do
     mode="$(git -C "$REPO" ls-files -s -- "$f" | cut -c1-6)"
     [ "$mode" = "100755" ] || bad="$bad $f($mode)"
   done
@@ -1464,4 +1464,56 @@ EOF2
   rm "$DAEDALUS_HOME/state/recall-index.log"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -cF 'NOTE     document recall: no automatic index run recorded yet')" -eq 1 ]
+}
+
+# --- update-command design §4.5: the brief, the command, local edits in tracked files, leftover promote scratch ------
+@test "doctor: brief — OK naming boundary.edit_brief false and whether CLAUDE.local.md is there; a NOTE when it is true; doctor stays green" {
+  doctor_upgrade_fixture
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       brief: boundary.edit_brief false — CLAUDE.local.md is the operator's (absent)"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'local line\n' > "$DAEDALUS_HOME/CLAUDE.local.md"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       brief: boundary.edit_brief false — CLAUDE.local.md is the operator's (present)"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'boundary:\n  edit_brief: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"NOTE     brief: boundary.edit_brief true — Daedalus may edit CLAUDE.local.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       brief:"*) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: core/update.py --doctor's lines are relayed — a local edit to CLAUDE.md is MISSING and counted, the command's NOTE is shown (scratch HOME and login shell); absent update.py, no line" {
+  doctor_upgrade_fixture
+  rm -f "$DAEDALUS_HOME/core/update.py"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"tracked files"*|*"     command:"*) echo "$output"; return 1 ;; esac
+  cp "$SRC/update.py" "$DAEDALUS_HOME/core/"
+  printf 'brief\n' > "$DAEDALUS_HOME/CLAUDE.md"; mkdir -p "$DAEDALUS_HOME/.claude"
+  printf '{"permissions":{"deny":["Edit(/CLAUDE.md)"]}}\n' > "$DAEDALUS_HOME/.claude/settings.json"
+  printf 'target/\nvault/\nstate/\nworktrees/\nconfig.yaml\n' > "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" init -q -b main; git -C "$DAEDALUS_HOME" add -A; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m i
+  printf 'more\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S"
+  printf '#!/bin/sh\nPATH="/usr/bin:/bin" exec /bin/sh -c "$3"\n' > "$BATS_TEST_TMPDIR/zsh"; chmod +x "$BATS_TEST_TMPDIR/zsh"
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"MISSING  local edits in tracked files: CLAUDE.md — run daedalus update, which moves them into the local layer"*"1 problem(s) found"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     command: ~/.local/bin/daedalus is absent; core/setup.sh installs it"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$DAEDALUS_HOME" checkout -q CLAUDE.md
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       tracked files: CLAUDE.md and .claude/settings.json carry no local edits"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "doctor: a pushed promotion that still holds scratch is a NOTE naming it and core/promote.sh NN --clean; records alone, or an unpushed promotion's scratch, are not; doctor stays green" {
+  doctor_promote_fixture
+  mkdir -p "$DAEDALUS_HOME/state/promote"
+  run D; base="$(problems)"
+  case "$output" in *"promote scratch"*) echo "$output"; return 1 ;; esac
+  promote_prepared 04-20261015-100000-abc '{"lease":"04","confirmed_at":"y"}'
+  : > "$DAEDALUS_HOME/state/promote/04-20261015-100000-abc/pushed"
+  run D; case "$output" in *"promote scratch"*) echo "records alone: $output"; return 1 ;; esac
+  mkdir -p "$DAEDALUS_HOME/state/promote/04-20261015-100000-abc/thing"
+  promote_prepared 01-20261015-090000-def '{"lease":"01"}'; mkdir -p "$DAEDALUS_HOME/state/promote/01-20261015-090000-def/thing"
+  run D
+  case "$output" in *"NOTE     promote scratch: 1 pushed promotion still holds scratch (04-20261015-100000-abc) — core/promote.sh NN --clean removes it (NN its window: 04)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq "$base" ] || { echo "$output"; return 1; }
 }

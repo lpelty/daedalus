@@ -573,3 +573,123 @@ print("ok")
 PY
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
+
+# --- the shim (§4.1, §5.6 test 27) and doctor's lines from update.py --doctor (§4.5) ---------------------------------
+# A fake login shell: `<shell> -l -c <command>` runs the command under /bin/sh with $FAKE_LOGIN_PATH as its PATH, the
+# PATH a login shell's startup files would give; named zsh and bash so the PATH line is worded for each. A broken
+# shell exits 1 having run nothing.
+login_shells() {
+  mkdir -p "$B/shells"
+  printf '#!/bin/sh\n[ "$1" = -l ] && [ "$2" = -c ] || exit 9\nPATH="$FAKE_LOGIN_PATH" exec /bin/sh -c "$3"\n' > "$B/shells/zsh"
+  cp "$B/shells/zsh" "$B/shells/bash"; printf '#!/bin/sh\nexit 1\n' > "$B/shells/broken"
+  chmod +x "$B/shells/zsh" "$B/shells/bash" "$B/shells/broken"
+  unset DAEDALUS_NO_COMMAND
+  export SHELL="$B/shells/zsh" FAKE_LOGIN_PATH="$HOME/.local/bin:/usr/bin:/bin"
+  SHIM="$HOME/.local/bin/daedalus"
+}
+shim() { python3 "${2:-$H}/core/update.py" --install-shim --home "${2:-$H}" </dev/null; }
+sha() { shasum < "$1" | cut -c1-40; }
+
+@test "shim: absent, it is written mode 755 with the marker naming this home and runs daedalus version; a second install says nothing and leaves it; one for this home with another body is rewritten" {
+  login_shells
+  run shim
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "Installed the daedalus command at ~/.local/bin/daedalus; type daedalus update in a terminal (or ~/.local/bin/daedalus update)." ] || { echo "$output"; return 1; }
+  [ "$(stat -f %Lp "$SHIM")" = 755 ]
+  [ "$(sed -n 2p "$SHIM")" = "# daedalus shim — installed by core/setup.sh for the home below; safe to delete" ]
+  [ "$(sed -n 3p "$SHIM")" = "exec python3 \"$H/core/update.py\" \"\$@\" --home \"$H\"" ] || { cat "$SHIM"; return 1; }
+  run "$SHIM" version
+  case "$output" in "Daedalus $N (home $H, remote origin"*) : ;; *) echo "$output"; return 1 ;; esac
+  before="$(sha "$SHIM")"; touch -t 202001010000 "$SHIM"
+  run shim
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "status $status: $output"; return 1; }
+  [ "$(sha "$SHIM")" = "$before" ]; [ "$(stat -f %Sm -t %Y "$SHIM")" = 2020 ]
+  printf '# an older body\n' >> "$SHIM"
+  run shim
+  [ "$output" = "Rewrote ~/.local/bin/daedalus for this home (its text was an older shim's)." ] || { echo "$output"; return 1; }
+  [ "$(sha "$SHIM")" = "$before" ]
+}
+
+@test "shim: one serving another live home is left with a line; one whose home has moved (no core/update.py there) is rewritten with a line; a file the install did not write is left with a line" {
+  login_shells
+  O="$B/other"; mkdir -p "$O/core"; cp "$H/core/update.py" "$O/core/update.py"
+  run shim "" "$O"; [ -f "$SHIM" ] || { echo "$output"; return 1; }
+  before="$(sha "$SHIM")"
+  run shim
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "~/.local/bin/daedalus serves $O; this home is not on the command, so type python3 $H/core/update.py update --home $H here." ] || { echo "$output"; return 1; }
+  [ "$(sha "$SHIM")" = "$before" ]
+  rm -rf "$O"
+  run shim
+  [ "$output" = "~/.local/bin/daedalus served $O, which has no core/update.py any more; it now serves this home." ] || { echo "$output"; return 1; }
+  grep -q -- "--home \"$H\"" "$SHIM"
+  printf '#!/bin/sh\necho mine\n' > "$SHIM"; before="$(sha "$SHIM")"
+  run shim
+  [ "$output" = "~/.local/bin/daedalus is not a shim daedalus wrote, so it was left as it is; type python3 $H/core/update.py update --home $H instead." ] || { echo "$output"; return 1; }
+  [ "$(sha "$SHIM")" = "$before" ]
+}
+
+@test "shim: a ~/.local that cannot be written is one line naming it, and nothing is written" {
+  login_shells
+  mkdir -p "$HOME/.local"; chmod 555 "$HOME/.local"
+  run shim
+  chmod 755 "$HOME/.local"
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "~/.local/bin could not be made ("*"); the daedalus command was not installed, so type python3 $H/core/update.py update --home $H instead.") : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$HOME/.local/bin" ]
+}
+
+@test "shim: off the login shell's PATH it says the shell's line and the full-path form (zsh, bash); another daedalus earlier on PATH is the shadow line; a login shell that fails falls back to this process's PATH" {
+  login_shells
+  shim >/dev/null
+  FAKE_LOGIN_PATH="/usr/bin:/bin" run shim
+  [ "$output" = "Add ~/.local/bin to PATH: echo 'path+=~/.local/bin' >> ~/.zshrc (new terminals); until then type ~/.local/bin/daedalus update." ] || { echo "$output"; return 1; }
+  SHELL="$B/shells/bash" FAKE_LOGIN_PATH="/usr/bin:/bin" run shim
+  [ "$output" = "Add ~/.local/bin to PATH: echo 'PATH=~/.local/bin:\$PATH' >> ~/.bash_profile (new terminals); until then type ~/.local/bin/daedalus update." ] || { echo "$output"; return 1; }
+  mkdir -p "$B/early"; printf '#!/bin/sh\n' > "$B/early/daedalus"; chmod +x "$B/early/daedalus"
+  FAKE_LOGIN_PATH="$B/early:$HOME/.local/bin:/usr/bin:/bin" run shim
+  [ "$output" = "Another daedalus ($B/early/daedalus) comes first on PATH; use ~/.local/bin/daedalus update." ] || { echo "$output"; return 1; }
+  SHELL="$B/shells/broken" PATH="$HOME/.local/bin:$PATH" run shim
+  [ -z "$output" ] || { echo "on this process's PATH: $output"; return 1; }
+  SHELL="$B/shells/broken" run shim
+  case "$output" in "Add ~/.local/bin to PATH"*"until then type ~/.local/bin/daedalus update.") : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "shim and doctor: update.py --doctor names the command (absent, then OK once installed and on PATH), and DAEDALUS_NO_COMMAND keeps both the install and the check silent" {
+  login_shells
+  run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"NOTE     command: ~/.local/bin/daedalus is absent; core/setup.sh installs it (until then type python3 $H/core/update.py update --home $H)"*) : ;; *) echo "$output"; return 1 ;; esac
+  shim >/dev/null
+  run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"OK       command: daedalus on PATH (~/.local/bin/daedalus)"*) : ;; *) echo "$output"; return 1 ;; esac
+  FAKE_LOGIN_PATH="/usr/bin:/bin" run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"NOTE     command: Add ~/.local/bin to PATH: echo 'path+=~/.local/bin' >> ~/.zshrc"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$SHIM"
+  DAEDALUS_NO_COMMAND=1 run shim
+  [ -z "$output" ] && [ ! -e "$SHIM" ] || { echo "$output"; return 1; }
+  DAEDALUS_NO_COMMAND=1 run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"command:"*) echo "$output"; return 1 ;; esac
+}
+
+@test "shim and doctor: on the replay of the second machine, local edits in tracked files are MISSING before daedalus update and OK after; a stale auto-mode line is a NOTE" {
+  older_release
+  replay_home
+  export DAEDALUS_NO_COMMAND=1
+  run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"MISSING  local edits in tracked files: CLAUDE.md, .claude/settings.json — run daedalus update, which moves them into the local layer"*) : ;; *) echo "$output"; return 1 ;; esac
+  run upd update; [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"MISSING"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       tracked files: CLAUDE.md and .claude/settings.json carry no local edits"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '\nan uncommitted line\n' >> "$H/CLAUDE.md"
+  run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"MISSING  local edits in tracked files: CLAUDE.md — run daedalus update"*) : ;; *) echo "$output"; return 1 ;; esac
+  mkdir -p "$HOME/.claude"
+  python3 - "$HOME/.claude/settings.json" "$H" <<'PY'
+import json, sys
+json.dump({"autoMode": {"allow": ["Editing CLAUDE.md in the Daedalus home at %s when the operator asked." % sys.argv[2]]}}, open(sys.argv[1], "w"))
+PY
+  run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
+  case "$output" in *"NOTE     brief: ~/.claude/settings.json's autoMode.allow names CLAUDE.md in this home; reword it to CLAUDE.local.md (README, \"Letting Daedalus edit its own brief\")"*) : ;; *) echo "$output"; return 1 ;; esac
+}

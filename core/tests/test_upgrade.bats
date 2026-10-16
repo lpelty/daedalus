@@ -478,3 +478,45 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
   run python3 "$UP"
   [ "$status" -eq 0 ]; [ "$output" = "Already upgraded to $CUR; nothing to do." ] || { echo "$output"; return 1; }
 }
+
+# --- step 7: the daedalus command (update-command design §4.7, Decision 18) -----------------------------------------
+@test "step 7 installs the daedalus command once, before the stamp, and a second run says nothing; --setup and a dry run write none; FULL is the length of STEPS and no literal 6 means the whole run" {
+  v061_state
+  S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S"
+  printf '#!/bin/sh\nPATH="%s/.local/bin:/usr/bin:/bin" exec /bin/sh -c "$3"\n' "$S" > "$BATS_TEST_TMPDIR/zsh"; chmod +x "$BATS_TEST_TMPDIR/zsh"
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP" --setup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$S/.local/bin/daedalus" ] || { echo "--setup wrote the shim"; return 1; }
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP" --dry-run
+  case "$output" in *"Upgrade to 0.7.0: would install the daedalus command at ~/.local/bin/daedalus"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$S/.local/bin/daedalus" ]
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -n 'Upgrade to 0.7.0: Installed the daedalus command at ~/.local/bin/daedalus' | cut -d: -f1)" = \
+    "$(( $(printf '%s\n' "$output" | grep -n 'Upgrade to 0.7.0: complete' | cut -d: -f1) - 1 ))" ] || { echo "$output"; return 1; }
+  grep -q -- "--home \"$DAEDALUS_HOME\"" "$S/.local/bin/daedalus"
+  rm "$DAEDALUS_HOME/state/upgraded-to"
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP"
+  [ "$status" -eq 0 ]; case "$output" in *daedalus\ command*) echo "$output"; return 1 ;; esac
+  run python3 - "$DAEDALUS_HOME/core" <<'PY'
+import inspect, re, sys
+sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
+import upgrade as u
+assert u.FULL == len(u.STEPS) == 7, u.FULL
+assert [n for n, _, _ in u.STEPS] == list(range(1, 8))
+assert u.STEPS[6][2] is u.step_command and u.STEPS[5][2] is u.step_trunk
+src = inspect.getsource(u)
+assert not re.search(r"upto\s*(==|=)\s*6\b|else 6\)", src), re.findall(r".*upto.*6.*", src)
+print("ok")
+PY
+  [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "step 7 never stops the upgrade: a file in ~/.local/bin it did not write is a line, it is left, and the stamp is written" {
+  S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S/.local/bin"; printf '#!/bin/sh\necho mine\n' > "$S/.local/bin/daedalus"
+  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL=/nonexistent python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Upgrade to 0.7.0: ~/.local/bin/daedalus is not a shim daedalus wrote, so it was left as it is"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$S/.local/bin/daedalus")" = "$(printf '#!/bin/sh\necho mine')" ]
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
