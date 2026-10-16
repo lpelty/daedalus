@@ -1352,7 +1352,7 @@ def cmd_capture(args: list[str], cfg: dict):
             # An operator typed this path (close.sh --transcript) — a typo, a
             # wrong id, a relative path from the wrong directory. Reporting
             # success here would let close.sh say "close complete" (and, with
-            # --commit, commit the vault) for a session that went unrecorded.
+            # by default, commit the vault) for a session that went unrecorded.
             print(f"capture: the transcript you named is not there: {transcript}")
             return False
         if source == "derived":

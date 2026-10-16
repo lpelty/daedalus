@@ -613,7 +613,18 @@ capture is off.
   another capture of the session is still in flight it waits up to 90
   seconds; past that it exits non-zero with "a capture is still in flight
   after 90 s; wait and close again" rather than report a close that did not
-  happen.
+  happen. Once the session is stored, it then commits the vault through
+  `core/vault-commit.sh`; `--no-commit` skips that (`--commit`, the old
+  opt-in, is still accepted). When another live session holds the pen,
+  `core/vault-commit.sh` says so in one line and exits 3, and the close still
+  succeeds: that session's next commit carries this one's files. When the
+  pen's holder has ended, a terminal session takes the pen and commits; a
+  headless one never takes it. If the commit fails for another reason, the
+  close exits 4: the session is recorded, so fix what the line names and run
+  `core/vault-commit.sh`, not the close. From an operator shell
+  (`--transcript`), the commit runs as the operator's, as a bare
+  `core/vault-commit.sh` does; a live other window's claimed documents are
+  still left out.
 
 The transcript is named, never guessed: the hook payload's `transcript_path`;
 else the path this session's start recorded; else
@@ -714,7 +725,7 @@ and a recorded miss is what argues for loosening them.
 `recall:` block in `config.yaml` names a deployment-owned engine that indexes the vault into
 `recall.store`, and `core/vault-search.py` is its only runner. Since
 2026-10-15 the index follows the vault by itself. It is rebuilt after every
-vault commit `core/vault-commit.sh` makes (each close with `--commit`), and
+vault commit `core/vault-commit.sh` makes (each close, unless `--no-commit`), and
 at the start of the window that holds the pen when the index is older than
 the vault — in the background, never holding the turn, one run at a time
 under `state/recall-index.lock`; a vault change during a run makes the run go

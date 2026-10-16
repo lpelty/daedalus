@@ -58,7 +58,9 @@ from the window that takes it). A session holding no window may take the pen
 when no live session holds it (`core/lease.sh prime take`, no reason needed),
 never from a live one; it gets `hot.md` and the vault commit, not a tree —
 `target/` stays closed to it until it claims a window, and promote waits
-while an upgrade is pending.
+while an upgrade is pending. A pen whose session has ended moves to the next
+session that commits the vault; one held by a live session never moves
+without `prime take` and the operator's words.
 
 A window you start in the background (`core/lease.sh spawn`) is a
 **background clone**: it takes the next number, works in its own worktree,
@@ -378,10 +380,10 @@ that started while an upgrade was pending — and by `core/lease.sh log`; the
 number is reserved for it under the same lock, and moves into the window it
 claims later. Its log's frontmatter says `lease: none`. Its close order is
 `core/lease.sh log` → `core/lease.sh prime take` (when no live session holds
-the pen) → `hot.md` → `core/close.sh --commit`. When a live session holds the
-pen, the refusal says whom to message, and that the operator can commit the
-vault from their own shell. A window swept before its session wrote the log
-frees the number.
+the pen) → `hot.md` (only if this session holds the pen) → `core/close.sh`.
+When a live session holds the pen, `prime take`'s refusal says whom to
+message, and the close leaves the vault commit to that session. A window
+swept before its session wrote the log frees the number.
 
 **Restarted under the same window on the same day?** `core/lease.sh log`
 prints the path you already have: append a dated `## Continued HH:MM` section
@@ -418,12 +420,20 @@ Capture is automatic when the deployment has a `memory:` block in
 `config.yaml`: a Stop hook records this session every couple of minutes, and
 once more when it ends, so what another window learned reaches the bank within
 minutes. At the end of a working session run `core/close.sh`: it waits until
-the server confirms the session was stored. It can take several minutes (up
+the server confirms the session was stored, then commits the vault. If another
+live session holds the pen, it says so in one line and leaves the commit to
+that session's close; if the pen's holder has ended, this session takes the
+pen and commits. `--no-commit` skips the commit. The close order for every
+session: `core/lease.sh log` → write the log → `core/lease.sh prime take` when
+the board says no live session holds the pen → `hot.md` (only if this session
+holds the pen) → `core/close.sh`. It can take several minutes (up
 to 90 s waiting for a capture already in flight, then settling, pushing and
 verifying inside the run's 300 s in-flight ceiling), so run it with the Bash
 tool's timeout at its maximum, 600000 ms. If it says a capture is
 still in flight, wait and run it again — do not report the session as
-recorded until it exits 0. A session started by the direct-call launcher does
+recorded until it exits 0. If it exits 4, the session is recorded but the
+vault commit did not run: fix what its line names, then run
+`core/vault-commit.sh` — never the whole close again. A session started by the direct-call launcher does
 not capture itself; its caller does.
 
 Reading it back works two ways. Relevant memories are surfaced automatically

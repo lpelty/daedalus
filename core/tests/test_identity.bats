@@ -513,9 +513,33 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   CM="$(tr '\n' ' ' < "$DAEDALUS_HOME/CLAUDE.md" | tr -s ' ')"
   for s in 'A session holding no window may take the pen when no live session holds it' \
            'A session holding no window is told its number at start' 'lease: none' \
-           '`core/lease.sh log` → `core/lease.sh prime take` (when no live session holds the pen) → `hot.md` → `core/close.sh --commit`'; do
+           '`core/lease.sh log` → `core/lease.sh prime take` (when no live session holds the pen) → `hot.md` (only if this session holds the pen) → `core/close.sh`.'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
+}
+
+@test "the close commits: CLAUDE.md's Memory paragraph and close order, README's close.sh entry and the v0.7.4 part say core/close.sh commits the vault, --no-commit skips it, a dead session's pen moves on, exit 3 and exit 4; no employer, agent or proposal number; short sentences" {
+  CM="$(tr '\n' ' ' < "$DAEDALUS_HOME/CLAUDE.md" | tr -s ' ')"
+  for s in 'At the end of a working session run `core/close.sh`: it waits until the server confirms the session was stored, then commits the vault.' \
+           'If another live session holds the pen, it says so in one line and leaves the commit to that session' \
+           "if the pen's holder has ended, this session takes the pen and commits." '`--no-commit` skips the commit.' \
+           'If it exits 4, the session is recorded but the vault commit did not run' 'then run `core/vault-commit.sh`' \
+           'A pen whose session has ended moves to the next session that commits the vault; one held by a live session never moves without `prime take` and the operator' \
+           '→ `hot.md` (only if this session holds the pen) → `core/close.sh`.'; do
+    case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
+  done
+  case "$CM" in *'core/close.sh --commit'*) echo "CLAUDE.md still teaches --commit"; return 1 ;; esac
+  RM="$(tr '\n' ' ' < "$DAEDALUS_HOME/README.md" | tr -s ' ')"
+  for s in 'then commits the vault' '`--no-commit`' 'exits 3' 'exits 4' 'takes the pen and commits'; do
+    case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
+  done
+  sec="$(awk '/^## v0.7.4 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
+  rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
+  for s in '**The close commits.**' '`core/close.sh` commits the vault now; `--commit` is no longer needed.' '`--no-commit`'; do
+    case "$rel" in *"$s"*) : ;; *) echo "the v0.7.4 section lacks: $s"; return 1 ;; esac
+  done
+  ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara|smartsheet' || { echo "names an agent or employer"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qE 'PROP-[0-9]|EX-[0-9]' || { echo "names a proposal number"; return 1; }
 }
 
 @test "CHANGELOG: v0.7.3, below v0.7.4 — in short, what went wrong, what changed, what you will see, the first update, how to tell; it thanks a deployment on a second machine, gives the one first-update line and the sentence for a local agent, and keeps every sentence to 30 words" {

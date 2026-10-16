@@ -10,7 +10,8 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 window, by design. It can now close like any other session. It gets its
 session-log number, takes the pen when no live session holds it, writes
 `hot.md` and commits the vault. Thanks to a Daedalus deployment on a second
-machine, which reported the stall this came from.
+machine, which reported the stall this came from. Every close now commits the
+vault, and a pen left by a session that has ended moves on by itself.
 
 **What went wrong.**
 - No window opens while the upgrade is pending, so that its safety copy reads
@@ -53,9 +54,28 @@ machine, which reported the stall this came from.
   `core/lease.sh prime take` when no live session holds the pen.
 - When a live session holds the pen, the refusal names it. It also says the
   operator can commit the vault from their own shell.
-- `core/vault-commit.sh` says whether the pen is free or held by a live
-  session, and what to run next.
+- `core/vault-commit.sh` takes a pen whose holder has ended and commits. When
+  a live session holds the pen, it says so in one line.
 - The board says when the pen is held by a session holding no window.
+
+**The close commits.**
+- Before, `core/close.sh` committed the vault only with `--commit`, and the
+  brief never taught that flag. So a normal close left the session log and
+  proposals uncommitted.
+- And a pen left by a session that had ended stayed with it. Every later
+  commit was refused until someone ran `core/lease.sh prime take`.
+- Now `core/close.sh` commits the vault after the session is stored.
+  `--no-commit` skips the commit.
+- When another live session holds the pen, the close says so in one line and
+  succeeds. That session's next commit carries this one's files.
+- When the pen's holder has ended, the next terminal session's close takes the
+  pen and commits. It never takes the pen from a live or quiet session.
+- A headless session, or a session started by the direct-call launcher, never
+  takes the pen.
+- If the session is stored but the commit fails, the close exits 4. Fix what
+  its line names, then run `core/vault-commit.sh`; do not close again.
+- If your deployment keeps its own close skill: `core/close.sh` commits the
+  vault now; `--commit` is no longer needed.
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
 in a terminal. It prints `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.` There
