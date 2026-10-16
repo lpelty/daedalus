@@ -692,3 +692,12 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   sec="$(awk '/^\*\*Taking a release\.\*\*/{f=1} f&&/^## /{exit} f' "$DAEDALUS_HOME/CLAUDE.md" | tr '\n' ' ' | tr -s ' ')"
   case "$sec" in *'untracked files'*"$remedy"*) : ;; *) echo "'Taking a release' lacks the untracked-files stop"; return 1 ;; esac
 }
+
+# A release never ships a file under a path a deployment keeps as its own (vault/, state/, target/, worktrees/):
+# a home that tracks its vault takes releases by merging, and a release file there would conflict with it.
+@test "the distribution tracks no file its own .gitignore ignores, and nothing under vault/, state/, target/ or worktrees/" {
+  run git -C "$DAEDALUS_HOME" ls-files -ci --exclude-standard
+  [ "$status" -eq 0 ]; [ -z "$output" ] || { echo "tracked yet ignored: $output"; return 1; }
+  run git -C "$DAEDALUS_HOME" ls-files -- vault state target worktrees
+  [ "$status" -eq 0 ]; [ -z "$output" ] || { echo "tracked under a deployment's paths: $output"; return 1; }
+}
