@@ -485,7 +485,7 @@ _run_scan_in_fixture() {
 # v0.7.4 (a session holding no window can still close): written for the operator, the house parts in order, what a
 # windowless session now does at its close and the commands it names; no employer, agent or proposal number.
 @test "CHANGELOG: v0.7.4 is the newest release — its heading verbatim; in short, what went wrong, what changed, what you will see, how to take it, how to tell; the close commands it names; short sentences; v0.7.3 right below it" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.4 — a session holding no window can still close: a log number, the pen, hot.md and the vault commit" ]
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
   sec="$(awk '/^## v0.7.4 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
   rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
   order=""

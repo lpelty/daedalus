@@ -4,7 +4,7 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
-## v0.7.4 — a session holding no window can still close: a log number, the pen, hot.md and the vault commit
+## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault
 
 **In short.** A session that started while an upgrade was pending holds no
 window, by design. It can now close like any other session. It gets its
@@ -90,6 +90,9 @@ merging.
   local edits into the local layer. Then the release merges into the branch.
 - `.gitignore` becomes the release's copy plus a marked block of the home's
   own lines. Later releases never conflict there.
+- `core/vault-commit.sh` no longer refuses a vault that `.gitignore` ignores
+  and then un-ignores with a `!vault/` line. It read git's report of that
+  negation as "ignored", so every commit in such a home stopped there.
 - If anything fails, the update puts back only what it wrote. A vault edit
   made meanwhile is kept.
 - `core/upgrade.py --rollback` refuses such a home in one line: its last step
