@@ -486,7 +486,8 @@ _run_scan_in_fixture() {
 # for the operator — the house parts in order, the board's new lines and the command they name; no employer, agent or
 # proposal number.
 @test "CHANGELOG: v0.7.5 is the newest release — its heading verbatim; in short, what went wrong, what changed, what you will see, how to take it, how to tell; the board's new lines and core/lease.sh list; short sentences; v0.7.4 right below it" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.5 — the lease board stays drawn when git is slow" ]
+  # the newest release: a draft section above it (v0.8.0 (draft), finalized at Release) is not a release
+  [ "$(grep -m1 '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.5 — the lease board stays drawn when git is slow" ]
   sec="$(awk '/^## v0.7.5 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
   rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
   order=""
@@ -508,7 +509,7 @@ text = re.sub(r"`[^`]*`", "X", sys.argv[1])
 long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.5 section:"; echo "$output"; return 1; }
-  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
+  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
 }
 
 # v0.7.4 (a session holding no window can still close): written for the operator, the house parts in order, what a
@@ -535,7 +536,7 @@ text = re.sub(r"`[^`]*`", "X", sys.argv[1])
 long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.4 section:"; echo "$output"; return 1; }
-  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
+  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
 }
 
 @test "CLAUDE.md says how a session holding no window closes: its log number at start and from lease.sh log, the pen when no live session holds it, lease: none in the frontmatter, and the close order" {
@@ -598,7 +599,7 @@ long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) 
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.3 section:"; echo "$output"; return 1; }
   # v0.7.2 sits right below it
-  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 4p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 4p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
 }
 
 @test "CHANGELOG: v0.7.2, below v0.7.3, keeps its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
@@ -749,7 +750,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   ! printf '%s\n' "$sec" | grep -qE 'PROP-[0-9]|EX-[0-9]|\bB[0-9]\b|\bA[0-9]\b' || { echo "names a proposal number or step code"; return 1; }
 }
 
-@test "frame-jack is documented: README has the Frame-jack section with the install, the config paste, weights by hand and the doctor lines; CLAUDE.md has the two operator rows and the gates paragraph; config.example.yaml has the ami: block with every key; CHANGELOG has the dated part saying shadow and naming the bar; none names the company or a section code" {
+@test "frame-jack is documented: README has the Frame-jack section with the install, the config paste, weights by hand and the doctor lines; CLAUDE.md has the two operator rows and the gates paragraph; config.example.yaml has the ami: block with every key; CHANGELOG has the draft v0.8.0 section above v0.7.5 saying shadow and naming the bar; none names the company or a section code" {
   H="$DAEDALUS_HOME"
   # README: the section, after "Direct calls", with its parts
   grep -qF '## Frame-jack (the AMI)' "$H/README.md" || { echo "README lacks the Frame-jack section"; return 1; }
@@ -786,13 +787,22 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   done
   printf '%s\n' "$csec" | grep -qE '^#   # enforce:' || { echo "enforce is not commented out"; return 1; }
   printf '%s\n' "$csec" | grep -qE '^#   command: /' || { echo "command is not an absolute placeholder"; return 1; }
-  # CHANGELOG: the dated part, its shadow sentence and the bar
-  grep -qF '#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack, a switch for the AMI' "$H/CHANGELOG.md" \
-    || { echo "CHANGELOG lacks the dated part"; return 1; }
-  ch="$(awk '/^#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack/{f=1; print; next} f&&/^#{2,4} /{exit} f' "$H/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
-  for s in 'shadow' 'never acts' '0.95' '0.60' '0.15' '0.85' '0.05' '400 ms' 'VERSION stays 0.7.0' 'git pull --ff-only' 'ask_destructive' 'off by default'; do
+  # CHANGELOG: the draft v0.8.0 section, the first heading, above the newest release (Release finalizes it); its
+  # shadow sentence and the bar; how it arrives is daedalus update, and nothing moves until /frame-jack on
+  [ "$(grep -m1 '^## ' "$H/CHANGELOG.md")" = "## v0.8.0 (draft) — frame-jack, a switch for the AMI" ] \
+    || { echo "CHANGELOG's first section is not the frame-jack draft"; return 1; }
+  [ "$(grep '^## ' "$H/CHANGELOG.md" | sed -n 2p)" = "## v0.7.5 — the lease board stays drawn when git is slow" ]
+  ! grep -q '^#### .*frame-jack' "$H/CHANGELOG.md" || { echo "a frame-jack part is still dated under an older release"; return 1; }
+  ch="$(awk '/^## v0.8.0 \(draft\) — frame-jack/{f=1; print; next} f&&/^## /{exit} f' "$H/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in 'shadow' 'never acts' '0.95' '0.60' '0.15' '0.85' '0.05' '400 ms' 'stays 0.7.5' 'daedalus update' 'ask_destructive' 'off by default' \
+           'downloads nothing for the AMI'; do
     case "$ch" in *"$s"*) : ;; *) echo "the CHANGELOG part lacks: $s"; return 1 ;; esac
   done
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$ch"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.8.0 draft:"; echo "$output"; return 1; }
   # none of the four names the company, and none carries a spec section code
   for t in "$rsec" "$rows" "$gsec" "$csec" "$ch"; do
     ! printf '%s' "$t" | grep -qi 'smartsheet' || { echo "the company is named"; return 1; }

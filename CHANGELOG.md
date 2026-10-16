@@ -4,6 +4,78 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.8.0 (draft) — frame-jack, a switch for the AMI
+
+**What you see.** A new switch, `/frame-jack on`, `off` and `status`. It runs
+the AMI (Artificial Machine Intelligence), a small local decision model, on
+this machine. Once switched on, the lease board gains one line: `AMI on ·
+shadow (logs, never acts)`, with counts. Other lines say `AMI off`, `AMI
+paused on battery`, or that the daemon is down. `/frame-jack status` prints
+the long form: the daemon, its memory, and the commands it would have asked
+you about.
+
+**What it does, and what it does not.** The AMI is Strands Decider 2B. It
+answers yes/no questions with a confidence, and it cannot write text. In this
+release it runs in shadow mode only: it asks, logs, and never acts. Before a
+full test-suite run during a build, it asks whether a targeted run would do
+(`ami.ask_suite`, on by default). It can also ask, before each Bash call the
+guard allowed, whether the command is destructive (`ami.ask_destructive`), but
+that question is off by default: its precision measured 0.36, the guard's own
+rules already deny the destructive cases, and an inference on every Bash call
+costs battery and heat for nearly nothing. Off means no inference and no row.
+`/frame-jack status` and doctor name the questions asked. The evidence run,
+`core/gates.sh`, is never asked. It never grants a call and never replaces a
+deny. Acting was promised only past a bar set in advance. For the destructive
+question, the bar is recall 0.95, precision 0.60 and Brier 0.15. It measured
+1.00, 0.36 and 0.054, on four positives. For the suite question, the bar is
+accuracy 0.85 with at most 0.05 unsafe "targeted" answers. It measured 0.78
+and 0.068. Latency met its bar of a 400 ms median: 245 ms on MPS, 60 ms on
+MLX. So both questions stay in shadow mode. Naming one under `ami.enforce` is
+a doctor MISSING. Off means conservative: with the switch off, the daemon down
+or the laptop on battery, nothing is skipped. Two questions at once crashed
+the MPS daemon in the lab (a Metal assertion, twice). MLX queued four callers
+at a 149 ms p99, about 27 questions a second, in the same 5.2 GB. So MLX is
+the default device on Apple silicon (`ami.device` may be left out); `mps`
+stays selectable, and doctor prints a NOTE naming the crash when it is
+configured. A lock in the client keeps one deployment's windows from
+overlapping, and that lock is what keeps the daemon alive.
+
+**One-time install, per machine.** Make a Python 3.12 virtual environment
+with `uv venv --python 3.12`. Install the git clone with its `[mlx]` extra
+and `mlx-lm<0.33`. Paste the `ami:` block into `config.yaml`, with the
+executable's absolute path. The first start downloads about 4.8 GB of
+weights. On a laptop behind a corporate proxy, copy them by hand instead and
+set `offline: true`. README "Frame-jack (the AMI)" has every step, and the
+tarball that carries the shared blobs. That copy is not yet run there.
+
+**What changed underneath.**
+- `core/frame-jack.py` is the switch, and `core/ami-daemon.py` supervises
+  serve. A pipe ties serve to its supervisor, so killing the supervisor stops
+  serve too. The supervisor checks the power source every 30 seconds.
+- The AMI tier sits inside `core/guard-bash.py`, after the deterministic
+  checks, under a hard deadline. Three failures in a row pause it for five
+  minutes in that session.
+- `core/ami-hook.py outcome` runs after each Bash call, on success and on
+  failure. It writes the real outcome beside the AMI's answer. Both hook
+  lines carry a 5 second timeout.
+- Two guard rules are new. Writes and removals under `state/ami/` from the
+  Bash tool are denied. The agent may switch the AMI on or off only after
+  your words say so.
+- `leaselib.py board-json` gains an `ami` key. It reads two small files and
+  makes one 100 ms port probe, with no config, no bash and no git.
+- `core/doctor.sh` gains a `frame-jack` block: the config, the executable, the
+  weights, the daemon, and a second daemon on the machine.
+- Measured idle costs on this kind of machine: a refused port probe takes
+  0.031 ms. A python3 start, the floor of the outcome hook, takes 17.6 ms.
+  The guard alone takes 58.9 ms on a harmless command.
+
+**How you get it.** This section is a draft: the release sets its heading
+and VERSION, which stays 0.7.5 until then. Once it is released, close every
+Daedalus window, then type `daedalus update` in a terminal. Then, only if you
+want the AMI, do the install above. The update downloads nothing for the AMI
+and changes nothing until the first `/frame-jack on`. `state/ami/` appears
+then.
+
 ## v0.7.5 — the lease board stays drawn when git is slow
 
 **In short.** On a deployment with several nested repos, the board failed to
@@ -1101,76 +1173,6 @@ about a promote before you say yes to it. A `gates_setup:` list in
 - README and `docs/handoff-reverse-caller.md` say the same convention.
 - Tests: `core/tests/test_session_log.bats` (new), two nested-vault cases in
   `test_vault_commit.bats`, and the `test_identity` pin on the naming.
-
-#### Added on trunk after the v0.7.0 tag — 2026-10-15: frame-jack, a switch for the AMI
-
-**What you see.** A new switch, `/frame-jack on`, `off` and `status`. It runs
-the AMI (Artificial Machine Intelligence), a small local decision model, on
-this machine. Once switched on, the lease board gains one line: `AMI on ·
-shadow (logs, never acts)`, with counts. Other lines say `AMI off`, `AMI
-paused on battery`, or that the daemon is down. `/frame-jack status` prints
-the long form: the daemon, its memory, and the commands it would have asked
-you about.
-
-**What it does, and what it does not.** The AMI is Strands Decider 2B. It
-answers yes/no questions with a confidence, and it cannot write text. In this
-release it runs in shadow mode only: it asks, logs, and never acts. Before a
-full test-suite run during a build, it asks whether a targeted run would do
-(`ami.ask_suite`, on by default). It can also ask, before each Bash call the
-guard allowed, whether the command is destructive (`ami.ask_destructive`), but
-that question is off by default: its precision measured 0.36, the guard's own
-rules already deny the destructive cases, and an inference on every Bash call
-costs battery and heat for nearly nothing. Off means no inference and no row.
-`/frame-jack status` and doctor name the questions asked. The evidence run,
-`core/gates.sh`, is never asked. It never grants a call and never replaces a
-deny. Acting was promised only past a bar set in advance. For the destructive
-question, the bar is recall 0.95, precision 0.60 and Brier 0.15. It measured
-1.00, 0.36 and 0.054, on four positives. For the suite question, the bar is
-accuracy 0.85 with at most 0.05 unsafe "targeted" answers. It measured 0.78
-and 0.068. Latency met its bar of a 400 ms median: 245 ms on MPS, 60 ms on
-MLX. So both questions stay in shadow mode. Naming one under `ami.enforce` is
-a doctor MISSING. Off means conservative: with the switch off, the daemon down
-or the laptop on battery, nothing is skipped. Two questions at once crashed
-the MPS daemon in the lab (a Metal assertion, twice). MLX queued four callers
-at a 149 ms p99, about 27 questions a second, in the same 5.2 GB. So MLX is
-the default device on Apple silicon (`ami.device` may be left out); `mps`
-stays selectable, and doctor prints a NOTE naming the crash when it is
-configured. A lock in the client keeps one deployment's windows from
-overlapping, and that lock is what keeps the daemon alive.
-
-**One-time install, per machine.** Make a Python 3.12 virtual environment
-with `uv venv --python 3.12`. Install the git clone with its `[mlx]` extra
-and `mlx-lm<0.33`. Paste the `ami:` block into `config.yaml`, with the
-executable's absolute path. The first start downloads about 4.8 GB of
-weights. On a laptop behind a corporate proxy, copy them by hand instead and
-set `offline: true`. README "Frame-jack (the AMI)" has every step, and the
-tarball that carries the shared blobs. That copy is not yet run there.
-
-**What changed underneath.**
-- `core/frame-jack.py` is the switch, and `core/ami-daemon.py` supervises
-  serve. A pipe ties serve to its supervisor, so killing the supervisor stops
-  serve too. The supervisor checks the power source every 30 seconds.
-- The AMI tier sits inside `core/guard-bash.py`, after the deterministic
-  checks, under a hard deadline. Three failures in a row pause it for five
-  minutes in that session.
-- `core/ami-hook.py outcome` runs after each Bash call, on success and on
-  failure. It writes the real outcome beside the AMI's answer. Both hook
-  lines carry a 5 second timeout.
-- Two guard rules are new. Writes and removals under `state/ami/` from the
-  Bash tool are denied. The agent may switch the AMI on or off only after
-  your words say so.
-- `leaselib.py board-json` gains an `ami` key. It reads two small files and
-  makes one 100 ms port probe, with no config, no bash and no git.
-- `core/doctor.sh` gains a `frame-jack` block: the config, the executable, the
-  weights, the daemon, and a second daemon on the machine.
-- Measured idle costs on this kind of machine: a refused port probe takes
-  0.031 ms. A python3 start, the floor of the outcome hook, takes 17.6 ms.
-  The guard alone takes 58.9 ms on a harmless command.
-
-**How you get it.** `git pull --ff-only` in the Daedalus home. Then, only if
-you want the AMI, the install above. VERSION stays 0.7.0: nothing moves and
-no state changes shape, so no upgrade runs. `state/ami/` appears at the
-first `/frame-jack on`.
 
 ## v0.6.1 — branch guard reads the configured trunk; refuter on by default
 
