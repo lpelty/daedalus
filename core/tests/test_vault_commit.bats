@@ -163,7 +163,7 @@ EOF
   git -C "$DAEDALUS_HOME" add -f vault; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m "vault force-added, still ignored"
   printf '# x\n' > "$DAEDALUS_HOME/vault/proposals/note.md"
   run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "ignored"; [ "$status" -ne 0 ]
-  case "$output" in *"vault/ is ignored by $DAEDALUS_HOME/.gitignore"*"remove that line"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"vault/ is ignored by $DAEDALUS_HOME/.gitignore (the rule \`vault/\`)"*"remove that line"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"git add failed"*) echo "the generic sentence, not the cause: $output"; return 1 ;; *) : ;; esac
   sed -i '' '/^vault\/$/d' "$DAEDALUS_HOME/.gitignore"; git -C "$DAEDALUS_HOME" add .gitignore
   run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "ignored"; [ "$status" -ne 0 ]
@@ -172,6 +172,16 @@ EOF
   printf '# é\n' > "$DAEDALUS_HOME/vault/proposals/café.md"; git -C "$DAEDALUS_HOME" add -- "vault/proposals/café.md"
   run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "accents"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(git -C "$DAEDALUS_HOME" -c core.quotepath=false show --name-only --format= HEAD | sort | tr '\n' ' ')" = "vault/proposals/café.md vault/proposals/note.md " ]
+}
+
+@test "a vault un-ignored by a negation line (the .gitignore daedalus update writes in a home that keeps its own vault) is committed, not refused" {
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  printf '!/vault/\n' >> "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add .gitignore vault; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m "the home keeps its vault"
+  git -C "$DAEDALUS_HOME" check-ignore -v --no-index -- vault >/dev/null   # the trap: with -v git reports the negation as a match, exit 0
+  printf '# n\n' > "$DAEDALUS_HOME/vault/proposals/negated.md"
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "negated"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$DAEDALUS_HOME" show --name-only --format= HEAD)" = "vault/proposals/negated.md" ]
 }
 
 # --- the document index follows the vault (reindex design 2026-10-15, §3.4) ---

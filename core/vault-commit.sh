@@ -37,9 +37,13 @@ elif git -C "$DAEDALUS_HOME" ls-files --error-unmatch vault >/dev/null 2>&1; the
   G="$DAEDALUS_HOME"; SPEC="vault"
   # A tracked vault that an ignore rule still matches (force-added once) makes `git add -A -- vault`
   # refuse every new file: say the cause and the fix, not git's hint.
+  # check-ignore -v reports the last matching rule and exits 0 even when that rule is a negation
+  # (`!/vault/`, which daedalus update writes in a home that keeps its own vault): only a rule
+  # without "!" ignores. Its output is <source>:<line>:<pattern><TAB><path>.
   if ign="$(git -C "$G" check-ignore -v --no-index -- vault 2>/dev/null)"; then   # --no-index: a tracked path is otherwise never reported
-    src="${ign%%:*}"; case "$src" in /*) : ;; *) src="$G/$src" ;; esac
-    die "vault/ is ignored by $src (the rule \`${ign##*	}\`); remove that line — a tracked directory stays tracked — and run core/vault-commit.sh again"
+    rule="${ign%%	*}"; src="${rule%%:*}"; rule="${rule#*:}"; rule="${rule#*:}"
+    case "$src" in /*) : ;; *) src="$G/$src" ;; esac
+    case "$rule" in '!'*) : ;; *) die "vault/ is ignored by $src (the rule \`$rule\`); remove that line — a tracked directory stays tracked — and run core/vault-commit.sh again" ;; esac
   fi
   # The whole index of that repository, which may be larger than the home (a home inside a
   # ship repo): --show-prefix is the home's path from the repository root, "" at the root.
