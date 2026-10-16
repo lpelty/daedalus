@@ -504,7 +504,10 @@ def crg_env(root: Path, exe: str, data_dir: Optional[Path]) -> dict:
     """The allowlist (§7): never the caller's environment, so no API key reaches the tool, cloud embeddings
     cannot turn on, and ~/.code-review-graph is never written."""
     home = cc_dir(root) / "home"
-    home.mkdir(parents=True, exist_ok=True)
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass                        # the call itself then fails, and says so; never this process
     path = ["/usr/bin", "/bin", os.path.dirname(exe)]
     git = shutil.which("git")
     if git:
@@ -1706,6 +1709,67 @@ def misses(root: Path, p: dict, pdir: Path) -> Tuple[str, dict]:
     return line, {"count": len(result), "kinds": kinds}
 
 
+# --- doctor (§12) ---------------------------------------------------------------------------------------
+
+def leftover_hook(root: Path) -> bool:
+    try:
+        d = json.loads((root / ".claude" / "settings.local.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return "code-context.py" in json.dumps((d or {}).get("hooks") if isinstance(d, dict) else None)
+
+
+def doctor_lines(root: Path) -> List[str]:
+    """OK and NOTE lines, never MISSING: the deployment works without any of this. Runs `<graph> -v` (cached)
+    and the rules' own tests in memory; never builds, updates or queries an index, never greps the target."""
+    cfg = read_config(root)
+    lines: List[str] = []
+    problem = exe_problem(cfg)
+    ver = None
+    if not problem:
+        ver, problem = graph_version(root, str(cfg.graph))
+    verdicts, files = judged_rules(root, cfg.placeholders, cfg.module_roots or [""])
+    n_rel = sum(1 for x in verdicts if x["source"] == "release")
+    n_dep = len(verdicts) - n_rel
+    bad = [x for x in verdicts if not x["ok"]]
+    if problem is None:
+        lines.append("OK       code context: code-review-graph %s at %s; %d release rule%s, %d deployment rule%s; %s" % (
+            ver, cfg.graph, n_rel, "" if n_rel == 1 else "s", n_dep, "" if n_dep == 1 else "s",
+            "every rule test passes" if not bad and not files else "%d rule%s skipped" % (
+                len(bad), "" if len(bad) == 1 else "s")))
+    elif problem == NOT_INSTALLED:
+        lines.append("NOTE     code context: no code graph configured (context.graph in config.yaml), so answers come "
+                     "from git grep and the rules (optional; see \"Code context\" in README.md)")
+    elif "not the pinned" in problem:
+        lines.append("NOTE     code context: %s, so answers come from git grep and the rules; install %s (README "
+                     "\"Code context\")" % (problem, PINNED))
+    else:
+        lines.append("NOTE     code context: %s, so answers come from git grep and the rules" % problem)
+    for f in files:
+        what = ("queries use the release rules only" if f["file"] == DEPLOY_RULES else
+                "queries use the deployment rules only")
+        lines.append("NOTE     code context: %s cannot be read (%s), so %s; fix it, then run %s"
+                     % (f["file"], f["why"], what, CHECK_HINT))
+    for x in bad:
+        where = DEPLOY_RULES if x["source"] == "deployment" else RELEASE_RULES
+        if x["why"] == "its own test fails":
+            lines.append("NOTE     code context: rule %s in %s fails its own test, so queries skip it; fix it, then "
+                         "run %s" % (x["name"], where, CHECK_HINT))
+        else:
+            lines.append("NOTE     code context: rule %s in %s is skipped (%s); fix it, then run %s"
+                         % (x["name"], where, x["why"], CHECK_HINT))
+    if any(x["ok"] and x["name"] == "template-placeholder" for x in verdicts) and not cfg.placeholders:
+        lines.append("NOTE     code context: rule template-placeholder has no placeholders to map "
+                     "(context.placeholders in config.yaml), so it adds nothing")
+    if cfg.ruff_leftover:
+        lines.append("NOTE     code context: recall.ruff in config.yaml is no longer read (0.9.0 removed the edit-time "
+                     "code-context hook); the line can be removed")
+    if leftover_hook(root):
+        lines.append("NOTE     code context: .claude/settings.local.json still runs core/code-context.py, which 0.9.0 "
+                     "removed; remove that hook entry")
+    return lines
+
+
 # --- the query verbs -------------------------------------------------------------------------------------
 
 def query(root: Path, verb: str, arg: str, want_json: bool) -> int:
@@ -1759,6 +1823,10 @@ def main(argv: List[str]) -> int:
             return rebuild(root, args[1:])
         if args == ["rules", "--check"]:
             return rules_check(root)
+        if args == ["--doctor"]:
+            for ln in doctor_lines(root):
+                print(ln)
+            return 0
         if args == ["--rules-worker"]:
             print(json.dumps(apply_rules(json.load(sys.stdin))))
             return 0

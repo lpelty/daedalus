@@ -1718,3 +1718,91 @@ EOF
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *'NOTE     frame-jack: device mps — two overlapping questions crashed the MPS daemon in the lab (a Metal assertion, twice); MLX queues them, about 27 questions a second in the same 5.2 GB — set ami.device: mlx (README "Frame-jack" installs the mlx extra)'*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- code context (code-context design §12, v0.9.0) -------------------------
+
+# cc_home [config lines...] — a green doctor home with core/context.py and the release rules, the given
+# lines appended to config.yaml; FAKE is a fake code-review-graph (fixtures/context) whose log is FAKE_LOG.
+cc_home() {
+  cat > "$DAEDALUS_HOME/config.yaml" <<'YAML'
+target:
+  repo: https://example.com/thing.git
+  branch: main
+vault:
+  repo: https://example.com/thing-kb.git
+gates:
+  - true
+proposals:
+  budget: 5
+YAML
+  local l; for l in "$@"; do printf '%s\n' "$l" >> "$DAEDALUS_HOME/config.yaml"; done
+  git init -q "$DAEDALUS_HOME/target/thing"
+  mkdir -p "$DAEDALUS_HOME/vault/.git" "$DAEDALUS_HOME/state"
+  for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+  cp "$SRC/context.py" "$SRC/context-rules.json" "$DAEDALUS_HOME/core/"
+  FAKE_DIR="$BATS_TEST_TMPDIR/crg"; mkdir -p "$FAKE_DIR"
+  cp "$BATS_TEST_DIRNAME/fixtures/context/fake-code-review-graph" "$FAKE_DIR/code-review-graph"
+  cp -R "$BATS_TEST_DIRNAME/fixtures/context/crg-2.3.9" "$FAKE_DIR/"
+  : > "$FAKE_DIR/fake-crg.env"; FAKE="$FAKE_DIR/code-review-graph"; FAKE_LOG="$FAKE_DIR/fake-crg.log"
+}
+cc_lines() { printf '%s\n' "$output" | sed 's/^daedalus: //' | grep -E '^(OK|NOTE|MISSING) +code context'; }
+
+@test "doctor's code-context lines: no graph is a NOTE; the OK line names the pinned graph and the rules; every state exits 0 and is never MISSING" {
+  cc_home
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cc_lines | grep -qxF 'NOTE     code context: no code graph configured (context.graph in config.yaml), so answers come from git grep and the rules (optional; see "Code context" in README.md)'
+  cc_lines | grep -qxF 'NOTE     code context: rule template-placeholder has no placeholders to map (context.placeholders in config.yaml), so it adds nothing'
+  [ -z "$(cc_lines | grep '^MISSING')" ]
+  printf 'context:\n  graph: %s\n  placeholders: APP=app\n' "$FAKE" >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cc_lines)" = "OK       code context: code-review-graph 2.3.9 at $FAKE; 4 release rules, 0 deployment rules; every rule test passes" ]
+  [ "$(grep '^argv ' "$FAKE_LOG" | awk '{print $2}' | sort -u)" = "-v" ]
+  printf 'VERSION=2.4.0\n' > "$FAKE_DIR/fake-crg.env"; rm -f "$DAEDALUS_HOME/state/code-context/home/version.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  cc_lines | grep -qxF "NOTE     code context: $FAKE is code-review-graph 2.4.0, not the pinned 2.3.9, so answers come from git grep and the rules; install 2.3.9 (README \"Code context\")"
+  chmod -x "$FAKE"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  cc_lines | grep -qxF "NOTE     code context: context.graph is $FAKE, which is not an executable file, so answers come from git grep and the rules"
+  [ "$(grep '^argv ' "$FAKE_LOG" | awk '{print $2}' | sort -u)" = "-v" ]
+  [ ! -d "$DAEDALUS_HOME/state/code-context/home/../01" ]
+}
+
+@test "doctor's code-context lines: a deployment rule failing its test, an unreadable deployment file, a leftover recall.ruff and a leftover hook entry are NOTEs" {
+  cc_home 'recall:' "  ruff: 'uvx ruff@0.16.5'"
+  printf '{"format": 1, "rules": [{"name": "bad-one", "about": "x", "hint": "x", "search": "(x)", "to": "{1}", "resolve": "tree", "origin": {"date": "2026-10-20", "window": "02", "why": "x"}, "test": {"file": "a", "text": "x", "expect": ["y"]}}]}\n' \
+    > "$DAEDALUS_HOME/vault/context-rules.json"
+  mkdir -p "$DAEDALUS_HOME/.claude"
+  printf '{"hooks": {"PreToolUse": [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "python3 \\"$CLAUDE_PROJECT_DIR\\"/core/code-context.py"}]}]}}\n' \
+    > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cc_lines | grep -qxF 'NOTE     code context: rule bad-one in vault/context-rules.json fails its own test, so queries skip it; fix it, then run python3 core/context.py rules --check'
+  cc_lines | grep -qxF 'NOTE     code context: recall.ruff in config.yaml is no longer read (0.9.0 removed the edit-time code-context hook); the line can be removed'
+  cc_lines | grep -qxF 'NOTE     code context: .claude/settings.local.json still runs core/code-context.py, which 0.9.0 removed; remove that hook entry'
+  printf '{nope' > "$DAEDALUS_HOME/vault/context-rules.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  cc_lines | grep -qxF 'NOTE     code context: vault/context-rules.json cannot be read (not valid JSON), so queries use the release rules only; fix it, then run python3 core/context.py rules --check'
+}
+
+@test "doctor's code-context check failing is one NOTE; doctor never walks the target for it (3000 files take no measurable longer)" {
+  cc_home
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  t0="$(python3 -c 'import time; print(time.time())')"
+  python3 "$DAEDALUS_HOME/core/context.py" --doctor >/dev/null
+  t1="$(python3 -c 'import time; print(time.time())')"
+  mkdir -p "$DAEDALUS_HOME/target/thing/many"
+  for i in $(seq 1 3000); do printf 'import os\n' > "$DAEDALUS_HOME/target/thing/many/f$i.py"; done
+  python3 "$DAEDALUS_HOME/core/context.py" --doctor >/dev/null
+  t2="$(python3 -c 'import time; print(time.time())')"
+  python3 -c 'import sys; a, b, c = map(float, sys.argv[1:]); assert (c - b) < (b - a) + 1.0, (b - a, c - b)' "$t0" "$t1" "$t2"
+  printf 'import sys\nsys.exit(3)\n' > "$DAEDALUS_HOME/core/context.py"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cc_lines)" = "NOTE     code context: check failed (core/context.py --doctor exited 3)" ]
+}

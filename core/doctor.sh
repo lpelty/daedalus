@@ -439,19 +439,22 @@ else
   log "NOTE     document recall: check skipped (core/vault-search.py absent)"
 fi
 
-# Code context: enhancement-layer health, NOTE lines only (spec §3.3).
-if [ -f "$DAEDALUS_HOME/core/code-context.py" ]; then
-  cc_out="$(python3 "$DAEDALUS_HOME/core/code-context.py" --check 2>/dev/null)"
-  cc_status=$?
-  if [ "$cc_status" -ne 0 ]; then
-    log "NOTE     code context: check failed (core/code-context.py --check exited $cc_status)"
+# Code context (code-context design §12, v0.9.0): the optional graph, the rules' own tests, leftovers of
+# the edit-time hook 0.9.0 removed. One reader, core/context.py --doctor; OK or NOTE, never MISSING (the
+# deployment works without any of it). It runs `<graph> -v` and nothing else of the tool: it never builds,
+# updates or queries an index, and never reads the target. Skipped when a fixture has no context.py.
+if [ -f "$DAEDALUS_HOME/core/context.py" ]; then
+  cc_out="$(python3 "$DAEDALUS_HOME/core/context.py" --doctor 2>/dev/null)"
+  cc_rc=$?
+  if [ "$cc_rc" -ne 0 ]; then
+    log "NOTE     code context: check failed (core/context.py --doctor exited $cc_rc)"
   else
-    printf '%s\n' "$cc_out" | while IFS= read -r line; do
-      log "NOTE     $line"
-    done
+    while IFS= read -r line; do
+      [ -n "$line" ] && log "$line"
+    done <<EOF
+$cc_out
+EOF
   fi
-else
-  log "NOTE     code context: check skipped (core/code-context.py absent)"
 fi
 
 # Direct calls (spec §8, §15): the direct_call: block, distribution-code
