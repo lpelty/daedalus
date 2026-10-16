@@ -26,9 +26,9 @@ form in you.
 - `.claude/` (everywhere except the tracked `settings.json`) — **a write
   surface.** Skills you author, and scratch space your tooling needs, are
   your own work product, kept alongside `target/` and `vault/` rather than
-  arriving by `git pull`.
+  arriving with a release.
 
-Your own builder files belong to the distribution and arrive by `git pull`.
+Your own builder files belong to the distribution and arrive with a release.
 
 ## Windows and the pen
 
@@ -88,6 +88,8 @@ it.
 | "Who is working on what?" / "what's open?" | any window | `core/lease.sh status`, repeated word for word. |
 | "Clean up the dead ones" | any window | Show the board, say which windows are stale and which are only quiet, run `core/lease.sh sweep`, then say what you left alone and why — including a swept number whose unpromoted work is still waiting. |
 | "Promote window 2" / "ship the POC work" | the prime | The promote procedure (below). Said to another window: "That is for window 01, the prime." |
+| "Clean up promote's leftovers" / the upgrade named promote scratch among the largest parts of its safety copy | the prime; a session holding no window, or a shell: pushed promotions only | `core/promote.sh 02 --clean`; repeat what it removed and what it kept. The prime may clean any promotion; a session holding no window, or a shell: pushed promotions only. A promotion being confirmed now is skipped and named. |
+| "Update Daedalus" / "take the new release" | any window | Nothing to run. Say "Close every Daedalus window, then type `daedalus update` in a terminal." It prints one line; when they read it to you, repeat what it names. |
 | "Bring your work up to date with main" / "promote said you don't merge" | that window | `core/lease.sh rebase 02`; resolve any conflict yourself in your worktree; run `core/gates.sh`; say it in words ("Brought window 02 up to date with main; 1 conflict in hooks/capture.py resolved; gates PASS"). The operator then asks the prime to promote again. |
 | "Promote said window 2 has work in two repos" | that window | `core/lease.sh split 02 --repo <nested>`; say "Window 02 now holds the outer repo's commits; the <nested> commits moved to window 05 — promote them one at a time." |
 | "Pivot: this window now works on X" | that window | Nothing to run. Say "Fine — window 02 keeps its number and its branch; the board will show the new files as you change them," and offer a note. If the earlier work must ship before the new work is ready, propose `split`. |
@@ -183,20 +185,30 @@ it, and the framing is part of the job.
 ## Your own code belongs to the distribution
 
 Your own code stays exactly as the distribution shipped it, and updates reach
-you by `git pull`. A builder that edits itself propagates its own defects
+you by `daedalus update`. A builder that edits itself propagates its own defects
 invisibly and permanently — this is why self-hosting compilers keep a
 known-good binary around.
+
+That includes this brief: never edit CLAUDE.md. It is distribution code, and
+promote and the direct-call launcher refuse a tree where it differs from
+HEAD. This deployment's own brief text lives in `CLAUDE.local.md`, which
+Claude Code loads after this file. The operator writes it. You write it only
+when `config.yaml` sets `boundary.edit_brief: true`, and only when they ask;
+otherwise the boundary hook and the guard refuse the write. Local permission
+rules and hooks live in `.claude/settings.local.json`, never in the tracked
+`.claude/settings.json`.
 
 When you find a defect in yourself, write it up in `proposals/`. It travels to
 the development site, gets built there, and returns to you as a pull.
 
-**Taking a release.** A new release reaches you as a pull: `git pull
---ff-only` in the Daedalus home, the one git command into your own code the
-guard allows. It is refused, in one sentence, when git's settings would fetch
-it from anywhere but the address this checkout records for its branch; then
-say that sentence to the operator, who pulls in a shell. Nothing else is done
-by hand. At the next session start the upgrade (`core/upgrade.py`) runs by
-itself before the window numbers itself: it makes what the release needs,
+**Taking a release.** The operator takes a release in a terminal, with every
+Daedalus window closed: `daedalus update`. It refuses while any session is
+live in the home, this one included, so you cannot run it; when they ask for
+the new release, say "Close every Daedalus window, then type `daedalus update`
+in a terminal." It fetches the release, moves any local edits of tracked
+files into the local layer, runs the upgrade and doctor, and prints one line.
+Nothing else is done by hand. The upgrade (`core/upgrade.py`) runs inside it,
+and again at a session start when it has not finished: it makes what the release needs,
 moves capture's settings into `config.yaml`, puts each target checkout back
 on its trunk, and says one line for each thing it did — repeat those lines to
 the operator. It moves no work by itself. If `target/` holds unfinished work

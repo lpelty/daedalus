@@ -179,7 +179,9 @@ want = u.normalise_address(u.RELEASE_ADDRESS)
 for a in ("https://github.com/lpelty/daedalus.git", "https://GitHub.com/lpelty/daedalus/", "ssh://git@github.com/lpelty/daedalus.git",
           "git@github.com:lpelty/daedalus.git", "github.com/lpelty/daedalus", "http://github.com/lpelty/daedalus"):
     assert u.normalise_address(a) == want, a
-for a in ("https://github.com/someone/daedalus.git", "git@github.com:lpelty/daedalus-fork.git", "/srv/daedalus.git"):
+# the same account's fork, derived from the constant (a sibling repository whose name only starts the same)
+for a in ("https://github.com/someone/daedalus.git", "git@github.com:" + u.RELEASE_ADDRESS.split("/", 1)[1] + "-fork.git",
+          "/srv/daedalus.git"):
     assert u.normalise_address(a) != want, a
 assert u.normalise_address("/srv/x/release.git/") == u.normalise_address("/srv/x/release")
 print("ok")
@@ -338,11 +340,13 @@ Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
 
 @test "bootstrap: the README's first-update line, run literally under bash and under zsh on a home with no core/update.py, updates it" {
   LINE='python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus'
-  if grep -q 'FETCH_HEAD:core/update.py' "$REPO/README.md"; then
-    grep -qxF "$LINE" "$REPO/README.md" || { echo "README's first-update line is not the one tested"; return 1; }
-  fi
+  # the README and the v0.7.3 CHANGELOG section carry exactly this line, on a line of its own
+  for f in README.md CHANGELOG.md; do
+    grep -qxF "$LINE" "$REPO/$f" || { echo "$f's first-update line is not the one tested"; return 1; }
+  done
   R3="$B/old.git"; SEED_OLD=1 seed_release "$R3" main
-  local here="${LINE//https:\/\/github.com\/lpelty\/daedalus.git/$R3}" sh i=0
+  local url='https://github.com/lpelty/daedalus.git'
+  local here="${LINE//"$url"/$R3}" sh i=0
   for sh in /bin/bash /bin/zsh; do
     i=$((i + 1)); export HOME="$B/home$i"; mkdir -p "$HOME"
     ADDRESS="$R3" deploy origin "$R3" "$HOME/daedalus"

@@ -35,48 +35,138 @@ your live harness:
 }
 ```
 
-### Letting Daedalus edit its own CLAUDE.md
+### The local layer
 
-The distribution denies it (`Edit(/CLAUDE.md)` in `.claude/settings.json`):
-CLAUDE.md is distribution code, and `core/promote.sh`, the direct-call launcher
-and the release pull all refuse a tree whose CLAUDE.md differs from HEAD. A
-deployment that chooses otherwise carries that cost itself. Two things then
-stand in the way. The deny rule: removing it from the tracked file leaves the
-tree modified (see above); a deployment that has already committed local
-changes on its own branch has made that choice. And in auto mode, Claude
-Code's classifier: its "Self-Modification" rule is a soft deny — a message
-from you in the session asking for that edit clears it on its own, and for an
-edit you want allowed without asking each time, add a prose exception to
-**`~/.claude/settings.json`** (user scope; the classifier never reads
-`autoMode` from a project's `.claude/settings*.json`), keeping `"$defaults"`:
+A deployment never edits a tracked file. A release rewrites those files, and
+a local edit inside one turns every update into a merge. Local choices go in
+three files no release touches:
+
+- `.claude/settings.local.json` (gitignored) — local permission rules and
+  hooks. Claude Code merges its lists with the tracked `.claude/settings.json`.
+  Its `Edit(...)` deny rules also protect Bash writes and the Stop check, as
+  the tracked ones do.
+- `CLAUDE.local.md` (gitignored) — local brief text. Claude Code loads it
+  after `CLAUDE.md`.
+- `config.yaml` — `boundary.edit_brief` decides whether Daedalus may write
+  `CLAUDE.local.md` (see below).
+
+`daedalus update` moves what a deployment already put in the tracked files
+into these, once, and keeps a backup (see "Upgrading").
+
+### Letting Daedalus edit its own brief
+
+`CLAUDE.md` is distribution code, and Daedalus never edits it: the
+distribution denies it (`Edit(/CLAUDE.md)` in `.claude/settings.json`), the
+boundary hook and the guard refuse it, and `core/promote.sh`, the direct-call
+launcher and the update all refuse a tree whose CLAUDE.md differs from HEAD.
+The deployment's own brief is `CLAUDE.local.md`. By default the operator
+writes it and Daedalus may not. To let Daedalus maintain it, set this in
+`config.yaml`:
+
+```yaml
+boundary:
+  edit_brief: true
+```
+
+Daedalus then writes `CLAUDE.local.md` when you ask, and still never
+`CLAUDE.md`. `core/doctor.sh` names the key's value. In auto mode, Claude
+Code's classifier may still refuse the edit under its "Self-Modification"
+rule. That rule is a soft deny: a message from you in the session asking for
+the edit clears it on its own. For an edit you want allowed without asking
+each time, add a prose exception to **`~/.claude/settings.json`** (user scope;
+the classifier never reads `autoMode` from a project's
+`.claude/settings*.json`), keeping `"$defaults"`:
 
 ```json
 {
   "autoMode": {
     "allow": [
       "$defaults",
-      "Editing CLAUDE.md in the Daedalus home at /path/to/daedalus when the operator asked for that change in this session: the deployment chose to let Daedalus maintain its own brief."
+      "Editing CLAUDE.local.md in the Daedalus home at /path/to/daedalus when the operator asked for that change in this session: the deployment chose to let Daedalus maintain its own brief."
     ]
   }
 }
 ```
 
-`core/doctor.sh` prints a NOTE pointing here when no deny rule in the settings
-it reads (project, local, user) covers CLAUDE.md, and OK naming the file that
-does. SOUL.md is different: it is this instance's own journal, is not denied by
-the distribution since 2026-10-15, and no release changes it (a test pins the
-tracked file to its seed).
+A v0.7.2 exception that names CLAUDE.md no longer fits; `daedalus update` and
+`core/doctor.sh` say so, and you reword it to `CLAUDE.local.md`. Neither ever
+writes `~/.claude/settings.json`. SOUL.md is different: it is this instance's
+own journal, is not denied by the distribution since 2026-10-15, and no
+release changes it (a test pins the tracked file to its seed); `daedalus
+update` keeps the deployment's copy.
 
 ## Upgrading
 
-A deployment takes a release by pulling this repository in its home:
-`git pull --ff-only` (a session may run exactly that; the guard allows no
+Close every Daedalus window, then type one command in a terminal:
+
+```
+daedalus update
+```
+
+It prints one line, `Daedalus updated 0.7.2 -> 0.7.3; doctor OK.`, or what
+needs attention, one sentence each. Run again, it says `Daedalus is up to
+date (0.7.3).` If `daedalus` is not found, type `~/.local/bin/daedalus
+update`; `core/setup.sh` and the upgrade install the command there and print
+the one line that adds it to your shell's PATH. It never overwrites a file
+there it did not write. `daedalus version` prints the release, the home, the
+remote and the tag.
+
+What it does, in order. It refuses while any Daedalus session is live in the
+home, naming each, and while another update runs. It picks the remote whose
+address is the release's, github.com/lpelty/daedalus, whatever it is called;
+a home that follows a mirror sets `update.address` in `config.yaml`. It
+refuses when git's settings would fetch from anywhere but that address. It
+fetches, runs the release's own copy of the update, and refuses, naming them,
+on local changes it cannot move: an edit to `core/`, `mods/` or the README,
+or an untracked file where the release adds one. When `CLAUDE.md` or
+`.claude/settings.json` carries a local edit, or the home's history has
+diverged from the release (a merge with local commits), it moves those edits
+into the local layer (see "The local layer"):
+
+- a permission rule or hook no release ever had goes to
+  `.claude/settings.local.json`;
+- a removed `Edit(/CLAUDE.md)` deny becomes `boundary.edit_brief: true` in
+  `config.yaml` (windows then re-run `core/gates.sh` before their next claim,
+  since the gates' record pins `config.yaml`);
+- brief lines no release ever had go to `CLAUDE.local.md`, under a header
+  naming the date and the backup;
+- a release rule or line the deployment removed or reworded is reported in one
+  sentence, never moved and never dropped silently;
+- `state/settings-before-merge.json`, a backup an earlier hand merge left, is
+  read for additions too.
+
+First it keeps a backup: the branch `local/before-update-<stamp>` and copies
+under `state/update-backups/<stamp>/`. Then it resets the tracked files to the
+release. SOUL.md, the journal, keeps the deployment's copy. A failure in that
+step puts the home back as it was. Then it runs the upgrade at once, then
+doctor, and prints the one line, naming the backup when it made one. Network
+failure, or anything unsafe, ends with one sentence that says nothing in the
+home was changed.
+
+**The first update.** A home older than v0.7.3 has no `daedalus` command yet.
+Close every Daedalus window and type this one line in a terminal, with your
+home's path in place of `~/daedalus`:
+
+```
+python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus
+```
+
+It names no remote: it fetches the release's own address and runs that
+release's update, which then picks the home's remote by address. Or say to an
+agent on that machine: "Close every Daedalus window, then run the first-update
+line from the Daedalus README's Upgrading section on GitHub,
+github.com/lpelty/daedalus." From then on, `daedalus update` is the whole
+procedure.
+
+**The upgrade.** `git pull --ff-only` in the home still works where nothing
+local is in the way (a session may run exactly that; the guard allows no
 other git route into Daedalus's own code, and refuses even that when git's
 settings would fetch from anywhere but the address this checkout records for
-its branch — then pull in a shell). Nothing else is done by hand. At the next
-session start `core/session-start.py` compares `VERSION` with
-`state/upgraded-to` and, when they differ, runs `core/upgrade.py` before the
-window numbers itself. Each step acts once and says one line when it does:
+its branch). It moves no local edit, and the upgrade then waits for the next
+session start. Whenever `VERSION` and `state/upgraded-to` differ,
+`core/session-start.py` runs `core/upgrade.py` before the window numbers
+itself; `daedalus update` runs it at once. Each step acts once and says one
+line when it does:
 
 1. makes `state/leases/`, `worktrees/`, `state/promote/` and `state/direct-calls/`;
 2. installs the pre-push hook in Daedalus's own checkout of each target repo;
@@ -119,7 +209,9 @@ window numbers itself. Each step acts once and says one line when it does:
    the upgrade or `lease.sh` runs touches a submodule's files, even where
    `submodule.recurse` is set. A checkout or reset "pick it up" began and was
    cut off is finished by the next start, or by picking it up again;
-7. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
+7. installs the daedalus command at `~/.local/bin/daedalus`, never over a file
+   it did not write, and says how to reach it from your shell;
+8. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
    worktree (the board and doctor name such a window).
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
@@ -138,7 +230,8 @@ not report (every `git` the upgrade runs in `target/` has it off), every file
 of a `.git` git cannot read, and every file in a directory git records as a
 submodule that holds no `.git`; git's record of a merge, rebase or bisect in progress, of each worktree
 whether or not its directory is there now), stops instead if it cannot
-make one (no room, or over `upgrade.snapshot_max_mb`, 2048 by default), and
+make one (no room, or over `upgrade.snapshot_max_mb`, 2048 by default; the
+stop names the three largest parts), and
 keeps it until `python3 core/upgrade.py --forget-snapshot`, which refuses while
 anything in it is missing — `python3 core/upgrade.py --restore-help` lists what
 is, with the commands that bring each back (into a new repository under
@@ -155,6 +248,21 @@ does not fit in a session start, the board says so and asks for
 limit. git's record of a worktree made by hand under `worktrees/`
 is never removed, even when its directory is gone (moved with `mv`, it still
 works through that record; `git worktree repair <new path>` points git at it).
+
+The copy leaves out what a lockfile rebuilds: a `.venv` directory beside a
+`uv.lock` or `pyproject.toml`, and a `node_modules` directory beside a
+`pnpm-lock.yaml`, `package-lock.json` or `yarn.lock`, in every repository and
+worktree. A tracked file changed under one is still copied. The manifest and
+`--restore-help` name each one left out, with the command that rebuilds it
+(`uv sync --frozen`, `pnpm install --frozen-lockfile`, `npm ci`, …). Before it
+estimates the copy, the upgrade removes the scratch worktrees of every
+promotion already pushed, keeping the records: their content is on trunk. A
+promote that pushes removes its own scratch too. Leftover scratch is removed
+with `core/promote.sh NN --clean`, which runs from the prime (any promotion),
+or from a session holding no window or a shell (pushed promotions only), so
+it works while the upgrade is stopped. When the upgrade stops, every session
+line, the board and the Stop hook say the stop's own sentence; in a terminal
+running `daedalus update` it ends "then run daedalus update again".
 
 Its `git fetch` of `origin` changes only origin's remote-tracking branches: it
 fetches, moves and deletes no tag, whatever `fetch.pruneTags` says.
@@ -235,17 +343,11 @@ and what you should see, then checks the result. `--rehearse` plays every
 window itself (the suite runs it that way); `--keep` leaves the scratch
 directory to inspect.
 
-**A deployment that modified a tracked file** (`CLAUDE.md`,
-`.claude/settings.json`) cannot fast-forward over a release that changes the
-same file: `git pull --ff-only` refuses with "Your local changes to the
-following files would be overwritten". Keep the local changes on the
-deployment's own branch and bring the release under them: `git stash push -m
-local-changes CLAUDE.md .claude/settings.json && git pull --ff-only && git
-stash pop`, then resolve what conflicts (the 2026-10-15 release rewrites
-CLAUDE.md's "Release window 2" row and the settings file's permissions block)
-and commit the result on the local branch. `core/doctor.sh` keeps naming the
-modified files, and promote and the launcher keep refusing while the tree
-differs from HEAD.
+**Local edits in tracked files**, made before v0.7.3, need nothing by
+hand: `daedalus update` moves the local edits into the local layer, keeps
+the backup, and takes the release. `core/doctor.sh` says MISSING, naming the
+files, while a tracked file carries a local edit; promote and the launcher
+keep refusing until then.
 
 ## Windows (leases)
 

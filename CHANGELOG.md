@@ -4,6 +4,108 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.7.3 — one command to update, and an upgrade that can finish
+
+**In short.** Taking a release is one command now. Close every Daedalus
+window, then type `daedalus update` in a terminal. It prints one line. Local
+edits no longer live in tracked files, so a release never conflicts with
+them. And the upgrade that stopped at every session start can finish. Thanks
+to a Daedalus deployment on a second machine, which reported each of these
+problems with its evidence.
+
+**What went wrong.**
+- Taking v0.7.1 and v0.7.2 on that deployment took an eight-step recipe and a
+  merge conflict in `.claude/settings.json`. A second agent on the machine had
+  to resolve it.
+- The deployment kept local edits inside tracked files: in `CLAUDE.md`, and
+  in `.claude/settings.json`, whose `Edit(/CLAUDE.md)` deny it had removed.
+  Every release that touched either file conflicted.
+- The 0.7.2 upgrade stopped at every session start. Its safety copy came to
+  about 15 GB, over a limit already raised to 10000 MB.
+- Most of that was one rebuildable Python environment, `engine/.venv`, copied
+  five times. Two of the copies sat in promote scratch worktrees whose push
+  had already happened.
+- A session open during the background copy was told only to restart. The
+  real reason, the size limit, showed only on the board.
+- The stop asked for cleanup. The supported cleanup, `core/promote.sh NN
+  --clean`, needed the prime window. No window opens until the upgrade
+  finishes. The operator removed the worktrees by hand.
+- After a promote, a window's IMPLEMENTED claim had no evidence the Stop hook
+  accepted. It refused the promotion's run, and a fresh `core/gates.sh` run had
+  nothing left to review.
+
+**What changed.**
+- `daedalus update` (`core/update.py`) takes a release in one step. It
+  refuses while a session is live. It picks the remote with the release's
+  address, fetches, and moves to the release.
+- It then runs the upgrade at once and doctor quietly, and prints one line.
+  `daedalus version` is the only other verb.
+- `core/setup.sh` and the upgrade install the command as
+  `~/.local/bin/daedalus`. They never overwrite a file they did not write.
+- The local layer. Local permission rules and hooks go in
+  `.claude/settings.local.json`, and local brief text in `CLAUDE.local.md`.
+  Both are gitignored, and Claude Code loads both.
+- `boundary.edit_brief` in `config.yaml` decides whether Daedalus may write
+  `CLAUDE.local.md`. It is false by default. `CLAUDE.md` stays denied always.
+- The update moves a home's local edits into the local layer. It first keeps
+  a backup branch, `local/before-update-<stamp>`, and copies under
+  `state/update-backups/<stamp>/`. Then it resets the tracked files to the
+  release.
+- A confirm that pushed removes its promotion's scratch worktrees and keeps
+  the records. The upgrade removes every pushed promotion's scratch before it
+  estimates its copy.
+- The safety copy skips a `.venv` or `node_modules` directory that a lockfile
+  beside it rebuilds. The manifest names each one with its rebuild command,
+  such as `uv sync --frozen`.
+- `core/promote.sh NN --clean` also runs from a session holding no window, or
+  from a shell, for pushed promotions. Every command an upgrade stop names is
+  tested to work in the state that stop leaves.
+- When the upgrade has stopped, the session start, the board and the Stop hook
+  all say that stop's own sentence.
+- A window's claim may cite its promotion's gate run once that promotion was
+  confirmed and pushed. The window must have no new work since.
+- `mods/lease-board/tsconfig.json` is gitignored. Claude Code writes it when
+  the mod loads.
+
+**What you will see.**
+- `daedalus update` prints `Daedalus updated 0.7.2 -> 0.7.3; doctor OK.` Run
+  again, it prints `Daedalus is up to date (0.7.3).`
+- When it moved local edits, the same line names the backup branch and the
+  copies.
+- When it wrote `config.yaml`, it says so. Each window then re-runs
+  `core/gates.sh` before its next claim, because the gates' record pins
+  `config.yaml`.
+- A home that had removed the CLAUDE.md deny now has `boundary.edit_brief:
+  true`. Its own brief lines are in `CLAUDE.local.md`, under a header naming
+  the date and the backup.
+- A release rule or brief line the deployment removed or reworded is reported
+  in one sentence. Nothing is dropped silently.
+- An upgrade stop in a terminal ends "then run daedalus update again". Over
+  the size limit, it names the three largest parts.
+- `core/doctor.sh` adds lines for the brief, the command, local edits in
+  tracked files, and leftover promote scratch.
+- The upgrade says one line for the command it installed, then `Upgrade to
+  0.7.3: complete.`
+
+**The first update.** A home older than v0.7.3 has no `daedalus` command yet.
+Close every Daedalus window, then type this one line in a terminal, with your
+home's path in place of `~/daedalus`:
+
+```
+python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus
+```
+
+It names no remote, so it works whatever your remotes are called. Or say to
+an agent on that machine: "Close every Daedalus window, then run the
+first-update line from the Daedalus README's Upgrading section on GitHub,
+github.com/lpelty/daedalus." After that, `daedalus update` is the whole
+procedure. README, "Upgrading", says the same.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.3`. `daedalus version`
+prints `Daedalus 0.7.3 (home <your home>, remote <its name>, tag v0.7.3)`.
+`core/doctor.sh` prints `OK       version: 0.7.3` and `OK       command:
+daedalus on PATH (~/.local/bin/daedalus)`.
+
 ## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again
 
 **In short.** Since v0.7.0 you had to remember or run some routine steps

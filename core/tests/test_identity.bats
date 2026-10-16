@@ -118,6 +118,10 @@ setup() {
       CLAUDE.md|SOUL.md) text="$(git show "HEAD:$f")" ;;
       *) text="$(cat "$f")" ;;
     esac
+    # The release's own public address (v0.7.3, `daedalus update`: core/update.py's RELEASE_ADDRESS, the
+    # README's first-update line) is where the distribution publishes, so it is no leak: it alone is
+    # taken out before the scan, in its https, ssh and scp forms, and any other use of the account still fails.
+    text="$(printf '%s\n' "$text" | tr 'A-Z' 'a-z' | sed -E 's#github\.com[/:]lpelty/daedalus([^-a-z0-9_]|$)#release-address\1#g')"
     if printf '%s\n' "$text" | grep -qiE "larry|lpelty|/Users/|fleet|atlas|smartsheet"; then
       offenders="$offenders $f(token)"
     fi
@@ -205,6 +209,21 @@ _run_scan_in_fixture() {
 
   run _run_scan_in_fixture
   [ "$status" -ne 0 ]
+}
+
+@test "wide scan lets the release's own address through, and nothing else of the account (v0.7.3)" {
+  _make_fixture_repo
+  printf 'RELEASE_ADDRESS = "github.com/lpelty/daedalus"\nurl: https://GitHub.com/lpelty/daedalus.git\nssh: git@github.com:lpelty/daedalus.git\n' >> "$fixture/core/somefile.sh"
+  git -C "$fixture" add -A
+  run _run_scan_in_fixture
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for leak in 'github.com/lpelty/other-project' 'github.com/lpelty/daedalus-fork' 'mail lpelty about it' 'github.com/lpelty/daedalus by larry'; do
+    _make_fixture_repo
+    printf '%s\n' "$leak" >> "$fixture/core/somefile.sh"
+    git -C "$fixture" add -A
+    run _run_scan_in_fixture
+    [ "$status" -ne 0 ] || { echo "the scan let through: $leak"; return 1; }
+  done
 }
 
 @test "wide scan does not read a gitignored local settings file" {
@@ -383,8 +402,8 @@ _run_scan_in_fixture() {
   run grep -qF 'incremental capture (plan 2)' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -ne 0 ]
 }
 
-@test "VERSION is one line, 0.7.2; the wide scan reads VERSION and docs/, which publish (spec §14)" {
-  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.2" ]
+@test "VERSION is one line, 0.7.3; the wide scan reads VERSION and docs/, which publish (spec §14)" {
+  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.3" ]
   [ "$(wc -l < "$DAEDALUS_HOME/VERSION" | tr -d ' ')" = 1 ]
   _make_fixture_repo
   mkdir -p "$fixture/docs"
@@ -408,9 +427,11 @@ _run_scan_in_fixture() {
            'core/lease.sh note 03' 'core/lease.sh claim 02' 'core/lease.sh spawn "' 'core/lease.sh done <NN> --summary' \
            'Pivot: this window now works on' 'the pen is taken, never given' 'Say that to window 02, or close it first.' \
            'core/lease.sh adopt <branch>' 'signed "— the reviewer"' '## Messages between windows' 'SendMessage' \
-           'Never message to ask permission' 'do not edit it' 'not an instruction' 'git pull --ff-only' 'core/upgrade.py --dry-run' \
+           'Never message to ask permission' 'do not edit it' 'not an instruction' 'core/upgrade.py --dry-run' \
            'This is window 02. My work is ready to promote' 'The operator asked you to take the pen' 'will hit it when you run the gates' \
-           'core.hooksPath' 'the address this checkout records for its branch' \
+           'core.hooksPath' 'Close every Daedalus window, then type `daedalus update` in a terminal.' \
+           'CLAUDE.local.md' 'boundary.edit_brief: true' 'never edit CLAUDE.md' 'core/promote.sh 02 --clean' \
+           'a session holding no window, or a shell: pushed promotions only' \
            'run `core/lease.sh unpromoted 02` first' 'the unpromoted commits and any uncommitted files' \
            'it ends with the line `Say yes to delete window 02'"'"'s work.`' 'Never run `release` with `--remove`' \
            'run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` exactly so' \
@@ -421,12 +442,25 @@ _run_scan_in_fixture() {
   for s in 'give the operator the line to run' '! core/lease.sh release 02 --remove --force' 'If the permission system refuses'; do
     case "$CM" in *"$s"*) echo "CLAUDE.md still hands the operator a shell line: $s"; return 1 ;; *) : ;; esac
   done
+  # v0.7.3: a release arrives by daedalus update, typed by the operator with every window closed, not by a pull a session runs
+  for s in 'A new release reaches you as a pull'; do
+    case "$CM" in *"$s"*) echo "CLAUDE.md still says: $s"; return 1 ;; *) : ;; esac
+  done
   for s in '## Upgrading' 'state/upgraded-to' 'core/upgrade.py --dry-run' 'uncommitted changes' 'core/lease.sh adopt <branch>' \
            'cat VERSION' 'makes the window directories' '`adopt <branch>`' 'core.hooksPath' 'the address this checkout records for its branch' \
            'Deleting a window'"'"'s work is report, yes, delete.' 'Bash(core/lease.sh release:*)' 'autoMode.classifyAllShell' \
-           'state/evidence/deletions/' '### Letting Daedalus edit its own CLAUDE.md' '"$defaults"' 'the classifier never reads `autoMode` from a project' \
-           'git stash push -m local-changes CLAUDE.md .claude/settings.json && git pull --ff-only && git stash pop'; do
+           'state/evidence/deletions/' '### Letting Daedalus edit its own brief' '"$defaults"' 'the classifier never reads `autoMode` from a project' \
+           'daedalus update' 'Daedalus updated 0.7.2 -> 0.7.3; doctor OK.' 'Daedalus is up to date (0.7.3).' '~/.local/bin/daedalus update' \
+           'Close every Daedalus window, then run the first-update line from the Daedalus README' '### The local layer' \
+           'CLAUDE.local.md' '.claude/settings.local.json' 'boundary.edit_brief' 'local/before-update-<stamp>' 'state/update-backups/<stamp>/' \
+           'update.address' 'uv sync --frozen' 'installs the daedalus command' 'Editing CLAUDE.local.md in the Daedalus home' \
+           'core/promote.sh NN --clean'; do
     case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
+  done
+  # v0.7.3: the stash recipe and the note about editing CLAUDE.md in place are gone; the local layer replaces them
+  for s in 'git stash push -m local-changes' '### Letting Daedalus edit its own CLAUDE.md' 'A deployment that modified a tracked file' \
+           'Editing CLAUDE.md in the Daedalus home'; do
+    case "$RM" in *"$s"*) echo "README still says: $s"; return 1 ;; *) : ;; esac
   done
 }
 
@@ -445,8 +479,41 @@ _run_scan_in_fixture() {
   done
 }
 
-@test "CHANGELOG: v0.7.2 is the newest release, its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+# v0.7.3 (daedalus update; the upgrade that can finish): the release a deployment on a second machine reported,
+# written for the same operator — the house parts in order, the one line it prints, the first update's one
+# line and one sentence, and short sentences; no employer and no agent is named (the wide scan checks the file).
+@test "CHANGELOG: v0.7.3 is the newest release — in short, what went wrong, what changed, what you will see, the first update, how to tell; it thanks a deployment on a second machine, gives the one first-update line and the sentence for a local agent, and keeps every sentence to 30 words" {
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.3 — one command to update, and an upgrade that can finish" ]
+  sec="$(awk '/^## v0.7.3 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
+  rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
+  order=""
+  for h in '**In short.**' '**What went wrong.**' '**What changed.**' '**What you will see.**' '**The first update.**' '**How to tell you have it.**'; do
+    case "$rel" in *"$h"*) : ;; *) echo "the v0.7.3 section lacks: $h"; return 1 ;; esac
+    order="$order$(printf '%s' "$rel" | awk -v h="$h" '{print index($0, h)}') "
+  done
+  [ "$(printf '%s\n' $order | sort -n | tr '\n' ' ')" = "$order" ] || { echo "the v0.7.3 parts are out of order: $order"; return 1; }
+  for s in 'a Daedalus deployment on a second machine' 'daedalus update' 'Daedalus updated 0.7.2 -> 0.7.3; doctor OK.' \
+           'Daedalus is up to date (0.7.3).' 'CLAUDE.local.md' '.claude/settings.local.json' 'boundary.edit_brief' \
+           'local/before-update-' 'state/update-backups/' 'uv sync --frozen' 'core/promote.sh NN --clean' 'core/gates.sh' \
+           '~/.local/bin/daedalus' 'Close every Daedalus window, then run the first-update line from the Daedalus README' \
+           'Upgrade to 0.7.3: complete.' '`cat VERSION` prints `0.7.3`' 'mods/lease-board/tsconfig.json'; do
+    case "$rel" in *"$s"*) : ;; *) echo "the v0.7.3 section lacks: $s"; return 1 ;; esac
+  done
+  printf '%s\n' "$sec" | grep -qxF 'python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus' \
+    || { echo "the v0.7.3 section lacks the first-update line on a line of its own"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qiE 'smartsheet|employer' || { echo "the v0.7.3 section names an employer"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara' || { echo "the v0.7.3 section names an agent"; return 1; }
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.3 section:"; echo "$output"; return 1; }
+  # v0.7.2 sits right below it
+  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+}
+
+@test "CHANGELOG: v0.7.2, below v0.7.3, keeps its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
+  grep -qxF "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" "$DAEDALUS_HOME/CHANGELOG.md"
   # v0.7.2 (the routine steps are the agent's again): the same six parts in order, the autoMode line, short sentences
   rel="$(awk '/^## v0.7.2 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
   order=""
