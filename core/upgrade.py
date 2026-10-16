@@ -94,9 +94,10 @@ FETCH_SECS = 4          # one cap for every target repo's fetch together, never 
 PICKED_NOTE = "picked up at the upgrade to %s"
 # The operator's decision of 2026-10-07 (spec Appendix E): unfinished work in target/ stops the upgrade before it
 # changes anything there, in one sentence naming it; the operator says "pick it up" (core/lease.sh adopt
-# --all-unfinished), or finishes and ships it the usual way, and the next session start finishes the upgrade.
-UNFINISHED = ("Daedalus has unfinished work in %s. Nothing was changed. Say 'pick it up' to move it into windows, or "
-              "finish and ship it the usual way, then start a new session.")
+# --all-unfinished), and the next session start finishes the upgrade. "Finish and ship it the usual way" is gone
+# from it (update-command Decision 10's rule): shipping needs a window, and none opens until the upgrade finishes.
+UNFINISHED = ("Daedalus has unfinished work in %s. Nothing was changed. Say 'pick it up' to move it into windows, "
+              "then start a new session.")
 MOST_ITEMS = 5          # things the sentence names before "and N more"
 UNTRACKED = ("upgrade to %s incomplete: target/%s has untracked files that %s would overwrite (%s) — move them out "
              "of that checkout, or commit them on its branch, then start a session again")
@@ -1654,6 +1655,26 @@ def _for_pick(sentence: str) -> str:
     return s.replace("then start a session again", "then say 'pick it up' again")
 
 
+# `upgrade.py --caller update` (daedalus update runs it): the stop is said in a terminal, where "start a session" is
+# the wrong next step (update-command Decision 23). (session wording, terminal wording); the recorded "sentence"
+# keeps the session wording.
+_UPDATE_WORDS = (("then start a session again", "then run daedalus update again"),
+                 ("and start a session again", "and run daedalus update again"),
+                 ("then start a new session", "then run daedalus update again"),
+                 ("it tries again at the next session start", "it tries again at the next daedalus update"),
+                 ("it runs again at the next session start", "it runs again at the next daedalus update"),
+                 ("the next session start finishes it", "the next daedalus update finishes it"),
+                 ("Say 'pick it up'", "Say 'pick it up' to this home's agent"))
+_CALLER = {"update": False}
+
+
+def _for_update(sentence: str) -> str:
+    """A stop sentence of the upgrade's, said to the terminal that ran `daedalus update`."""
+    for a, b in _UPDATE_WORDS:
+        sentence = sentence.replace(a, b)
+    return sentence
+
+
 def pick_up(root: Path) -> int:
     """`core/lease.sh adopt --all-unfinished`: see "pick it up" above. Prints one line per window made (adopt's own
     sentence), one per thing left with what to do, and a last line; exit 1 when anything was left."""
@@ -1723,6 +1744,15 @@ def pick_up(root: Path) -> int:
     for s in left:
         print(s if s.endswith(".") else s + ".")
     pend = pending(root)
+    if not left and pend:
+        # the stop it answered is dealt with: the board and every no-window line go back to "the next start finishes
+        # it" (update-command Decision 9), never the stale "Say 'pick it up'"
+        rec = _read_json(root / STOPPED) or {}
+        if str(rec.get("sentence", "")).startswith(UNFINISHED.split("%s", 1)[0]):
+            try:
+                (root / STOPPED).unlink()
+            except OSError:
+                pass
     if left:
         print("That stays where it is until it is done; then say 'pick it up' again%s."
               % (" — the upgrade finishes at the first session start that finds nothing unfinished" if pend else ""))
@@ -1789,6 +1819,40 @@ SNAP_LINE = ("A safety copy of everything in target/ from before the upgrade is 
              "was lost, but if anything looks missing, core/upgrade.py --restore-help lists it")
 SNAP_BG_COPIED = ("The upgrade to %s took its safety copy of target/ in the background; it finishes at the next "
                   "session start in this home")
+# The stop-command rule (update-command Decisions 10 and 23): every command a stop sentence names must work in the
+# state that stop leaves — the upgrade not stamped, so no window opens and nobody holds the pen — run by whoever the
+# sentence asks: "operator" from a terminal in this home, "agent" from a session holding no window, "both".
+# START is "start a session again" (the operator starts one; its start runs the upgrade); the --caller update wording
+# (_for_update) turns it into UPDATE. A sentence naming no command maps to (). Placeholders are filled from the
+# stop's own words: {repo} a target repository (thing), {trunk}, {branch}, {new} a new branch name, {sha}, {path},
+# {elsewhere}, {locks}, {cmd} the git command the sentence names, {nn} a window number.
+# test_upgrade_stop_commands.bats runs each in that state, and fails on a stop constant missing here.
+START = "start a session again"
+_UPGRADE_CLI = ("operator", "python3 core/upgrade.py")
+STOP_COMMANDS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "SNAP_BIG": (("operator", START), ("both", "core/promote.sh {nn} --clean")),
+    "SNAP_DISK": (("operator", START),),
+    "SNAP_FAIL": (),
+    "SNAP_BG_FAIL": (_UPGRADE_CLI,),
+    "SNAP_SLOW": (_UPGRADE_CLI,),
+    "SNAP_BG_GONE": (("operator", START),),
+    "STOPPED_WHILE": (("operator", START),),
+    "STOPPED_TIME": (("operator", START), _UPGRADE_CLI),
+    "UNFINISHED": (("agent", "core/lease.sh adopt --all-unfinished"), ("operator", START)),
+    "UNTRACKED": (("operator", "mv target/{repo}/{path} {elsewhere}"), ("operator", START)),
+    "GITLINK": (("operator", "mv target/{repo}/{path} {elsewhere}"), ("operator", START)),
+    "SHADOW": (("operator", "git -C target/{repo} branch -m origin/{trunk} {new}"), ("operator", START)),
+    "LOCKS_LEFT": (("operator", "rm {locks}"), ("operator", START)),
+    "UNBORN": (("operator", "git -C target/{repo} branch {branch} {sha}"), ("operator", START)),
+    "TWINS": (("operator", "git -C target/{repo} pack-refs --all"),
+              ("operator", "git -C target/{repo} branch -m {branch} {new}"), ("operator", START)),
+    "CUT_WAIT": (("operator", START),),
+    "CUT_OTHER": (("operator", "git -C target/{repo} {cmd}"), ("operator", START)),
+    "_NO_WORKTREE": (("operator", START),),
+}
+# stops only a session start reaches (its deadline, or the run in the background it hands the copy to): never said to
+# the terminal of `daedalus update`, so their wording keeps "session start"
+SESSION_ONLY = ("SNAP_BG_FAIL", "SNAP_SLOW", "SNAP_BG_GONE", "STOPPED_TIME")
 # a package directory a lockfile beside it rebuilds is no work: the copy skips its untracked and ignored files and
 # records it with the command that rebuilds it (update-command Decision 8). (directory name, ((lockfile, command), ...))
 REBUILD = ((".venv", (("uv.lock", "uv sync --frozen"), ("pyproject.toml", "uv sync"))),
@@ -2444,13 +2508,27 @@ def _snap_largest(root: Path, coll: List[dict]) -> List[Tuple[int, str]]:
 def _snap_big(root: Path, ver: str, size: int, cap: int, coll: List[dict]) -> str:
     """SNAP_BIG, naming the three largest parts of at least 1 MB, so the operator can tell what to remove."""
     top = [(n, k) for n, k in _snap_largest(root, coll) if n >= (1 << 20)][:3]
-    names = ["%s (%s)" % (k, _mb(n)) for n, k in top]
+    names = ["%s (%s%s)" % (k, _mb(n), _scratch_clean(root, k)) for n, k in top]
     clause = ""
     if len(names) == 1:
         clause = "; the largest is %s" % names[0]
     elif names:
         clause = "; the largest are %s and %s" % (", ".join(names[:-1]), names[-1])
     return SNAP_BIG % (ver, _mb(size), cap, clause)
+
+
+def _scratch_clean(root: Path, name: str) -> str:
+    """For a part of the copy under a pushed promotion's scratch (state/promote/<NN>-.../), the command that removes
+    it with no window and no pen (update-command Decision 10b); "" for anything else. The upgrade removes pushed
+    scratch before it estimates, so this is a promotion a confirm held then. An unpushed promotion's scratch is not
+    named: only the prime removes it, and no window opens until the upgrade finishes; raising the limit is the way."""
+    m = re.match(r"state/promote/(([0-9]{2})-[^/]+)/", name)
+    if not m:
+        return ""
+    pdir = root / "state" / "promote" / m.group(1)
+    if not ((pdir / "pushed").exists() or (pdir / "announced").exists()):
+        return ""
+    return ", pushed: core/promote.sh %s --clean removes it" % m.group(2)
 
 
 def _progress(n: int) -> None:
@@ -3808,6 +3886,8 @@ def _stopped(root: Path, ver: Optional[str], step: int, sentence: str, backgroun
     rec = {"version": ver, "step": step, "sentence": sentence, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     if background:
         rec["background"] = True
+    if _CALLER["update"]:
+        rec["sentence_update"] = _for_update(sentence)      # session lines read "sentence" (Decision 23)
     try:
         _write(root / STOPPED, json.dumps(rec, indent=2) + "\n")
     except OSError:
@@ -3818,19 +3898,11 @@ def _stopped(root: Path, ver: Optional[str], step: int, sentence: str, backgroun
 def pending_line(root: Path) -> Optional[str]:
     """The board's line on every prompt until the stamp is this VERSION's (spec §14 "What the operator sees if
     a step could not run"): the recorded stop, else "has not run yet"."""
-    ver = version(root)
-    if ver is None or stamped(root) == ver:
+    import leaselib as ll
+    if version(root) is None:
         return None
-    try:
-        rec = json.loads((root / STOPPED).read_text())
-    except (OSError, ValueError):
-        rec = None
-    if isinstance(rec, dict) and rec.get("version") == ver and isinstance(rec.get("sentence"), str):
-        if rec.get("background") and not _bg_running(root):
-            bg = _read_json(root / BACKGROUND) or {}
-            return SNAP_BG_COPIED % ver if bg.get("copied") and bg.get("version") == ver else SNAP_BG_GONE % ver
-        return rec["sentence"]
-    return "upgrade to %s has not run yet — it runs at the next session start in this home" % ver
+    p = ll.pending_stop(root)        # the one reading of the recorded stop, shared with every no-window sentence
+    return p[2] if p else None
 
 
 def _repo_flag(root: Path, key: str) -> str:
@@ -4717,9 +4789,16 @@ def main(argv: List[str]) -> int:
             sys.stderr.write("usage: python3 core/upgrade.py --rollback [--dry-run] [--force]\n")
             return 2
         return rollback(root, dry="--dry-run" in args, force="--force" in args)
+    if "--caller" in args:
+        i = args.index("--caller")
+        if args[i + 1:i + 2] != ["update"]:
+            sys.stderr.write("usage: python3 core/upgrade.py ... --caller update\n")
+            return 2
+        args = args[:i] + args[i + 2:]
+        _CALLER["update"] = True
     if [a for a in args if a not in ("--dry-run", "--setup", "--progress")]:
-        sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] [--progress] | --doctor | --restore-help | "
-                         "--forget-snapshot | --rollback [--dry-run] [--force]\n")
+        sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] [--progress] [--caller update] | --doctor | "
+                         "--restore-help | --forget-snapshot | --rollback [--dry-run] [--force]\n")
         return 2
     dry, upto = "--dry-run" in args, (3 if "--setup" in args else 6)
     _PROGRESS["on"] = 1 if "--progress" in args else 0
@@ -4738,7 +4817,7 @@ def main(argv: List[str]) -> int:
     for ln in lines:
         print(ln)
     if stop:
-        print(("would stop: " if dry else "") + stop)
+        print(("would stop: " if dry else "") + (_for_update(stop) if _CALLER["update"] else stop))
         return 0 if dry else 1
     if not lines:
         print("Nothing to do.")

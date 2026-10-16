@@ -96,8 +96,8 @@ branch with commits origin lacks, the trunk ahead of origin, unsaved files
 revert or bisect stopped part-way, or a worktree made by hand, the upgrade
 stopped before changing anything there, and the board says on every prompt:
 "Daedalus has unfinished work in target/<repo>: … Nothing was changed. Say
-'pick it up' to move it into windows, or finish and ship it the usual way,
-then start a new session." "Pick it up" runs `core/lease.sh adopt
+'pick it up' to move it into windows, then start a new session." "Pick it
+up" runs `core/lease.sh adopt
 --all-unfinished`: each piece becomes a numbered window, and what it cannot
 move is named with what to do. A stash is never the remedy: it stays in the
 trunk mirror, where no window shows it. If it had ignored files where putting

@@ -9,7 +9,7 @@ load fixtures/upgrade/setup.bash
 setup() { upgrade_fixture; }
 teardown() { teardown_live; }
 
-TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."
+TAIL="Nothing was changed. Say 'pick it up' to move it into windows, then start a new session."
 
 # --- one test per kind: the stop, and nothing under target/ changed -----------------------------------------------
 

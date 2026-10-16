@@ -219,7 +219,15 @@ def main() -> int:
             uncopied = upgrade_pending(root) and up.copy_missing(root)
         except Exception:
             uncopied = False
-        if uncopied and not visitor:
+        # When the upgrade stopped, "a session started after that is numbered" (COPY_FIRST, WINDOWS_WAIT) reads as
+        # restart advice, which a restart does not make true: the stop's own sentence says what to do, and the
+        # line after it only that no window opens until the upgrade finishes (update-command Decision 9).
+        try:
+            import leaselib as ll0
+            stopped = (ll0.pending_stop(root) or ("", "", ""))[1] == "stopped"
+        except Exception:
+            stopped = False
+        if uncopied and not visitor and not stopped:
             bind_notes.append(up.COPY_FIRST + ".")
         # No window at all while the upgrade is not stamped — it stopped (on unfinished work, out of time, ...), a
         # run in the background holds it, or it did not get to run: numbering one adds lease/<NN>, a worktree
@@ -235,7 +243,12 @@ def main() -> int:
                 pend = None
             if pend and pend not in bind_notes:
                 bind_notes.append(pend)
-            if not uncopied:
+            if stopped and not visitor:
+                try:
+                    bind_notes.append(up.WINDOWS_WAIT_BOARD)
+                except Exception:
+                    pass
+            elif not uncopied:
                 try:
                     bind_notes.append(up.WINDOWS_WAIT + ".")
                 except Exception:

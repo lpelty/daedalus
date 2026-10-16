@@ -96,7 +96,7 @@ teardown() { teardown_live; }
   printf 'dirt\n' >> "$T/a.txt"
   run python3 "$UP"
   [ "$status" -eq 1 ]
-  s="Daedalus has unfinished work in target/thing: 1 unsaved file. Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."
+  s="Daedalus has unfinished work in target/thing: 1 unsaved file. Nothing was changed. Say 'pick it up' to move it into windows, then start a new session."
   [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["sentence"] == sys.argv[2] and d["version"] == "0.7.0" and d["step"] == 6, d' "$DAEDALUS_HOME/state/upgrade-stopped.json" "$s"
@@ -339,7 +339,7 @@ print(ll.git_reason(""))' "$DAEDALUS_HOME/core"
   [ -z "$(git -C "$T" status --porcelain --untracked-files=no)" ]
   run python3 "$UP"
   [ "$status" -eq 1 ]
-  [ "$(printf '%s\n' "$output" | tail -1)" = "Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin), and 1 changed file git status does not show (a.txt). Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session." ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | tail -1)" = "Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin), and 1 changed file git status does not show (a.txt). Nothing was changed. Say 'pick it up' to move it into windows, then start a new session." ] || { echo "$output"; return 1; }
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]
   [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]; [ "$(cat "$T/a.txt")" = "MY UNCOMMITTED EDIT" ]
   run python3 "$UP" --doctor

@@ -34,7 +34,7 @@ for f in sorted(glob.glob(sys.argv[1] + "/state/leases/[0-9]*.json")):
 ship_in_flight() {  # fix/in-flight reached origin's main: target/ holds no work origin lacks (this laptop's real shape)
   git -C "$T" push -q origin fix/in-flight:main; git -C "$T" fetch -q origin
 }
-TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."
+TAIL="Nothing was changed. Say 'pick it up' to move it into windows, then start a new session."
 
 @test "v0.6.1, built and started by its own code, then pulled: the open session's next prompt says the upgrade has not run and its Stop passes, with no traceback; the first new session stops the upgrade on the in-flight branch, changing nothing in target/; 'pick it up' makes it a window; the next session upgrades the home with nobody else's hands on it — every §14 predicate holds; the old session's Stop then gives only the release's config.yaml reason (do not restore it; start a new session) and the promotion backstop; the session after changes nothing" {
   pull_current
@@ -54,7 +54,7 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, or finish a
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx_of "$output")"
   s="Daedalus has unfinished work in target/thing: the branch fix/in-flight (1 commit not on origin). $TAIL"
-  case "$c" in *"$s"*"This session has no window yet: windows open once the upgrade finishes"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"$s"*"No window opens until the upgrade finishes."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"Upgrade to $CUR: complete."*|*"installed the pre-push hook"*|*"You are window"*) echo "$c"; return 1 ;; esac
   [ ! -e "$H/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = fix/in-flight ]
   [ "$(git -C "$T" rev-parse fix/in-flight)" = "$tip" ]
@@ -130,7 +130,8 @@ target_bytes() {    # every file under target/, git's own included, by content (
   [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
   c="$(ctx_of "$output")"
   s="Daedalus has unfinished work in target/thing: the branch feat/unshipped (1 commit not on origin), and 1 unsaved file. $TAIL"
-  case "$c" in *"$s"*"This session has no window yet: windows open once the upgrade finishes; a session started after that is numbered."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"$s"*"No window opens until the upgrade finishes."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"a session started after that is numbered"*) echo "$c"; return 1 ;; esac
   case "$c" in *"You are window"*|*"you hold the pen"*|*"installed the pre-push hook"*|*"complete."*) echo "$c"; return 1 ;; esac
   [ "$(target_bytes)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_bytes); return 1; }
   [ ! -e "$H/state/upgraded-to" ]; [ -z "$(ls "$H/state/leases" 2>/dev/null)" ]

@@ -516,7 +516,7 @@ EOF
 
 # --- the upgrade at step 0 (spec §14; plan 5 Task 4) -------------------------------
 
-@test "step 0: a home that pulled 0.7.0 with an in-flight branch stops the upgrade at the first interactive start, changing nothing in target/ — this window gets no number and is told windows open once the upgrade finishes; 'pick it up' makes the branch window 01; the next start completes the upgrade, numbers itself 02 and takes the pen, the marker records the trunk base; the context says each step once" {
+@test "step 0: a home that pulled 0.7.0 with an in-flight branch stops the upgrade at the first interactive start, changing nothing in target/ — this window gets no number and is told the stop and that no window opens until the upgrade finishes; 'pick it up' makes the branch window 01; the next start completes the upgrade, numbers itself 02 and takes the pen, the marker records the trunk base; the context says each step once" {
   cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
   git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
@@ -525,8 +525,8 @@ EOF
   run start s1 startup
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
-  case "$c" in *"Daedalus has unfinished work in target/thing: the branch feat/x (1 commit not on origin). Nothing was changed. Say 'pick it up' to move it into windows, or finish and ship it the usual way, then start a new session."*"This session has no window yet: windows open once the upgrade finishes; a session started after that is numbered."*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"You are window"*|*"hold the pen"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"Daedalus has unfinished work in target/thing: the branch feat/x (1 commit not on origin). Nothing was changed. Say 'pick it up' to move it into windows, then start a new session."*"No window opens until the upgrade finishes."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"You are window"*|*"hold the pen"*|*"a session started after that is numbered"*) echo "$c"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]; [ "$(git -C "$T" branch --show-current)" = feat/x ]
   [ ! -e "$DAEDALUS_HOME/state/leases/01.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
   ! git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null; [ ! -e "$T/.git/hooks/pre-push" ]

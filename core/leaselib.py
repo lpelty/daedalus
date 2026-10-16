@@ -55,6 +55,21 @@ BOARD_UNRENDERED = "The lease board could not be rendered: %s"
 NO_WINDOW_PENDING = ("This session started before the upgrade to %s finished, so it holds no window and none opens "
                      "for it. Tell the operator to close this session and start a new one; that start finishes the "
                      "upgrade.")
+# That restart advice is true only while a start would finish the upgrade: it has not run yet, or a run in the
+# background took the copy (update-command Decision 9). When the upgrade stopped, the session is told that stop's
+# own sentence, whose remedy is what the operator needs; while the background copy runs, that it is running. The
+# three share NO_WINDOW_PENDING's opening (boundary-hook.py PENDING_PREFIX).
+NO_WINDOW_STOPPED = ("This session started before the upgrade to %s finished, so it holds no window and none opens "
+                     "for it. The upgrade stopped: %s")
+NO_WINDOW_RUNNING = ("This session started before the upgrade to %s finished, so it holds no window and none opens "
+                     "for it. The upgrade is taking its safety copy in the background; the board says when it is done.")
+# upgrade.pending_line's three sentences of its own, read here without importing upgrade.py (pending_stop; a test pins
+# them equal to upgrade.py's)
+UPGRADE_NOT_RUN = "upgrade to %s has not run yet — it runs at the next session start in this home"
+SNAP_BG_COPIED = ("The upgrade to %s took its safety copy of target/ in the background; it finishes at the next "
+                  "session start in this home")
+SNAP_BG_GONE = ("upgrade to %s incomplete: the run in the background ended before it finished (state/upgrade.log "
+                "says how far it got); it runs again at the next session start")
 
 # SessionStart's two lease-lock waits are bounded by the hook's budget (§4.2;
 # plan 2 Decision 18). What each says when the lock stays busy past it:
@@ -335,14 +350,73 @@ def pending_version(root: Path) -> Optional[str]:
     return ver if done != ver else None
 
 
+def _read_record(path: Path) -> Optional[dict]:
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _bg_running(root: Path) -> bool:
+    """upgrade._bg_running: state/upgrade-background.json names a live `upgrade.py --background`."""
+    rec = _read_record(root / "state" / "upgrade-background.json")
+    if not rec or not rec.get("running"):
+        return False
+    try:
+        pid = int(rec.get("pid"))
+        os.kill(pid, 0)
+    except (TypeError, ValueError, OSError):
+        return False
+    code, out, _ = v.run(["ps", "-o", "command=", "-p", str(pid)], timeout=5)
+    return code == 0 and "upgrade.py" in out and "--background" in out
+
+
+def pending_stop(root: Path) -> Optional[Tuple[str, str, str]]:
+    """While the upgrade is pending (pending_version): (version, kind, sentence), else None. The sentence is
+    upgrade.pending_line's, read by the same rules from state/upgrade-stopped.json and state/upgrade-background.json
+    without importing upgrade.py; kind says which no-window sentence a session gets (no_window_pending):
+    'stopped' (a recorded stop, or a run in the background that ended without its copy), 'running' (that run is
+    going), or 'restart' (not run yet, or the copy taken in the background: the next start finishes it)."""
+    ver = pending_version(root)
+    if ver is None:
+        return None
+    rec = _read_record(root / "state" / "upgrade-stopped.json")
+    if not (rec and rec.get("version") == ver and isinstance(rec.get("sentence"), str)):
+        return ver, "restart", UPGRADE_NOT_RUN % ver
+    if not rec.get("background"):
+        return ver, "stopped", rec["sentence"]
+    if _bg_running(root):
+        return ver, "running", rec["sentence"]
+    bg = _read_record(root / "state" / "upgrade-background.json") or {}
+    if bg.get("copied") and bg.get("version") == ver:
+        return ver, "restart", SNAP_BG_COPIED % ver
+    return ver, "stopped", SNAP_BG_GONE % ver
+
+
+def no_window_pending(pending) -> str:
+    """The no-window sentence while the upgrade is pending: `pending` is pending_stop's triple, or (older callers)
+    the version alone, which reads as not run yet."""
+    if isinstance(pending, str):
+        return NO_WINDOW_PENDING % pending
+    ver, kind, sentence = pending
+    if kind == "running":
+        return NO_WINDOW_RUNNING % ver
+    if kind != "stopped":
+        return NO_WINDOW_PENDING % ver
+    body = re.sub(r"^upgrade to \S+ incomplete: ", "", sentence).strip().rstrip(".")
+    return NO_WINDOW_STOPPED % (ver, body + ".")
+
+
 def resolve_lease(leases: Dict[str, dict], sid: str,
-                  pending: Optional[str] = None) -> Tuple[Optional[str], Optional[dict]]:
+                  pending=None) -> Tuple[Optional[str], Optional[dict]]:
     """§4.4 steps 2–3 over an already-read lease dict. Pure: no I/O, no lock.
     (nn, lease) when the session is bound; (None, None) when no lease file
     exists or the session holds only the pen; Refused for every case that
     must fail closed. The PreToolUse hooks call this on lease_context's read.
-    `pending` (pending_version): the no-window refusal names the upgrade
-    instead of create/claim, which are refused until it finishes."""
+    `pending` (pending_stop, or pending_version's string): the no-window
+    refusal names the upgrade — its recorded stop when it stopped — instead of
+    create/claim, which are refused until it finishes."""
     if not leases:
         return None, None
     numbered = {k: d for k, d in leases.items() if k != "prime"}
@@ -374,7 +448,7 @@ def resolve_lease(leases: Dict[str, dict], sid: str,
     # the number of live sessions. The old sentence blamed "several sessions";
     # the window of 2026-10-10 repeated that to the operator as its cause (§4.4).
     if pending:
-        raise Refused(NO_WINDOW_PENDING % pending)
+        raise Refused(no_window_pending(pending))
     raise Refused("This session holds no window: no lease names it and it does not hold the pen. "
                   "Run `core/lease.sh create` and then `claim <NN>`.")
 
@@ -402,7 +476,7 @@ def resolve(root: Path, sid: Optional[str], name: str) -> Path:
         sys.stderr.write("daedalus: no session — using the prime's checkout target/%s (%d window%s live)\n"
                          % (name, live, "" if live == 1 else "s"))
         return default
-    nn, lease = resolve_lease(leases, sid, pending_version(root))
+    nn, lease = resolve_lease(leases, sid, pending_stop(root))
     if lease is None:
         return default
     return root / str(lease.get("worktree") or ("worktrees/%s" % nn)) / name
@@ -3632,7 +3706,7 @@ def log_path(root: Path, sid: str, today: Optional[str] = None) -> str:
         if key is None and leases.get("prime", {}).get("session_id") == sid:
             key = "prime"
         if key is None:
-            resolve_lease(leases, sid, pending_version(root))   # raises the no-window sentence when leases exist
+            resolve_lease(leases, sid, pending_stop(root))   # raises the no-window sentence when leases exist
             raise Refused(UNLEASED_NAG)
         return log_path_locked(root, key, leases, today)
 
@@ -4023,8 +4097,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
     elif sid is not None and not mine and numbered:
         # a session with no lease is nagged; an operator shell (sid None) is not a session. While the upgrade
         # is pending the nag's remedy is refused (create/claim), so the sentence names the upgrade instead.
-        pv = pending_version(root)
-        lines.append(NO_WINDOW_PENDING % pv if pv else UNLEASED_NAG)
+        ps = pending_stop(root)
+        lines.append(no_window_pending(ps) if ps else UNLEASED_NAG)
     lines.append(MESSAGE_LINE)
     return "\n".join(lines)
 

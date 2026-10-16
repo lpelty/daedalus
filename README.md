@@ -100,8 +100,8 @@ window numbers itself. Each step acts once and says one line when it does:
    any, it stops and changes nothing there. It
    says one sentence, for example: "Daedalus has unfinished work in
    target/app: the branch fix-login (2 commits not on GitHub), and 3 unsaved
-   files. Nothing was changed. Say 'pick it up' to move it into windows, or
-   finish and ship it the usual way, then start a new session." The board
+   files. Nothing was changed. Say 'pick it up' to move it into windows,
+   then start a new session." The board
    repeats it on every prompt, and `core/doctor.sh` shows it. Until the
    upgrade finishes no session gets a window and `core/lease.sh` makes none
    (the board says so), so nothing in `target/` changes, its `.git` included;

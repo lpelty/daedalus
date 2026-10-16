@@ -85,3 +85,105 @@ pre_upgrade_session_after_pick_up() {
   case "$stderr" in *"No such file or directory"*) echo "$stderr"; return 1 ;; *) : ;; esac
   case "$stderr" in *"the upgrade has not run; start a session in this home"*) : ;; *) echo "$stderr"; return 1 ;; esac
 }
+
+# --- the recorded stop on every session-facing line (update-command design, Decision 9) ---
+
+BIG="upgrade to 0.7.0 incomplete: before it changes anything in target/ it keeps a safety copy of it, and that copy would be about 16100 MB, over the 10000 MB limit (upgrade.snapshot_max_mb in config.yaml); the largest is target/thing/engine/.venv (1800 MB) — raise the limit, or remove files target/ does not need (ignored build output counts), then start a session again"
+BIG_BODY="before it changes anything in target/ it keeps a safety copy of it, and that copy would be about 16100 MB, over the 10000 MB limit (upgrade.snapshot_max_mb in config.yaml); the largest is target/thing/engine/.venv (1800 MB) — raise the limit, or remove files target/ does not need (ignored build output counts), then start a session again."
+# background_stopped — what background_main leaves when its copy stopped: the stop recorded without the background
+# mark (_stopped), and the run's own record ended, not copied
+background_stopped() {
+  python3 -c 'import json,sys; json.dump({"version": "0.7.0", "step": 2, "sentence": sys.argv[2], "at": "2026-10-15T12:00:00"}, open(sys.argv[1], "w"))' \
+    "$DAEDALUS_HOME/state/upgrade-stopped.json" "$BIG"
+  printf '{"pid": null, "version": "0.7.0", "running": false, "copied": false, "at": "2026-10-15T12:00:01"}\n' > "$DAEDALUS_HOME/state/upgrade-background.json"
+}
+board_of() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"hello"}' "$1" | python3 "$DAEDALUS_HOME/core/lease-board.py" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+
+@test "stop sentence: a session open while the background copy ran, which then stopped over the limit — its Stop, its board and the lease commands say that stop's own sentence, never 'close this session and start a new one'" {
+  pre_upgrade_session_after_pick_up
+  background_stopped
+  run --separate-stderr stop s1
+  [ "$status" -eq 2 ] || { echo "status $status: $output $stderr"; return 1; }
+  case "$stderr" in *"This session started before the upgrade to 0.7.0 finished, so it holds no window and none opens for it. The upgrade stopped: $BIG_BODY"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"close this session"*|*"lease.sh create"*) echo "$stderr"; return 1 ;; esac
+  run --separate-stderr stop s1
+  [ "$status" -eq 0 ] && [ -z "$stderr" ] || { echo "status $status: $output $stderr"; return 1; }
+  run board_of s1
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$BIG"*"No window opens until the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"The upgrade stopped: $BIG_BODY"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close this session"*) echo "$output"; return 1 ;; esac
+  run --separate-stderr env DAEDALUS_SESSION_ID=s1 bash -c "source '$DAEDALUS_HOME/core/lib.sh'; target_path"
+  case "$stderr" in *"The upgrade stopped: $BIG_BODY"*) : ;; *) echo "$stderr"; return 1 ;; esac
+}
+
+@test "stop sentence: a session start whose own upgrade stops over the limit says the stop and that no window opens, never that a session started after it is numbered; its Stop says the same stop" {
+  pre_upgrade_session_after_pick_up
+  python3 -c 'import sys; open(sys.argv[1], "wb").truncate(3 << 20)' "$T/big.bin"
+  printf 'upgrade:\n  snapshot_max_mb: 1\n' >> "$DAEDALUS_HOME/config.yaml"
+  P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
+  run start s2; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])')"
+  case "$c" in *"over the 1 MB limit"*"then start a session again"*"No window opens until the upgrade finishes."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"a session started after that is numbered"*|*"close this session"*) echo "$c"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  run --separate-stderr stop s2
+  [ "$status" -eq 2 ] || { echo "status $status: $output $stderr"; return 1; }
+  case "$stderr" in *"The upgrade stopped: before it changes anything in target/"*"over the 1 MB limit"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"close this session"*) echo "$stderr"; return 1 ;; esac
+}
+
+@test "stop sentence: while the background run is going the line says it is taking the copy; once it took the copy, the restart line; leaselib.pending_stop agrees with upgrade.pending_line on every recorded shape" {
+  pre_upgrade_session_after_pick_up
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & bgpid=$!; printf '%s\n' "$bgpid" >> "$BATS_TEST_TMPDIR/live-pids"
+  run python3 - "$DAEDALUS_HOME" "$bgpid" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1]); sys.path.insert(0, str(root / "core"))
+import leaselib as ll, upgrade as up
+st, bg = root / "state" / "upgrade-stopped.json", root / "state" / "upgrade-background.json"
+for name in ("SNAP_BG_COPIED", "SNAP_BG_GONE"):
+    assert getattr(ll, name) == getattr(up, name), name
+running = {"ps": False}
+up._bg_running = lambda r: running["ps"]          # what ps says, both modules asked the same
+ll._bg_running = lambda r: running["ps"]
+def put(rec, b):
+    for f, d in ((st, rec), (bg, b)):
+        if d is None:
+            f.unlink() if f.exists() else None
+        else:
+            f.write_text(json.dumps(d))
+big = up.SNAP_BIG % ("0.7.0", "3 MB", 1, "")
+shapes = [
+    ("not run", None, None, False, "restart", ll.NO_WINDOW_PENDING % "0.7.0"),
+    ("other version", {"version": "0.6.9", "sentence": big}, None, False, "restart", None),
+    ("stopped", {"version": "0.7.0", "step": 2, "sentence": big}, None, False, "stopped", None),
+    ("background stopped", {"version": "0.7.0", "step": 2, "sentence": big}, {"running": False, "copied": False, "version": "0.7.0"}, False, "stopped", None),
+    ("running", {"version": "0.7.0", "step": 2, "sentence": up.SNAP_BG % "0.7.0", "background": True}, {"running": True, "pid": int(sys.argv[2]), "version": "0.7.0"}, True, "running", ll.NO_WINDOW_RUNNING % "0.7.0"),
+    ("copied", {"version": "0.7.0", "step": 2, "sentence": up.SNAP_BG % "0.7.0", "background": True}, {"running": False, "copied": True, "version": "0.7.0"}, False, "restart", ll.NO_WINDOW_PENDING % "0.7.0"),
+    ("gone", {"version": "0.7.0", "step": 2, "sentence": up.SNAP_BG % "0.7.0", "background": True}, {"running": False, "copied": False, "version": "0.7.0"}, False, "stopped", None),
+    ("gone after copying another version", {"version": "0.7.0", "step": 2, "sentence": up.SNAP_BG % "0.7.0", "background": True}, {"running": False, "copied": True, "version": "0.6.9"}, False, "stopped", None),
+]
+for name, rec, b, ps, kind, nowin in shapes:
+    put(rec, b); running["ps"] = ps
+    p = ll.pending_stop(root)
+    assert p is not None and p[0] == "0.7.0" and p[1] == kind, (name, p)
+    assert p[2] == up.pending_line(root), (name, p[2], up.pending_line(root))
+    said = ll.no_window_pending(p)
+    assert said.startswith("This session started before the upgrade to 0.7.0 finished"), (name, said)
+    if nowin:
+        assert said == nowin, (name, said)
+    if kind == "stopped":
+        assert "close this session" not in said and said.startswith(ll.NO_WINDOW_STOPPED.split("%s")[0]), (name, said)
+        assert p[2].split(": ", 1)[-1].rstrip(".") in said, (name, said)
+print("ok")
+PY
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "stop sentence: 'pick it up' that leaves nothing behind clears the recorded unfinished-work stop, so the lines go back to the restart advice" {
+  pre_upgrade_session_after_pick_up
+  [ ! -e "$DAEDALUS_HOME/state/upgrade-stopped.json" ]
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path; print(ll.pending_stop(Path(sys.argv[1]).parent)[1])' "$DAEDALUS_HOME/core"
+  [ "$output" = restart ] || { echo "$output"; return 1; }
+}
