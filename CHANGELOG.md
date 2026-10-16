@@ -4,13 +4,12 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
-## v0.8.0 (draft) — frame-jack, a switch for the AMI
+## v0.8.0 — frame-jack, a switch for the AMI
 
 **In short.** A new switch, `/frame-jack on`, `off` and `status`, runs a small
 local decision model on this machine: the AMI (Artificial Machine
 Intelligence). In this release it runs in shadow mode only: it asks, logs, and never
-acts. This section is a draft: the release sets its heading and VERSION, which
-stays 0.7.5 until then.
+acts. Until you switch it on, nothing runs.
 
 **What changed.**
 - The AMI is Strands Decider 2B. It answers yes/no questions with a
@@ -72,8 +71,9 @@ stays 0.7.5 until then.
   `/frame-jack on`. The guard refuses the switch until your own message says
   it.
 
-**How to take it.** Once it is released, close every Daedalus window, then
-type `daedalus update` in a terminal. The update downloads nothing for the AMI
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.7.5 -> 0.8.0; doctor OK.` The
+update downloads nothing for the AMI
 and starts nothing; `state/ami/` appears at the first `/frame-jack on`. Then,
 only if you want the AMI, install it once per machine:
 - Make a Python 3.12 virtual environment with `uv venv --python 3.12`.
@@ -84,7 +84,8 @@ only if you want the AMI, install it once per machine:
   `offline: true`. README "Frame-jack (the AMI)" has every step, and the
   tarball that carries the shared blobs. That copy is not yet run there.
 
-**How to tell you have it.** `python3 core/frame-jack.py status` prints
+**How to tell you have it.** `cat VERSION` prints `0.8.0`.
+`python3 core/frame-jack.py status` prints
 `frame-jack: off — never switched on in this deployment`. `core/doctor.sh`
 prints a `frame-jack` line. After `/frame-jack on`, the band shows `AMI on`
 within about half a minute.
