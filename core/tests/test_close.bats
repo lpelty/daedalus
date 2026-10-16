@@ -241,6 +241,16 @@ stop_stub() {
   case "$output" in *"close complete"*) echo "$output"; return 1 ;; esac
 }
 
+@test "close.sh passes vault-commit.sh's lines through in the order it wrote them, each on its own stream, and a failure's line names the reason vault-commit.sh gave last on stderr" {
+  printf '#!/usr/bin/env bash\necho "daedalus: out one"\nsleep 0.3\necho "daedalus: the reason" >&2\nsleep 0.3\necho "daedalus: out two"\nexit 1\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
+  configure_capture; start_stub
+  run bash "$CLOSE"; [ "$status" -eq 4 ] || { echo "$status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -E 'out one|the reason|out two' | tr '\n' '|')" = "daedalus: out one|daedalus: the reason|daedalus: out two|daedalus: the session is recorded; the vault commit did not run: the reason|" ] || { echo "$output"; return 1; }
+  printf '{"type":"user","message":{"role":"user","content":"one more turn"}}\n' >> "$TRANSCRIPT_DIR/session-a.jsonl"
+  bash "$CLOSE" 2>/dev/null > "$BATS_TEST_TMPDIR/close.out" || true
+  grep -q "out one" "$BATS_TEST_TMPDIR/close.out"; ! grep -q "the reason" "$BATS_TEST_TMPDIR/close.out"
+}
+
 @test "close.sh keeps its mode 100755 in the distribution" {
   [ "$(git -C "$SRC/.." ls-files -s core/close.sh core/vault-commit.sh | cut -c1-6 | sort -u)" = 100755 ]
 }

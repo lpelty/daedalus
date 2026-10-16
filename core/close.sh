@@ -79,15 +79,16 @@ python3 "$DAEDALUS_HOME/core/capture.py" capture ${transcript:+--transcript "$tr
 # rc=0 … || rc=$?: lib.sh sets -e, and `|| die` alone cannot tell exit 3 from exit 1.
 if [ "$commit" -eq 1 ]; then
   log "phase 2/2: vault commit"
+  # Its lines pass through as it writes them, each on its own stream, in its order; stderr is also kept
+  # (tee) for the failure's line — vault-commit.sh says why it failed last on stderr.
   errf="$(mktemp)"
-  rc=0; out="$(bash "$DAEDALUS_HOME/core/vault-commit.sh" 2>"$errf")" || rc=$?
+  rc=0
+  { bash "$DAEDALUS_HOME/core/vault-commit.sh" 2>&1 1>&3 3>&- | tee "$errf" >&2 3>&- || rc=${PIPESTATUS[0]}; } 3>&1
   err="$(cat "$errf")"; rm -f "$errf"
-  [ -z "$out" ] || printf '%s\n' "$out"
-  [ -z "$err" ] || printf '%s\n' "$err" >&2
   case $rc in
     0) : ;;
     3) log "close complete (the vault is the pen holder's to commit)"; exit 0 ;;
-    *) last="$(printf '%s\n%s\n' "$out" "$err" | sed '/^$/d' | tail -1)"; last="${last#daedalus: }"
+    *) last="$(printf '%s\n' "$err" | sed '/^$/d' | tail -1)"; last="${last#daedalus: }"
        printf 'daedalus: %s\n' "the session is recorded; the vault commit did not run: ${last:-core/vault-commit.sh exited $rc}" >&2
        exit 4 ;;
   esac
