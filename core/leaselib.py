@@ -394,18 +394,24 @@ def pending_stop(root: Path) -> Optional[Tuple[str, str, str]]:
     return ver, "stopped", SNAP_BG_GONE % ver
 
 
+# What every no-window sentence of a pending upgrade ends with: the close that works for a session holding no window.
+# True whether or not it holds the pen yet, so the Stop's once-only comparison does not re-block when the pen moves.
+WINDOWLESS_CLOSE = ("At its close, `core/lease.sh log` prints this session's log path; when no live session holds "
+                    "the pen, `core/lease.sh prime take` gives it the pen, for hot.md and `core/vault-commit.sh`.")
+
+
 def no_window_pending(pending) -> str:
     """The no-window sentence while the upgrade is pending: `pending` is pending_stop's triple, or (older callers)
-    the version alone, which reads as not run yet."""
+    the version alone, which reads as not run yet. Each kind ends with WINDOWLESS_CLOSE."""
     if isinstance(pending, str):
-        return NO_WINDOW_PENDING % pending
+        return NO_WINDOW_PENDING % pending + " " + WINDOWLESS_CLOSE
     ver, kind, sentence = pending
     if kind == "running":
-        return NO_WINDOW_RUNNING % ver
+        return NO_WINDOW_RUNNING % ver + " " + WINDOWLESS_CLOSE
     if kind != "stopped":
-        return NO_WINDOW_PENDING % ver
+        return NO_WINDOW_PENDING % ver + " " + WINDOWLESS_CLOSE
     body = re.sub(r"^upgrade to \S+ incomplete: ", "", sentence).strip().rstrip(".")
-    return NO_WINDOW_STOPPED % (ver, body + ".")
+    return NO_WINDOW_STOPPED % (ver, body + ".") + " " + WINDOWLESS_CLOSE
 
 
 def pen_without_tree(leases: Dict[str, dict], sid: Optional[str], pending=None) -> bool:
@@ -4268,6 +4274,14 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
         lines.append("You no longer hold the pen; %s took it at %s (reason: '%s')."
                      % (window_label(tnn, tlease) if tnn else "another session",
                         str(hist[-1].get("at", ""))[11:16], hist[-1].get("reason", "")))
+    # a pen held by a session holding no window shows on no numbered line: say so, so a window knows why it is not its
+    if prime_sid and lease_of_session(leases, str(prime_sid))[0] is None:
+        if prime_sid == sid:
+            lines.append("You hold the pen, with no window: hot.md and `core/vault-commit.sh` are yours.")
+        else:
+            names = [e.get("name") for e in live_map.get(str(prime_sid), []) if e.get("name")]
+            lines.append("The pen is held by a session holding no window (peer name %s)."
+                         % (names[0] if names else "unknown"))
     for nn in order:
         d = numbered[nn]
         marks = []
@@ -4444,7 +4458,7 @@ def announce_pushed(root: Path, sid: Optional[str]) -> list:
 
 
 def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False,
-              deadline: Optional[float] = None) -> str:
+              deadline: Optional[float] = None, with_mine: bool = False):
     """The duties of §4.3 in one call: recompute the reader's changed set
     (every lease's for `list`/`status` — a shell has no budget), touch the
     reader's heartbeat, refresh stored pid/proc_started/peer_name from the
@@ -4458,9 +4472,10 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     BOARD_UNRENDERED."""
     with lock(root, shared=True, deadline=deadline, busy=BOARD_LOCK_BUSY):
         leases = read_all(root)
-    if not any(k != "prime" for k in leases) and not waiting_numbers(root, leases):
-        return ""       # with no window open, swept work still waiting is still listed (review 2, finding 7)
     mine, _ = lease_of_session(leases, sid or "")
+    if not any(k != "prime" for k in leases) and not waiting_numbers(root, leases):
+        # with no window open, swept work still waiting is still listed (review 2, finding 7)
+        return ("", mine) if with_mine else ""
     for nn, d in leases.items():
         if nn == "prime" or not (recompute_all or nn == mine):
             continue
@@ -4484,7 +4499,8 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     text = render_board(root, sid, leases, changed, waiting_numbers(root, leases), states, now, visitor=visitor,
                         live_map=live_map)
     announced = announce_pushed(root, sid) if not visitor else []
-    return "\n".join(announced + [text]) if announced else text
+    text = "\n".join(announced + [text]) if announced else text
+    return (text, mine) if with_mine else text
 
 
 def _since(ts: Optional[float], now: float) -> str:
@@ -4873,7 +4889,20 @@ def main(argv: list) -> int:
         mine, _ = lease_of_session(leases, sid or "")
         prime_nn, prime_lease = lease_of_session(leases, str(holder)) if holder else (None, None)
         me = "You are %s" % window_label(mine, leases.get(mine)) if mine else "This session holds no window"
-        if prime_nn:
+        if mine is None and sid:
+            # a session holding no window takes the pen only when no live session holds it (prime_take_windowless)
+            take = ("take it with `core/lease.sh prime take` (no window needed when no live session holds it), then "
+                    "run `core/vault-commit.sh` again.")
+            what = window_label(prime_nn, prime_lease) if prime_nn else "a session holding no window"
+            if not holder:
+                pen = "nobody holds the pen — " + take
+            elif (prime_nn is None and not registry_present()) or prime_holder_live(root, leases, str(holder))[0]:
+                pen = ("the pen is held by %s — a session holding no window cannot take it from a live session: ask "
+                       "it to commit, or the operator commits the vault from their own shell: `cd %s && "
+                       "core/vault-commit.sh`." % (what, root))
+            else:
+                pen = "the pen is held by %s, which is gone — %s" % (what, take)
+        elif prime_nn:
             pen = "the pen is held by %s — ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so." % window_label(prime_nn, prime_lease)
         elif holder:
             pen = "the pen is held by a session that holds no window now — take it with `core/lease.sh prime take` if the operator says so."

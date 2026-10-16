@@ -53,8 +53,9 @@ def main() -> int:
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.alarm(BUDGET_SECS)
+    mine = None
     try:
-        text = ll.board_for(v.ROOT, sid, visitor)
+        text, mine = ll.board_for(v.ROOT, sid, visitor, with_mine=True)
     except ll.Refused as e:
         text = ll.BOARD_UNRENDERED % e       # the operator sentence names the file and the fix
     except Exception:
@@ -71,6 +72,9 @@ def main() -> int:
         lead.append(pend)
         if pend:            # no window is made until the stamp is written (session-start.py)
             lead.append(up.WINDOWS_WAIT_BOARD)
+            # how a session holding no window closes; the board itself ends with it whenever a window is open
+            if sid and not visitor and mine is None and ll.WINDOWLESS_CLOSE not in text:
+                lead.append(ll.WINDOWLESS_CLOSE)
         lead.append(up.snapshot_line(v.ROOT))
     except Exception:
         pass

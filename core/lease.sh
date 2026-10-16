@@ -23,6 +23,10 @@ esac
 # Spec §14: a home that pulled a release and has not started a session since has no state/leases/ yet; the
 # upgrade makes it at the next session start. Only when VERSION says a release is waiting (plan 5 Decision 13).
 if [ ! -d "$DAEDALUS_HOME/state/leases" ] && upgrade_pending; then
+  case "$cmd" in
+    # the close of a session holding no window: only the log number waits for the upgrade (leaselib NO_LEASES_YET)
+    log|prime) die "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import leaselib; print(leaselib.NO_LEASES_YET)' "$DAEDALUS_HOME/core")" ;;
+  esac
   die "the upgrade has not run; start a session in this home"
 fi
 exec python3 "$DAEDALUS_HOME/core/leaselib.py" "$cmd" "$@"
