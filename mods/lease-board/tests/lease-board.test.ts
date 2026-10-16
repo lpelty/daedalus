@@ -443,7 +443,7 @@ test('the engine\'s own node from next(e) is kept, outside any Box that has a wi
   const desktop = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(walk(await desktop.drawn()).filter((x) => x.node.type === 'engine').length).toBe(1)
   expect((await windowLines(desktop)).length).toBe(5)
-}
+})
 
 // --- frame-jack: the AMI line (frame-jack spec §9.2) ------------------------------------------------------------
 
