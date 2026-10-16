@@ -39,7 +39,12 @@ for rel in sys.stdin.read().split("\0"):
         continue
     os.makedirs(os.path.dirname(os.path.join(dst, rel)) or dst, exist_ok=True)
     shutil.copy2(os.path.join(src, rel), os.path.join(dst, rel))' "$REPO" "$w"
-  git init -q -b "$br" "$w"; git -C "$w" add -A; git -C "$w" commit -q -m "v$N"; git -C "$w" tag -a "v$N" -m "v$N"
+  git init -q -b "$br" "$w"
+  if [ -n "${SEED_OLD:-}" ]; then   # a commit before release N with no core/update.py (a home the bootstrap reaches)
+    mv "$w/core/update.py" "$B/update.py.aside"; git -C "$w" add -A; git -C "$w" commit -q -m "before update.py"
+    git -C "$w" tag before-update; mv "$B/update.py.aside" "$w/core/update.py"
+  fi
+  git -C "$w" add -A; git -C "$w" commit -q -m "v$N"; git -C "$w" tag -a "v$N" -m "v$N"
   printf '%s\n' "$N1" > "$w/VERSION"
   printf '\nA line release %s added.\n' "$N1" >> "$w/CLAUDE.md"
   python3 - "$w/.claude/settings.json" <<'PY'
@@ -279,4 +284,72 @@ PY
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
   [ "$output" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
   [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R2" trunk)" ]
+}
+
+# marked_release — one more commit on $R's main whose core/update.py first prints "HANDED-OFF-MARKER <its args>"
+marked_release() {
+  git clone -q "$R" "$B/mark"
+  python3 - "$B/mark/core/update.py" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+anchor = "def main(argv: List[str]) -> int:\n"
+assert s.count(anchor) == 1
+s = s.replace(anchor, anchor + '    print("HANDED-OFF-MARKER " + " ".join(argv[1:]), flush=True)\n')
+open(p, "w").write(s)
+PY
+  git -C "$B/mark" commit -q -am "update.py with a marker"; git -C "$B/mark" push -q origin main
+}
+
+@test "hand-off: a home whose update.py differs from the release's runs the release's copy once, from a temporary directory outside the home, holding the parent's lock; --handed-off never hands off again" {
+  marked_release
+  mkdir -p "$B/tmp"
+  TMPDIR="$B/tmp" run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -c HANDED-OFF-MARKER)" = 1 ] || { echo "$output"; return 1; }
+  case "$output" in *"HANDED-OFF-MARKER update --home $H --handed-off --lock-fd "[0-9]*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
+  [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
+  [ -z "$(find "$H/state" -name update.py)" ]
+  [ -z "$(ls -A "$B/tmp")" ] || { ls -A "$B/tmp"; return 1; }
+  # the home now runs the release's copy itself: equal to the release, so no hand-off (the marker's args say so)
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "HANDED-OFF-MARKER update --home $H
+Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
+  # started with --handed-off, the home's older copy does the update itself
+  H="$B/dae2"; deploy origin "$R" "$H"
+  run upd update --handed-off
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
+  [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
+}
+
+@test "hand-off: a script read from a pipe always hands off, even when it is the release's own text" {
+  marked_release
+  run bash -c "git -C '$R' show main:core/update.py | python3 /dev/stdin update --home '$H'"
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -c HANDED-OFF-MARKER)" = 2 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -c 'HANDED-OFF-MARKER update --home .* --handed-off --lock-fd [0-9]*$')" = 1 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
+}
+
+@test "bootstrap: the README's first-update line, run literally under bash and under zsh on a home with no core/update.py, updates it" {
+  LINE='python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus'
+  if grep -q 'FETCH_HEAD:core/update.py' "$REPO/README.md"; then
+    grep -qxF "$LINE" "$REPO/README.md" || { echo "README's first-update line is not the one tested"; return 1; }
+  fi
+  R3="$B/old.git"; SEED_OLD=1 seed_release "$R3" main
+  local here="${LINE//https:\/\/github.com\/lpelty\/daedalus.git/$R3}" sh i=0
+  for sh in /bin/bash /bin/zsh; do
+    i=$((i + 1)); export HOME="$B/home$i"; mkdir -p "$HOME"
+    ADDRESS="$R3" deploy origin "$R3" "$HOME/daedalus"
+    git -C "$HOME/daedalus" reset -q --hard before-update
+    [ ! -e "$HOME/daedalus/core/update.py" ]
+    run "$sh" -c "$here" </dev/null
+    [ "$status" -eq 0 ] || { echo "$sh status $status: $output"; return 1; }
+    [ "$output" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$sh: $output"; return 1; }
+    [ "$(git -C "$HOME/daedalus" rev-parse HEAD)" = "$(trunk_sha "$R3")" ]
+    [ -f "$HOME/daedalus/core/update.py" ]
+  done
 }

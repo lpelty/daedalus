@@ -16,7 +16,10 @@ only; the home's own core/upgrade.py is imported for one thing, its liveness che
      follows a mirror) — never by name alone, so a fork named origin is never taken for the release — and checks
      that address is the one recorded, unrewritten (remote_problem, the release-pull rule guard-bash uses too);
   3. asks the remote which branch is its trunk (git ls-remote --symref <r> HEAD; main when it does not say);
-  4. fetches that trunk and the release tags;
+  4. fetches that trunk and the release tags, then hands off: unless this run is the home's own core/update.py and
+     that file equals the release's, the release's copy is written to a fresh temporary directory outside the home
+     and runs in this one's place (--handed-off, holding this run's lock through --lock-fd), so the rules that move
+     a home are always the release's; a script read from a pipe cannot be compared, so it always hands off;
   5. with the home already at the remote trunk: says it is up to date (and finishes a stopped upgrade first);
   6. otherwise fast-forwards to the remote trunk (a journal in SOUL.md, modified in the working tree, is kept);
      a local edit in another tracked file, or history the release does not have, is refused in this build;
@@ -34,9 +37,11 @@ import fcntl
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -50,6 +55,7 @@ STAMP = Path("state") / "upgraded-to"
 LOCK_WAIT_SECS = 2      # a session start holds the lock shared for a moment; a second update holds it throughout
 NOTHING = "Nothing in this home was changed."
 USAGE = "usage: daedalus update | daedalus version   (python3 core/update.py <verb> --home <absolute path>)"
+SELF = Path("core") / "update.py"
 JOURNAL = "SOUL.md"     # the deployment's journal: modified in the working tree, kept across the move
 
 
@@ -206,9 +212,16 @@ def remote_trunk(home: Path, remote: str) -> str:
 
 # --- liveness and the lock (Decisions 2a, 17, 19) ------------------------------------------------------------------
 
-def take_lock(home: Path) -> Optional[int]:
+def take_lock(home: Path, inherited: Optional[int] = None) -> Optional[int]:
     """The home's update lock, held to the last line. A session start takes it shared for a moment, so a held lock
-    is waited for briefly before it counts as another update's."""
+    is waited for briefly before it counts as another update's. A handed-off run is given its parent's descriptor
+    (--lock-fd): the same open lock, so taking it again succeeds at once and nothing else can take it between."""
+    if inherited is not None:
+        try:
+            fcntl.flock(inherited, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return inherited
+        except OSError:
+            return None
     (home / "state").mkdir(parents=True, exist_ok=True)
     fd = os.open(str(home / UPDATE_LOCK), os.O_RDWR | os.O_CREAT, 0o644)
     deadline = time.time() + LOCK_WAIT_SECS
@@ -307,6 +320,50 @@ def fast_forward(home: Path, ref: str) -> Tuple[int, str]:
     return code, err or out
 
 
+# --- the hand-off (Decision 13) -------------------------------------------------------------------------------------
+
+def running_release_copy(home: Path, ref: str) -> bool:
+    """True when this run is the home's own core/update.py, a real file, whose blob equals <ref>:core/update.py.
+    A script read from a pipe (python3 /dev/stdin, python3 <(...)) cannot re-read its own text, so it is never
+    taken for the release's."""
+    me = os.path.realpath(globals().get("__file__") or "")
+    mine = home / SELF
+    if not me or me != os.path.realpath(str(mine)) or not mine.is_file():
+        return False
+    code, here, _ = git(home, "hash-object", "--no-filters", "--", str(mine))
+    want = git(home, "rev-parse", "-q", "--verify", "%s:%s" % (ref, SELF.as_posix()))[1].strip()
+    return code == 0 and bool(want) and here.strip() == want
+
+
+def hand_off(home: Path, ref: str, verb: str, lock_fd: int) -> Optional[int]:
+    """Run the release's core/update.py in this one's place, from a fresh temporary directory outside the home,
+    with --handed-off and this run's lock passed down; its exit code, or None when this run goes on itself (the
+    release has no core/update.py)."""
+    try:
+        blob = subprocess.run(["git", "-C", str(home), "show", "%s:%s" % (ref, SELF.as_posix())],
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=120, env=_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if blob.returncode != 0 or not blob.stdout:
+        return None
+    tmp = tempfile.mkdtemp(prefix="daedalus-update-")
+    try:
+        script = os.path.join(tmp, "update.py")
+        with open(script, "wb") as f:
+            f.write(blob.stdout)
+        sys.stdout.flush()
+        proc = subprocess.Popen([sys.executable, script, verb, "--home", str(home), "--handed-off",
+                                 "--lock-fd", str(lock_fd)], stdin=subprocess.DEVNULL, pass_fds=(lock_fd,),
+                                cwd=str(home))
+        while True:
+            try:
+                return proc.wait()
+            except KeyboardInterrupt:
+                continue    # the child has the same Ctrl-C and decides; this run only waits for it
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # --- the upgrade and doctor ----------------------------------------------------------------------------------------
 
 def _cmd(env_key: str, default: List[str]) -> List[str]:
@@ -380,22 +437,23 @@ def finish(home: Path, head: str, done: str = "") -> Tuple[str, int]:
 
 # --- the verbs -----------------------------------------------------------------------------------------------------
 
-def update(home: Path) -> int:
-    fd = take_lock(home)
+def update(home: Path, handed_off: bool = False, lock_fd: Optional[int] = None) -> int:
+    fd = take_lock(home, lock_fd)
     if fd is None:
         print("Not updating: another daedalus update is running in this home. " + NOTHING)
         return 1
     try:
-        line, code = _update(home)
+        line, code = _update(home, fd, handed_off)
     except Refuse as e:
         line, code = str(e), 1
     finally:
         os.close(fd)
-    print(line)
+    if line is not None:
+        print(line)
     return code
 
 
-def _update(home: Path) -> Tuple[str, int]:
+def _update(home: Path, fd: int, handed_off: bool) -> Tuple[Optional[str], int]:
     refuse_if_live(home)
     branch = current_branch(home)
     if not branch:
@@ -412,6 +470,10 @@ def _update(home: Path) -> Tuple[str, int]:
         raise Refuse("Could not reach %s: %s. %s" % (url, _last(err), NOTHING))
     git(home, "fetch", "--quiet", "--no-tags", remote, "refs/tags/v*:refs/tags/v*", timeout=300)   # tags: best effort
     fetched = "fetched %s/%s, and nothing else in this home was changed." % (remote, trunk)
+    if not handed_off and not running_release_copy(home, ref):
+        child = hand_off(home, ref, "update", fd)
+        if child is not None:
+            return None, child      # the release's copy said its own one line
     target = git(home, "rev-parse", "--verify", ref + "^{commit}")[1].strip()
     head = git(home, "rev-parse", "--verify", "HEAD")[1].strip()
     if not target or not head:
@@ -464,6 +526,16 @@ def version(home: Path) -> int:
 
 def main(argv: List[str]) -> int:
     args = argv[1:]
+    handed_off = "--handed-off" in args
+    args = [a for a in args if a != "--handed-off"]
+    lock_fd = None
+    if "--lock-fd" in args:
+        i = args.index("--lock-fd")
+        if i + 1 >= len(args) or not args[i + 1].isdigit():
+            sys.stderr.write(USAGE + "\n")
+            return 2
+        lock_fd = int(args[i + 1])
+        args = args[:i] + args[i + 2:]
     home_arg = None
     if "--home" in args:
         i = args.index("--home")
@@ -479,7 +551,9 @@ def main(argv: List[str]) -> int:
     if not (home / ".git").exists() or not (home / "core").is_dir():
         print("%s is not a Daedalus home (no .git or core/ there). %s" % (home, NOTHING))
         return 1
-    return update(home) if args[0] == "update" else version(home)
+    if args[0] == "version":
+        return version(home)
+    return update(home, handed_off, lock_fd)
 
 
 if __name__ == "__main__":
