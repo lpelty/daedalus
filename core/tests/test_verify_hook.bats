@@ -239,3 +239,84 @@ claim_l() {  # claim_l <file> <lease-or-empty>
   run env DIRECT_CALL_ID=abc bash -c "$(declare -f stop); stop"
   [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "status=$status output=$output"; return 1; }
 }
+
+# --- A confirmed, pushed promotion's run behind its own window's claim (update-command Decision 11) ---
+
+# promo04 — window 04 (session sD, live under $$) with one commit on lease/04 in worktrees/04/thing;
+# promotion 04's scratch merges it, gates.sh --promote runs there, and the records say confirmed and
+# pushed. Sets PID, PDIR, PRUN, TIP.
+promo04() {
+  git -C "$T" branch -q lease/04
+  mkdir -p "$DAEDALUS_HOME/worktrees/04"; git -C "$T" worktree add -q "$DAEDALUS_HOME/worktrees/04/thing" lease/04
+  W="$DAEDALUS_HOME/worktrees/04/thing"; printf 'w\n' > "$W/w.txt"; git -C "$W" add -A
+  git -C "$W" -c user.email=t@x -c user.name=t commit -q -m work
+  TIP="$(git -C "$T" rev-parse lease/04)"
+  PID=04-20261015-120000-abc; PDIR="$DAEDALUS_HOME/state/promote/$PID"; PT="$PDIR/thing"
+  mkdir -p "$PDIR"; git clone -q "$T" "$PT"
+  git -C "$PT" -c user.email=t@x -c user.name=t merge -q --no-ff --no-edit -m "promote: merge lease/04" origin/lease/04
+  M="$(git -C "$PT" rev-parse HEAD)"; B="$(git -C "$T" rev-parse HEAD)"
+  printf '{"promote_id":"%s","lease":"04","repo":"thing","trunk_sha_at_prepare":"%s","merge_sha":"%s","nested":{}}' "$PID" "$B" "$M" > "$PDIR/context.json"
+  PRUN="$(DAEDALUS_TARGET_OVERRIDE="$PT" bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID" | tail -1)"
+  printf '{"promote_id":"%s","lease":"04","repo":"thing","trunk":"main","merge_sha":"%s","trunk_sha_at_prepare":"%s","lease_tip":"%s","run_id":"%s","confirmed_at":"2026-10-15T12:05:00Z"}' \
+    "$PID" "$M" "$B" "$TIP" "$PRUN" > "$PDIR/prepared.json"
+  printf '{"at":"2026-10-15T12:05:01Z","lease":"04","merge_sha":"%s"}' "$M" > "$PDIR/pushed"
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  printf '{"lease":"04","session_id":"sD","worktree":"worktrees/04","branch":"lease/04","pid":%s,"proc_started":%s}' "$$" "$(ps_ms $$)" > "$DAEDALUS_HOME/state/leases/04.json"
+  touch "$DAEDALUS_HOME/state/leases/04.seen"
+  printf '{"hook_event_name":"SessionStart","session_id":"sD","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+}
+claim_p() {  # claim_p <lease> <run>
+  printf -- '---\ntype: proposal\nstatus: IMPLEMENTED\nupdated-by: daedalus\ncreated: 2026-12-01\nlease: %s\nevidence-run: %s\n---\n# P\n' "$1" "$2" > "$DAEDALUS_HOME/vault/proposals/PROP-P.md"
+}
+
+@test "promotion: a claim of window 04 citing promotion 04's run, confirmed and pushed, with lease/04 at the promoted tip and worktrees/04 clean, passes at Stop and --doctor says nothing of it" {
+  own="$(gate)"; promo04
+  claim_p 04 "$PRUN"
+  run stop sD; [ "$status" -eq 0 ] || { echo "refused: $output"; return 1; }
+  run python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor; [ "$status" -eq 0 ]
+  case "$output" in *"PROP-P.md"*) echo "listed: $output"; return 1 ;; *) : ;; esac
+  # The config check still holds for a promotion's run.
+  cp "$DAEDALUS_HOME/config.yaml" "$BATS_TEST_TMPDIR/cfg.bak"; printf '  - echo extra\n' >> "$DAEDALUS_HOME/config.yaml"
+  run stop sD; [ "$status" -eq 2 ]; case "$output" in *"config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  cp "$BATS_TEST_TMPDIR/cfg.bak" "$DAEDALUS_HOME/config.yaml"
+}
+
+@test "promotion: the same run is refused with no pushed record, with no confirmed_at, with a different pushed merge, or cited by window 01's claim, each naming what is missing" {
+  own="$(gate)"; promo04
+  claim_p 04 "$PRUN"
+  mv "$PDIR/pushed" "$BATS_TEST_TMPDIR/pushed"
+  run stop sD; [ "$status" -eq 2 ]
+  case "$output" in *"PROP-P.md cites a promotion's gate run ($PRUN)"*"was not pushed"*"once the promotion is confirmed and pushed, its run stands behind this window's claim while the window has no new work"*) : ;; *) echo "$output"; return 1 ;; esac
+  mv "$BATS_TEST_TMPDIR/pushed" "$PDIR/pushed"
+  run stop sD; [ "$status" -eq 0 ] || { echo "control: $output"; return 1; }
+  cp "$PDIR/prepared.json" "$BATS_TEST_TMPDIR/prep.bak"
+  python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p.pop("confirmed_at"); json.dump(p,open(sys.argv[1],"w"))' "$PDIR/prepared.json"
+  run stop sD; [ "$status" -eq 2 ]
+  case "$output" in *"was not confirmed"*"once the promotion is confirmed and pushed"*) : ;; *) echo "$output"; return 1 ;; esac
+  cp "$BATS_TEST_TMPDIR/prep.bak" "$PDIR/prepared.json"
+  cp "$PDIR/pushed" "$BATS_TEST_TMPDIR/pushed.bak"
+  printf '{"lease":"04","merge_sha":"%s"}' "$TIP" > "$PDIR/pushed"
+  run stop sD; [ "$status" -eq 2 ]
+  case "$output" in *"pushed merge ${TIP:0:7}"*"not the merge"*) : ;; *) echo "$output"; return 1 ;; esac
+  cp "$BATS_TEST_TMPDIR/pushed.bak" "$PDIR/pushed"
+  run stop sD; [ "$status" -eq 0 ] || { echo "control: $output"; return 1; }
+  claim_p 01 "$PRUN"
+  run python3 "$DAEDALUS_HOME/core/verify-hook.py" --doctor
+  case "$output" in *"PROP-P.md"*"window 04's"*"lease: 01"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "promotion: after the promote, new work committed on lease/04 or an uncommitted change in worktrees/04 makes the promotion's run refuse the window's new claim, naming which, and asking for a core/gates.sh run" {
+  own="$(gate)"; promo04
+  claim_p 04 "$PRUN"
+  W="$DAEDALUS_HOME/worktrees/04/thing"
+  printf 'more\n' > "$W/more.txt"; git -C "$W" add -A; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m more
+  run stop sD; [ "$status" -eq 2 ]
+  case "$output" in *"PROP-P.md"*"lease/04"*"new work"*"core/gates.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W" reset -q --hard "$TIP"
+  run stop sD; [ "$status" -eq 0 ] || { echo "control: $output"; return 1; }
+  printf 'x\n' > "$W/w.txt"
+  run stop sD; [ "$status" -eq 2 ]
+  case "$output" in *"PROP-P.md"*"worktrees/04"*"uncommitted"*"w.txt"*"core/gates.sh"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W" checkout -q -- w.txt
+  run stop sD; [ "$status" -eq 0 ] || { echo "control: $output"; return 1; }
+}

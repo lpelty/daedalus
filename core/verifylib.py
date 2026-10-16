@@ -509,6 +509,79 @@ def run_record(root: Path, run_id: str) -> Optional[dict]:
             "config_sha": fm.get("config-sha", ""), "gates": [], "source": "vault"}
 
 
+PROMO_REFUSED = "%s cites a promotion's gate run (%s); a window's claim needs its own core/gates.sh run"
+PROMO_LATER = "; once the promotion is confirmed and pushed, its run stands behind this window's claim while the window has no new work."
+PROMO_NEW_WORK = "; run core/gates.sh in window %s and cite that run."
+
+
+def is_promotion_run(rec: dict) -> bool:
+    """A promotion's gate run (gates.sh --promote): PASS with its reviewer deferred to core/promote.sh."""
+    return bool(rec.get("tree") == "promote-scratch" or rec.get("refuter") == "deferred-to-promote" or rec.get("promote_id"))
+
+
+def _read_record(p: Path) -> Optional[dict]:
+    try:
+        d = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def promotion_vouches(root: Path, rec: dict, fm: Dict[str, str], doc: object = "") -> Optional[str]:
+    """None when a promotion's PASS run may stand behind this claim (update-command
+    Decision 11), else the refusal naming the first condition that fails. It may
+    when the promotion was confirmed and pushed for the claim's own window, that
+    push is the merge the run tested, lease/NN is still at the tip it promoted and
+    worktrees/NN holds no uncommitted change: after a promote the window's own run
+    has an empty diff the refuter cannot certify, but new work needs its own run."""
+    rid, pid = str(rec.get("run_id") or fm.get("evidence-run", "")), str(rec.get("promote_id") or "")
+    head = PROMO_REFUSED % (doc, rid)
+    if not re.fullmatch(r"[0-9A-Za-z-]+", pid):
+        return head + PROMO_LATER
+    pdir = root / "state" / "promote" / pid
+    p = _read_record(pdir / "prepared.json")
+    if p is None:
+        return head + ", and promotion %s has no readable prepared record (state/promote/%s/prepared.json)%s" % (pid, pid, PROMO_LATER)
+    if str(p.get("run_id") or "") != rid:
+        return head + ", and promotion %s's prepared record names run %s, not this one." % (pid, p.get("run_id"))
+    if not p.get("confirmed_at"):
+        return head + ", and promotion %s was not confirmed%s" % (pid, PROMO_LATER)
+    pushed = _read_record(pdir / "pushed")
+    if pushed is None:
+        return head + ", and promotion %s was not pushed%s" % (pid, PROMO_LATER)
+    repo, merge = str(p.get("repo") or ""), str(p.get("merge_sha") or "")
+    outer = str(rec.get("repo") or repo).split("/", 1)[0]
+    # The run records the outer repo's merge; a nested repo's is under nested/<rel> (as promote reads it).
+    tested = str(rec.get("merge_sha") or "") if repo == outer or "/" not in repo else \
+        str(((rec.get("nested") or {}).get(repo.split("/", 1)[1]) or {}).get("merge_sha") or "")
+    if str(pushed.get("merge_sha") or "") != merge or tested != merge:
+        return head + ", and promotion %s pushed merge %s, not the merge this run tested (%s)." % (
+            pid, str(pushed.get("merge_sha") or "none")[:7], (tested or "none")[:7])
+    nn, mine = str(p.get("lease") or ""), doc_lease(fm)
+    if str(rec.get("lease") or "") != nn or mine != nn:
+        return head + ", and promotion %s is window %s's, not this claim's window (%s)." % (
+            pid, nn, ("lease: %s" % mine) if mine else "it carries no lease:")
+    code, tip, err = run(["git", "-C", str(root / "target" / repo), "rev-parse", "--verify", "-q", "refs/heads/lease/%s" % nn])
+    tip = tip.strip()
+    if code != 0 or not tip:
+        return head + ", and lease/%s cannot be read in target/%s, so the window's new work cannot be ruled out%s" % (
+            nn, repo, PROMO_NEW_WORK % nn)
+    if tip != str(p.get("lease_tip") or ""):
+        return head + ", and lease/%s has new work committed since promotion %s (now at %s, promoted at %s)%s" % (
+            nn, pid, tip[:7], str(p.get("lease_tip") or "")[:7], PROMO_NEW_WORK % nn)
+    import leaselib as ll
+    for r in ll.repos_of(root):
+        try:
+            dirty = ll.dirty_files(root / "worktrees" / nn / r)
+        except ll.Refused as e:
+            return head + ", and %s%s" % (e, PROMO_NEW_WORK % nn)
+        if dirty:
+            return head + ", and worktrees/%s/%s has uncommitted changes since promotion %s (%s)%s" % (
+                nn, r, pid, ", ".join(dirty[:5]) + (" and %d more" % (len(dirty) - 5) if len(dirty) > 5 else ""),
+                PROMO_NEW_WORK % nn)
+    return None
+
+
 def transcript_first_ts(path: object) -> Optional[float]:
     try:
         with open(str(path), "r", encoding="utf-8", errors="replace") as fh:

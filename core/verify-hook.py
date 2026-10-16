@@ -6,7 +6,10 @@ A claim is a vault document of Daedalus's, changed this session, carrying
 first evidence. Each must cite an `evidence-run:` whose record says PASS,
 whose config hash matches the session's, and whose fingerprint matches the
 target now. A promotion's gate run (tree promote-scratch) is promote's
-evidence and never stands behind a window's claim. Never exits early on `stop_hook_active`. Fails closed only when a
+evidence; it stands behind a window's claim only once that promotion was
+confirmed and pushed for the claim's own window, while lease/NN is still at the
+promoted tip and worktrees/NN is clean (no fingerprint compare; the config
+check stays). Never exits early on `stop_hook_active`. Fails closed only when a
 claim exists and the evidence cannot be read. `--doctor` runs the same check
 over the whole vault and prints one line per problem.
 
@@ -56,16 +59,24 @@ def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], 
             continue
         # A promotion's gate run (gates.sh --promote) is PASS with its reviewer deferred to
         # core/promote.sh, which never flips it; its merged tree can fingerprint exactly like a
-        # window's clean worktree. It is promote's evidence, never a window's claim.
-        if rec.get("tree") == "promote-scratch" or rec.get("refuter") == "deferred-to-promote" or rec.get("promote_id"):
-            out.append("%s cites a promotion's gate run (%s); a window's claim needs its own core/gates.sh run." % (p, rid))
-            continue
+        # window's clean worktree. It is promote's evidence, and stands behind a window's claim
+        # only once that promotion was confirmed and pushed for the same window and the window
+        # has no new work (update-command Decision 11). Its tree is the pushed merge, not the
+        # window's checkout, so the fingerprint is not compared; the config check still is.
+        promoted = v.is_promotion_run(rec)
+        if promoted:
+            why = v.promotion_vouches(root, dict(rec, run_id=rec.get("run_id") or rid), fm, p)
+            if why:
+                out.append(why)
+                continue
         if not live:
             continue
         live_cfg = v.sha256_file(root / "config.yaml")
         marker_cfg = marker.get("config_sha") if marker else None
         if rec.get("config_sha") != live_cfg or (marker_cfg is not None and rec.get("config_sha") != marker_cfg):
             out.append("%s cites evidence-run %s, but the gate definition (config.yaml) changed this session; re-run core/gates.sh — if the operator changed it, restart the session (it re-snapshots)." % (p, rid))
+            continue
+        if promoted:
             continue
         if fp_now == "null":
             out.append("%s: the target's fingerprint cannot be computed right now (index.lock, or not a repository); clear it and re-run core/gates.sh." % p)
