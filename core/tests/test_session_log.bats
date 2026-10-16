@@ -169,3 +169,29 @@ PY
   [ "$(lease_json prime logs)" = "None" ] || { lease_json prime logs; return 1; }
   run log_of sN; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ] || { echo "$output"; return 1; }
 }
+
+@test "a session holding no window keeps the number it was told when it later holds a window: a compaction start after the stamp numbers it, and the start line and lease.sh log both say that number; the entry is gone and no second number was reserved" {
+  printf '0.7.4\n' > "$DAEDALUS_HOME/VERSION"
+  pw="$(live_pid)"; registry_entry "$pw" sW interactive cli daedalus-xx
+  mkdir -p "$DAEDALUS_HOME/vault/sessions/2026/10"; touch "$DAEDALUS_HOME/vault/sessions/2026/10/2026-10-15-050.md"
+  run log_of sW; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-051.md" ] || { echo "$output"; return 1; }
+  printf '0.7.4\n' > "$DAEDALUS_HOME/state/upgraded-to"          # a later session finished the upgrade
+  run start sW compact; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  nn="$(DAEDALUS_SESSION_ID=sW python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease)"; [ -n "$nn" ] || { echo "not numbered: $output"; return 1; }
+  case "$output" in *"Your session log for today is vault/sessions/$YM/$TODAY-051.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  run log_of sW; [ "$output" = "vault/sessions/$YM/$TODAY-051.md" ] || { echo "$output"; return 1; }
+  [ "$(lease_json "$nn" logs)" = "{'$TODAY': 51}" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/unwindowed.json" ] || ! grep -q '"sW"' "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  run log_of sA; [ "$output" = "vault/sessions/$YM/$TODAY-052.md" ]        # 51 was never reserved twice
+}
+
+@test "the same carry through claim: the windowless session's number moves into the window it claims" {
+  pw="$(live_pid)"; registry_entry "$pw" sW
+  run log_of sW; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ] || { echo "$output"; return 1; }
+  run bash "$DAEDALUS_HOME/core/lease.sh" create; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run env DAEDALUS_SESSION_ID=sW bash "$DAEDALUS_HOME/core/lease.sh" claim 03; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run log_of sW; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 03 logs)" = "{'$TODAY': 1}" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/unwindowed.json" ] || ! grep -q '"sW"' "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  run log_of sB; [ "$output" = "vault/sessions/$YM/$TODAY-002.md" ]
+}

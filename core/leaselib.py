@@ -3608,12 +3608,18 @@ def session_start_bind(root: Path, sid: str, deadline: Optional[float] = None, n
             out["prime"] = (read_lease(root, "prime") or {}).get("session_id") == sid
         # The session-log number, reserved here under the same lock (§4.7 D7 as
         # amended): the start says the path, so no session ever counts the directory.
+        # A number reserved while the session held no window moves into the window it holds now (carry), so the
+        # start says the number the session was already told.
         key = out["lease"] or ("prime" if out["prime"] else None)
         if key is not None:
             try:
                 leases = read_all(root)
-                if key in leases:
-                    out["log"] = log_path_locked(root, key, leases, time.strftime("%Y-%m-%d"), new_day=new_day)
+                today = time.strftime("%Y-%m-%d")
+                if key == "prime":
+                    out["log"] = session_log_locked(root, sid, leases, today, new_day=new_day)
+                elif key in leases:
+                    carry_unwindowed_locked(root, sid, key, leases, today)
+                    out["log"] = log_path_locked(root, key, leases, today, new_day=new_day)
             except Refused as e:
                 out["notes"].append(str(e))
     return out
@@ -3751,11 +3757,35 @@ def unwindowed_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: 
     return _log_file(today, n)
 
 
+def carry_unwindowed_locked(root: Path, sid: str, nn: str, leases: Dict[str, dict], today: str) -> None:
+    """A session that reserved its log while it held no window and now holds
+    window NN with no reservation of its own: the entry's logs move into the
+    lease and the entry is removed, so the session keeps the number it was
+    told — never two numbers. CALLER HOLDS THE LOCK. Nothing to carry reads
+    nothing more than unwindowed.json."""
+    lease = leases.get(nn)
+    if lease is None or _reservations(lease) or not lease_path(root, UNWINDOWED).exists():
+        return
+    unw = read_unwindowed(root)
+    entry = unw.get(sid)
+    logs = _reservations(entry) if isinstance(entry, dict) else {}
+    if not logs:
+        return
+    lease["logs"] = logs
+    write_lease(root, nn, lease)
+    unw.pop(sid, None)
+    write_unwindowed(root, unw, today)
+
+
 def session_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: str, new_day: bool = False) -> str:
-    """The session's log path from whichever store holds it (log_key_locked). CALLER HOLDS THE LOCK."""
+    """The session's log path from whichever store holds it (log_key_locked),
+    after carrying a reservation made with no window into the window it now
+    holds. CALLER HOLDS THE LOCK."""
     kind, key = log_key_locked(root, sid, leases)
     if kind == UNWINDOWED:
         return unwindowed_log_locked(root, sid, leases, today, new_day=new_day)
+    if key != "prime":
+        carry_unwindowed_locked(root, sid, key, leases, today)
     return log_path_locked(root, key, leases, today, new_day=new_day)
 
 
