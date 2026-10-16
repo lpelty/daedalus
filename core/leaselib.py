@@ -4194,6 +4194,12 @@ PEN_UNTOLD_AT_COMMIT = ("The vault is left for the pen's holder, %s; this build 
 PEN_ENDED_NOT_TERMINAL = ("The pen's holder, %s, has ended, but this is not a terminal session, so it does not take the "
                           "pen: the next close in a terminal session takes it and commits these files, or the operator "
                           "commits from their own shell: `cd %s && core/vault-commit.sh`.")
+NOBODY_NOT_TERMINAL = ("Nobody holds the pen, and this is not a terminal session, so it does not take it: the next "
+                       "close in a terminal session takes it and commits these files, or the operator commits from "
+                       "their own shell: `cd %s && core/vault-commit.sh`.")
+TERMINAL_UNTOLD_AT_COMMIT = ("%s, but this build has no session registry, so it cannot tell whether this is a terminal "
+                             "session and does not take the pen: `core/lease.sh prime take` takes it, or the operator "
+                             "commits from their own shell: `cd %s && core/vault-commit.sh`.")
 VISITOR_AT_COMMIT = "This is a direct-call session; it does not commit the vault — its caller's session does."
 NOT_IN_REGISTRY_AT_COMMIT = WINDOWLESS_NOT_IN_REGISTRY + " The next session's close commits these files."
 
@@ -4252,6 +4258,11 @@ def pen_for_commit(root: Path, sid: Optional[str]) -> Tuple[int, str]:
             return 3, PEN_HELD_AT_COMMIT % label
         registry_entry_for(sid)            # a session open in two terminals is refused, as at every take
         if not is_terminal_window(sid):
+            if not registry_present():     # no registry: no session can be told a terminal one, so never "not one"
+                said = ("The pen's holder, %s, has ended" % label) if holder else "Nobody holds the pen"
+                return 3, TERMINAL_UNTOLD_AT_COMMIT % (said, root)
+            if not holder:
+                return 3, NOBODY_NOT_TERMINAL % root
             return 3, PEN_ENDED_NOT_TERMINAL % (label, root)
         pending = pending_version(root)
         entry: Dict[str, object] = {"from": holder, "to": sid, "at": now_stamp(),

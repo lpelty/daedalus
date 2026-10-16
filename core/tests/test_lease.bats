@@ -2118,6 +2118,26 @@ PFC() { python3 "$LL" pen-for-commit; }
   [ "$(lease_json prime session_id)" = sGone ]
 }
 
+@test "pen-for-commit, wording: with no holder a non-terminal session is told nobody holds the pen; on a build with no session registry the line says it cannot tell whether this is a terminal session, never that it is not one" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  ph="$(live_pid)"; registry_entry "$ph" sH bg cli; win 04 sH "$ph"
+  DAEDALUS_SESSION_ID=sH run PFC; [ "$status" -eq 3 ] || { echo "$status $output"; return 1; }
+  [ "$output" = "Nobody holds the pen, and this is not a terminal session, so it does not take it: the next close in a terminal session takes it and commits these files, or the operator commits from their own shell: \`cd $DAEDALUS_HOME && core/vault-commit.sh\`." ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  # no session registry: an ended window holder, then no holder
+  rm -rf "$BATS_TEST_TMPDIR/sessions"
+  po="$(live_pid)"; win 01 sOld "$po"; kill "$po"; wait "$po" 2>/dev/null || true
+  python3 "$LL" _test-write prime '{"session_id":"sOld","history":[]}'
+  DAEDALUS_SESSION_ID=sH run PFC; [ "$status" -eq 3 ] || { echo "$status $output"; return 1; }
+  [ "$output" = "The pen's holder, window 01, has ended, but this build has no session registry, so it cannot tell whether this is a terminal session and does not take the pen: \`core/lease.sh prime take\` takes it, or the operator commits from their own shell: \`cd $DAEDALUS_HOME && core/vault-commit.sh\`." ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sOld ]
+  rm -f "$DAEDALUS_HOME/state/leases/prime.json"
+  DAEDALUS_SESSION_ID=sH run PFC; [ "$status" -eq 3 ] || { echo "$status $output"; return 1; }
+  [ "$output" = "Nobody holds the pen, but this build has no session registry, so it cannot tell whether this is a terminal session and does not take the pen: \`core/lease.sh prime take\` takes it, or the operator commits from their own shell: \`cd $DAEDALUS_HOME && core/vault-commit.sh\`." ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  case "$output" in *"not a terminal session"*) echo "$output"; return 1 ;; esac
+}
+
 @test "pen-for-commit: an unreadable lease file fails closed (exit 1, its sentence)" {
   mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{not json' > "$DAEDALUS_HOME/state/leases/01.json"
   DAEDALUS_SESSION_ID=sA run PFC; [ "$status" -eq 1 ]
