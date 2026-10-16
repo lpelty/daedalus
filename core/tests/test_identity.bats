@@ -482,10 +482,39 @@ _run_scan_in_fixture() {
 # v0.7.3 (daedalus update; the upgrade that can finish): the release a deployment on a second machine reported,
 # written for the same operator — the house parts in order, the one line it prints, the first update's one
 # line and one sentence, and short sentences; no employer and no agent is named (the wide scan checks the file).
+# v0.7.5 (the lease board stays drawn when git is slow): the report from the deployment on a second machine, written
+# for the operator — the house parts in order, the board's new lines and the command they name; no employer, agent or
+# proposal number.
+@test "CHANGELOG: v0.7.5 is the newest release — its heading verbatim; in short, what went wrong, what changed, what you will see, how to take it, how to tell; the board's new lines and core/lease.sh list; short sentences; v0.7.4 right below it" {
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.5 — the lease board stays drawn when git is slow" ]
+  sec="$(awk '/^## v0.7.5 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
+  rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
+  order=""
+  for h in '**In short.**' '**What went wrong.**' '**What changed.**' '**What you will see.**' '**How to take it.**' '**How to tell you have it.**'; do
+    case "$rel" in *"$h"*) : ;; *) echo "the v0.7.5 section lacks: $h"; return 1 ;; esac
+    order="$order$(printf '%s' "$rel" | awk -v h="$h" '{print index($0, h)}') "
+  done
+  [ "$(printf '%s\n' $order | sort -n | tr '\n' ' ')" = "$order" ] || { echo "the v0.7.5 parts are out of order: $order"; return 1; }
+  for s in 'a Daedalus deployment on a second machine' 'state/leases/unpromoted.cache' 'not checked for unpromoted work this' \
+           'at least N unpromoted commits waiting' '`core/lease.sh list`' 'A commit with an empty message now counts as unpromoted work' \
+           'daedalus update' 'Daedalus updated 0.7.4 -> 0.7.5; doctor OK.' '`cat VERSION` prints `0.7.5`'; do
+    case "$rel" in *"$s"*) : ;; *) echo "the v0.7.5 section lacks: $s"; return 1 ;; esac
+  done
+  ! printf '%s\n' "$sec" | grep -qiE 'smartsheet|employer' || { echo "the v0.7.5 section names an employer"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara' || { echo "the v0.7.5 section names an agent"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qE 'PROP-[0-9]|EX-[0-9]' || { echo "the v0.7.5 section names a proposal number"; return 1; }
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.5 section:"; echo "$output"; return 1; }
+  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
+}
+
 # v0.7.4 (a session holding no window can still close): written for the operator, the house parts in order, what a
 # windowless session now does at its close and the commands it names; no employer, agent or proposal number.
-@test "CHANGELOG: v0.7.4 is the newest release — its heading verbatim; in short, what went wrong, what changed, what you will see, how to take it, how to tell; the close commands it names; short sentences; v0.7.3 right below it" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
+@test "CHANGELOG: v0.7.4, below v0.7.5 — its heading verbatim; in short, what went wrong, what changed, what you will see, how to take it, how to tell; the close commands it names; short sentences; v0.7.3 right below it" {
+  grep -qxF "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" "$DAEDALUS_HOME/CHANGELOG.md"
   sec="$(awk '/^## v0.7.4 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
   rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
   order=""
@@ -506,7 +535,7 @@ text = re.sub(r"`[^`]*`", "X", sys.argv[1])
 long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.4 section:"; echo "$output"; return 1; }
-  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
+  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
 }
 
 @test "CLAUDE.md says how a session holding no window closes: its log number at start and from lease.sh log, the pen when no live session holds it, lease: none in the frontmatter, and the close order" {
@@ -569,7 +598,7 @@ long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) 
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.3 section:"; echo "$output"; return 1; }
   # v0.7.2 sits right below it
-  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 4p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
 }
 
 @test "CHANGELOG: v0.7.2, below v0.7.3, keeps its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {

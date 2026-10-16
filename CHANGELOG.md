@@ -4,6 +4,57 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.7.5 — the lease board stays drawn when git is slow
+
+**In short.** On a deployment with several nested repos, the board failed to
+draw on about one prompt in three. It named a different window each time,
+because the cause was the clock, not the repository. The board now checks
+swept windows from a cache, draws what it checked in time, and says what it did
+not check. Thanks to a Daedalus deployment on a second machine, which reported
+it with the cause.
+
+**What went wrong.**
+- The prompt hook gave the board 2 seconds, enforced with an alarm. The alarm's
+  error was caught as a failed git call, so the board said it "cannot tell"
+  whether whichever window was being checked had unpromoted work, and drew
+  nothing else.
+- Where the alarm landed decided the damage. Sometimes the board vanished; and
+  sometimes a swept window's waiting work was left off with no sentence at all.
+- Every swept window was checked again in every repo on every prompt, with
+  three git processes each. A reclaimed window was checked forever.
+
+**What changed.**
+- Each swept window's answer is kept in `state/leases/unpromoted.cache`, keyed
+  on its branch tip and the trunk tip. It is recomputed only when one of them
+  moves. In steady state the board runs one git process per repo.
+- Commands that act on the answer (`create`, `claim`, deleting a window's
+  work) never read the cache. They check git as before.
+- A reclaimed window stops costing anything: reclaim records what it proved,
+  and a later commit in its worktree still shows.
+- A commit with an empty message now counts as unpromoted work. Before, a new
+  window could be handed a number over it.
+
+**What you will see.**
+- A window not checked in time reads "not checked for unpromoted work this
+  time". The next prompt finishes the check, or `core/lease.sh list` checks
+  now.
+- A window with work already found reads "at least N unpromoted commits
+  waiting" until every repo is checked.
+- A repo whose lease branches could not be listed has its own line, naming
+  `core/lease.sh list`.
+- A git error on one window is on that window's line, with the command that
+  shows the error. The other windows still draw.
+- While a window is being made or swept, the board says the lock is busy and
+  draws at the next prompt. Before, it was silent.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.7.4 -> 0.7.5; doctor OK.` There
+is no migration: the cache is made by the first board that needs it.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.5`. `daedalus version`
+prints `Daedalus 0.7.5`. With a swept window open, `state/leases/` holds
+`unpromoted.cache` after the next prompt.
+
 ## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault
 
 **In short.** A session that started while an upgrade was pending holds no
