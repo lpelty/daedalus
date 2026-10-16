@@ -374,3 +374,24 @@ EOF
   [ "$TENANT_BANK" = daedalus ]; [ "$CAPTURE_INTERVAL" = 120 ]; [ "$HINDSIGHT_API_URL" = http://127.0.0.1:8888 ]
   [ "$HINDSIGHT_API_TENANT_API_KEY" = k ]
 }
+
+@test "config.example.yaml ships boundary.edit_brief false, which cfg reads; verifylib.edit_brief is true only for the word true, false when absent" {
+  ex="$DAEDALUS_HOME/config.example.yaml"
+  grep -q '^boundary:$' "$ex"
+  export DAEDALUS_CONFIG="$ex"
+  run cfg boundary.edit_brief; [ "$status" -eq 0 ]; [ "$output" = false ]
+  H="$BATS_TEST_TMPDIR/h"; mkdir -p "$H/core"; cp "$DAEDALUS_HOME/core/lib.sh" "$DAEDALUS_HOME/core/verifylib.py" "$H/core/"
+  for pair in "absent:False" "true:True" "false:False" "yes:False" "'true':True"; do
+    val="${pair%%:*}"; want="${pair##*:}"
+    { cat "$TESTCFG"; [ "$val" = absent ] || printf 'boundary:\n  edit_brief: %s\n' "$val"; } > "$H/config.yaml"
+    got="$(env -u DAEDALUS_CONFIG DAEDALUS_HOME="$H" PYTHONDONTWRITEBYTECODE=1 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import verifylib as v; from pathlib import Path; print(v.edit_brief(Path(sys.argv[2])))' "$H/core" "$H")"
+    [ "$got" = "$want" ] || { echo "$val: $got"; return 1; }
+  done
+}
+
+@test ".gitignore keeps the local layer out of the release: CLAUDE.local.md, .claude/settings.local.json and the lease board's tsconfig.json" {
+  for p in CLAUDE.local.md .claude/settings.local.json mods/lease-board/tsconfig.json; do
+    git -C "$DAEDALUS_HOME" check-ignore -q --no-index "$p" || { echo "not ignored: $p"; return 1; }
+  done
+  run git -C "$DAEDALUS_HOME" check-ignore -q --no-index CLAUDE.md; [ "$status" -ne 0 ]
+}

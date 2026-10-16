@@ -95,6 +95,13 @@ verify:
   # needs no timeout line. Anything else is refused before any gate runs.
   refute_timeout: 600
 
+boundary:
+  # May Daedalus edit its own brief? false (the default): no. true: it edits
+  # CLAUDE.local.md, never CLAUDE.md, which is distribution code. Local brief
+  # text lives in CLAUDE.local.md (gitignored; Claude Code loads it after
+  # CLAUDE.md), so a release never conflicts with it.
+  edit_brief: false
+
 # Direct calls (optional) — core/call-agent.sh. Uncomment to use.
 # The target's own agent — the one Daedalus may summon for context or a
 # review — is named HERE and nowhere else: core has no default and takes no

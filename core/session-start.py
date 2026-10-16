@@ -363,6 +363,7 @@ def main() -> int:
                 "version": v.home_version(root),
                 "config_changes_sha": v.sha256_file(root / v.CONFIG_CHANGES),
                 "local_settings_sha": v.local_settings_sha(root),
+                "local_brief_sha": v.local_brief_sha(root),   # CLAUDE.local.md is gitignored; the Stop check compares this
                 "target_branch": branch,
                 "target_base": base,
                 "target_base_error": base_err,

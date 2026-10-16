@@ -9,7 +9,7 @@ having moved past where origin/<config target.branch> stood at session start (PR
 ends nothing until fixed; on PostToolUse, exit 2 is immediate feedback — the
 command already ran.
 
-Since v0.7.0 the same file is also wired on PreToolUse(Edit|Write) — the
+Since v0.7.0 the same file is also wired on PreToolUse(Edit|Write; NotebookEdit since 0.7.3) — the
 boundary warning (spec §4.6): one locked read of the leases, then a path in
 another live window's changed set is denied ONCE per session (the deny
 reason is the warning; recorded under `warned` in
@@ -259,6 +259,17 @@ def check_config(root: Path, marker: dict, reasons: List[str], notes: Optional[L
             reasons.append("The gate definition (config.yaml) changed this session; restore it.%s%s" % (told, RESTART))
     if marker.get("local_settings_sha") != v.local_settings_sha(root):
         reasons.append("The deny rules or hooks in .claude/settings.local.json changed this session; restore them.%s" % RESTART)
+
+
+def check_local_brief(root: Path, marker: dict, reasons: List[str]) -> None:
+    """CLAUDE.local.md is gitignored, so check_protected cannot see it: while boundary.edit_brief
+    is false, its hash must still be the one the session started with. A marker from before
+    this check has no hash and is not judged."""
+    if "local_brief_sha" not in marker or v.edit_brief(root):
+        return
+    if marker.get("local_brief_sha") != v.local_brief_sha(root):
+        reasons.append("CLAUDE.local.md changed this session; it is the operator's brief and boundary.edit_brief is "
+                       "false in config.yaml, so restore it.%s" % RESTART)
 
 
 def check_distribution(root: Path, reasons: List[str]) -> None:
@@ -664,17 +675,38 @@ def git_gate_deny(p: Path) -> Optional[str]:
     return None
 
 
+BRIEF_DENY = ("CLAUDE.md is distribution code; local brief text goes in CLAUDE.local.md (boundary.edit_brief: true "
+              "lets Daedalus write it).")
+LOCAL_BRIEF_DENY = "CLAUDE.local.md is the operator's brief; boundary.edit_brief is false in config.yaml."
+
+
+def brief_deny(root: Path, p: Path) -> Optional[str]:
+    """The home's two briefs (update design §4.4): CLAUDE.md is the release's, denied always;
+    CLAUDE.local.md is the deployment's, denied unless config.yaml boundary.edit_brief is true.
+    Matched without case, as the default macOS file system opens either spelling."""
+    try:
+        rel = p.resolve().relative_to(root.resolve()).as_posix().lower()
+    except ValueError:
+        return None
+    if rel == v.BRIEF.lower():
+        return BRIEF_DENY
+    if rel == v.LOCAL_BRIEF.lower() and not v.edit_brief(root):
+        return LOCAL_BRIEF_DENY
+    return None
+
+
 def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """The lease-era checks for one resolved write path — the Edit/Write leg and every Bash
     write operand run this same function. In order: the session transcript (§7.4, any
-    session, leases or none); fail closed under target/, worktrees/ and
+    session, leases or none); git's own gate; the two briefs (brief_deny, any session, leases
+    or none — a session with no leases is exactly the pending-upgrade state); fail closed under target/, worktrees/ and
     hot.md for a session that cannot be bound or a lease file that cannot be read (§4.4 —
     judged BEFORE the empty-leases return, which is what a read failure leaves; `refused` is
     the caller's, since the guard's may also come from the bash seam); vault/hot.md for a
     non-prime (§4.7); the trees (tree_deny); the stop-once cross-lease warning (§4.6).
     Returns (deny reason, context): a deny; or context alone for a cross-lease path already
     warned this session; or (None, None)."""
-    reason = transcript_deny(root, p) or git_gate_deny(p)
+    reason = transcript_deny(root, p) or git_gate_deny(p) or brief_deny(root, p)
     if reason:
         return reason, None
     rroot = root.resolve()
@@ -716,13 +748,14 @@ def _pre(decision: Optional[str], text: str) -> dict:
 
 
 def check_pretooluse(root: Path, payload: dict) -> Optional[dict]:
-    """PreToolUse(Edit|Write): the transcript denial first (§7.4 — no lease state),
+    """PreToolUse(Edit|Write|NotebookEdit): the transcript denial first (§7.4 — no lease state),
     then one read of the leases (lease_context, §4.6 budget rule — no bash seam,
     no git), then write_check on the path. None means nothing to say."""
-    if payload.get("tool_name") not in ("Edit", "Write"):
+    if payload.get("tool_name") not in ("Edit", "Write", "NotebookEdit"):
         return None
     sid = v.export_session(payload)
-    fp = str((payload.get("tool_input") or {}).get("file_path") or "")
+    ti = payload.get("tool_input") or {}
+    fp = str(ti.get("file_path") or ti.get("notebook_path") or "")   # NotebookEdit names notebook_path
     if not fp or not os.path.isabs(fp):
         return None
     op = Path(fp).resolve()
@@ -767,13 +800,15 @@ def main() -> int:
     try:
         if marker is None:
             marker = {"session_id": sid, "protected_status": [], "config_sha": v.sha256_file(root / "config.yaml"),
-                      "local_settings_sha": v.local_settings_sha(root), "started": "",
+                      "local_settings_sha": v.local_settings_sha(root), "local_brief_sha": v.local_brief_sha(root),
+                      "started": "",
                       "target_branch": v.target_branch(root), "target_base": "",
                       "target_base_error": "session-start hook did not run, so origin/<branch> was never recorded"}
             notes.append("The session-start hook did not run; boundary checks compare against the current state.%s" % RESTART)
             # With no snapshot, any protected dirt counts.
         check_protected(root, marker, reasons)
         check_config(root, marker, reasons, notes)
+        check_local_brief(root, marker, reasons)
         check_evidence(root, marker, reasons)
         if event == "Stop":
             if not visitor:

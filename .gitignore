@@ -12,6 +12,14 @@ config.yaml
 # the identity-leakage test (core/tests/test_identity.bats).
 .claude/settings.local.json
 
+# The deployment's own brief text (Claude Code loads it after CLAUDE.md). A
+# release never touches it, so local lines never conflict with an update;
+# boundary.edit_brief in config.yaml decides whether Daedalus may write it.
+CLAUDE.local.md
+
+# Written by Claude Code when the lease-board mod loads with --plugin-dir.
+mods/lease-board/tsconfig.json
+
 .DS_Store
 
 # Runtime state written by the SessionEnd capture hook (e.g. transcript byte

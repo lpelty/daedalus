@@ -897,3 +897,13 @@ PY
   grep -qF 'The direct-call launcher' "$R/CHANGELOG.md"
   ! grep -qF 'keep it free of anything that would steer a reviewer' "$R/README.md"
 }
+
+@test "the refuter's claudeMdExcludes names CLAUDE.local.md beside CLAUDE.md, so a deployment's local brief never reaches a review (update design §4.4)" {
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$BATS_TEST_DIRNAME/.." <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import call_agent as ca
+assert "**/CLAUDE.local.md" in ca.CLAUDE_MD_EXCLUDES and "**/CLAUDE.md" in ca.CLAUDE_MD_EXCLUDES, ca.CLAUDE_MD_EXCLUDES
+assert json.loads(ca.REFUTER_SETTINGS)["claudeMdExcludes"] == ca.CLAUDE_MD_EXCLUDES
+PY
+}

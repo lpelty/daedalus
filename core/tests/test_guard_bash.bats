@@ -1221,3 +1221,35 @@ assert m.LEASE_HEADS == {"lease.sh"}, m.LEASE_HEADS
 PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+# --- The local layer on the Bash leg (update design §4.4; Decisions 3, 22) ---
+
+brief_bash_checks() {   # brief_bash_checks <session-id> — the same sentences as the Edit leg
+  run guard_as "$1" 'echo x > CLAUDE.md'; denied
+  case "$output" in *"CLAUDE.md is distribution code; local brief text goes in CLAUDE.local.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as "$1" 'echo x >> CLAUDE.local.md'; denied
+  case "$output" in *"CLAUDE.local.md is the operator's brief; boundary.edit_brief is false in config.yaml."*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as "$1" 'rm -f CLAUDE.local.md'; denied
+  run guard_as "$1" 'sed -i "" s/a/b/ CLAUDE.local.md'; denied
+  run guard_as "$1" 'cat CLAUDE.local.md'; allowed
+  printf 'boundary:\n  edit_brief: true\n' >> "$DAEDALUS_HOME/config.yaml"
+  run guard_as "$1" 'echo x >> CLAUDE.local.md'; allowed
+  run guard_as "$1" 'echo x > CLAUDE.md'; denied
+  sed -i '' '/^boundary:/,$d' "$DAEDALUS_HOME/config.yaml"
+}
+
+@test "settings.local and the brief on the Bash leg, no leases held: CLAUDE.local.md is the operator's while edit_brief is false and Daedalus's when true; CLAUDE.md is always distribution code; an Edit(...) deny in settings.local.json refuses a Bash write" {
+  brief_bash_checks s1
+  printf '{"permissions":{"deny":["Edit(/notes/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run guard_as s1 'echo x > notes/a.md'; denied
+  run guard_as s1 'cp /etc/hosts notes/'; denied
+  run guard_as s1 'echo x > other.md'; allowed
+}
+
+@test "settings.local and the brief on the Bash leg, with windows held: the same answers for the prime and a clone, from the home" {
+  guard_leases
+  brief_bash_checks sA
+  brief_bash_checks sB
+  printf '{"permissions":{"deny":["Edit(./notes/**)"]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run guard_as sB 'echo x > notes/a.md'; denied
+}

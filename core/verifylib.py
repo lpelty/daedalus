@@ -20,7 +20,11 @@ from typing import Dict, List, Optional, Tuple
 
 OWN_PARTY = "daedalus"
 CLAIM_EXCLUDED_TYPES = {"session", "pitfall", "rolling-state", "evidence"}
-EXTRA_PROTECTED = ["config.yaml", "state/**", "vault/evidence/**"]
+# CLAUDE.md is here as well as in the tracked deny list, so it stays protected in a home whose
+# tracked settings.json lost that rule (update design Decision 3, §4.4).
+EXTRA_PROTECTED = ["CLAUDE.md", "config.yaml", "state/**", "vault/evidence/**"]
+BRIEF = "CLAUDE.md"               # distribution code: the release's brief, never written by the agent
+LOCAL_BRIEF = "CLAUDE.local.md"   # the deployment's brief, gitignored; the agent's only when boundary.edit_brief is true
 
 
 def root_dir() -> Path:
@@ -212,21 +216,59 @@ def home_relative_glob(root: Path, pattern: str) -> Optional[str]:
     return g
 
 
-def protected_globs(root: Path) -> List[str]:
-    globs: List[str] = []
+_EDIT_BRIEF: Dict[str, Tuple[Tuple[float, int], bool]] = {}
+
+
+def edit_brief(root: Path) -> bool:
+    """config.yaml boundary.edit_brief, read with lib.sh cfg: True only for the word `true`
+    (anything else, an absent key or an unreadable config is False). Cached per process on the
+    config file's mtime and size, because is_protected asks once per Bash write operand."""
+    conf = Path(os.environ.get("DAEDALUS_CONFIG") or (root / "config.yaml"))
     try:
-        data = json.loads((root / ".claude" / "settings.json").read_text())
+        st = conf.stat()
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        return False
+    hit = _EDIT_BRIEF.get(str(conf))
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    val = _lib(root, "cfg boundary.edit_brief 2>/dev/null || true").strip() == "true"
+    _EDIT_BRIEF[str(conf)] = (key, val)
+    return val
+
+
+def local_brief_sha(root: Path) -> str:
+    """CLAUDE.local.md's content hash ("" when absent). It is gitignored, so protected_status
+    never sees it; the session-start marker records this and the Stop check compares it while
+    boundary.edit_brief is false."""
+    return sha256_file(root / LOCAL_BRIEF)
+
+
+def _deny_globs(root: Path, name: str) -> List[str]:
+    out: List[str] = []
+    try:
+        data = json.loads((root / ".claude" / name).read_text())
         for rule in (data.get("permissions") or {}).get("deny", []):
-            m = re.fullmatch(r"Edit\((.+)\)", rule)
+            m = re.fullmatch(r"Edit\((.+)\)", rule) if isinstance(rule, str) else None
             if m:
                 g = home_relative_glob(root, m.group(1))
                 if g is not None:
-                    globs.append(g)
-    except (OSError, ValueError):
+                    out.append(g)
+    except (OSError, ValueError, AttributeError):
         pass
-    for g in EXTRA_PROTECTED:
+    return out
+
+
+def protected_globs(root: Path) -> List[str]:
+    """The Edit(...) deny rules of .claude/settings.json AND .claude/settings.local.json (a local
+    deny the update moved out of the tracked file stays enforced on the Bash leg and at Stop,
+    Decision 22), EXTRA_PROTECTED, and CLAUDE.local.md unless boundary.edit_brief is true."""
+    globs: List[str] = []
+    for g in _deny_globs(root, "settings.json") + _deny_globs(root, "settings.local.json") + EXTRA_PROTECTED:
         if g not in globs:
             globs.append(g)
+    if LOCAL_BRIEF not in globs and not edit_brief(root):
+        globs.append(LOCAL_BRIEF)
     return globs
 
 

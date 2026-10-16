@@ -347,14 +347,14 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   run edit_as sB "$DAEDALUS_HOME/vault/proposals/PROP-9.md"; [ -z "$output" ]
 }
 
-@test "the Edit check answers in under 1 s with 40 LIVE fixture leases (the live path: a ps per lease and a registry scan, no git), and the tracked settings.json wires boundary-hook.py on PreToolUse Edit|Write with a 5 s timeout" {
+@test "the Edit check answers in under 1 s with 40 LIVE fixture leases (the live path: a ps per lease and a registry scan, no git), and the tracked settings.json wires boundary-hook.py on PreToolUse Edit|Write|NotebookEdit with a 5 s timeout" {
   two_leases; live_holder 01; live_holder 02
   for i in $(seq 3 42); do nn="$(printf '%02d' "$i")"; python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write "$nn" "{\"lease\":\"$nn\",\"session_id\":\"s$nn\",\"pid\":$$,\"proc_started\":$(ps_ms $$),\"worktree\":\"worktrees/$nn\",\"branch\":\"lease/$nn\",\"trunks\":{\"thing\":\"main\"}}"; python3 "$DAEDALUS_HOME/core/leaselib.py" heartbeat "$nn"; printf '{"thing":{"f%s.py":"2026-01-01T00:00:00"}}' "$i" > "$DAEDALUS_HOME/state/leases/$nn.changed"; done
   run python3 "$DAEDALUS_HOME/core/leaselib.py" liveness 30; [ "$output" = "live" ]
   t0="$(python3 -c 'import time; print(time.time())')"; run edit_as sA "$DAEDALUS_HOME/worktrees/01/thing/f10.py"; t1="$(python3 -c 'import time; print(time.time())')"
   case "$output" in *'"permissionDecision": "deny"'*"window 10"*) : ;; *) echo "a live holder's path must warn: $output"; return 1 ;; esac
   python3 -c 'import sys; assert float(sys.argv[2])-float(sys.argv[1]) < 1.0' "$t0" "$t1"
-  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(g.get("matcher")=="Edit|Write" and any("boundary-hook.py" in h["command"] and h["timeout"]==5 for h in g["hooks"]) for g in d["hooks"]["PreToolUse"]), d' "$SRC/../.claude/settings.json"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(g.get("matcher")=="Edit|Write|NotebookEdit" and any("boundary-hook.py" in h["command"] and h["timeout"]==5 for h in g["hooks"]) for g in d["hooks"]["PreToolUse"]), d' "$SRC/../.claude/settings.json"
 }
 
 @test "a lease file that cannot be read fails CLOSED for Edit/Write under target/, worktrees/ and vault/hot.md — the lease.sh sentence, not silence; a path outside every tree is untouched" {
@@ -659,7 +659,7 @@ assert not v.is_protected(root, root / "core" / "x.py"), v.protected_globs(root)
 # a rule naming the home itself names no file: nothing is protected and git status gets no "." pathspec
 for rule in ("Edit(//%s)" % root, "Edit(//%s/)" % root, "Edit(/)", "Edit(.)", "Edit(./)"):
     s.write_text(json.dumps({"permissions": {"deny": [rule]}}))
-    assert v.protected_globs(root) == v.EXTRA_PROTECTED, (rule, v.protected_globs(root))
+    assert v.protected_globs(root) == v.EXTRA_PROTECTED + [v.LOCAL_BRIEF], (rule, v.protected_globs(root))   # edit_brief false
     assert "." not in v.protected_pathspecs(root), rule
 # a trailing slash is the directory and everything in it, in every form
 for rule in ("Edit(/core/)", "Edit(./core/)", "Edit(//%s/core/)" % root):
@@ -686,4 +686,82 @@ PY
   run --separate-stderr bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s1\",\"stop_hook_active\":true}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 2 ] || { echo "status $status: $output $stderr"; return 1; }
   case "$stderr" in *"CLAUDE.md"*) : ;; *) echo "$stderr"; return 1 ;; esac
+}
+
+# --- The local layer (update design §4.4; Decisions 3, 22): boundary.edit_brief, CLAUDE.local.md ---
+
+notebook_as() { printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s","new_source":"x"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+write_as() { printf '{"hook_event_name":"PreToolUse","session_id":"%s","tool_name":"Write","tool_input":{"file_path":"%s","content":"x"}}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"; }
+LOCAL_DENY="CLAUDE.local.md is the operator's brief; boundary.edit_brief is false in config.yaml."
+BRIEF_DENY="CLAUDE.md is distribution code; local brief text goes in CLAUDE.local.md (boundary.edit_brief: true lets Daedalus write it)."
+brief_denied() {   # brief_denied <sentence> — a deny whose reason is that sentence
+  case "$output" in *'"permissionDecision": "deny"'*"$1"*) : ;; *) echo "expected deny [$1]: $output"; return 1 ;; esac; }
+edit_brief_true() { printf 'boundary:\n  edit_brief: true\n' >> "$DAEDALUS_HOME/config.yaml"; }
+
+@test "edit_brief false (the default), no leases held and with one: Edit, Write and NotebookEdit of CLAUDE.local.md are denied naming the key; CLAUDE.md is denied as distribution code; a file beside them is not" {
+  run edit_as s1 "$DAEDALUS_HOME/CLAUDE.local.md"; brief_denied "$LOCAL_DENY"
+  run write_as s1 "$DAEDALUS_HOME/CLAUDE.local.md"; brief_denied "$LOCAL_DENY"
+  run notebook_as s1 "$DAEDALUS_HOME/CLAUDE.local.md"; brief_denied "$LOCAL_DENY"
+  run edit_as s1 "$DAEDALUS_HOME/CLAUDE.md"; brief_denied "$BRIEF_DENY"
+  run notebook_as s1 "$DAEDALUS_HOME/CLAUDE.md"; brief_denied "$BRIEF_DENY"
+  run edit_as s1 "$DAEDALUS_HOME/NOTES.md"; [ -z "$output" ]
+  run edit_as s1 "$T/CLAUDE.md"; [ -z "$output" ]     # the target's own brief is the target's, not Daedalus's
+  two_leases; live_holder 01; live_holder 02
+  for s in sA sB; do
+    run edit_as "$s" "$DAEDALUS_HOME/CLAUDE.local.md"; brief_denied "$LOCAL_DENY"
+    run notebook_as "$s" "$DAEDALUS_HOME/CLAUDE.local.md"; brief_denied "$LOCAL_DENY"
+    run write_as "$s" "$DAEDALUS_HOME/CLAUDE.md"; brief_denied "$BRIEF_DENY"
+  done
+}
+
+@test "edit_brief true, no leases held and with one: CLAUDE.local.md goes through for Edit, Write and NotebookEdit; CLAUDE.md is still denied; a value other than true is false" {
+  edit_brief_true
+  run edit_as s1 "$DAEDALUS_HOME/CLAUDE.local.md"; [ -z "$output" ] || { echo "$output"; return 1; }
+  run notebook_as s1 "$DAEDALUS_HOME/CLAUDE.local.md"; [ -z "$output" ] || { echo "$output"; return 1; }
+  run edit_as s1 "$DAEDALUS_HOME/CLAUDE.md"; brief_denied "$BRIEF_DENY"
+  two_leases; live_holder 01; live_holder 02
+  for s in sA sB; do
+    run write_as "$s" "$DAEDALUS_HOME/CLAUDE.local.md"; [ -z "$output" ] || { echo "$s: $output"; return 1; }
+    run edit_as "$s" "$DAEDALUS_HOME/CLAUDE.md"; brief_denied "$BRIEF_DENY"
+  done
+  sed -i '' 's/edit_brief: true/edit_brief: yes/' "$DAEDALUS_HOME/config.yaml"
+  run edit_as sA "$DAEDALUS_HOME/CLAUDE.local.md"; brief_denied "$LOCAL_DENY"
+}
+
+@test "Stop, edit_brief false, no leases: CLAUDE.local.md written this session blocks even though it is gitignored (the marker's local_brief_sha); put back, the Stop passes; with edit_brief true a fresh session may write it" {
+  printf 'CLAUDE.local.md\n' >> "$DAEDALUS_HOME/.gitignore"
+  printf 'operator line\n' > "$DAEDALUS_HOME/CLAUDE.local.md"
+  printf '{"hook_event_name":"SessionStart","session_id":"s5","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get("local_brief_sha"), d' "$DAEDALUS_HOME/state/session-s5.json"
+  run hook_as Stop s5; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'agent line\n' >> "$DAEDALUS_HOME/CLAUDE.local.md"   # as a Bash write past the guard would leave it
+  run hook_as Stop s5; [ "$status" -eq 2 ]
+  case "$output" in *"CLAUDE.local.md changed this session"*"boundary.edit_brief is false"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'operator line\n' > "$DAEDALUS_HOME/CLAUDE.local.md"
+  run hook_as Stop s5; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  rm "$DAEDALUS_HOME/CLAUDE.local.md"
+  run hook_as Stop s5; [ "$status" -eq 2 ]          # removing it is a change too
+  edit_brief_true
+  printf '{"hook_event_name":"SessionStart","session_id":"s6","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  printf 'agent line\n' > "$DAEDALUS_HOME/CLAUDE.local.md"
+  run hook_as Stop s6; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "settings.local.json: an Edit(...) deny there (no leases) protects the path on the Bash leg and shows at Stop like a tracked deny; settings.json's denies still count" {
+  export PYTHONDONTWRITEBYTECODE=1      # the guard's imports must not leave core/__pycache__ dirt for the Stop to see
+  cp "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
+  git -C "$DAEDALUS_HOME" add core/guard-bash.py; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m guard
+  printf '{"permissions":{"deny":["Edit(//elsewhere/**)","Edit(/notes/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"hook_event_name":"SessionStart","session_id":"s7","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  bash_as() { printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"s7","cwd":"%s","tool_input":{"command":%s}}' "$DAEDALUS_HOME" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1")" | python3 "$DAEDALUS_HOME/core/guard-bash.py"; }
+  run bash_as 'echo x > notes/a.md'
+  case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "local deny must hold on the Bash leg: $output"; return 1 ;; esac
+  run bash_as 'echo x > core/x.sh'
+  case "$output" in *'"permissionDecision": "deny"'*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash_as 'echo x > other/a.md'; [ -z "$output" ] || { echo "$output"; return 1; }
+  mkdir -p "$DAEDALUS_HOME/notes"; printf 'x\n' > "$DAEDALUS_HOME/notes/a.md"
+  run hook_as Stop s7; [ "$status" -eq 2 ]
+  case "$output" in *"Protected files changed this session: "*"notes/a.md. Revert these"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -r "$DAEDALUS_HOME/notes"
+  run hook_as Stop s7; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
