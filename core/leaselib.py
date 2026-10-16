@@ -3522,6 +3522,7 @@ def first_up(root: Path, sid: str) -> bool:
     fresh["history"] = (fresh.get("history") or []) + [{"from": holder, "to": sid, "at": now_stamp(),
                                                         "reason": "first-up (previous holder gone)"}]
     fresh.pop("logs", None)      # a pen-only reservation was the gone holder's, like a window's on takeover
+    fresh.pop("taken_without_window", None)
     fresh.update(dict({"session_id": sid}, **pen_bound()))
     write_lease(root, "prime", fresh)
     return True
@@ -3999,7 +4000,7 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
         leases = read_all(root)
     mine, _ = lease_of_session(leases, sid)
     if mine is None:
-        raise Refused("This session holds no window, so it cannot take the pen; claim a number first.")
+        return prime_take_windowless(root, sid, reason)
     registry_entry_for(sid)   # §4.5: a session open in two terminals cannot take the pen either (Refused)
     if mode == "tty" and reason is not None:
         raise Refused("In tty mode (promote.confirm: tty) the reason for taking the pen is typed in a terminal, "
@@ -4061,9 +4062,77 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
         entry.update(record)
         fresh["history"] = (fresh.get("history") or []) + [entry]
         fresh.pop("logs", None)      # the pen's reservation, if any, was the previous holder's
+        fresh.pop("taken_without_window", None)
         fresh.update(dict({"session_id": sid}, **pen_bound()))
         write_lease(root, "prime", fresh)
     return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
+
+
+WINDOWLESS_NOT_IN_REGISTRY = ("This session is not in the session registry, so no later session could tell it is "
+                              "live; it cannot take the pen.")
+WINDOWLESS_PEN_HELD = ("The pen is held by a live session, %s; a session holding no window never takes it from a live "
+                       "holder. Your session log is still yours (`core/lease.sh log`); for hot.md and the vault "
+                       "commit, message that session (SendMessage to %s); or the operator commits the vault from "
+                       "their own shell: `cd %s && core/vault-commit.sh`.")
+WINDOWLESS_PEN_UNTOLD = ("The pen is held by a session holding no window, and on this build (no session registry) it "
+                         "cannot be told whether it is live, so it is treated as live; a session holding no window "
+                         "never takes it from a live holder. Your session log is still yours (`core/lease.sh log`); "
+                         "for hot.md and the vault commit, message that session; or the operator commits the vault "
+                         "from their own shell: `cd %s && core/vault-commit.sh`.")
+WINDOWLESS_PEN_TAKEN = "This session holds the pen now, with no window: hot.md and `core/vault-commit.sh` are yours%s."
+PROMOTE_WAITS_CLAUSE = "; promote waits until the upgrade finishes"
+
+
+def _holder_words(leases: Dict[str, dict], holder: str) -> Tuple[str, str]:
+    """(how the refusal names the live holder, its peer name)."""
+    names = [e.get("name") for e in registry_live_entries(holder) if e.get("name")]
+    hnn, hlease = lease_of_session(leases, holder)
+    if hlease is not None:
+        peer = names[0] if names else peer_of(hlease)
+        return window_label(hnn, hlease), peer
+    peer = names[0] if names else "unknown"
+    return "a session holding no window (peer name %s)" % peer, peer
+
+
+def prime_take_windowless(root: Path, sid: str, reason: Optional[str]) -> str:
+    """`prime take` from a session holding no numbered lease — one that started
+    while the upgrade was pending, or any other: it takes the pen only when no
+    live session holds it, never from a live holder whatever --reason says (the
+    reason path stays a window's). Liveness is judged and the write made in one
+    exclusive section (first_up's pattern): no lock-free read, no transcript,
+    no terminal, no git. It makes no window, branch or worktree and touches
+    nothing under target/: it writes state/leases/prime.json only, marked
+    taken_without_window so the pen gives it no tree until it claims a window
+    (pen_without_tree)."""
+    if registry_entry_for(sid) is None and registry_present():
+        # a session id with no live registry entry would hold a pen every later judge calls gone at once
+        raise Refused(WINDOWLESS_NOT_IN_REGISTRY)
+    with lock(root):
+        leases = read_all(root)
+        if lease_of_session(leases, sid)[0] is not None:
+            raise Refused("`prime` changed under you — re-read the board and try again")
+        fresh = read_lease(root, "prime")
+        holder = (fresh or {}).get("session_id")
+        if holder == sid:
+            return "This session already holds the pen."
+        if holder:
+            hnn, _ = lease_of_session(leases, str(holder))
+            if hnn is None and not registry_present():
+                raise Refused(WINDOWLESS_PEN_UNTOLD % root)
+            if prime_holder_live(root, leases, str(holder))[0]:
+                label, peer = _holder_words(leases, str(holder))
+                raise Refused(WINDOWLESS_PEN_HELD % (label, peer, root))
+        entry = {"from": holder, "to": sid, "at": now_stamp(),
+                 "reason": reason or "taken by a session holding no window; previous holder gone", "no_window": True}
+        data = dict(fresh or {})
+        data["history"] = (data.get("history") or []) + [entry]
+        data.pop("logs", None)       # the previous holder's pen-only reservation, as on every take
+        data.update(dict({"session_id": sid, "taken_without_window": sid}, **pen_bound()))
+        try:
+            write_lease(root, "prime", data, exclusive=fresh is None)
+        except FileExistsError:
+            raise Refused("`prime` changed under you — re-read the board and try again")
+    return WINDOWLESS_PEN_TAKEN % (PROMOTE_WAITS_CLAUSE if pending_version(root) else "")
 
 
 # --- The board (§4.3) ---------------------------------------------------------
@@ -4843,7 +4912,19 @@ def main(argv: list) -> int:
     # and releases LOCK_SH itself. list/status do it through the board (Task 8);
     # create and resolve do not (a spawner's create may run hook-adjacent, and
     # resolve is on every target_path).
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase", "split"):
+    recompute = cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase",
+                        "split")
+    if cmd == "prime":
+        # a session holding no window takes the pen running no git at all (the pre-pass runs git in every window's
+        # worktree): one shared read decides whether the caller holds a window
+        psid = session_id_from_env()
+        try:
+            with lock(root, shared=True):
+                recompute = bool(psid) and lease_of_session(read_all(root), psid)[0] is not None
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e)
+            return 1
+    if recompute:
         try:
             recompute_all_changed(root)
         except Refused as e:

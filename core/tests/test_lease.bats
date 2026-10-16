@@ -722,10 +722,10 @@ PY
   [ "$(lease_json prime session_id)" = "sA" ]
 }
 
-@test "prime take from a session that holds no numbered lease is refused (every prime is a window)" {
+@test "prime take from a session that holds no numbered lease and that the registry does not show live is refused: no later session could tell it is live" {
   LS create >/dev/null; CLAUDE_CODE_SESSION_ID=sA LS claim 01 >/dev/null
   CLAUDE_CODE_SESSION_ID=sQ run LS prime take --reason x
-  [ "$status" -ne 0 ]; case "$output" in *"holds no window"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -ne 0 ]; case "$output" in *"not in the session registry"*"cannot take the pen"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -f "$DAEDALUS_HOME/state/leases/prime.json" ]
 }
 
@@ -1899,4 +1899,115 @@ PY
   DAEDALUS_SESSION_ID=sA run python3 "$LL" release 02 --remove --force --operator-said yes
   [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]
+}
+
+# --- The pen for a session holding no window ------------------------------------------------------------------
+
+# win <NN> <session> <pid> — a window bound to a session whose process is <pid> (live while that pid is)
+win() { python3 "$LL" _test-write "$1" "{\"lease\":\"$1\",\"session_id\":\"$2\",\"worktree\":\"worktrees/$1\",\"pid\":$3,\"proc_started\":$(ps_ms "$3")}"; touch "$DAEDALUS_HOME/state/leases/$1.seen"; }
+hist_last() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["history"][-1].get(sys.argv[2]))' "$DAEDALUS_HOME/state/leases/prime.json" "$1"; }
+
+@test "windowless prime take: with no prime.json the session takes the pen — no window made, the history says so, prime.json names it as taken without a window" {
+  pa="$(live_pid)"; registry_entry "$pa" sA interactive cli daedalus-01; win 01 sA "$pa"
+  pw="$(live_pid)"; registry_entry "$pw" sW interactive cli daedalus-xx
+  CLAUDE_CODE_SESSION_ID=sW run LS prime take
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in "This session holds the pen now, with no window: hot.md and \`core/vault-commit.sh\` are yours."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"promote waits"*) echo "nothing is pending: $output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sW ]; [ "$(lease_json prime taken_without_window)" = sW ]
+  [ "$(hist_last no_window)" = True ]
+  [ "$(cd "$DAEDALUS_HOME/state/leases" && ls *.json | tr '\n' ' ')" = "01.json prime.json " ]
+  CLAUDE_CODE_SESSION_ID=sW run LS prime take; [ "$status" -eq 0 ]
+  [ "$output" = "This session already holds the pen." ] || { echo "$output"; return 1; }
+}
+
+@test "windowless prime take over a stale window holder: taken with no reason, the previous holder's pen reservation dropped; while the upgrade is pending it says promote waits" {
+  printf '0.7.4\n' > "$DAEDALUS_HOME/VERSION"
+  pa="$(live_pid)"; win 01 sA "$pa"; kill "$pa"; wait "$pa" 2>/dev/null || true
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[],"logs":{"2026-01-01":3}}'
+  pw="$(live_pid)"; registry_entry "$pw" sW
+  CLAUDE_CODE_SESSION_ID=sW run LS prime take
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"promote waits until the upgrade finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sW ]; [ "$(lease_json prime logs)" = None ]
+  [ "$(hist_last from)" = sA ]; [ "$(hist_last no_window)" = True ]
+  case "$(hist_last reason)" in *"taken by a session holding no window; previous holder gone"*) : ;; *) hist_last reason; return 1 ;; esac
+}
+
+@test "windowless prime take never takes the pen from a live holder — live or quiet window, even with --reason; the refusal names core/lease.sh log, the holder's peer name and the operator's own-shell core/vault-commit.sh" {
+  pa="$(live_pid)"; registry_entry "$pa" sA interactive cli poc-holder; win 01 sA "$pa"
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  pw="$(live_pid)"; registry_entry "$pw" sW
+  for r in "" "--reason the operator said so"; do
+    # shellcheck disable=SC2086
+    CLAUDE_CODE_SESSION_ID=sW run LS prime take ${r:+--reason "the operator said so"}
+    [ "$status" -ne 0 ] || { echo "taken ($r): $output"; return 1; }
+    case "$output" in *"The pen is held by a live session, window 01"*"a session holding no window never takes it from a live holder"*"\`core/lease.sh log\`"*"SendMessage to poc-holder"*"\`cd $DAEDALUS_HOME && core/vault-commit.sh\`"*) : ;; *) echo "$output"; return 1 ;; esac
+    [ "$(lease_json prime session_id)" = sA ]
+  done
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"         # quiet: its process is alive, its heartbeat old
+  [ "$(python3 "$LL" liveness 01)" = quiet ]
+  CLAUDE_CODE_SESSION_ID=sW run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"held by a live session"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sA ]
+}
+
+@test "windowless prime take: a taker the registry does not show live is refused; two terminals are refused; a second windowless session is refused while the first is live, and taken from once the first is gone" {
+  CLAUDE_CODE_SESSION_ID=sGhost run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"not in the session registry, so no later session could tell it is live; it cannot take the pen"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  p1="$(live_pid)"; registry_entry "$p1" sT; p2="$(live_pid)"; registry_entry "$p2" sT
+  CLAUDE_CODE_SESSION_ID=sT run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"open in two terminals at once"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  pw="$(live_pid)"; registry_entry "$pw" sW interactive cli first-one
+  pv="$(live_pid)"; registry_entry "$pv" sV
+  CLAUDE_CODE_SESSION_ID=sW run LS prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  CLAUDE_CODE_SESSION_ID=sV run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"held by a live session, a session holding no window (peer name first-one)"*"SendMessage to first-one"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sW ]
+  kill "$pw"; wait "$pw" 2>/dev/null || true
+  CLAUDE_CODE_SESSION_ID=sV run LS prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sV ]; [ "$(lease_json prime taken_without_window)" = sV ]
+  # the holder came back (a registry entry appears for it): live again, so it is not taken from
+  python3 "$LL" _test-write prime '{"session_id":"sX","bound_at":"2026-01-01T00:00:00","history":[]}'
+  px="$(live_pid)"; registry_entry "$px" sX
+  CLAUDE_CODE_SESSION_ID=sV run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"held by a live session"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "windowless prime take on a build with no session registry: allowed over a stale window, refused over a holder that holds no window — its liveness cannot be told, so it is treated as live" {
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/no-registry"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  python3 "$LL" _test-write 01 '{"lease":"01","session_id":"sA","worktree":"worktrees/01"}'
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  DAEDALUS_SESSION_ID=sW run LS prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sW ]
+  DAEDALUS_SESSION_ID=sV run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"cannot be told whether it is live"*"&& core/vault-commit.sh\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sW ]
+}
+
+@test "a later move of the pen clears taken_without_window: a window's prime take, and first-up at a window's start" {
+  pw="$(live_pid)"; registry_entry "$pw" sW
+  CLAUDE_CODE_SESSION_ID=sW run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime taken_without_window)" = sW ]
+  kill "$pw"; wait "$pw" 2>/dev/null || true
+  pa="$(live_pid)"; registry_entry "$pa" sA; win 01 sA "$pa"
+  CLAUDE_CODE_SESSION_ID=sA run LS prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sA ]; [ "$(lease_json prime taken_without_window)" = None ]
+  python3 "$LL" _test-write prime '{"session_id":"sGone","taken_without_window":"sGone","history":[]}'
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1] + "/core"); import leaselib as ll; from pathlib import Path
+r = Path(sys.argv[1])
+with ll.lock(r):
+    print(ll.first_up(r, "sA"))' "$DAEDALUS_HOME"
+  [ "$output" = True ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sA ]; [ "$(lease_json prime taken_without_window)" = None ]
+}
+
+@test "a window's prime take is unchanged: still refused for a session that holds no window only when a live holder holds the pen; the window path's CAS and reason rules stay" {
+  pa="$(live_pid)"; registry_entry "$pa" sA; win 01 sA "$pa"
+  pb="$(live_pid)"; registry_entry "$pb" sB; win 02 sB "$pb"
+  python3 "$LL" _test-write prime '{"session_id":"sA","bound_at":"2026-01-01T00:00:00","history":[]}'
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take
+  [ "$status" -ne 0 ]; case "$output" in *"window 01"*"--reason"*) : ;; *) echo "$output"; return 1 ;; esac
 }
