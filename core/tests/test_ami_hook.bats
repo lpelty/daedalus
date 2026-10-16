@@ -425,6 +425,40 @@ outcome() {
     "$1" "$2" "$DAEDALUS_HOME" "${3:+,$3}" | python3 "$DAEDALUS_HOME/core/ami-hook.py" outcome
 }
 
+@test "the counters lock under a deadline: held by another process, _Locked(path, deadline) raises LockBusy at the deadline with nothing done; a free lock is taken even past it; without a deadline it waits; ami-hook.py outcome writes its row and returns inside its 2 s wait with the counters missing it" {
+  mkdir -p "$AMI"; touch "$AMI/on"
+  python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close(); time.sleep(float(sys.argv[3]))' "$AMI/.lock" "$BATS_TEST_TMPDIR/held" 4 3>&- &
+  HOLDER=$!; printf '%s\n' "$HOLDER" >> "$BATS_TEST_TMPDIR/live-pids"
+  for _ in $(seq 100); do [ -f "$BATS_TEST_TMPDIR/held" ] && break; sleep 0.05; done
+  run ami_py 'import time
+t0 = time.monotonic()
+try:
+    with a._Locked(a.lock_path(ROOT), t0 + 0.3):
+        print("taken")
+except a.LockBusy:
+    el = time.monotonic() - t0
+    print("busy", 0.3 <= el < 0.5)'
+  [ "$output" = "busy True" ] || { echo "$output"; return 1; }
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run outcome PostToolUse toolu_9 '"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  python3 -c 'import sys, time; el = time.time() - float(sys.argv[1]); assert el < 3.0, el' "$t0"
+  grep -q '"tool_use_id": "toolu_9"' "$AMI/decisions/$(date +%Y-%m-%d).jsonl"
+  [ ! -f "$AMI/session-sA.json" ]
+  run ami_py 'import time
+t0 = time.monotonic()
+with a._Locked(a.lock_path(ROOT)):
+    print("waited", time.monotonic() - t0 > 0.5)'
+  [ "$output" = "waited True" ] || { echo "$output"; return 1; }
+  wait "$HOLDER" 2>/dev/null || true
+  run ami_py 'import time
+with a._Locked(a.lock_path(ROOT), time.monotonic() - 1):
+    print("taken")'
+  [ "$output" = taken ]
+}
+
 @test "outcome: PostToolUse writes ran; interrupted true writes interrupted; PostToolUseFailure writes failed with error_head = the Exit code N line; the sentinel absent writes nothing; a would_ask row for the same tool_use_id followed by failed bumps would_ask_then_failed, a would_shorten one shortened_then_failed, and an ask the operator let run counts as an override" {
   [ -f "$DAEDALUS_HOME/core/ami-hook.py" ] || { echo "core/ami-hook.py is missing"; return 1; }
   # the sentinel absent (and then state/ami absent too): nothing written, nothing printed, exit 0

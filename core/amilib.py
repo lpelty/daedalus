@@ -38,6 +38,7 @@ HEARTBEAT_STALE_SECS = 90          # §5.1 step 4: an older heartbeat means the 
 CONNECT_TIMEOUT_SECS = 0.1         # §5.1 step 7: the port probe (0.03 ms when refused, measured)
 MIN_REMAINING_SECS = 0.3           # §6.0: under this nothing is sent — `budget`
 LOCK_POLL_SECS = 0.01              # §6.5: the ask lock is polled with LOCK_NB every 10 ms
+COUNT_LOCK_SECS = 0.25             # §6.2: the call count waits at most this for .lock, so the question keeps its budget
 OPERATOR_TEXT_CAP = 600            # §5.5: the operator's message, as the calibration capped it
 COMMAND_HEAD_CHARS = 200           # §5.4: the row keeps the first 200 characters of the command
 RECENT_WOULD_ASK = 10              # §5.4: the last ten would-ask command heads
@@ -205,17 +206,39 @@ def _write_json(p: Path, data: dict) -> None:
     os.replace(str(tmp), str(p))
 
 
-class _Locked:
-    """`with _Locked(path):` — an exclusive flock on a lock file for the length of the block."""
+class LockBusy(Exception):
+    """The counters lock stayed held past the caller's deadline; nothing was done under it."""
 
-    def __init__(self, path: Path):
+
+class _Locked:
+    """`with _Locked(path):` — an exclusive flock on a lock file for the length of the block. Without `deadline`
+    it blocks (the switch and the supervisor: no hook budget). With one (absolute, time.monotonic(); a hook's
+    budget) it polls with LOCK_NB every LOCK_POLL_SECS, as the ask lock does, and, still held at the deadline,
+    raises LockBusy with nothing done. A lock that is free is taken even past the deadline."""
+
+    def __init__(self, path: Path, deadline: Optional[float] = None):
         self.path = path
+        self.deadline = deadline
         self.fd = None
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        try:
+            if self.deadline is None:
+                fcntl.flock(self.fd, fcntl.LOCK_EX)
+            else:
+                while True:
+                    try:
+                        fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= self.deadline:
+                            raise LockBusy(str(self.path))
+                        time.sleep(LOCK_POLL_SECS)
+        except BaseException:
+            os.close(self.fd)
+            raise
         return self
 
     def __exit__(self, *exc):
@@ -631,9 +654,10 @@ def _count_row(c: dict, row: dict) -> None:
     _remember_pending(c, row)
 
 
-def append_row(root, sid, row: dict) -> None:
+def append_row(root, sid, row: dict, deadline: Optional[float] = None) -> None:
     """One os.write on an O_APPEND descriptor to the day's log (a row is under 4 KB; concurrent windows append
-    whole rows); then the counters' read-modify-write under .lock, written tmp + rename."""
+    whole rows); then the counters' read-modify-write under .lock, written tmp + rename. With a hook's
+    `deadline` and the lock still held at it, the row stays in the log and the counters miss it."""
     p = decisions_path(root, row.get("t"))
     p.parent.mkdir(parents=True, exist_ok=True)
     data = (json.dumps(row) + "\n").encode("utf-8")
@@ -645,10 +669,13 @@ def append_row(root, sid, row: dict) -> None:
     cp = counters_path(root, sid)
     if cp is None:
         return
-    with _Locked(lock_path(root)):
-        c = _load_counters(root, sid)
-        _count_row(c, row)
-        _write_json(cp, c)
+    try:
+        with _Locked(lock_path(root), deadline):
+            c = _load_counters(root, sid)
+            _count_row(c, row)
+            _write_json(cp, c)
+    except LockBusy:
+        pass
 
 
 def _sha(text: str) -> str:
@@ -667,7 +694,8 @@ def row_base(root, sid, payload: dict, cwd=None) -> dict:
             "state_inputs": None, "edited_since_run": None}
 
 
-def row_unanswered(root, sid, payload: dict, reason: str, question: Optional[str] = None, **extra) -> dict:
+def row_unanswered(root, sid, payload: dict, reason: str, question: Optional[str] = None,
+                   deadline: Optional[float] = None, **extra) -> dict:
     """The row for a question that could not be asked (§6.4's matrix), written now."""
     row = row_base(root, sid, payload)
     row["question"] = question
@@ -675,7 +703,7 @@ def row_unanswered(root, sid, payload: dict, reason: str, question: Optional[str
     if question in QUESTIONS:
         row["threshold"] = QUESTIONS[question][2]
     row.update(extra)
-    append_row(root, sid, row)
+    append_row(root, sid, row, deadline)
     return row
 
 
@@ -683,16 +711,17 @@ def row_unanswered(root, sid, payload: dict, reason: str, question: Optional[str
 SWITCH_ON_WORDS = re.compile(r"(?<![\w-])/?frame-jack\s+on\b", re.IGNORECASE)
 
 
-def record_operator_message(root, sid, prompt, transcript_path, offset) -> None:
+def record_operator_message(root, sid, prompt, transcript_path, offset, deadline: Optional[float] = None) -> None:
     """UserPromptSubmit: with the sentinel present, the operator's words (capped as the calibration capped
     them), the moment, and the transcript's size at that moment go into session-<sid>.json. One stat when
     off; nothing is written then — except a prompt that says `frame-jack on`, which the guard's switch rule
-    (§6.6) must be able to read before the sentinel exists."""
+    (§6.6) must be able to read before the sentinel exists. With the lock still held at the board's `deadline`,
+    LockBusy and nothing recorded: the board is drawn all the same."""
     if not sid:
         return
     if not sentinel_path(root).exists() and not SWITCH_ON_WORDS.search(str(prompt or "")):
         return
-    with _Locked(lock_path(root)):
+    with _Locked(lock_path(root), deadline):
         c = _load_counters(root, sid)
         c["operator"] = {"text": str(prompt or "")[:OPERATOR_TEXT_CAP], "epoch": time.time(),
                          "transcript_offset": int(offset or 0), "transcript_path": str(transcript_path or "")}
@@ -856,7 +885,7 @@ def _certified(root) -> tuple:
     return tuple(q for q in enforce_requested(root) if q in CERTIFIED)
 
 
-def outcome_row(root, sid, payload: dict) -> Optional[dict]:
+def outcome_row(root, sid, payload: dict, deadline: Optional[float] = None) -> Optional[dict]:
     """`core/ami-hook.py outcome` (§5.4, §6.3): with the sentinel present, the real outcome of one Bash call keyed
     on its tool_use_id — `ran` (PostToolUse), `interrupted` (PostToolUse with tool_response.interrupted true),
     `failed` (PostToolUseFailure; error_head is the first line of its error, `Exit code N` for a command that ran
@@ -875,26 +904,30 @@ def outcome_row(root, sid, payload: dict) -> Optional[dict]:
     dur = payload.get("duration_ms")
     row = {"t": time.time(), "session": sid, "tool_use_id": payload.get("tool_use_id"), "outcome": outcome,
            "error_head": error_head, "duration_ms": dur if isinstance(dur, (int, float)) else None}
-    append_row(root, sid, row)
+    append_row(root, sid, row, deadline)
     return row
 
 
-def _warn_once(root, sid, reason) -> Optional[str]:
+def _warn_once(root, sid, reason, deadline: Optional[float] = None) -> Optional[str]:
     """§6.4: the once-per-session sentence for `down` / `supervisor gone` — recorded in session-<sid>.json as
-    `warned: {reason: epoch}`; the sentence the first time, None after. With no session every call warns."""
+    `warned: {reason: epoch}`; the sentence the first time, None after. With no session every call warns; so
+    does one whose lock stayed held past the deadline (said again rather than lost)."""
     sentence = ONCE_SENTENCES.get(reason)
     if sentence is None:
         return None
     if not sid:
         return sentence
-    with _Locked(lock_path(root)):
-        c = _load_counters(root, sid)
-        warned = dict(c.get("warned") or {})
-        if reason in warned:
-            return None
-        warned[reason] = time.time()
-        c["warned"] = warned
-        _write_json(counters_path(root, sid), c)
+    try:
+        with _Locked(lock_path(root), deadline):
+            c = _load_counters(root, sid)
+            warned = dict(c.get("warned") or {})
+            if reason in warned:
+                return None
+            warned[reason] = time.time()
+            c["warned"] = warned
+            _write_json(counters_path(root, sid), c)
+    except LockBusy:
+        pass
     return sentence
 
 
@@ -1022,25 +1055,29 @@ def edited_since(prev: dict, now: dict) -> List[str]:
     return sorted(out)
 
 
-def _bump_calls(root, sid) -> None:
-    """§6.2: `bash_calls_since_run` counts every Bash call the tier sees between two full runs."""
+def _bump_calls(root, sid, deadline: Optional[float] = None) -> None:
+    """§6.2: `bash_calls_since_run` counts every Bash call the tier sees between two full runs (a call whose
+    lock stayed held past the deadline goes uncounted)."""
     if not sid:
         return
-    with _Locked(lock_path(root)):
-        c = _load_counters(root, sid)
-        suite = dict(c.get("suite") or {})
-        suite["bash_calls_since_run"] = int(suite.get("bash_calls_since_run") or 0) + 1
-        c["suite"] = suite
-        _write_json(counters_path(root, sid), c)
+    try:
+        with _Locked(lock_path(root), deadline):
+            c = _load_counters(root, sid)
+            suite = dict(c.get("suite") or {})
+            suite["bash_calls_since_run"] = int(suite.get("bash_calls_since_run") or 0) + 1
+            c["suite"] = suite
+            _write_json(counters_path(root, sid), c)
+    except LockBusy:
+        pass
 
 
-def _suite_record(root, sid, cmd, cwd, tree, snapshot) -> Optional[dict]:
+def _suite_record(root, sid, cmd, cwd, tree, snapshot, deadline: Optional[float] = None) -> Optional[dict]:
     """The full run goes: it becomes the session's last run (its snapshot, or None when none could be taken),
     the call count resets, the cwd's toplevel is cached. Returns what was there before — the previous run and
-    the calls since it."""
+    the calls since it. LockBusy when the lock stayed held past the deadline: nothing recorded."""
     if not sid:
         return None
-    with _Locked(lock_path(root)):
+    with _Locked(lock_path(root), deadline):
         c = _load_counters(root, sid)
         suite = dict(c.get("suite") or {})
         before = {"last_run": suite.get("last_run"), "calls": int(suite.get("bash_calls_since_run") or 0)}
@@ -1059,21 +1096,21 @@ def _suite_record(root, sid, cmd, cwd, tree, snapshot) -> Optional[dict]:
     return before
 
 
-def _not_on(root, sid, payload, question, d, extra):
+def _not_on(root, sid, payload, question, d, extra, deadline=None):
     """§6.4: the switch reads present-but-not-on — a row with the reason, and the once sentence for the two
     states that need the operator's hand."""
     reason = d.get("reason") or d["state"]
-    row_unanswered(root, sid, payload, reason, question, **extra)
+    row_unanswered(root, sid, payload, reason, question, deadline, **extra)
     if reason in WARN_REASONS:
-        sentence = _warn_once(root, sid, reason)
+        sentence = _warn_once(root, sid, reason, deadline)
         if sentence:
             return {"context": sentence, "system": sentence}
     return None
 
 
-def _unanswered_out(root, sid, r):
+def _unanswered_out(root, sid, r, deadline=None):
     if r.reason in WARN_REASONS:
-        sentence = _warn_once(root, sid, r.reason)
+        sentence = _warn_once(root, sid, r.reason, deadline)
         if sentence:
             return {"context": sentence, "system": sentence}
     return None
@@ -1083,22 +1120,26 @@ def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
     """§6.2 in shadow: the tree, the snapshot, the first run as the baseline, the question on every later full
     run with the files edited since the previous one; the full run always goes."""
     if d["state"] != "on":
-        return _not_on(root, sid, payload, "suite", d, extra)
+        return _not_on(root, sid, payload, "suite", d, extra, deadline)
     if deadline - time.monotonic() < MIN_REMAINING_SECS:
-        row_unanswered(root, sid, payload, "budget", "suite", **extra)
+        row_unanswered(root, sid, payload, "budget", "suite", deadline, **extra)
         return None
     tree = suite_tree(root, cwd, sid, deadline)
     if isinstance(tree, Unanswered):
-        row_unanswered(root, sid, payload, tree.reason, "suite", **extra)
+        row_unanswered(root, sid, payload, tree.reason, "suite", deadline, **extra)
         return None
     extra = dict(extra, tree=str(tree))
     snap = suite_snapshot(tree, deadline)
-    if isinstance(snap, Unanswered):
-        if snap.reason == "too many files":
-            _suite_record(root, sid, cmd, cwd, tree, None)
-        row_unanswered(root, sid, payload, snap.reason, "suite", **extra)
+    try:
+        if isinstance(snap, Unanswered):
+            if snap.reason == "too many files":
+                _suite_record(root, sid, cmd, cwd, tree, None, deadline)
+            row_unanswered(root, sid, payload, snap.reason, "suite", deadline, **extra)
+            return None
+        before = _suite_record(root, sid, cmd, cwd, tree, snap, deadline) or {}
+    except LockBusy:
+        row_unanswered(root, sid, payload, "busy", "suite", deadline, **extra)
         return None
-    before = _suite_record(root, sid, cmd, cwd, tree, snap) or {}
     prev = before.get("last_run") or {}
     if prev.get("tree") != str(tree) or not isinstance(prev.get("snapshot"), dict):
         return None                                      # the first full run in this tree: the baseline, not asked
@@ -1121,8 +1162,8 @@ def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
     row["edited_since_run"] = edited[:EDITED_CAP]
     if isinstance(r, Unanswered):
         row["unanswered"] = r.reason
-        append_row(root, sid, row)
-        return _unanswered_out(root, sid, r)
+        append_row(root, sid, row, deadline)
+        return _unanswered_out(root, sid, r, deadline)
     dec = decide("suite", r.p, certified=_certified(root), edited=edited)
     row["p"] = r.p
     row["would_shorten"] = dec["would_shorten"]
@@ -1132,7 +1173,7 @@ def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
     row["queued_ms"] = r.queued_ms
     row["input_tokens"] = r.input_tokens
     row["state_truncated"] = state_truncated(r.input_tokens, r.max_length) if r.max_length else False
-    append_row(root, sid, row)
+    append_row(root, sid, row, deadline)
     return None                                          # §7: the full run goes (CERTIFIED is empty)
 
 
@@ -1157,14 +1198,14 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
         if not asked["suite"]:
             return None                                  # ami.ask_suite false: no snapshot, no inference, no row
         return _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline)
-    if asked["suite"]:
-        _bump_calls(root, sid)                           # §6.2: every other Bash call counts toward the next suite run
+    if asked["suite"]:                                   # §6.2: every other Bash call counts toward the next suite run
+        _bump_calls(root, sid, min(deadline, time.monotonic() + COUNT_LOCK_SECS))
     if question == "none" or not asked.get(question, False):
         return None                                      # §6.1 none, or ami.ask_destructive false: no inference, no row
     if state != "on":
-        return _not_on(root, sid, payload, question, d, extra)
+        return _not_on(root, sid, payload, question, d, extra, deadline)
     if deadline - time.monotonic() < MIN_REMAINING_SECS:
-        row_unanswered(root, sid, payload, "budget", question, **extra)
+        row_unanswered(root, sid, payload, "budget", question, deadline, **extra)
         return None
     inputs = build_inputs(root, sid, payload, cwd)
     state_text = state_destructive(inputs)
@@ -1180,8 +1221,8 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     row["state_inputs"] = inputs.get("state_inputs")
     if isinstance(r, Unanswered):
         row["unanswered"] = r.reason
-        append_row(root, sid, row)
-        return _unanswered_out(root, sid, r)
+        append_row(root, sid, row, deadline)
+        return _unanswered_out(root, sid, r, deadline)
     dec = decide(question, r.p, certified=_certified(root))
     row["p"] = r.p
     row["would_ask"] = dec["would_ask"]
@@ -1191,7 +1232,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     row["queued_ms"] = r.queued_ms
     row["input_tokens"] = r.input_tokens
     row["state_truncated"] = state_truncated(r.input_tokens, r.max_length) if r.max_length else False
-    append_row(root, sid, row)
+    append_row(root, sid, row, deadline)
     return None                                          # §7: nothing acts in this release (CERTIFIED is empty)
 
 

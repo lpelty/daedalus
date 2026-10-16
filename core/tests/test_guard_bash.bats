@@ -1638,6 +1638,41 @@ print(eval(sys.argv[2]))' "${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" "$1"
   [ "$(fake_requests)" -eq 0 ]
 }
 
+hold_ami_lock() {  # hold_ami_lock <secs> — another process holds state/ami/.lock (an `on` stopping an orphaned serve); sets HOLDER
+  mkdir -p "$(AMI_DIR_OF)"
+  python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close(); time.sleep(float(sys.argv[3]))' "$(AMI_DIR_OF)/.lock" "$BATS_TEST_TMPDIR/held" "$1" 3>&- &
+  HOLDER=$!; printf '%s\n' "$HOLDER" >> "$BATS_TEST_TMPDIR/live-pids"
+  for _ in $(seq 100); do [ -f "$BATS_TEST_TMPDIR/held" ] && return 0; sleep 0.05; done
+  return 1
+}
+
+@test "the AMI's counters lock held by another process does not hold the hooks past their budgets: ls and rm -rf x through the guard under AMI_TEST_DEADLINE_SECS=1 and 1.5 return inside them, the count's wait short enough that the rm is still asked (the rm's row still in the log, its count missed), a UserPromptSubmit through lease-board.py returns well inside 5 s and says the message was not recorded; free again, the same prompt is recorded" {
+  ami_on_with_fake FAKE_P=0.2
+  hold_ami_lock 8
+  t0="$(secs)"
+  AMI_TEST_DEADLINE_SECS=1 run guard_ami sA 'ls'; [ "$status" -eq 0 ]; allowed
+  AMI_TEST_DEADLINE_SECS=1.5 run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
+  t1="$(secs)"
+  python3 -c 'import sys; el=float(sys.argv[2])-float(sys.argv[1]); assert el < 3.7, el' "$t0" "$t1"
+  run ami_row 1 '(r["question"], r["p"], r["unanswered"])'
+  [ "$output" = "('destructive', 0.2, None)" ] || { echo "$output"; return 1; }
+  [ ! -f "$(AMI_DIR_OF)/session-sA.json" ]                                            # the counters were never written
+  mkdir -p "$BATS_TEST_TMPDIR/transcripts"
+  t0="$(secs)"
+  run bash -c 'printf "%s" "$1" | python3 "$2/core/lease-board.py"' _ \
+    "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"sA\",\"transcript_path\":\"$BATS_TEST_TMPDIR/transcripts/sA.jsonl\",\"prompt\":\"/frame-jack off\"}" \
+    "$DAEDALUS_HOME"
+  t1="$(secs)"
+  python3 -c 'import sys; el=float(sys.argv[2])-float(sys.argv[1]); assert el < 2.5, el' "$t0" "$t1"
+  said "the AMI's lock was busy, so this message was not recorded for it"
+  [ ! -f "$(AMI_DIR_OF)/session-sA.json" ]
+  kill "$HOLDER" 2>/dev/null || true; wait "$HOLDER" 2>/dev/null || true
+  prompt_as sA "/frame-jack off"
+  run ami_counters sA 'c["operator"]["text"]'; [ "$output" = "/frame-jack off" ]
+}
+
 # ---------------------------------------------------------------------------------------------------------
 # The observer and its subject (frame-jack spec §6.6, §7; §13.2 items 13–14): two additive deterministic rules,
 # and no runtime seam that lets the live hook act.
@@ -1665,7 +1700,7 @@ AMI_STATE_SENTENCE="state/ami/ is the AMI's record; /frame-jack off is the switc
   run guard_ami sA 'python3 core/frame-jack.py status'; allowed
   # the switch's own verbs: only after the operator said so
   run guard_ami sA 'python3 core/frame-jack.py off'; denied
-  said "the operator has not said /frame-jack off in this session; the AMI stays on"
+  said "the operator has not said /frame-jack off in this session; the AMI stays on until they type /frame-jack off"
   run guard_ami sA 'cd core && ./frame-jack.py off'; denied
   run guard_ami sA 'bash -c "python3 core/frame-jack.py off"'; denied
   prompt_as sA "please do the thing"
@@ -1679,7 +1714,10 @@ AMI_STATE_SENTENCE="state/ami/ is the AMI's record; /frame-jack off is the switc
   rm -f "$(AMI_DIR_OF)/on"
   prompt_as sC "something else"
   run guard_ami sC 'python3 core/frame-jack.py on'; denied
-  said "the operator has not said /frame-jack on in this session; the AMI stays off"
+  said "the operator has not said /frame-jack on in this session; the AMI stays off until they type /frame-jack on"
+  prompt_as sC "turn the AMI on"                                                       # other words: the stop names the phrase that works
+  run guard_ami sC 'python3 core/frame-jack.py on'; denied
+  said "the AMI stays off until they type /frame-jack on"
   prompt_as sC "frame-jack on"
   run guard_ami sC 'python3 core/frame-jack.py on'; allowed
   rm -rf "$(AMI_DIR_OF)"

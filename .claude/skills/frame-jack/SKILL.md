@@ -1,6 +1,6 @@
 ---
 name: frame-jack
-description: Switch the AMI (Artificial Machine Intelligence, the small local decision model) on or off, or read its status. Use when the operator says "frame-jack on", "frame-jack off", "frame-jack status", "/frame-jack", "switch the AMI on/off", or asks whether the AMI is running.
+description: Switch the AMI (Artificial Machine Intelligence, the small local decision model) on or off, or read its status. Use when the operator says "frame-jack on", "frame-jack off", "frame-jack status" or "/frame-jack", or asks whether the AMI is running.
 user-invocable: true
 ---
 
@@ -29,4 +29,6 @@ question, and the band above the prompt shows when it does.
 
 - Do not flip the switch any other way. The command above is the whole mechanism; the
   files it writes are its record and are not yours to edit.
-- Do not run `on` or `off` unless the operator asked for it in this session.
+- Do not run `on` or `off` unless the operator's own message in this session said
+  `frame-jack on` (or `off`); the guard refuses it otherwise. When they ask in other words
+  ("turn the AMI on"), ask them to type `/frame-jack on`.

@@ -269,7 +269,7 @@ HOME_TREES = ("target", "worktrees", "state/promote")
 # interpreter or a shell reads, and hold the switch's two verbs to the operator's recorded words.
 AMI_STATE = "state/ami"
 AMI_STATE_DENY = "state/ami/ is the AMI's record; /frame-jack off is the switch"
-SWITCH_DENY = "the operator has not said /frame-jack %s in this session; the AMI stays %s"
+SWITCH_DENY = "the operator has not said /frame-jack %s in this session; the AMI stays %s until they type /frame-jack %s"
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 INTERPRETERS = {"python3", "python", "perl", "ruby", "node"}
 PREFIX_CMDS = {"command", "exec", "nohup", "time"}
@@ -2650,7 +2650,8 @@ def ami_body_write(rhead: str, body: str, here: Path, g: G) -> bool:
 def switch_verb_denied(seg: List[str], g: G) -> Optional[str]:
     """§6.6: `frame-jack.py on|off` from the Bash tool runs only when the operator's last recorded message in this
     session (amilib's session file, operator.text) says `frame-jack on` / `frame-jack off`, with or without the
-    slash, in any case. Other verbs (status, --doctor) are free."""
+    slash, in any case — those words only: "turn the AMI on" is refused with the phrase that works. Other verbs
+    (status, --doctor) are free."""
     if not any("frame-jack.py" in t for t in seg):
         return None
     import amilib
@@ -2676,7 +2677,7 @@ def switch_verb_denied(seg: List[str], g: G) -> Optional[str]:
         text = str((c.get("operator") or {}).get("text") or "")
     if re.search(r"(?<![\w-])/?frame-jack\s+%s\b" % verb, text, re.IGNORECASE):
         return None
-    return SWITCH_DENY % (verb, "on" if verb == "off" else "off")
+    return SWITCH_DENY % (verb, "on" if verb == "off" else "off", verb)
 
 
 CD_FLAGS = "LPe@"      # bash's cd options (zsh's -q and -s too): none moves the directory elsewhere
@@ -3061,16 +3062,17 @@ def main() -> int:
     # sentence of §6.4. An exception inside it is a row and a stderr line; the guard's decision stands.
     ami_out = None
     if not reason and not os.environ.get("DIRECT_CALL_ID"):
+        ami_deadline = started + ami_deadline_secs()     # the counters lock is waited on only until it, too
         try:
             import amilib
             ami_out = amilib.before_bash(root, sid, payload, cmd, cwd,
                                          guard="allow" if not contexts else contexts[0][:80],
-                                         deadline=started + ami_deadline_secs(),
+                                         deadline=ami_deadline,
                                          segments=lambda: segments_of(cmd, cwd, g))
         except Exception as e:
             try:
                 amilib.row_unanswered(root, sid, payload, "error %s" % type(e).__name__, "destructive",
-                                      guard="allow" if not contexts else contexts[0][:80], cwd=str(cwd))
+                                      deadline=ami_deadline, guard="allow" if not contexts else contexts[0][:80], cwd=str(cwd))
             except Exception:
                 pass
             print("daedalus: the AMI tier could not run (%r); the command goes on as the guard decided." % e,

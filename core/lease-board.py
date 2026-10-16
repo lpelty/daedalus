@@ -37,6 +37,7 @@ import leaselib as ll  # noqa: E402
 CHECK_SECS = 2.5        # the swept-window checks, both lock waits and the reader's changed set
 RENDER_SECS = 3.5       # the render's `git log -1` per repo of each non-stale window
 BACKSTOP_SECS = 4       # whole seconds (signal.alarm); 1 s under Claude Code's 5 s kill
+AMI_RECORD_SECS = 0.5   # frame-jack's operator record waits at most this for the AMI's lock, before the alarm is armed
 BOARD_OVERRUN = "The lease board was not drawn in time at this prompt; run `core/lease.sh list` to see it now"
 
 
@@ -72,9 +73,14 @@ def main() -> int:
             try:
                 import amilib
                 amilib.record_operator_message(v.ROOT, str(payload.get("session_id") or ""), payload["prompt"],
-                                               payload["transcript_path"], row.get("size"))
+                                               payload["transcript_path"], row.get("size"),
+                                               deadline=time.monotonic() + AMI_RECORD_SECS)
             except Exception as e:
-                print("daedalus: the operator's message was not recorded for the AMI: %r" % e, file=sys.stderr)
+                if type(e).__name__ == "LockBusy":     # bounded (AMI_RECORD_SECS): the board is drawn all the same
+                    print("daedalus: the AMI's lock was busy, so this message was not recorded for it; "
+                          "say /frame-jack on or off again if that is what it asked", file=sys.stderr)
+                else:
+                    print("daedalus: the operator's message was not recorded for the AMI: %r" % e, file=sys.stderr)
     sid = v.export_session(payload)
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     signal.signal(signal.SIGALRM, _on_alarm)

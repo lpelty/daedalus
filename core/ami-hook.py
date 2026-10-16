@@ -18,9 +18,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+LOCK_SECS = 2.0         # the counters lock is waited on at most this long (the hook's timeout is 5 s); the row is written regardless
 
 
 def root_dir() -> Path:
@@ -48,7 +50,8 @@ def main(argv) -> int:
     try:
         sys.path.insert(0, str(HERE))
         import amilib
-        amilib.outcome_row(root, str(payload.get("session_id") or "") or None, payload)
+        amilib.outcome_row(root, str(payload.get("session_id") or "") or None, payload,
+                           deadline=time.monotonic() + LOCK_SECS)
     except Exception as e:
         print("daedalus: the AMI outcome row was not written (%r)." % e, file=sys.stderr)
     return 0

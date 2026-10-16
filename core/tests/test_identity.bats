@@ -766,13 +766,14 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
     case "$rsec" in *"$s"*) : ;; *) echo "README's Frame-jack section lacks: $s"; return 1 ;; esac
   done
   # CLAUDE.md: the two operator rows, after "Pick it up", and the paragraph under "Gates and evidence"
-  grep -qF '| "Turn the AMI on / off"' "$H/CLAUDE.md" || { echo "CLAUDE.md lacks the on/off row"; return 1; }
+  grep -qF '| "/frame-jack on" / "frame-jack off"' "$H/CLAUDE.md" || { echo "CLAUDE.md lacks the on/off row"; return 1; }
   grep -qF '| "Is frame-jack on?"' "$H/CLAUDE.md" || { echo "CLAUDE.md lacks the is-it-on row"; return 1; }
   pk="$(grep -n '^| "Pick it up"' "$H/CLAUDE.md" | cut -d: -f1)"
-  ro="$(grep -n '^| "Turn the AMI on / off"' "$H/CLAUDE.md" | cut -d: -f1)"
+  ro="$(grep -n '^| "/frame-jack on" / "frame-jack off"' "$H/CLAUDE.md" | cut -d: -f1)"
   [ "$ro" -gt "$pk" ] || { echo "the AMI rows are not after Pick it up"; return 1; }
-  rows="$(grep -E '^\| "(Turn the AMI on / off|Is frame-jack on\?)"' "$H/CLAUDE.md")"
-  for s in 'python3 core/frame-jack.py on' 'python3 core/frame-jack.py off' 'word for word' 'status'; do
+  rows="$(grep -E '^\| "(/frame-jack on|Is frame-jack on\?)"' "$H/CLAUDE.md")"
+  for s in 'python3 core/frame-jack.py on' 'python3 core/frame-jack.py off' 'word for word' 'status' \
+           'ask them to type `/frame-jack on`'; do
     case "$rows" in *"$s"*) : ;; *) echo "the CLAUDE.md rows lack: $s"; return 1 ;; esac
   done
   gsec="$(awk '/^## Gates and evidence/{f=1; next} f&&/^## /{exit} f' "$H/CLAUDE.md" | tr '\n' ' ' | tr -s ' ')"
