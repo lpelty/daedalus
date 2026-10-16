@@ -170,14 +170,15 @@ trunk_sha() { git -C "$1" rev-parse "refs/heads/${2:-main}"; }
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }
 
-@test "update: the release's address is matched in its https, ssh and scp forms, with or without .git and a trailing slash, host case aside" {
+@test "update: the release's address is matched in its https, ssh and scp forms, with or without .git and a trailing slash, host case and a GitHub path's case aside" {
   run python3 - "$REPO/core" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 import update as u
 want = u.normalise_address(u.RELEASE_ADDRESS)
 for a in ("https://github.com/lpelty/daedalus.git", "https://GitHub.com/lpelty/daedalus/", "ssh://git@github.com/lpelty/daedalus.git",
-          "git@github.com:lpelty/daedalus.git", "github.com/lpelty/daedalus", "http://github.com/lpelty/daedalus"):
+          "git@github.com:lpelty/daedalus.git", "github.com/lpelty/daedalus", "http://github.com/lpelty/daedalus",
+          "https://github.com/LPelty/Daedalus.git", "git@GitHub.com:LPELTY/daedalus"):
     assert u.normalise_address(a) == want, a
 # the same account's fork, derived from the constant (a sibling repository whose name only starts the same)
 for a in ("https://github.com/someone/daedalus.git", "git@github.com:" + u.RELEASE_ADDRESS.split("/", 1)[1] + "-fork.git",
@@ -696,4 +697,65 @@ json.dump({"autoMode": {"allow": ["Editing CLAUDE.md in the Daedalus home at %s 
 PY
   run python3 "$H/core/update.py" --doctor --home "$H" </dev/null
   case "$output" in *"NOTE     brief: ~/.claude/settings.json's autoMode.allow names CLAUDE.md in this home; reword it to CLAUDE.local.md (README, \"Letting Daedalus edit its own brief\")"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "migration restore: a backup that fails (at the branch commit, then at the copies) changes nothing — the dirty CLAUDE.md and SOUL.md stay as they were, and no backup is named or left" {
+  printf '\nA line this home appended.\n' >> "$H/CLAUDE.md"
+  printf '\n## A journal entry\n' >> "$H/SOUL.md"
+  claude="$(shasum < "$H/CLAUDE.md")"; soul="$(shasum < "$H/SOUL.md")"; orig="$(git -C "$H" rev-parse HEAD)"
+  real="$(command -v git)"; mkdir -p "$B/bin"
+  printf '#!/bin/bash\ncase " $* " in *" commit-tree "*) echo "fatal: injected commit-tree failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' \
+    "$real" > "$B/bin/git"
+  chmod +x "$B/bin/git"
+  PATH="$B/bin:$PATH" run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ]
+  case "$output" in "Not updating: "*"injected commit-tree failure"*"the backup could not be made, so nothing in this home was changed"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"local/before-update-"*|*"update-backups"*) echo "$output"; return 1 ;; esac
+  [ -z "$(git -C "$H" for-each-ref refs/heads/local/)" ]
+  [ ! -e "$H/state/update-backups" ] || [ -z "$(ls -A "$H/state/update-backups")" ]
+  [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
+  [ "$(shasum < "$H/CLAUDE.md")" = "$claude" ] && [ "$(shasum < "$H/SOUL.md")" = "$soul" ]
+  [ ! -e "$H/CLAUDE.local.md" ]
+  # the copies: state/update-backups cannot be a directory
+  rm -rf "$H/state/update-backups"; : > "$H/state/update-backups"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updating: "*"the backup could not be made, so nothing in this home was changed"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"local/before-update-"*) echo "$output"; return 1 ;; esac
+  [ -z "$(git -C "$H" for-each-ref refs/heads/local/)" ]
+  [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
+  [ "$(shasum < "$H/CLAUDE.md")" = "$claude" ] && [ "$(shasum < "$H/SOUL.md")" = "$soul" ]
+}
+
+@test "migration brief: a release line between two local lines (a table separator) stays in the moved passage; a longer release run inside a local passage is reported as a split" {
+  python3 - "$H/CLAUDE.md" <<'PY'
+import sys
+p = sys.argv[1]
+text = open(p).read()
+heads = [l for l in text.split("\n") if l.startswith("## ")]
+add = ("\n| Local column | Local value |\n|---|---|\n| local row | 1 |\n"
+       "\nLocal passage start.\n|---|---|---|\n|---|---|\n" + heads[0] + "\nLocal passage end.\n")
+open(p, "w").write(text.rstrip("\n") + "\n" + add)
+PY
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  python3 - "$H/CLAUDE.local.md" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+assert "| Local column | Local value |\n|---|---|\n| local row | 1 |" in t, t
+PY
+  grep -qx 'Local passage start.' "$H/CLAUDE.local.md"
+  grep -qx 'Local passage end.' "$H/CLAUDE.local.md"
+  case "$output" in *"CLAUDE.md: 1 local passage held lines a release's brief also has"*"split there"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "migration refused: an ignored file at a path the release adds is refused, naming it, and nothing is changed" {
+  printf 'NEXT-RELEASE.md\n' >> "$H/.git/info/exclude"
+  printf 'mine\n' > "$H/NEXT-RELEASE.md"
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updating: NEXT-RELEASE.md is untracked here and the release adds it"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }

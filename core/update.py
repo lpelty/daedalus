@@ -148,7 +148,7 @@ def config_value(home: Path, dotted: str) -> Optional[str]:
 # --- the release's address (Decisions 14, 20) ------------------------------------------------------------------------
 
 def normalise_address(url: str) -> str:
-    """An address in one form for comparing: host (lower case) and path, without the scheme, the user, a port, a
+    """An address in one form for comparing: host (lower case) and path (lower case too on GitHub), without the scheme, the user, a port, a
     trailing .git or slash — so https://, ssh://git@, git@host: and a bare host/path name one repository alike.
     A local path stays a path (file:// dropped), normalised the same way at its end."""
     s = (url or "").strip()
@@ -168,7 +168,10 @@ def normalise_address(url: str) -> str:
         path = path[:-4].rstrip("/")
     if not host:
         return os.path.normpath(path) if path else ""
-    return host.lower() + "/" + path.lstrip("/")
+    host = host.lower()
+    if host in ("github.com", "www.github.com"):     # GitHub names owner and repository without regard to case
+        host, path = "github.com", path.lower()
+    return host + "/" + path.lstrip("/")
 
 
 def remote_problem(repo: Path, remote: str) -> Optional[str]:
@@ -500,7 +503,15 @@ def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[
     code, out, err = git(home, "ls-files", "--others", "--exclude-standard", "-z")
     if code != 0:
         raise Unmovable("git could not list untracked files (%s)" % _last(err))
-    untracked = sorted(p for p in out.split("\0") if p and p in tt)
+    untracked = {p for p in out.split("\0") if p and p in tt}
+    # an ignored file at a path the release adds is as untracked as any other: the reset or the fast-forward
+    # would write over it, and no backup holds it
+    code, out, err = git(home, "ls-files", "-z")
+    if code != 0:
+        raise Unmovable("git could not list tracked files (%s)" % _last(err))
+    indexed = set(p for p in out.split("\0") if p)
+    untracked |= {p for p in tt if p not in th and p not in indexed and os.path.lexists(str(home / p))}
+    untracked = sorted(untracked)
     dirty = [p for p in changed if wt.get(p, ZERO) != th.get(p, ZERO)]
     return {"head": th, "target": tt, "base": tb, "changed": changed, "wt": wt, "local": local, "pinned": pinned,
             "untracked": untracked, "dirty": dirty}
@@ -674,8 +685,32 @@ def _heading(lines: List[str], i: int) -> str:
     return "the top of CLAUDE.md"
 
 
-def _local_runs(lines: List[str], known: Set[str]) -> List[List[str]]:
-    """The contiguous runs of lines no release ever had (blank lines join a run; a release's line ends it)."""
+BRIDGE = 2     # at most this many release lines between two local lines stay in the passage (a rule, a separator)
+
+
+def _local_runs(lines: List[str], known: Set[str], splits: Optional[List[int]] = None) -> List[List[str]]:
+    """The contiguous runs of lines no release ever had (blank lines join a run; a release's line ends it). Up to
+    BRIDGE release lines with local lines on both sides (a '---' rule, a table separator, a common heading) stay in
+    the run; a longer such stretch splits it, and each split is counted in `splits`."""
+    rel = [bool(ln.strip()) and ln.rstrip() in known for ln in lines]
+    keep = [False] * len(lines)
+    i = 0
+    while i < len(lines):
+        if not rel[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and (rel[j] or not lines[j].strip()):
+            j += 1
+        before = any(lines[k].strip() and not rel[k] for k in range(i))
+        after = j < len(lines)
+        if before and after:
+            if sum(rel[i:j]) <= BRIDGE:
+                for k in range(i, j):
+                    keep[k] = True
+            elif splits is not None:
+                splits.append(1)
+        i = j
     runs: List[List[str]] = []
     cur: List[str] = []
 
@@ -687,8 +722,8 @@ def _local_runs(lines: List[str], known: Set[str]) -> List[List[str]]:
         if cur:
             runs.append(list(cur))
         cur.clear()
-    for ln in lines:
-        if ln.strip() and ln.rstrip() in known:
+    for ln, r, k in zip(lines, rel, keep):
+        if r and not k:
             flush()
         else:
             cur.append(ln)
@@ -707,10 +742,11 @@ def analyse_brief(base: str, wt: str, target: str, versions: List[str], bdir: st
     blocks: List[Tuple[str, List[str]]] = []
     reworded: List[str] = []
     removed = 0
+    splits: List[int] = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, b, w, autojunk=False).get_opcodes():
         if tag == "equal":
             continue
-        runs = _local_runs(w[j1:j2], known)
+        runs = _local_runs(w[j1:j2], known, splits)
         heading = _heading(b, i1)
         if tag == "replace" and runs:
             reworded.append(heading)
@@ -724,6 +760,11 @@ def analyse_brief(base: str, wt: str, target: str, versions: List[str], bdir: st
         reports.append("CLAUDE.md: the deployment had reworded %d passage%s of the release's brief, under %s; the "
                        "release's wording is back; the reworded text is in %s/CLAUDE.md — move what still applies "
                        "into CLAUDE.local.md" % (len(reworded), "" if len(reworded) == 1 else "s", where, bdir))
+    if splits:
+        reports.append("CLAUDE.md: %d local passage%s held lines a release's brief also has, so %s split there in "
+                       "CLAUDE.local.md without them; the whole passage is in %s/CLAUDE.md"
+                       % (len(splits), "" if len(splits) == 1 else "s", "it is" if len(splits) == 1 else "they are",
+                          bdir))
     if removed:
         reports.append("CLAUDE.md: the deployment had removed %d line%s of the release's brief; they are back; the "
                        "old text is in %s/CLAUDE.md" % (removed, "" if removed == 1 else "s", bdir))
@@ -849,8 +890,10 @@ def restore(home: Path, orig_head: str, branch: str, bdir: Path, moved_before_me
             problems.append("%s (%s)" % (what, _last(res[2] or res[1])))
             return False
         return True
-    step(git(home, "reset", "--quiet", "--hard", orig_head, timeout=600), "git reset to the original HEAD")
-    if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0:
+    if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] != 0:
+        # without the branch nothing could put the working tree's edits back after a reset: leave the files alone
+        problems.append("the tracked files, left as they are because the backup branch %s does not exist" % branch)
+    elif step(git(home, "reset", "--quiet", "--hard", orig_head, timeout=600), "git reset to the original HEAD"):
         if step(git(home, "checkout", branch, "--", ".", timeout=600), "the original files from the backup branch"):
             for p in _names(git(home, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", orig_head,
                                 branch)):
@@ -953,6 +996,14 @@ def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
     try:
         try:
             make_backup(home, head, branch, bdir, stamp)
+        except (MoveFailed, OSError) as e:
+            # nothing in the home has been touched yet: no reset (it would wipe the uncommitted edits the backup
+            # was for), and no half-made backup left to be mistaken for a whole one
+            if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0:
+                git(home, "branch", "-D", branch)
+            shutil.rmtree(str(bdir), ignore_errors=True)
+            raise Refuse("Not updating: %s; the backup could not be made, so nothing in this home was changed." % e)
+        try:
             if soul_release:
                 _write(bdir / "SOUL.release.md", at(JOURNAL, tt) or "")
             if local_settings is not None:
@@ -971,11 +1022,14 @@ def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
             set_tracking(home, branch_name, remote, trunk)
         except (MoveFailed, OSError, Unmovable) as e:
             problems = restore(home, head, branch, bdir, moved_before_merge)
+            have = [w for w, ok in ((branch, git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0),
+                                    (bdir_rel + "/", bdir.is_dir())) if ok]
             back = ("this home is back as it was (HEAD %s, its files and its local-layer files restored%s)"
                     % (head[:7], "; changes that were staged come back unstaged" if staged else ""))
             if problems:
                 back = "restoring this home also failed for %s — put those back from the backup" % "; ".join(problems)
-            raise Refuse("Not updating: %s; %s; the backup is at %s and %s/." % (e, back, branch, bdir_rel))
+            where = ("the backup is at %s" % " and ".join(have)) if have else "no backup of this home survives"
+            raise Refuse("Not updating: %s; %s; %s." % (e, back, where))
     finally:
         for s, h in old.items():
             signal.signal(s, h)

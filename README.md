@@ -137,8 +137,9 @@ into the local layer (see "The local layer"):
 
 First it keeps a backup: the branch `local/before-update-<stamp>` and copies
 under `state/update-backups/<stamp>/`. Then it resets the tracked files to the
-release. SOUL.md, the journal, keeps the deployment's copy. A failure in that
-step puts the home back as it was. Then it runs the upgrade at once, then
+release. SOUL.md, the journal, keeps the deployment's copy. If the backup
+itself fails, it stops before changing anything. A failure after the backup
+puts the home back from it. Then it runs the upgrade at once, then
 doctor, and prints the one line, naming the backup when it made one. Network
 failure, or anything unsafe, ends with one sentence that says nothing in the
 home was changed.
