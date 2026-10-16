@@ -947,3 +947,17 @@ print(len(u.deployment_paths(home)))'
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import update, distcheck; assert update.DIST_PATHS == distcheck.DIST_PATHS, (update.DIST_PATHS, distcheck.DIST_PATHS)' "$REPO/core"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+@test "rollback: python3 core/upgrade.py --rollback in a home that tracks its vault refuses in one line before anything changes — checking out v0.6.1 would take the vault out of the working tree" {
+  older_release; tracked_vault_home
+  run upd update; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  before="$(listing)"
+  for dry in "" --dry-run; do
+    # shellcheck disable=SC2086
+    run env PYTHONDONTWRITEBYTECODE=1 DAEDALUS_HOME="$H" python3 "$H/core/upgrade.py" --rollback $dry </dev/null
+    [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+    [ "${#lines[@]}" = 1 ] || { echo "$output"; return 1; }
+    case "$output" in "Not rolled back: this home tracks 4"[0-9]" files no release has (vault/"*"); \`git checkout v0.6.1\` would take them out of the working tree. Nothing was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  done
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+}

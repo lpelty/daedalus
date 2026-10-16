@@ -4571,8 +4571,22 @@ def _checkouts_back(root: Path, keys: List[str], at: Dict[Tuple[str, str], str],
     return out
 
 
+ROLLBACK_TRACKED = ("Not rolled back: this home tracks %d files no release has (%s, …); `git checkout %s` would take "
+                    "them out of the working tree. Nothing was changed.")
+
+
 def rollback(root: Path, dry: bool = False, force: bool = False) -> int:
-    """python3 core/upgrade.py --rollback [--dry-run] [--force]: the steps, in order, as one numbered list."""
+    """python3 core/upgrade.py --rollback [--dry-run] [--force]: the steps, in order, as one numbered list. A home
+    that tracks files no release has (its vault, update.deployment_paths) is refused before anything: the last
+    step's `git checkout v0.6.1` would take every one of them out of the working tree."""
+    try:
+        import update as upd
+        dep = upd.deployment_paths(root)
+    except Exception:
+        dep = []
+    if dep:
+        print(ROLLBACK_TRACKED % (len(dep), dep[0], ROLLBACK_TO))
+        return 1
     import leaselib as ll
     import prepush
     os.environ["GIT_OPTIONAL_LOCKS"] = "0"      # git status reads; it never rewrites an index here
