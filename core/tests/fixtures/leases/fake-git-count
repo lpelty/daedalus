@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# A git that records every call, then delegates to the real git. Each call appends one line to $GIT_LOG:
+#   <the -C directory><TAB><subcommand and its arguments>
+# (the -c pairs and other global options are left out, so a test counts subcommands per repo).
+# FAKE_GIT_SLEEP_ON  space-separated tokens; a call matching one sleeps FAKE_GIT_SLEEP seconds first.
+#                    A token is a subcommand (`log`), or `<subcommand>:<argument prefix>` (`for-each-ref:--merged`
+#                    matches only a for-each-ref given an argument starting --merged).
+# FAKE_GIT_FAIL_ON   tokens of the same form; a matching call fails the way a held index lock does (exit 128).
+# FAKE_GIT_SLEEP_IN / FAKE_GIT_FAIL_IN  when set, only calls whose -C directory ends with this suffix match.
+# The real git is the first `git` on PATH outside this file's own directory (see fake-git-slow).
+self="$(cd "$(dirname "$0")" && pwd -P)"
+real=""
+IFS=: ; for d in $PATH; do
+  [ -n "$d" ] || continue
+  [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$self" ] && continue
+  if [ -x "$d/git" ]; then real="$d/git"; break; fi
+done
+unset IFS
+[ -n "$real" ] || { echo "fake-git-count: no real git on PATH" >&2; exit 127; }
+cdir="" sub="" rest=""
+set_args=("$@")
+i=0; n=$#
+while [ $i -lt $n ]; do
+  a="${set_args[$i]}"
+  if [ -z "$sub" ]; then
+    case "$a" in
+      -c) i=$((i + 2)); continue ;;
+      -C) cdir="${set_args[$((i + 1))]}"; i=$((i + 2)); continue ;;
+      -*) i=$((i + 1)); continue ;;
+      *) sub="$a" ;;
+    esac
+  else
+    rest="$rest $a"
+  fi
+  i=$((i + 1))
+done
+[ -z "${GIT_LOG:-}" ] || printf '%s\t%s%s\n' "$cdir" "$sub" "$rest" >> "$GIT_LOG"
+matches() {   # matches <tokens> <dir suffix>
+  local t name pre
+  if [ -n "$2" ]; then case "$cdir" in *"$2") : ;; *) return 1 ;; esac; fi
+  for t in $1; do
+    name="${t%%:*}"
+    [ "$name" = "$sub" ] || continue
+    [ "$name" = "$t" ] && return 0
+    pre="${t#*:}"
+    case "$rest " in *" $pre"*) return 0 ;; esac
+  done
+  return 1
+}
+if [ -n "${FAKE_GIT_FAIL_ON:-}" ] && matches "$FAKE_GIT_FAIL_ON" "${FAKE_GIT_FAIL_IN:-}"; then
+  echo "fatal: Unable to create '$cdir/.git/index.lock': File exists." >&2
+  exit 128
+fi
+if [ -n "${FAKE_GIT_SLEEP_ON:-}" ] && matches "$FAKE_GIT_SLEEP_ON" "${FAKE_GIT_SLEEP_IN:-}"; then
+  sleep "${FAKE_GIT_SLEEP:-0}"
+fi
+exec "$real" "$@"

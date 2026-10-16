@@ -125,3 +125,40 @@ _origin_moves() {
   git -C "$o" push -q origin HEAD:main
   [ "${TRUNK_MOVES_NO_FETCH:-}" = 1 ] || git -C "$target" fetch -q origin
 }
+
+# add_nested <rel> — one more nested repo at target/thing/<rel>, with its own bare origin and origin/HEAD, added to
+# config target.nested and to the outer repo's .gitignore (committed and pushed, so every window's outer worktree
+# ignores it too). Call it before the first window is made.
+add_nested() {
+  local rel="$1" T="$DAEDALUS_HOME/target/thing" o="$BATS_TEST_TMPDIR/$1-origin.git"
+  git init -q -b main "$T/$rel"; printf 'n\n' > "$T/$rel/n.txt"
+  git -C "$T/$rel" add -A; git -C "$T/$rel" -c user.email=t@x -c user.name=t commit -q -m n
+  git init -q --bare -b main "$o"
+  git -C "$T/$rel" remote add origin "$o"; git -C "$T/$rel" push -q -u origin main
+  git -C "$T/$rel" remote set-head origin main
+  printf '%s/\n' "$rel" >> "$T/.gitignore"
+  git -C "$T" add .gitignore; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m "ignore $rel"
+  git -C "$T" push -q origin main
+  sed -i '' "s|^  nested: \(.*\)\$|  nested: \1,$rel=https://example.com/$rel.git|" "$DAEDALUS_HOME/config.yaml"
+}
+
+# swept_with_work <NN>... — one commit in every repo of each window's worktree (the outer one and each nested one
+# present), then the window's lease files are removed: swept, with unpromoted work waiting on lease/<NN>.
+swept_with_work() {
+  local nn d
+  for nn in "$@"; do
+    for d in "$DAEDALUS_HOME/worktrees/$nn/thing" "$DAEDALUS_HOME/worktrees/$nn/thing"/*; do
+      [ -e "$d/.git" ] || continue
+      printf 'w%s\n' "$nn" >> "$d/w.txt"
+      git -C "$d" add w.txt; git -C "$d" -c user.email=t@x -c user.name=t commit -q -m "work $nn in ${d##*/}"
+    done
+    rm -f "$DAEDALUS_HOME/state/leases/$nn.json" "$DAEDALUS_HOME/state/leases/$nn.seen" "$DAEDALUS_HOME/state/leases/$nn.changed"
+  done
+}
+
+# count_git — a directory holding `git` -> fake-git-count, for the front of PATH; every call lands in $GIT_LOG.
+count_git() {
+  local d="$BATS_TEST_TMPDIR/count-git"
+  mkdir -p "$d"; ln -sf "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-count" "$d/git"
+  printf '%s\n' "$d"
+}
