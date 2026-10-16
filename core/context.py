@@ -1308,6 +1308,83 @@ def as_json(where: Where, verb: str, arg: str, subj: Subject, g: GraphInfo, hits
         "rules_skipped": skipped, "counts": counts_of(hits), "truncated": len(hits) - len(shown)})
 
 
+# --- the query log (§8) and pruning (§7) ---------------------------------------------------------------
+
+def append_row(path: Path, row: dict) -> Optional[str]:
+    """One JSON row, one write, under flock on the file. The reason it failed, or None."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path), "a") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                fh.write(json.dumps(row) + "\n")
+                fh.flush()
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return None
+    except OSError as e:
+        return e.strerror or str(e)
+
+
+def read_rows(path: Path) -> List[dict]:
+    rows: List[dict] = []
+    try:
+        with open(str(path)) as fh:
+            for ln in fh:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    rows.append(r)
+    except OSError:
+        pass
+    return rows
+
+
+def record(root: Path, where: Where, verb: str, arg: str, subj: Subject, g: GraphInfo, hits: List[dict],
+           applied: object) -> Optional[str]:
+    row = {"at": now_iso(), "lease": where.window, "lease_created": (where.lease or {}).get("created"),
+           "session_id": where.sid, "verb": verb, "arg": arg, "repo": subj.repo, "subject_files": subj.files,
+           "hits": [[h["file"], h["label"]] for h in hits], "graph": g.state, "rules": applied,
+           "broad": verb == "grep" and len(hits) > BROAD}
+    return append_row(cc_dir(root) / str(where.window) / "queries.jsonl", row)
+
+
+def recorded_created(d: Path) -> Optional[str]:
+    """The lease_created a window directory was written for: its rows, else any index's meta.json."""
+    for r in read_rows(d / "queries.jsonl"):
+        if r.get("lease_created"):
+            return str(r["lease_created"])
+    for m in sorted(d.glob("*/meta.json")):
+        c = (read_json_file(m) or {}).get("lease_created")
+        if c:
+            return str(c)
+    return None
+
+
+def prune(root: Path) -> None:
+    """Only a window prunes (§7): a directory whose lease file is gone (swept), or whose rows were written for an
+    earlier holder of the number (reissued). A released window that is not swept keeps its directory, since its
+    promote may still need the queries; a live window's rows carry its own lease_created, so it is never touched."""
+    base = cc_dir(root)
+    if not base.is_dir():
+        return
+    import leaselib as ll
+    try:
+        with ll.lock(root, shared=True):
+            leases = ll.read_all(root)
+    except ll.Refused:
+        return
+    for d in sorted(base.iterdir()):
+        if not d.is_dir() or not re.fullmatch(r"[0-9]{2}", d.name):
+            continue
+        lease = leases.get(d.name)
+        created = recorded_created(d)
+        if lease is None or (created and lease.get("created") and created != str(lease.get("created"))):
+            shutil.rmtree(str(d), ignore_errors=True)
+
+
 # --- the query verbs -------------------------------------------------------------------------------------
 
 def query(root: Path, verb: str, arg: str, want_json: bool) -> int:
@@ -1315,19 +1392,30 @@ def query(root: Path, verb: str, arg: str, want_json: bool) -> int:
     cfg = read_config(root)
     where = resolve_where(root, cfg)
     tree = where.tree
+    if where.window is not None:
+        try:
+            prune(root)
+        except Exception:
+            pass
     subj = parse_subject(verb, arg, tree)
     deadline = started + cfg.budget
     roots = module_roots(tree, cfg)
     tests_only = verb == "tests"
     gi, ghits = graph_part(root, cfg, where, verb, subj, deadline)
     grep = grep_part(tree, verb_patterns(verb, subj, roots, arg), tests_only)
-    rhits, skipped, _applied = rules_part(root, cfg, tree, subj, roots)
+    rhits, skipped, applied = rules_part(root, cfg, tree, subj, roots)
     if tests_only:
         rhits = {f: h for f, h in rhits.items() if is_test_path(f)}
     hits = merge(ghits, grep, rhits, subj.files)
     tail: List[str] = []
+    if where.window is not None:
+        why = record(root, where, verb, arg, subj, gi, hits, applied)
+        if why:
+            tail.append("This query was not recorded (%s); promote will count its files as unpredicted." % why)
     if want_json:
         print(as_json(where, verb, arg, subj, gi, hits, skipped))
+        for ln in tail:                 # stdout stays one JSON object
+            sys.stderr.write(ln + "\n")
     else:
         print(plain(root, where, verb, arg, subj, gi, hits, skipped, tail))
     return 0
