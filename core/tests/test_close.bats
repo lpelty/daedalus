@@ -15,6 +15,8 @@ setup() {
   mkdir -p "$DAEDALUS_HOME/core"
   SRC="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   cp "$SRC/lib.sh" "$SRC/close.sh" "$SRC/capture.py" "$DAEDALUS_HOME/core/" 2>/dev/null || true
+  # the close commits the vault by default: a stand-in that commits nothing, unless a test writes its own
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
   export DAEDALUS_HOME
   CLOSE="$DAEDALUS_HOME/core/close.sh"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'
@@ -208,17 +210,39 @@ stop_stub() {
   STUB_PID=""
 }
 
-@test "close.sh --commit runs core/vault-commit.sh after a successful capture, and not when capture fails" {
-  cp "$SRC/vault-commit.sh" "$DAEDALUS_HOME/core/"
+@test "close.sh commits the vault by default after a successful capture, --commit is the same, --no-commit skips it, and a failed capture commits nothing" {
   printf '#!/usr/bin/env bash\necho VAULT-COMMIT-RAN\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
   configure_capture; start_stub
-  run bash "$CLOSE" --commit; [ "$status" -eq 0 ]; case "$output" in *VAULT-COMMIT-RAN*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *"phase 1/2"*"phase 2/2"*) : ;; *) echo "expected two phases: $output"; return 1 ;; esac
+  for flag in "" --commit; do
+    # shellcheck disable=SC2086
+    run bash "$CLOSE" $flag; [ "$status" -eq 0 ] || { echo "$flag: $output"; return 1; }
+    case "$output" in *"phase 1/2"*"phase 2/2: vault commit"*VAULT-COMMIT-RAN*"close complete") : ;; *) echo "$flag: $output"; return 1 ;; esac
+  done
+  run bash "$CLOSE" --no-commit; [ "$status" -eq 0 ]
+  case "$output" in *VAULT-COMMIT-RAN*|*"phase 2"*) echo "--no-commit committed: $output"; return 1 ;; esac
+  case "$output" in *"phase 1/1"*"close complete") : ;; *) echo "$output"; return 1 ;; esac
   stop_stub
   # New transcript bytes past the stored offset: with nothing new, capture.py
   # never touches the backend and exits 0, and the failure leg would prove nothing.
   printf '{"type":"user","message":{"role":"user","content":"one more turn"}}\n' >> "$TRANSCRIPT_DIR/session-a.jsonl"
-  run bash "$CLOSE" --commit; [ "$status" -ne 0 ]; case "$output" in *VAULT-COMMIT-RAN*) echo "must not commit after a failed capture: $output"; return 1 ;; *) : ;; esac
+  run bash "$CLOSE"; [ "$status" -ne 0 ]; case "$output" in *VAULT-COMMIT-RAN*) echo "must not commit after a failed capture: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "close.sh: a vault commit left to the pen's live holder (exit 3) is a successful close — its one line once, then close complete (the vault is the pen holder's to commit); any other commit failure exits 4 saying the session is recorded" {
+  printf '#!/usr/bin/env bash\necho "daedalus: The vault is left for the pen'"'"'s holder, window 01, which is live." >&2\nexit 3\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
+  configure_capture; start_stub
+  run bash "$CLOSE"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -c "which is live")" -eq 1 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | tail -1)" = "daedalus: close complete (the vault is the pen holder's to commit)" ] || { echo "$output"; return 1; }
+  printf '#!/usr/bin/env bash\necho "daedalus: PROP-2.md claims IMPLEMENTED with no evidence-run" >&2\nexit 1\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
+  printf '{"type":"user","message":{"role":"user","content":"one more turn"}}\n' >> "$TRANSCRIPT_DIR/session-a.jsonl"
+  run bash "$CLOSE"; [ "$status" -eq 4 ] || { echo "$status: $output"; return 1; }
+  case "$output" in *"the session is recorded; the vault commit did not run: PROP-2.md claims IMPLEMENTED with no evidence-run"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"close complete"*) echo "$output"; return 1 ;; esac
+}
+
+@test "close.sh keeps its mode 100755 in the distribution" {
+  [ "$(git -C "$SRC/.." ls-files -s core/close.sh core/vault-commit.sh | cut -c1-6 | sort -u)" = 100755 ]
 }
 
 # --- the memory: block is the source (spec §4.7 "one place") ----------------

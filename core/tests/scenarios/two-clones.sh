@@ -420,7 +420,7 @@ if [ "$mode" = interactive ] && [ -n "$bank" ]; then
   printf 'memory:\n  bank: %s\n' "$bank" >> "$H/config.yaml"
   tr2="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$H" | sed 's/[^A-Za-z0-9]/-/g')/$term2_session.jsonl"
   check "terminal 2's conversation was sent to memory and confirmed (the call close.sh makes)" \
-    bash -c 'cd "$1" && bash core/close.sh --transcript "$2"' _ "$H" "$tr2"
+    bash -c 'cd "$1" && bash core/close.sh --no-commit --transcript "$2"' _ "$H" "$tr2"
   step 9 "Terminal 1" "what did window 2 change?" "an answer that recalls window 02's change to hooks/capture.py and README.md"
 else
   say "Step 9 (recall) is skipped: it needs a memory server; run interactively with --with-memory <bank> to include it."

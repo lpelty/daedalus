@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# End a working session: flush episodic capture explicitly; with --commit,
-# then run the one sanctioned vault commit (core/vault-commit.sh, spec §4.7).
+# End a working session: flush episodic capture explicitly, then commit the vault
+# with the one sanctioned vault commit (core/vault-commit.sh, spec §4.7) unless
+# --no-commit. (--commit, the old opt-in, is still accepted and changes nothing.)
+# When another live session holds the pen, vault-commit.sh says so in one line
+# and exits 3: that session's next commit carries this one's files, and the
+# close still succeeds. When the pen's holder has ended, this session takes the
+# pen there and commits.
 #
 # The SessionEnd hook runs capture too, and capture is offset-tracked, so
 # running both is safe and never double-captures. This exists because a
@@ -8,8 +13,10 @@
 # gone from working memory either way, so an unrecorded session is lost
 # rather than merely delayed.
 #
-# Exits non-zero when the flush failed. A close that reports success while
-# the session went unrecorded is worse than no close at all.
+# Exits 1 when the flush failed: a close that reports success while the session
+# went unrecorded is worse than no close at all. Exits 4 when the session is
+# recorded but the vault commit did not run: fix what its line names, then run
+# core/vault-commit.sh — never the whole close again.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 # Capture's configuration (spec §4.7): the memory: block in config.yaml, each
@@ -22,12 +29,13 @@ eval "$env_lines"
 
 # --transcript <path>: an operator shell names the session to flush (spec
 # §4.7 (2)); from a session capture.py finds it by CLAUDE_CODE_SESSION_ID.
-commit=0
+commit=1
 transcript=""
-usage="usage: core/close.sh [--transcript <path>] [--commit]"
+usage="usage: core/close.sh [--transcript <path>] [--no-commit]"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --commit) commit=1 ;;
+    --commit) commit=1 ;;      # the default now; accepted so older briefs and deployment skills keep working
+    --no-commit) commit=0 ;;
     --transcript)
       { [ $# -ge 2 ] && [ -n "$2" ]; } || die "$usage"
       transcript="$2"; shift ;;
@@ -66,10 +74,22 @@ esac
 CAPTURE_VERIFY_EXTRACTION=1 \
 python3 "$DAEDALUS_HOME/core/capture.py" capture ${transcript:+--transcript "$transcript"} --wait-in-flight "$wait_secs" </dev/null \
   || die "capture failed or is not yet confirmed — the session is not recorded yet; see the capture lines above and close again"
-# --commit: the prime's vault commit (spec §4.7) runs only after the capture
-# succeeded — a failed capture stops the close before anything is committed.
+# Phase 2, the vault commit (spec §4.7), runs only after the capture succeeded —
+# a failed capture stops the close before anything is committed.
+# rc=0 … || rc=$?: lib.sh sets -e, and `|| die` alone cannot tell exit 3 from exit 1.
 if [ "$commit" -eq 1 ]; then
   log "phase 2/2: vault commit"
-  bash "$DAEDALUS_HOME/core/vault-commit.sh" || die "vault commit failed"
+  errf="$(mktemp)"
+  rc=0; out="$(bash "$DAEDALUS_HOME/core/vault-commit.sh" 2>"$errf")" || rc=$?
+  err="$(cat "$errf")"; rm -f "$errf"
+  [ -z "$out" ] || printf '%s\n' "$out"
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  case $rc in
+    0) : ;;
+    3) log "close complete (the vault is the pen holder's to commit)"; exit 0 ;;
+    *) last="$(printf '%s\n%s\n' "$out" "$err" | sed '/^$/d' | tail -1)"; last="${last#daedalus: }"
+       printf 'daedalus: %s\n' "the session is recorded; the vault commit did not run: ${last:-core/vault-commit.sh exited $rc}" >&2
+       exit 4 ;;
+  esac
 fi
 log "close complete"
