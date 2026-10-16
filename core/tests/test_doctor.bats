@@ -1789,18 +1789,16 @@ cc_lines() { printf '%s\n' "$output" | sed 's/^daedalus: //' | grep -E '^(OK|NOT
   cc_lines | grep -qxF 'NOTE     code context: vault/context-rules.json cannot be read (not valid JSON), so queries use the release rules only; fix it, then run python3 core/context.py rules --check'
 }
 
-@test "doctor's code-context check failing is one NOTE; doctor never walks the target for it (3000 files take no measurable longer)" {
+@test "doctor's code-context check failing is one NOTE; doctor never reads the target for it (an unreadable target gives the same lines)" {
   cc_home
-  run bash "$DAEDALUS_HOME/core/doctor.sh"
-  [ "$status" -eq 0 ]
-  t0="$(python3 -c 'import time; print(time.time())')"
-  python3 "$DAEDALUS_HOME/core/context.py" --doctor >/dev/null
-  t1="$(python3 -c 'import time; print(time.time())')"
   mkdir -p "$DAEDALUS_HOME/target/thing/many"
-  for i in $(seq 1 3000); do printf 'import os\n' > "$DAEDALUS_HOME/target/thing/many/f$i.py"; done
-  python3 "$DAEDALUS_HOME/core/context.py" --doctor >/dev/null
-  t2="$(python3 -c 'import time; print(time.time())')"
-  python3 -c 'import sys; a, b, c = map(float, sys.argv[1:]); assert (c - b) < (b - a) + 1.0, (b - a, c - b)' "$t0" "$t1" "$t2"
+  for i in $(seq 1 300); do printf 'import os\n' > "$DAEDALUS_HOME/target/thing/many/f$i.py"; done
+  run python3 "$DAEDALUS_HOME/core/context.py" --doctor
+  [ "$status" -eq 0 ]; readable="$output"
+  chmod 000 "$DAEDALUS_HOME/target/thing"
+  run python3 "$DAEDALUS_HOME/core/context.py" --doctor
+  chmod 755 "$DAEDALUS_HOME/target/thing"
+  [ "$status" -eq 0 ]; [ "$output" = "$readable" ] || { echo "with the target unreadable: $output"; echo "readable: $readable"; return 1; }
   printf 'import sys\nsys.exit(3)\n' > "$DAEDALUS_HOME/core/context.py"
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ]
