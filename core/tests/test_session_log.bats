@@ -66,11 +66,51 @@ PY
   [ "${lines[5]}" = "vault/sessions/2026/10/2026-10-15-003.md" ]
 }
 
-@test "a session with no window is refused with the no-window sentence; an operator shell is told it needs a session" {
-  run --separate-stderr log_of sZ; [ "$status" -eq 1 ]
-  case "$stderr" in *"This session holds no window"*) : ;; *) echo "$stderr"; return 1 ;; esac
+@test "a session with no window gets a number reserved for it in state/leases/unwindowed.json; an operator shell is told it needs a session" {
+  run log_of sZ; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ]
+  run python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sZ"]["logs"])' "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  [ "$output" = "{'$TODAY': 1}" ] || { echo "$output"; return 1; }
   run --separate-stderr bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID bash '$DAEDALUS_HOME/core/lease.sh' log"; [ "$status" -eq 1 ]
-  case "$stderr" in *"session"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"run it from a session, not from an operator shell"*) : ;; *) echo "$stderr"; return 1 ;; esac
+}
+
+@test "while the upgrade is pending a session holding no window is told its log: max over the vault and every reservation, plus one; the same path again; the next window and a second windowless session get the numbers after it" {
+  printf '0.7.4\n' > "$DAEDALUS_HOME/VERSION"          # pulled, not stamped: the session started before it finished
+  mkdir -p "$DAEDALUS_HOME/vault/sessions/2026/10"; touch "$DAEDALUS_HOME/vault/sessions/2026/10/2026-10-15-049.md"
+  python3 - "$DAEDALUS_HOME/state/leases/02.json" <<'PY2'
+import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["logs"]={"2026-10-15": 50}; json.dump(d, open(p,"w"))
+PY2
+  run log_of sW; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "vault/sessions/$YM/$TODAY-051.md" ]
+  run log_of sW; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-051.md" ]
+  run log_of sA; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-052.md" ]    # one counter for windows and the rest
+  run log_of sV; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-053.md" ]
+  run log_of sW; [ "$output" = "vault/sessions/$YM/$TODAY-051.md" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/03.json" ]                 # no window was made
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+}
+
+@test "a visitor is still refused the log; a corrupt unwindowed.json refuses by name for every new reservation, a window's included, while a reservation already held is still returned" {
+  run --separate-stderr env DIRECT_CALL_ID=x DAEDALUS_SESSION_ID=sZ bash "$DAEDALUS_HOME/core/lease.sh" log
+  [ "$status" -eq 1 ]; case "$stderr" in *"direct-call session (a visitor)"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run log_of sA; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ]
+  printf '{"sZ":' > "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  run --separate-stderr log_of sZ; [ "$status" -eq 1 ]
+  case "$stderr" in *"state/leases/unwindowed.json cannot be read"*"Fix or remove it; it holds only session-log reservations."*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run --separate-stderr log_of sB; [ "$status" -eq 1 ]
+  case "$stderr" in *"state/leases/unwindowed.json cannot be read"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run log_of sA; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ]   # held already: no counter read
+  DAEDALUS_SESSION_ID=sA run bash "$DAEDALUS_HOME/core/lease.sh" list; [ "$status" -eq 0 ] || { echo "$output"; return 1; }   # the board never reads it
+}
+
+@test "a reservation for a session holding no window is pruned once its day is past and its session has no live registry entry; a live session's, and today's, are kept" {
+  pl="$(live_pid)"; registry_entry "$pl" sLive
+  printf '{"sDead": {"logs": {"2026-01-01": 40}}, "sLive": {"logs": {"2026-01-02": 41}}, "sToday": {"logs": {"%s": 42}}}' "$TODAY" \
+    > "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  run log_of sW; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-043.md" ] || { echo "$output"; return 1; }
+  run python3 -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))))' "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  [ "$output" = "['sLive', 'sToday', 'sW']" ] || { echo "$output"; return 1; }
 }
 
 @test "a session that holds only the pen logs with a number reserved in prime.json" {

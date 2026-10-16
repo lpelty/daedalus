@@ -3634,10 +3634,11 @@ LOG_NEEDS_SESSION = ("`core/lease.sh log` names the calling session's log for to
                      "not from an operator shell.")
 
 
-def _max_log_number(root: Path, leases: Dict[str, dict]) -> int:
+def _max_log_number(root: Path, leases: Dict[str, dict], unwindowed: Optional[dict] = None) -> int:
     """The highest number in the sequence: in the vault's files, or reserved in
-    any lease file (prime.json included) for a log not written yet, whatever
-    day it was reserved for."""
+    any lease file (prime.json included), or for a session holding no window
+    (unwindowed.json), for a log not written yet, whatever day it was reserved
+    for. An unwindowed.json that cannot be read refuses (no counting around it)."""
     n = 0
     sdir = root / "vault" / "sessions"
     if sdir.is_dir():
@@ -3648,7 +3649,114 @@ def _max_log_number(root: Path, leases: Dict[str, dict]) -> int:
     for lease in leases.values():
         for val in _reservations(lease).values():
             n = max(n, val)
+    for entry in (read_unwindowed(root) if unwindowed is None else unwindowed).values():
+        if isinstance(entry, dict):
+            for val in _reservations(entry).values():
+                n = max(n, val)
     return n
+
+
+# The log reservations of sessions holding no window: {"<session id>": {"logs": {"<date>": N}}}. Its own file, so
+# read_all (which reads only prime.json and numbered files) and every reader of the lease files never see it.
+UNWINDOWED = "unwindowed"
+UNWINDOWED_UNREADABLE = ("state/leases/unwindowed.json cannot be read (%s). Fix or remove it; it holds only "
+                         "session-log reservations.")
+UNWINDOWED_KEEP_DAYS = 7      # a build with no session registry cannot tell a live session: an entry this old goes
+
+
+def read_unwindowed(root: Path) -> dict:
+    """unwindowed.json, {} when it does not exist. Caller holds the lock. A file
+    that cannot be read, or is not a JSON object, raises Refused by name."""
+    try:
+        text = lease_path(root, UNWINDOWED).read_text()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise Refused(UNWINDOWED_UNREADABLE % (e.strerror or str(e)))
+    if text == "":
+        return {}
+    try:
+        d = json.loads(text)
+    except ValueError as e:
+        raise Refused(UNWINDOWED_UNREADABLE % ("not valid JSON: %s" % e))
+    if not isinstance(d, dict):
+        raise Refused(UNWINDOWED_UNREADABLE % "not a JSON object")
+    return d
+
+
+def _prune_unwindowed(d: dict, today: str, keep: Optional[str] = None) -> dict:
+    """Drop the entries whose newest reserved day is before today and whose
+    session has no live registry entry (no registry: older than
+    UNWINDOWED_KEEP_DAYS). A number pruned before its file was written is free
+    again, as a swept window's is. `keep` is never dropped."""
+    out = {}
+    registry = registry_present()
+    floor = time.strftime("%Y-%m-%d", time.localtime(time.time() - UNWINDOWED_KEEP_DAYS * 86400))
+    for sid, entry in d.items():
+        logs = _reservations(entry) if isinstance(entry, dict) else {}
+        if sid != keep:
+            if not logs:
+                continue
+            newest = max(logs)
+            if newest < today and (not registry_live_entries(sid) if registry else newest < floor):
+                continue
+        out[sid] = entry
+    return out
+
+
+def write_unwindowed(root: Path, d: dict, today: str, keep: Optional[str] = None) -> None:
+    """Prune, then write (tmp + os.replace through write_lease); the file is
+    removed when nothing is left. CALLER HOLDS THE LOCK."""
+    d = _prune_unwindowed(d, today, keep)
+    if d:
+        write_lease(root, UNWINDOWED, d)
+        return
+    try:
+        lease_path(root, UNWINDOWED).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def log_key_locked(root: Path, sid: str, leases: Dict[str, dict]) -> Tuple[str, str]:
+    """Which store holds the session's log reservation: ("lease", NN) for its
+    numbered lease; ("lease", "prime") when it holds the pen and prime.json
+    already holds a reservation, or it has none for this session elsewhere (a
+    session that kept the pen after releasing its window, as before);
+    ("unwindowed", sid) otherwise — a session holding no window, its entry in
+    unwindowed.json (made on its first reservation). CALLER HOLDS THE LOCK."""
+    nn, _ = lease_of_session(leases, sid)
+    if nn is not None:
+        return "lease", nn
+    prime = leases.get("prime") or {}
+    if prime.get("session_id") == sid and (_reservations(prime) or sid not in read_unwindowed(root)):
+        return "lease", "prime"
+    return UNWINDOWED, sid
+
+
+def unwindowed_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: str, new_day: bool = False) -> str:
+    """log_path_locked for a session holding no window: the same rules, kept in
+    its unwindowed.json entry. CALLER HOLDS THE LOCK."""
+    unw = read_unwindowed(root)
+    entry = unw.get(sid) if isinstance(unw.get(sid), dict) else {}
+    logs = _reservations(entry)
+    if today in logs:
+        return _log_file(today, logs[today])
+    if logs and not new_day:
+        day = max(logs)
+        return _log_file(day, logs[day])
+    n = _max_log_number(root, leases, unw) + 1
+    logs[today] = n
+    unw[sid] = dict(entry, logs=logs)
+    write_unwindowed(root, unw, today, keep=sid)
+    return _log_file(today, n)
+
+
+def session_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: str, new_day: bool = False) -> str:
+    """The session's log path from whichever store holds it (log_key_locked). CALLER HOLDS THE LOCK."""
+    kind, key = log_key_locked(root, sid, leases)
+    if kind == UNWINDOWED:
+        return unwindowed_log_locked(root, sid, leases, today, new_day=new_day)
+    return log_path_locked(root, key, leases, today, new_day=new_day)
 
 
 def _reservations(lease: dict) -> Dict[str, int]:
@@ -3697,18 +3805,13 @@ def log_path_locked(root: Path, key: str, leases: Dict[str, dict], today: str, n
 
 def log_path(root: Path, sid: str, today: Optional[str] = None) -> str:
     """`core/lease.sh log`: the calling session's log path for today, reserved
-    under the lock. A session with no window and no pen is refused with the
-    same sentence every other command gives it (resolve_lease)."""
+    under the lock — for a window, for a session holding only the pen, and for
+    a session holding no window at all (unwindowed.json), so no session ever
+    counts the directory to name its log."""
     today = today or time.strftime("%Y-%m-%d")
     with lock(root):
         leases = read_all(root)
-        key, _ = lease_of_session(leases, sid)
-        if key is None and leases.get("prime", {}).get("session_id") == sid:
-            key = "prime"
-        if key is None:
-            resolve_lease(leases, sid, pending_stop(root))   # raises the no-window sentence when leases exist
-            raise Refused(UNLEASED_NAG)
-        return log_path_locked(root, key, leases, today)
+        return session_log_locked(root, sid, leases, today)
 
 
 def orientation(root: Path, sid: Optional[str], visitor: bool = False, deadline: Optional[float] = None) -> str:
