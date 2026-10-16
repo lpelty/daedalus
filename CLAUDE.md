@@ -54,7 +54,11 @@ One window holds the **pen** (the board marks it `prime`): only it writes
 `hot.md` and commits the vault, always through `core/vault-commit.sh`, which
 checks every claim first. The first interactive window up takes the pen; it
 moves only when the operator says so (`core/lease.sh prime take --reason "…"`
-from the window that takes it).
+from the window that takes it). A session holding no window may take the pen
+when no live session holds it (`core/lease.sh prime take`, no reason needed),
+never from a live one; it gets `hot.md` and the vault commit, not a tree —
+`target/` stays closed to it until it claims a window, and promote waits
+while an upgrade is pending.
 
 A window you start in the background (`core/lease.sh spawn`) is a
 **background clone**: it takes the next number, works in its own worktree,
@@ -220,6 +224,9 @@ to move it into windows, ..."). Repeat that sentence to the operator word for
 word; the board repeats it on every prompt. Until the upgrade finishes this
 session has no window and `core/lease.sh` makes none (create, claim, spawn
 and adopt of a branch are refused, naming the stop); do not try to get one.
+It still closes: `core/lease.sh log` prints its session log, and when no
+live session holds the pen, `core/lease.sh prime take` gives it the pen for
+`hot.md` and `core/vault-commit.sh` (see "Session logs").
 When the operator then says
 "pick it up", run `core/lease.sh adopt --all-unfinished` and report what it
 printed: each window it made (number, repo, commits), and anything it could
@@ -366,7 +373,15 @@ The log is keyed to the date the session **opened**: a session that runs past
 midnight keeps the file it was told at start (`core/lease.sh log` and a
 compaction both return it), and a start or resume on the new day gets the next
 number. A session that holds only the pen and no window gets its number the
-same way. A window swept before its session wrote the log frees the number.
+same way. A session holding no window is told its number at start too — one
+that started while an upgrade was pending — and by `core/lease.sh log`; the
+number is reserved for it under the same lock, and moves into the window it
+claims later. Its log's frontmatter says `lease: none`. Its close order is
+`core/lease.sh log` → `core/lease.sh prime take` (when no live session holds
+the pen) → `hot.md` → `core/close.sh --commit`. When a live session holds the
+pen, the refusal says whom to message, and that the operator can commit the
+vault from their own shell. A window swept before its session wrote the log
+frees the number.
 
 **Restarted under the same window on the same day?** `core/lease.sh log`
 prints the path you already have: append a dated `## Continued HH:MM` section

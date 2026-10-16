@@ -103,9 +103,9 @@ Close every Daedalus window, then type one command in a terminal:
 daedalus update
 ```
 
-It prints one line, `Daedalus updated 0.7.2 -> 0.7.3; doctor OK.`, or what
+It prints one line, `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.`, or what
 needs attention, one sentence each. Run again, it says `Daedalus is up to
-date (0.7.3).` If `daedalus` is not found, type `~/.local/bin/daedalus
+date (0.7.4).` If `daedalus` is not found, type `~/.local/bin/daedalus
 update`; `core/setup.sh` and the upgrade install the command there and print
 the one line that adds it to your shell's PATH. It never overwrites a file
 there it did not write. `daedalus version` prints the release, the home, the
@@ -371,6 +371,16 @@ stopped once with the advice to message that window, and goes through on the
 next try (`core/guard-bash.py` does the same for Bash write operands). One
 window holds the pen — the board marks it `prime` — and only it writes
 `vault/hot.md` and commits the vault, through `core/vault-commit.sh`.
+
+A session that started while an upgrade was pending holds no window: none
+opens until the upgrade finishes, so its safety copy reads `target/` first.
+It can still close. `core/lease.sh log` reserves its session-log number
+(kept in `state/leases/unwindowed.json`), and `core/lease.sh prime take` gives
+it the pen when no live session holds it — never from a live one. The pen
+gives it `vault/hot.md` and `core/vault-commit.sh`, not a tree: `target/`
+stays closed to it, and promote waits, until the upgrade finishes and it
+claims a window. When a live session holds the pen, the operator can commit
+the vault from their own shell: `cd <home> && core/vault-commit.sh`.
 
 The board is also on your screen. A Claude Code mod under `mods/lease-board/`
 draws it in the band above the prompt in every window and refreshes it every

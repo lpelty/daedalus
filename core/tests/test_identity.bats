@@ -402,8 +402,8 @@ _run_scan_in_fixture() {
   run grep -qF 'incremental capture (plan 2)' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -ne 0 ]
 }
 
-@test "VERSION is one line, 0.7.3; the wide scan reads VERSION and docs/, which publish (spec §14)" {
-  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.3" ]
+@test "VERSION is one line, 0.7.4; the wide scan reads VERSION and docs/, which publish (spec §14)" {
+  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.4" ]
   [ "$(wc -l < "$DAEDALUS_HOME/VERSION" | tr -d ' ')" = 1 ]
   _make_fixture_repo
   mkdir -p "$fixture/docs"
@@ -450,7 +450,7 @@ _run_scan_in_fixture() {
            'cat VERSION' 'makes the window directories' '`adopt <branch>`' 'core.hooksPath' 'the address this checkout records for its branch' \
            'Deleting a window'"'"'s work is report, yes, delete.' 'Bash(core/lease.sh release:*)' 'autoMode.classifyAllShell' \
            'state/evidence/deletions/' '### Letting Daedalus edit its own brief' '"$defaults"' 'the classifier never reads `autoMode` from a project' \
-           'daedalus update' 'Daedalus updated 0.7.2 -> 0.7.3; doctor OK.' 'Daedalus is up to date (0.7.3).' '~/.local/bin/daedalus update' \
+           'daedalus update' 'Daedalus updated 0.7.3 -> 0.7.4; doctor OK.' 'Daedalus is up to date (0.7.4).' '~/.local/bin/daedalus update' \
            'Close every Daedalus window, then run the first-update line from the Daedalus README' '### The local layer' \
            'CLAUDE.local.md' '.claude/settings.local.json' 'boundary.edit_brief' 'local/before-update-<stamp>' 'state/update-backups/<stamp>/' \
            'update.address' 'uv sync --frozen' 'installs the daedalus command' 'Editing CLAUDE.local.md in the Daedalus home' \
@@ -482,8 +482,44 @@ _run_scan_in_fixture() {
 # v0.7.3 (daedalus update; the upgrade that can finish): the release a deployment on a second machine reported,
 # written for the same operator — the house parts in order, the one line it prints, the first update's one
 # line and one sentence, and short sentences; no employer and no agent is named (the wide scan checks the file).
-@test "CHANGELOG: v0.7.3 is the newest release — in short, what went wrong, what changed, what you will see, the first update, how to tell; it thanks a deployment on a second machine, gives the one first-update line and the sentence for a local agent, and keeps every sentence to 30 words" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
+# v0.7.4 (a session holding no window can still close): written for the operator, the house parts in order, what a
+# windowless session now does at its close and the commands it names; no employer, agent or proposal number.
+@test "CHANGELOG: v0.7.4 is the newest release — its heading verbatim; in short, what went wrong, what changed, what you will see, how to take it, how to tell; the close commands it names; short sentences; v0.7.3 right below it" {
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.4 — a session holding no window can still close: a log number, the pen, hot.md and the vault commit" ]
+  sec="$(awk '/^## v0.7.4 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
+  rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
+  order=""
+  for h in '**In short.**' '**What went wrong.**' '**What changed.**' '**What you will see.**' '**How to take it.**' '**How to tell you have it.**'; do
+    case "$rel" in *"$h"*) : ;; *) echo "the v0.7.4 section lacks: $h"; return 1 ;; esac
+    order="$order$(printf '%s' "$rel" | awk -v h="$h" '{print index($0, h)}') "
+  done
+  [ "$(printf '%s\n' $order | sort -n | tr '\n' ' ')" = "$order" ] || { echo "the v0.7.4 parts are out of order: $order"; return 1; }
+  for s in 'core/lease.sh log' 'core/lease.sh prime take' 'hot.md' 'core/vault-commit.sh' 'state/leases/unwindowed.json' \
+           'never takes the pen from a live' 'daedalus update' 'Daedalus updated 0.7.3 -> 0.7.4; doctor OK.' '`cat VERSION` prints `0.7.4`'; do
+    case "$rel" in *"$s"*) : ;; *) echo "the v0.7.4 section lacks: $s"; return 1 ;; esac
+  done
+  ! printf '%s\n' "$sec" | grep -qiE 'smartsheet|employer' || { echo "the v0.7.4 section names an employer"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara' || { echo "the v0.7.4 section names an agent"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qE 'PROP-[0-9]|EX-[0-9]' || { echo "the v0.7.4 section names a proposal number"; return 1; }
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.4 section:"; echo "$output"; return 1; }
+  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
+}
+
+@test "CLAUDE.md says how a session holding no window closes: its log number at start and from lease.sh log, the pen when no live session holds it, lease: none in the frontmatter, and the close order" {
+  CM="$(tr '\n' ' ' < "$DAEDALUS_HOME/CLAUDE.md" | tr -s ' ')"
+  for s in 'A session holding no window may take the pen when no live session holds it' \
+           'A session holding no window is told its number at start' 'lease: none' \
+           '`core/lease.sh log` → `core/lease.sh prime take` (when no live session holds the pen) → `hot.md` → `core/close.sh --commit`'; do
+    case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
+  done
+}
+
+@test "CHANGELOG: v0.7.3, below v0.7.4 — in short, what went wrong, what changed, what you will see, the first update, how to tell; it thanks a deployment on a second machine, gives the one first-update line and the sentence for a local agent, and keeps every sentence to 30 words" {
+  grep -qxF "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" "$DAEDALUS_HOME/CHANGELOG.md"
   sec="$(awk '/^## v0.7.3 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
   rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
   order=""
@@ -509,7 +545,7 @@ long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) 
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.3 section:"; echo "$output"; return 1; }
   # v0.7.2 sits right below it
-  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+  [ "$(grep '^## ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
 }
 
 @test "CHANGELOG: v0.7.2, below v0.7.3, keeps its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {

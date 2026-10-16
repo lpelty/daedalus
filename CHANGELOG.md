@@ -4,6 +4,66 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.7.4 — a session holding no window can still close: a log number, the pen, hot.md and the vault commit
+
+**In short.** A session that started while an upgrade was pending holds no
+window, by design. It can now close like any other session. It gets its
+session-log number, takes the pen when no live session holds it, writes
+`hot.md` and commits the vault. Thanks to a Daedalus deployment on a second
+machine, which reported the stall this came from.
+
+**What went wrong.**
+- No window opens while the upgrade is pending, so that its safety copy reads
+  `target/` before anything there changes. That rule is right, and it stays.
+- But a session started in that state could not close. `core/lease.sh log`
+  refused it, so it counted the files to pick a number, the race the
+  reservation exists to prevent.
+- It could not write `hot.md` or take the pen, because only a window could. So
+  the next session read stale state first.
+- `core/vault-commit.sh` refused it too. The session log and the proposals it
+  wrote were left uncommitted.
+- The stall on that deployment ran across three sessions. A session that
+  cannot close loses its reasoning exactly when it matters most.
+
+**What changed.**
+- `core/lease.sh log` reserves a number for a session holding no window. It
+  uses the same lock and the same counter as windows, kept in
+  `state/leases/unwindowed.json`.
+- When that session later holds a window, the number moves with it. It is
+  never told two numbers.
+- `core/lease.sh prime take` works from a session holding no window when no
+  live session holds the pen. It never takes the pen from a live or quiet
+  holder, whatever reason is given.
+- Taking the pen that way writes only `state/leases/prime.json` and runs no
+  git. It makes no window, branch or worktree.
+- The pen gives such a session the vault, not a tree. Until the upgrade
+  finishes, and until it claims a window, `target/` and `worktrees/` stay
+  closed to it.
+- So promote waits until the upgrade finishes. `core/promote.sh NN --clean`
+  still removes pushed scratch, as before.
+- Every message such a session is shown names a command that works for it. A
+  test runs each one from that state.
+
+**What you will see.**
+- A session started while the upgrade is pending is told its session log at
+  start. It is also told that `core/lease.sh prime take` gives it the pen at
+  the close.
+- The no-window sentence ends with the close: `core/lease.sh log`, then
+  `core/lease.sh prime take` when no live session holds the pen.
+- When a live session holds the pen, the refusal names it. It also says the
+  operator can commit the vault from their own shell.
+- `core/vault-commit.sh` says whether the pen is free or held by a live
+  session, and what to run next.
+- The board says when the pen is held by a session holding no window.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.` There
+is no migration: the upgrade only writes the new stamp.
+
+**How to tell you have it.** `cat VERSION` prints `0.7.4`. `daedalus version`
+prints `Daedalus 0.7.4`, with the home, the remote and the tag. `core/doctor.sh`
+prints `OK       version: 0.7.4`.
+
 ## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy
 
 **In short.** Taking a release is one command now. Close every Daedalus
