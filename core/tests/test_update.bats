@@ -961,3 +961,102 @@ print(len(u.deployment_paths(home)))'
   done
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }
+
+# --- every refusal is one short line; every result leads (B2, B3); every refusal exits 1 (B4) -----------------------
+
+FORBIDDEN='undo|reset|--abort|delete|remove them|discard|checkout --'
+
+@test "one line: 435 local changes are refused in one line — the count, at most three paths, and state/update-refused.txt holding all 435; five untracked files where the release adds files likewise; nothing tracked is changed" {
+  mkdir -p "$H/core/extra"; for i in $(seq 1 435); do printf '%s\n' "$i" > "$H/core/extra/f$i.sh"; done
+  git -C "$H" add core/extra; git -C "$H" commit -q -m "435 local files"
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "${#lines[@]}" = 1 ] || { echo "$output" | head -3; return 1; }
+  case "$output" in "Not updated: 435 files under core/ (core/extra/"*", core/extra/"*", core/extra/"*", …; the full list is in state/update-refused.txt) carry local changes the update cannot carry"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(printf '%s' "$output" | grep -o 'core/extra/f' | wc -l | tr -d ' ')" = 3 ]
+  [ "$(wc -l < "$H/state/update-refused.txt" | tr -d ' ')" = 435 ]
+  [ "$(listing | grep -v 'update-refused.txt')" = "$(printf '%s\n' "$before" | grep -v 'update-refused.txt')" ]
+  ! printf '%s\n' "$output" | grep -qE "$FORBIDDEN"
+  git -C "$H" reset -q --hard "v$N"; rm -f "$H/state/update-refused.txt"
+  # five untracked where the release adds them
+  git clone -q "$R" "$B/next"; mkdir -p "$B/next/added"
+  for i in 1 2 3 4 5; do printf 'r\n' > "$B/next/added/a$i.md"; printf 'mine\n' > "$H/added/a$i.md" 2>/dev/null || { mkdir -p "$H/added"; printf 'mine\n' > "$H/added/a$i.md"; }; done
+  git -C "$B/next" add -A; git -C "$B/next" commit -q -m "five files"; git -C "$B/next" push -q origin main
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updated: 5 files under added/ (added/a1.md, added/a2.md, added/a3.md, …; the full list is in state/update-refused.txt) are untracked here where the release adds files; move them out of the release's way"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(wc -l < "$H/state/update-refused.txt" | tr -d ' ')" = 5 ]
+}
+
+@test "one line: five live sessions are named three at a time, and how many more" {
+  mkdir -p "$H/state/leases"
+  for n in 01 02 03 04 05; do p="$(live_pid)"
+    printf '{"lease":"%s","session_id":"s%s","pid":%s,"proc_started":%s}' "$n" "$n" "$p" "$(ps_ms "$p")" > "$H/state/leases/$n.json"; done
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updated: 5 Daedalus sessions are live in this home — window 01 (session s01), window 02 (session s02), window 03 (session s03) and 2 more. Close them"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "every refusal: each class exits 1 with one line starting \"Not updated:\", and no refusal line advises undoing, resetting, aborting, deleting or discarding anything" {
+  out="$B/refusals"; : > "$out"
+  refuse() {   # refuse <label> — the last run was a refusal of this class
+    [ "$status" -eq 1 ] || { echo "$1: status $status: $output"; return 1; }
+    [ "${#lines[@]}" = 1 ] || { echo "$1: $output"; return 1; }
+    case "$output" in "Not updated: "*) : ;; *) echo "$1: $output"; return 1 ;; esac
+    printf '%s\n' "$output" >> "$out"
+  }
+  # detached HEAD
+  git -C "$H" checkout -q --detach; run upd update; refuse detached; git -C "$H" checkout -q main
+  # an in-progress merge, a held index lock
+  git -C "$H" rev-parse HEAD > "$H/.git/MERGE_HEAD"; run upd update; refuse merge; rm "$H/.git/MERGE_HEAD"
+  : > "$H/.git/index.lock"; run upd update; refuse lock; rm "$H/.git/index.lock"
+  # history git cannot read (a fake git that fails the log of the release's history)
+  real="$(command -v git)"; mkdir -p "$B/bin"
+  printf '#!/bin/bash\ncase " $* " in *" log -m --root "*) echo "fatal: injected" >&2; exit 128 ;; esac\nexec "%s" "$@"\n' "$real" > "$B/bin/git"; chmod +x "$B/bin/git"
+  PATH="$B/bin:$PATH" run upd update; refuse history
+  # the update lock held by another update
+  python3 -c 'import fcntl,os,sys,time; fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT); fcntl.flock(fd, fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(30)' "$H/state/.update.lock" "$B/locked" 3>&- &
+  holder=$!; i=0; while [ ! -e "$B/locked" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  run upd update; refuse "update lock"; kill "$holder"; wait "$holder" 2>/dev/null || true
+  # not a Daedalus home
+  mkdir -p "$B/plain"; run python3 "$H/core/update.py" update --home "$B/plain" </dev/null; refuse "not a home"
+  # an unexpected error outside a move: one line, no traceback
+  DAEDALUS_UPDATE_TEST_RAISE=classify run upd update; refuse unexpected
+  case "$output" in *"RuntimeError"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *Traceback*) echo "$output"; return 1 ;; esac
+  # every refusal line here, and those the other tests in this file check, carry no destructive advice
+  run grep -nE "$FORBIDDEN" "$out"; [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
+@test "every refusal in update.py's source opens \"Not updated:\", and no refusal's words advise undoing, resetting, aborting, deleting or discarding" {
+  run python3 - "$REPO/core/update.py" <<'PY'
+import ast, re, sys
+src = open(sys.argv[1]).read(); tree = ast.parse(src)
+FORBID = re.compile(r"undo|reset|--abort|delete|remove them|discard|checkout --")
+bad = []
+def strings(node):
+    return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+def opens(arg):
+    while isinstance(arg, ast.BinOp):
+        arg = arg.left
+    return (isinstance(arg, ast.Name) and arg.id == "NOT_UPDATED") or (isinstance(arg, ast.Constant) and str(arg.value).startswith("Not updated: "))
+for node in ast.walk(tree):
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Refuse":
+        if not node.args or not opens(node.args[0]):
+            bad.append("line %d: a refusal that does not open Not updated:" % node.lineno)
+        for s in strings(node):
+            if FORBID.search(s):
+                bad.append("line %d: %r" % (node.lineno, s))
+    if isinstance(node, ast.FunctionDef) and node.name in ("in_progress", "summarise", "refuse_if_live", "_refuse_paths", "_restored_refusal"):
+        for s in strings(node):
+            if FORBID.search(s) and "remove that file" not in s:
+                bad.append("%s: %r" % (node.name, s))
+for name in ("IN_PROGRESS",):
+    m = re.search(r"^%s = \(.*?\n\n" % name, src, re.S | re.M)
+    if m and FORBID.search(m.group(0)):
+        bad.append(name)
+print("\n".join(bad)); sys.exit(1 if bad else 0)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}

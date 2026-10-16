@@ -309,7 +309,7 @@ def _join(words: List[str]) -> str:
 def summarise(home: Path, paths: List[str]) -> str:
     """A list of paths in a refusal's one line: the path itself when there is one; else the count, the first
     directory when at least two thirds share it, and at most three examples. With more than three, the full list is
-    written (overwritten) to state/update-refused.txt, which the words name. A refusal never prints a wall of paths."""
+    written (overwritten) to state/update-refused.txt, which the words name inside the parentheses. A refusal never prints a wall of paths."""
     paths = list(paths)
     if len(paths) == 1:
         return paths[0]
@@ -319,15 +319,16 @@ def summarise(home: Path, paths: List[str]) -> str:
             tops[q.split("/", 1)[0]] = tops.get(q.split("/", 1)[0], 0) + 1
     top = max(tops, key=lambda k: tops[k]) if tops else None
     under = " under %s/" % top if top and tops[top] * 3 >= len(paths) * 2 else ""
-    words = "%d files%s (%s)" % (len(paths), under, ", ".join(paths[:MOST]) + (", …" if len(paths) > MOST else ""))
+    shown = ", ".join(paths[:MOST])
     if len(paths) > MOST:
+        shown += ", …"
         try:
             (home / "state").mkdir(parents=True, exist_ok=True)
             (home / REFUSED_LIST).write_text("\n".join(paths) + "\n")
-            words += "; the full list is in %s" % REFUSED_LIST.as_posix()
+            shown += "; the full list is in %s" % REFUSED_LIST.as_posix()
         except OSError:
             pass
-    return words
+    return "%d files%s (%s)" % (len(paths), under, shown)
 
 
 def _names_in_words(names: List[str]) -> str:
@@ -535,6 +536,8 @@ def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[
     untracked files at paths the release has. A deployment path — tracked here, never on the release's history,
     not under DIST_PATHS (a vault the home tracks is the case doctor knows) — is the deployment's own: never local,
     carried by merging (deployment)."""
+    if os.environ.get("DAEDALUS_UPDATE_TEST_RAISE") == "classify":     # test knob: an error that is not a refusal
+        raise RuntimeError("injected by DAEDALUS_UPDATE_TEST_RAISE")
     th, tt, tb = tree(home, head), tree(home, target), tree(home, base)
     changed = sorted(set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", target)))
                      | set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", head, target))))
