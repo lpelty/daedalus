@@ -2011,3 +2011,129 @@ with ll.lock(r):
   CLAUDE_CODE_SESSION_ID=sB run LS prime take
   [ "$status" -ne 0 ]; case "$output" in *"window 01"*"--reason"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- The pen at a vault commit: holder_ended and pen-for-commit ------------------------------------------------
+
+# ended <holder> — leaselib.holder_ended over the current lease files: True, False or None
+ended() { python3 - "$DAEDALUS_HOME/core" "$DAEDALUS_HOME" "$1" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll
+from pathlib import Path
+root = Path(sys.argv[2]); leases = ll.read_all(root)
+print(ll.holder_ended(root, leases, sys.argv[3] or None))
+PY
+}
+PFC() { python3 "$LL" pen-for-commit; }
+
+@test "holder_ended: a windowed holder whose recorded process is gone is ended; quiet, resumed and pid-less are not or cannot be told; a holder with no window is judged by the registry; no holder is ended" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  pa="$(live_pid)"; win 01 sA "$pa"; kill "$pa"; wait "$pa" 2>/dev/null || true
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"
+  [ "$(ended sA)" = True ] || { ended sA; return 1; }
+  pq="$(live_pid)"; win 02 sQ "$pq"; touch -t 202001010000 "$DAEDALUS_HOME/state/leases/02.seen"
+  [ "$(python3 "$LL" liveness 02)" = quiet ]; [ "$(ended sQ)" = False ]
+  pr="$(live_pid)"; win 03 sR "$pr"; kill "$pr"; wait "$pr" 2>/dev/null || true
+  pr2="$(live_pid)"; registry_entry "$pr2" sR
+  [ "$(python3 "$LL" liveness 03)" = resumed ]; [ "$(ended sR)" = False ]
+  python3 "$LL" _test-write 04 '{"lease":"04","session_id":"sN","worktree":"worktrees/04"}'
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/04.seen"
+  [ "$(ended sN)" = None ]
+  pw="$(live_pid)"; registry_entry "$pw" sW
+  [ "$(ended sW)" = False ]; [ "$(ended sGone)" = True ]
+  [ "$(ended '')" = True ]
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/no-registry"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  [ "$(ended sGone)" = None ]
+}
+
+@test "pen-for-commit: an operator shell, a home with no lease files, and the holder itself pass silently; no state/leases/ is never created; a visitor is told its caller commits (exit 3)" {
+  run PFC; [ "$status" -eq 0 ]; [ -z "$output" ]
+  DAEDALUS_SESSION_ID=sA run PFC; [ "$status" -eq 0 ]; [ -z "$output" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases" ]
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  DAEDALUS_SESSION_ID=sA run PFC; [ "$status" -eq 0 ]; [ -z "$output" ]
+  [ ! -e "$DAEDALUS_HOME/state/leases/prime.json" ]
+  pa="$(live_pid)"; registry_entry "$pa" sA; win 01 sA "$pa"
+  python3 "$LL" _test-write prime '{"session_id":"sA","history":[]}'
+  DAEDALUS_SESSION_ID=sA run PFC; [ "$status" -eq 0 ]; [ -z "$output" ]
+  DIRECT_CALL_ID=x DAEDALUS_SESSION_ID=sV run PFC; [ "$status" -eq 3 ]
+  [ "$output" = "This is a direct-call session; it does not commit the vault — its caller's session does." ] || { echo "$output"; return 1; }
+}
+
+@test "pen-for-commit, the reported case: window 01 is the only window, the pen's holder held no window and has ended — 01 takes the pen at the commit, says so in one line, and the history records it" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  pa="$(live_pid)"; registry_entry "$pa" sA interactive cli daedalus-01; win 01 sA "$pa"
+  python3 "$LL" _test-write prime '{"session_id":"sOld","taken_without_window":"sOld","bound_at":"2026-01-01T00:00:00","history":[],"logs":{"2026-01-01":4}}'
+  DAEDALUS_SESSION_ID=sA run PFC; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "The pen's holder, a session holding no window (peer name unknown), has ended; this session holds the pen now and commits the vault." ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sA ]; [ "$(lease_json prime logs)" = None ]; [ "$(lease_json prime taken_without_window)" = None ]
+  [ "$(hist_last from)" = sOld ]; [ "$(hist_last auto)" = commit ]; [ "$(hist_last reason)" = "taken at commit: previous holder ended" ]
+  [ "$(hist_last no_window)" = None ]
+}
+
+@test "pen-for-commit: a windowless taker while the upgrade is pending is marked taken without a window and while pending, and its line ends with the promote clause; a later take and first-up drop the pending mark" {
+  printf '0.7.4\n' > "$DAEDALUS_HOME/VERSION"
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  po="$(live_pid)"; win 01 sOld "$po"; kill "$po"; wait "$po" 2>/dev/null || true
+  python3 "$LL" _test-write prime '{"session_id":"sOld","history":[]}'
+  pw="$(live_pid)"; registry_entry "$pw" sW
+  DAEDALUS_SESSION_ID=sW run PFC; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "The pen's holder, window 01, has ended; this session holds the pen now and commits the vault; promote waits until the upgrade finishes." ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime taken_without_window)" = sW ]; [ "$(lease_json prime taken_while_pending)" = 0.7.4 ]
+  [ "$(hist_last no_window)" = True ]
+  kill "$pw"; wait "$pw" 2>/dev/null || true
+  pv="$(live_pid)"; registry_entry "$pv" sV
+  DAEDALUS_SESSION_ID=sV run LS prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime taken_while_pending)" = None ]
+}
+
+@test "pen-for-commit never takes from a live or quiet holder (exit 3, one line, prime.json unchanged), nor from one whose liveness cannot be told; a headless session never takes; a windowless session the registry does not show is refused" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  pa="$(live_pid)"; registry_entry "$pa" sA interactive cli daedalus-01; win 01 sA "$pa"
+  python3 "$LL" _test-write prime '{"session_id":"sA","history":[]}'
+  pb="$(live_pid)"; registry_entry "$pb" sB; win 02 sB "$pb"
+  before="$(cat "$DAEDALUS_HOME/state/leases/prime.json")"
+  DAEDALUS_SESSION_ID=sB run PFC; [ "$status" -eq 3 ]
+  [ "$output" = "The vault is left for the pen's holder, window 01, which is live: its next vault commit carries every window's files, this session's included, and once it ends the next close takes the pen and commits them." ] || { echo "$output"; return 1; }
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"; [ "$(python3 "$LL" liveness 01)" = quiet ]
+  DAEDALUS_SESSION_ID=sB run PFC; [ "$status" -eq 3 ]
+  [ "$(cat "$DAEDALUS_HOME/state/leases/prime.json")" = "$before" ]
+  # a pid-less holder: cannot be told, so it is not taken
+  python3 "$LL" _test-write 03 '{"lease":"03","session_id":"sN","worktree":"worktrees/03"}'
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/03.seen"
+  python3 "$LL" _test-write prime '{"session_id":"sN","history":[]}'
+  DAEDALUS_SESSION_ID=sB run PFC; [ "$status" -eq 3 ]
+  case "$output" in "The vault is left for the pen's holder, window 03; this build cannot tell whether it is live, so it is not taken"*"\`core/lease.sh prime take\`"*"\`cd $DAEDALUS_HOME && core/vault-commit.sh\`.") : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sN ]
+  # an ended holder, a headless taker (claude -p registers interactive/sdk-cli; --bg registers bg/cli)
+  python3 "$LL" _test-write prime '{"session_id":"sGone","history":[]}'
+  for k in "interactive sdk-cli" "bg cli"; do
+    ph="$(live_pid)"; set -- $k; registry_entry "$ph" sH "$1" "$2"; win 04 sH "$ph"
+    DAEDALUS_SESSION_ID=sH run PFC; [ "$status" -eq 3 ] || { echo "$k: $status $output"; return 1; }
+    case "$output" in *"has ended"*"not a terminal session"*"\`cd $DAEDALUS_HOME && core/vault-commit.sh\`"*) : ;; *) echo "$output"; return 1 ;; esac
+    [ "$(lease_json prime session_id)" = sGone ]
+    rm -f "$BATS_TEST_TMPDIR/sessions/$ph.json"
+  done
+  # a windowless session the registry does not show
+  DAEDALUS_SESSION_ID=sGhost run PFC; [ "$status" -eq 3 ]
+  case "$output" in "This session is not in the session registry, so no later session could tell it is live; it cannot take the pen. The next session's close commits these files.") : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = sGone ]
+}
+
+@test "pen-for-commit: an unreadable lease file fails closed (exit 1, its sentence)" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"; printf '{not json' > "$DAEDALUS_HOME/state/leases/01.json"
+  DAEDALUS_SESSION_ID=sA run PFC; [ "$status" -eq 1 ]
+  case "$output" in "daedalus: "*"01"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "pen-for-commit: two live sessions committing at once after the holder ended — exactly one takes the pen, the other is told the vault is the new holder's, and the history gains one entry" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  pa="$(live_pid)"; registry_entry "$pa" sA; win 01 sA "$pa"
+  pb="$(live_pid)"; registry_entry "$pb" sB; win 02 sB "$pb"
+  python3 "$LL" _test-write prime '{"session_id":"sGone","history":[]}'
+  for s in A B; do
+    ( rc=0; DAEDALUS_SESSION_ID=s$s python3 "$LL" pen-for-commit > "$BATS_TEST_TMPDIR/$s.out" 2>&1 || rc=$?; echo "$rc" > "$BATS_TEST_TMPDIR/$s.rc" ) &
+  done
+  wait
+  rcs="$(cat "$BATS_TEST_TMPDIR/A.rc" "$BATS_TEST_TMPDIR/B.rc" | sort | tr '\n' ' ')"
+  [ "$rcs" = "0 3 " ] || { echo "$rcs"; cat "$BATS_TEST_TMPDIR"/*.out; return 1; }
+  [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["history"]))' "$DAEDALUS_HOME/state/leases/prime.json")" = 1 ]
+}

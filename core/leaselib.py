@@ -3556,6 +3556,7 @@ def first_up(root: Path, sid: str) -> bool:
                                                         "reason": "first-up (previous holder gone)"}]
     fresh.pop("logs", None)      # a pen-only reservation was the gone holder's, like a window's on takeover
     fresh.pop("taken_without_window", None)
+    fresh.pop("taken_while_pending", None)
     fresh.update(dict({"session_id": sid}, **pen_bound()))
     write_lease(root, "prime", fresh)
     return True
@@ -4107,6 +4108,7 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
         fresh["history"] = (fresh.get("history") or []) + [entry]
         fresh.pop("logs", None)      # the pen's reservation, if any, was the previous holder's
         fresh.pop("taken_without_window", None)
+        fresh.pop("taken_while_pending", None)
         fresh.update(dict({"session_id": sid}, **pen_bound()))
         write_lease(root, "prime", fresh)
     return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
@@ -4171,12 +4173,107 @@ def prime_take_windowless(root: Path, sid: str, reason: Optional[str]) -> str:
         data = dict(fresh or {})
         data["history"] = (data.get("history") or []) + [entry]
         data.pop("logs", None)       # the previous holder's pen-only reservation, as on every take
+        data.pop("taken_while_pending", None)
         data.update(dict({"session_id": sid, "taken_without_window": sid}, **pen_bound()))
         try:
             write_lease(root, "prime", data, exclusive=fresh is None)
         except FileExistsError:
             raise Refused("`prime` changed under you — re-read the board and try again")
     return WINDOWLESS_PEN_TAKEN % (PROMOTE_WAITS_CLAUSE if pending_version(root) else "")
+
+
+# --- The pen at a vault commit (close-commits design 2026-10-16) ------------------------------------------
+
+PEN_TAKEN_AT_COMMIT = "The pen's holder, %s, has ended; this session holds the pen now and commits the vault%s."
+PEN_HELD_AT_COMMIT = ("The vault is left for the pen's holder, %s, which is live: its next vault commit carries every "
+                      "window's files, this session's included, and once it ends the next close takes the pen and "
+                      "commits them.")
+PEN_UNTOLD_AT_COMMIT = ("The vault is left for the pen's holder, %s; this build cannot tell whether it is live, so it is "
+                        "not taken — `core/lease.sh prime take` moves it, or the operator commits from their own shell: "
+                        "`cd %s && core/vault-commit.sh`.")
+PEN_ENDED_NOT_TERMINAL = ("The pen's holder, %s, has ended, but this is not a terminal session, so it does not take the "
+                          "pen: the next close in a terminal session takes it and commits these files, or the operator "
+                          "commits from their own shell: `cd %s && core/vault-commit.sh`.")
+VISITOR_AT_COMMIT = "This is a direct-call session; it does not commit the vault — its caller's session does."
+NOT_IN_REGISTRY_AT_COMMIT = WINDOWLESS_NOT_IN_REGISTRY + " The next session's close commits these files."
+
+
+def holder_ended(root: Path, leases: Dict[str, dict], holder: Optional[str]) -> Optional[bool]:
+    """Has the pen's holder ended? True, False, or None (cannot tell — treated as live by every caller).
+    No holder: True. A holder with a numbered lease: reclaim_idle_locked's test word for word — a pid on
+    file and liveness "stale"; live, quiet and resumed are False, a lease that recorded no pid is None.
+    A holder with no window: the registry's live entries, None when this build has no registry. Pure over
+    the read; stricter than prime_holder_live, which reads a pid-less heartbeat-stale window as gone —
+    the automatic take has no operator in the loop."""
+    if not holder:
+        return True
+    hnn, hlease = lease_of_session(leases, str(holder))
+    if hlease is not None:
+        if hlease.get("pid") is None:
+            return None
+        return liveness(root, hnn, hlease) == "stale"
+    if not registry_present():
+        return None
+    return not registry_live_entries(str(holder))
+
+
+def pen_for_commit(root: Path, sid: Optional[str]) -> Tuple[int, str]:
+    """vault-commit.sh step 1: may this session commit the vault, taking a pen whose holder has ended?
+    (exit, line): 0 commit (the line says the pen moved, or is empty), 3 not here (the pen's holder
+    commits; the line says why), 1 a lease file cannot be read (Refused propagates). The judge and the
+    write sit in ONE exclusive lock (first_up's pattern): no lock-free read, no CAS window. The take is
+    a terminal session's only (is_terminal_window, first_up's rule): a headless, background or spawned
+    session, or a visitor, never holds the pen. It writes prime.json alone — no window, branch or
+    worktree, nothing under target/ — marked taken_without_window for a taker holding no window
+    (pen_without_tree) and taken_while_pending while the upgrade is pending (promote.who waits)."""
+    if sid is None:
+        return 0, ""
+    if os.environ.get("DIRECT_CALL_ID"):
+        return 3, VISITOR_AT_COMMIT
+    if not leases_dir(root).is_dir():
+        return 0, ""                       # never made here: lock() would mkdir it
+    with lock(root):
+        leases = read_all(root)            # an unreadable lease file fails closed (Refused)
+        numbered = [k for k in leases if k != "prime"]
+        prime = leases.get("prime")
+        holder = (prime or {}).get("session_id")
+        if not numbered and not holder:
+            return 0, ""
+        if holder == sid:
+            return 0, ""
+        label = _holder_words(leases, str(holder))[0] if holder else "nobody"
+        mine, _ = lease_of_session(leases, sid)
+        if mine is None and registry_present() and not registry_live_entries(sid):
+            return 3, NOT_IN_REGISTRY_AT_COMMIT
+        ended = holder_ended(root, leases, holder)
+        if ended is None:
+            return 3, PEN_UNTOLD_AT_COMMIT % (label, root)
+        if not ended:
+            return 3, PEN_HELD_AT_COMMIT % label
+        registry_entry_for(sid)            # a session open in two terminals is refused, as at every take
+        if not is_terminal_window(sid):
+            return 3, PEN_ENDED_NOT_TERMINAL % (label, root)
+        pending = pending_version(root)
+        entry: Dict[str, object] = {"from": holder, "to": sid, "at": now_stamp(),
+                                    "reason": "taken at commit: previous holder ended", "auto": "commit"}
+        data = dict(prime or {})
+        if mine is None:
+            entry["no_window"] = True
+            data["taken_without_window"] = sid
+        else:
+            data.pop("taken_without_window", None)
+        if pending:
+            data["taken_while_pending"] = pending
+        else:
+            data.pop("taken_while_pending", None)
+        data["history"] = (data.get("history") or []) + [entry]
+        data.pop("logs", None)             # the ended holder's pen-only reservation, as on every take
+        data.update(dict({"session_id": sid}, **pen_bound()))
+        write_lease(root, "prime", data)
+    if holder:
+        return 0, PEN_TAKEN_AT_COMMIT % (label, PROMOTE_WAITS_CLAUSE if pending else "")
+    return 0, ("Nobody held the pen; this session holds it now and commits the vault%s."
+               % (PROMOTE_WAITS_CLAUSE if pending else ""))
 
 
 # --- The board (§4.3) ---------------------------------------------------------
@@ -4878,6 +4975,16 @@ def main(argv: list) -> int:
         if not sid:
             return 1
         print(sid); return 0
+    if cmd == "pen-for-commit":
+        # vault-commit.sh step 1: exit 0 commit (a line when the pen moved), 3 the pen's holder commits (its line),
+        # 1 a lease file cannot be read. Lines go to stdout; vault-commit.sh decides where they are shown.
+        try:
+            rc, line = pen_for_commit(root, session_id_from_env())
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+        if line:
+            print(line)
+        return rc
     if cmd in ("is-prime", "not-prime-sentence", "numbers"):
         # vault-commit.sh (§4.7): is-prime exits 0 when prime.json names the caller's
         # session, or when the deployment has no lease files at all (nothing to hold);
