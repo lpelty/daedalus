@@ -94,3 +94,22 @@ use_fake_graph() {
 crg_knob() { printf '%s\n' "$1" >> "$CRG_DIR/fake-crg.env"; }
 # crg_verbs — the subcommand of every logged call, in order, one per line.
 crg_verbs() { grep '^argv ' "$CRG_LOG" | awk '{print $2}'; }
+
+# deploy_rules <json array of rules> — vault/context-rules.json holding them (format 1).
+deploy_rules() {
+  printf '{"format": 1, "author": "daedalus", "created": "2026-10-20", "updated-by": "daedalus", "updated": "2026-10-20", "rules": %s}\n' "$1" \
+    > "$DAEDALUS_HOME/vault/context-rules.json"
+}
+# a_rule <name> <hint> <search> <to> <resolve> <test-file> <test-text> <expect-json> [extra-json-fields]
+a_rule() {
+  python3 - "$@" <<'PY'
+import json, sys
+name, hint, search, to, resolve, tfile, ttext, expect = sys.argv[1:9]
+r = {"name": name, "about": "A fixture rule.", "hint": hint, "search": search, "to": to, "resolve": resolve,
+     "origin": {"date": "2026-10-20", "window": "02", "why": "fixture"},
+     "test": {"file": tfile, "text": ttext, "expect": json.loads(expect)}}
+if len(sys.argv) > 9:
+    r.update(json.loads(sys.argv[9]))
+print(json.dumps(r))
+PY
+}

@@ -4,7 +4,7 @@
 # holding code-review-graph 2.3.9.
 bats_require_minimum_version 1.5.0
 load fixtures/context/setup.bash
-setup() { context_fixture; window_02; cd "$DAEDALUS_HOME"; }
+setup() { context_fixture; rm -f "$DAEDALUS_HOME/core/context-rules.json"; window_02; cd "$DAEDALUS_HOME"; }   # rules: test_context_rules.bats
 teardown() { teardown_live; pkill -f "$BATS_TEST_TMPDIR/crg/" 2>/dev/null || true; }
 
 @test "the graph's environment is an allowlist: no API key, HOME and CRG_HOME and CRG_DATA_DIR under state/code-context/, the caller's git on PATH, cwd the repo root; every call is an allowed verb" {

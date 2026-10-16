@@ -3,7 +3,7 @@
 # (code-context design §5, §6; Task 2). The fixture's files are listed in fixtures/context/setup.bash.
 bats_require_minimum_version 1.5.0
 load fixtures/context/setup.bash
-setup() { context_fixture; }
+setup() { context_fixture; rm -f "$DAEDALUS_HOME/core/context-rules.json"; }   # the rules have their own file
 teardown() { teardown_live; }
 
 @test "outside a window, each verb's grep patterns find exactly the expected files, all labelled grep only; untracked found, ignored not, the subject never a hit" {

@@ -904,9 +904,301 @@ def rebuild(root: Path, args: List[str]) -> int:
 
 # --- the rules (§10) -----------------------------------------------------------------------------------
 
-def rules_part(root: Path, cfg: Cfg, tree: Tree, subj: Subject) -> Tuple[Dict[str, dict], List[str], object]:
-    """(hits, skipped lines, the names applied or 'timed-out')."""
-    return {}, [], []
+RULE_NAME = re.compile(r"[a-z0-9-]+")
+RESOLVES = ("tree", "beside", "roots", "suffix")
+SLOT = re.compile(r"\{(\d+)(?::(module|map|join))?\}")
+CONFIG_MAP = "config:context.placeholders"
+RELEASE_RULES = "core/context-rules.json"
+DEPLOY_RULES = "vault/context-rules.json"
+CHECK_HINT = "python3 core/context.py rules --check"
+
+
+def rule_problem(r: object) -> Optional[str]:
+    """What is wrong with a rule's shape, or None (§10.2)."""
+    if not isinstance(r, dict):
+        return "it is not a JSON object"
+    if not isinstance(r.get("name"), str) or not RULE_NAME.fullmatch(r["name"]):
+        return "its name must be lower-case letters, digits and dashes"
+    for k in ("about", "hint", "search", "to"):
+        if not isinstance(r.get(k), str) or not r[k].strip():
+            return "%s is required" % k
+    try:
+        rx = re.compile(r["search"])
+    except re.error as e:
+        return "its search does not compile (%s)" % e
+    if r.get("resolve") not in RESOLVES:
+        return "resolve must be one of %s" % ", ".join(RESOLVES)
+    if "in" in r and not (isinstance(r["in"], list) and all(isinstance(g, str) and g for g in r["in"])):
+        return "in must be a list of file globs"
+    m = r.get("map")
+    if m is not None and m != CONFIG_MAP and not (isinstance(m, dict) and all(isinstance(x, str) for x in m.values())):
+        return "map must be an object or \"%s\"" % CONFIG_MAP
+    for slot in SLOT.finditer(r["to"]):
+        if int(slot.group(1)) > rx.groups:
+            return "to names group %s, which its search does not have" % slot.group(1)
+        if slot.group(2) == "map" and m is None:
+            return "to uses {N:map} but the rule has no map"
+    o = r.get("origin")
+    if not isinstance(o, dict) or not all(isinstance(o.get(k), str) and o[k].strip() for k in ("date", "window", "why")):
+        return "origin needs date, window and why"
+    t = r.get("test")
+    if not isinstance(t, dict) or not isinstance(t.get("file"), str) or not isinstance(t.get("text"), str) \
+            or not isinstance(t.get("expect"), list):
+        return "test needs file, text and expect"
+    return None
+
+
+def in_globs(r: dict, rel: str) -> bool:
+    globs = r.get("in")
+    if not globs:
+        return True
+    base = posixpath.basename(rel)
+    return any(fnmatch.fnmatchcase(rel if "/" in g else base, g) for g in globs)
+
+
+def rule_map(r: dict, placeholders: Dict[str, str]) -> Dict[str, str]:
+    m = r.get("map")
+    if m == CONFIG_MAP:
+        return placeholders
+    return m if isinstance(m, dict) else {}
+
+
+def expand(r: dict, m: "re.Match", mapping: Dict[str, str]) -> List[str]:
+    """The candidate templates of `to`, filled from the match; a slot that cannot be filled drops its template."""
+    out: List[str] = []
+    for tmpl in r["to"].split(" | "):
+        ok = True
+
+        def fill(slot: "re.Match") -> str:
+            nonlocal ok
+            g = m.group(int(slot.group(1)))
+            if g is None:
+                ok = False
+                return ""
+            kind = slot.group(2)
+            if kind == "module":
+                return g.replace(".", "/")
+            if kind == "map":
+                if g not in mapping:
+                    ok = False
+                    return ""
+                return mapping[g]
+            if kind == "join":
+                return "/".join(re.findall(r"[\"']([^\"']+)[\"']", g))
+            return g
+        cand = SLOT.sub(fill, tmpl.strip())
+        if ok and cand:
+            out.append(cand)
+    return out
+
+
+def norm_candidate(c: str) -> Optional[str]:
+    c = posixpath.normpath(c.lstrip("/"))
+    if c in (".", "") or c.startswith("../") or c == "..":
+        return None
+    return c
+
+
+def resolve_candidates(r: dict, cands: List[str], rel: str, roots: List[str],
+                       files: Optional[Set[str]]) -> List[str]:
+    """Paths, tree-relative. `files` None (a rule's own test): nothing is checked for existence."""
+    out: List[str] = []
+    how = r["resolve"]
+    for c in cands:
+        if how == "beside":
+            ps = [posixpath.join(posixpath.dirname(rel), c)]
+        elif how == "roots":
+            ps = [posixpath.join(rt, c) if rt else c for rt in roots]
+        else:
+            ps = [c]
+        for p in ps:
+            p2 = norm_candidate(p)
+            if p2 is None:
+                continue
+            if how == "suffix" and files is not None:
+                out += [f for f in files if f == p2 or f.endswith("/" + p2)]
+            elif files is None or p2 in files:
+                out.append(p2)
+    return sorted(set(out))
+
+
+def rule_test(r: dict, placeholders: Dict[str, str], roots: List[str]) -> Tuple[bool, List[str]]:
+    """A rule's own test, in memory: the regex on `text` as if it sat in `file`, candidates unchecked."""
+    t = r["test"]
+    got: List[str] = []
+    if in_globs(r, t["file"]):
+        mapping = t["map"] if isinstance(t.get("map"), dict) else rule_map(r, placeholders)
+        rts = [norm_dir(x) for x in t["roots"]] if isinstance(t.get("roots"), list) else roots
+        rx = re.compile(r["search"])
+        for m in rx.finditer(t["text"]):
+            got += resolve_candidates(r, expand(r, m, mapping), t["file"], rts, None)
+    got = sorted(set(got))
+    return got == sorted(set(str(x) for x in t["expect"])), got
+
+
+def load_rules(root: Path) -> Tuple[List[Tuple[str, object]], List[dict]]:
+    """(every rule as (source, raw), release first; the files that cannot be read, with why)."""
+    rules: List[Tuple[str, object]] = []
+    problems: List[dict] = []
+    for src, rel in (("release", RELEASE_RULES), ("deployment", DEPLOY_RULES)):
+        p = root / rel
+        if not p.exists():
+            continue
+        try:
+            d = json.loads(p.read_text())
+        except OSError as e:
+            problems.append({"file": rel, "why": e.strerror or str(e)})
+            continue
+        except ValueError:
+            problems.append({"file": rel, "why": "not valid JSON"})
+            continue
+        if not isinstance(d, dict) or not isinstance(d.get("rules"), list):
+            problems.append({"file": rel, "why": "it has no rules list"})
+            continue
+        rules += [(src, r) for r in d["rules"]]
+    return rules, problems
+
+
+def judged_rules(root: Path, placeholders: Dict[str, str], roots: List[str]) -> Tuple[List[dict], List[dict]]:
+    """Every rule with its verdict: [{"name", "source", "rule", "ok", "why", "got"}], plus file-level problems."""
+    rules, files = load_rules(root)
+    verdicts: List[dict] = []
+    release_names: Set[str] = set()
+    seen: Set[str] = set()
+
+    def key(x: Tuple[str, object]) -> Tuple[int, str]:
+        n = x[1].get("name") if isinstance(x[1], dict) else None
+        return (0 if x[0] == "release" else 1, n if isinstance(n, str) else "")
+    for src, r in sorted(rules, key=key):
+        name = r.get("name") if isinstance(r, dict) and isinstance(r.get("name"), str) else "(unnamed)"
+        v_ = {"name": name, "source": src, "rule": r, "ok": False, "why": None, "got": None}
+        problem = rule_problem(r)
+        if problem:
+            v_["why"] = problem
+        elif src == "deployment" and name in release_names:
+            v_["why"] = "a release rule has that name; rename it"
+        elif name in seen:
+            v_["why"] = "another rule in the same file has that name; rename it"
+        else:
+            ok, got = rule_test(r, placeholders, roots)
+            v_["got"] = got
+            if not ok:
+                v_["why"] = "its own test fails"
+            else:
+                v_["ok"] = True
+        if src == "release" and not problem:
+            release_names.add(name)
+        seen.add(name)
+        verdicts.append(v_)
+    return verdicts, files
+
+
+def skip_line(v_: dict) -> str:
+    if v_["why"] == "a release rule has that name; rename it":
+        return "rule %s skipped: %s" % (v_["name"], v_["why"])
+    return "rule %s skipped: %s (%s)" % (v_["name"], v_["why"], CHECK_HINT)
+
+
+def rules_check(root: Path) -> int:
+    cfg = read_config(root)
+    verdicts, files = judged_rules(root, cfg.placeholders, cfg.module_roots or [""])
+    fails = 0
+    for f in files:
+        print("FAIL %s: it cannot be read (%s), so its rules are skipped" % (f["file"], f["why"]))
+        fails += 1
+    for v_ in verdicts:
+        if v_["ok"]:
+            print("ok %s" % v_["name"])
+            continue
+        fails += 1
+        if v_["why"] == "its own test fails":
+            print("FAIL %s: expected %s, got %s" % (v_["name"], json.dumps(sorted(v_["rule"]["test"]["expect"])),
+                                                   json.dumps(v_["got"])))
+        else:
+            print("FAIL %s: %s" % (v_["name"], v_["why"]))
+    n_fail = sum(1 for v_ in verdicts if not v_["ok"])
+    print("%d rules, %d fail" % (len(verdicts), n_fail))
+    return 1 if fails else 0
+
+
+def apply_rules(job: dict) -> dict:
+    """The rules worker's body (§10.2 At query time): load, judge, and run every good rule over the tree."""
+    root = Path(job["root"])
+    tree = Tree(Path(job["tree"]), job["outer"], job["nested"])
+    placeholders, roots, subjects = job["placeholders"], job["roots"], set(job["subjects"])
+    verdicts, files = judged_rules(root, placeholders, roots)
+    skipped = ["rules in %s skipped: the file cannot be read (%s); %s" % (f["file"], f["why"], CHECK_HINT)
+               for f in files]
+    skipped += [skip_line(v_) for v_ in verdicts if not v_["ok"]]
+    good = [v_["rule"] for v_ in verdicts if v_["ok"]]
+    hits: List[dict] = []
+    if subjects and good:
+        all_files = ls_files(tree)
+        for r in good:
+            rx = re.compile(r["search"])
+            mapping = rule_map(r, placeholders)
+            for rel in sorted(git_grep(tree, r["hint"])):
+                if not in_globs(r, rel):
+                    continue
+                try:
+                    text = (tree.root / rel).read_text(errors="replace")
+                except OSError:
+                    continue
+                for n, line in enumerate(text.splitlines(), 1):
+                    if len(line) > LONG_LINE:
+                        continue
+                    for m in rx.finditer(line):
+                        named = resolve_candidates(r, expand(r, m, mapping), rel, roots, all_files)
+                        if subjects.intersection(named):
+                            hits.append({"file": rel, "rule": r["name"], "line": n, "text": m.group(0)[:80]})
+    return {"hits": hits, "skipped": skipped, "applied": sorted(r["name"] for r in good)}
+
+
+def rules_timeout() -> float:
+    try:
+        return float(os.environ.get("DAEDALUS_CONTEXT_TEST_RULES_TIMEOUT") or RULES_TIMEOUT)
+    except ValueError:
+        return RULES_TIMEOUT
+
+
+def rules_part(root: Path, cfg: Cfg, tree: Tree, subj: Subject,
+               roots: List[str]) -> Tuple[Dict[str, dict], List[str], object]:
+    """(hits, skipped lines, the names applied or 'timed-out'). The rules run in a child process with a
+    timeout: Python's re has no timeout of its own, so a catastrophic regex would otherwise hang the query."""
+    job = {"root": str(root), "tree": str(tree.root), "outer": tree.outer, "nested": tree.nested_prefixes(),
+           "placeholders": cfg.placeholders, "roots": roots, "subjects": subj.files}
+    limit = rules_timeout()
+    try:
+        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--rules-worker"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, start_new_session=True, env=dict(os.environ, DAEDALUS_HOME=str(root)))
+    except OSError as e:
+        return {}, ["rules could not run (%s), so this answer has no rule hits" % (e.strerror or e)], "failed"
+    try:
+        out, _ = proc.communicate(json.dumps(job), timeout=limit)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        return {}, ["rules timed out after %s s, so this answer has no rule hits; %s lists them"
+                    % (("%g" % limit), CHECK_HINT)], "timed-out"
+    try:
+        res = json.loads(out)
+    except ValueError:
+        return {}, ["rules could not run (the worker exited %s), so this answer has no rule hits"
+                    % proc.returncode], "failed"
+    hits: Dict[str, dict] = {}
+    for h in res.get("hits") or []:
+        e = hits.setdefault(h["file"], {"lines": set(), "why": [], "rules": [], "text": ""})
+        e["lines"].add(h["line"])
+        if h["rule"] not in e["rules"]:
+            e["rules"].append(h["rule"])
+            e["why"].append("rule:%s: %s" % (h["rule"], h["text"]))
+        if not e["text"] or sorted(e["rules"])[0] == h["rule"]:
+            e["text"] = e["text"] or h["text"]
+    return hits, list(res.get("skipped") or []), list(res.get("applied") or [])
 
 
 # --- merge and labels (§6) -----------------------------------------------------------------------------
@@ -1029,7 +1321,7 @@ def query(root: Path, verb: str, arg: str, want_json: bool) -> int:
     tests_only = verb == "tests"
     gi, ghits = graph_part(root, cfg, where, verb, subj, deadline)
     grep = grep_part(tree, verb_patterns(verb, subj, roots, arg), tests_only)
-    rhits, skipped, _applied = rules_part(root, cfg, tree, subj)
+    rhits, skipped, _applied = rules_part(root, cfg, tree, subj, roots)
     if tests_only:
         rhits = {f: h for f, h in rhits.items() if is_test_path(f)}
     hits = merge(ghits, grep, rhits, subj.files)
@@ -1056,6 +1348,11 @@ def main(argv: List[str]) -> int:
             return query(root, verb, args[1], want_json)
         if verb == "rebuild":
             return rebuild(root, args[1:])
+        if args == ["rules", "--check"]:
+            return rules_check(root)
+        if args == ["--rules-worker"]:
+            print(json.dumps(apply_rules(json.load(sys.stdin))))
+            return 0
         raise Usage(USAGE)
     except Usage as e:
         print(str(e))

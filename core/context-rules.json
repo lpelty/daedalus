@@ -1,0 +1,55 @@
+{
+  "format": 1,
+  "author": "daedalus", "created": "2026-10-16", "updated-by": "daedalus", "updated": "2026-10-16",
+  "rules": [
+    {
+      "name": "module-run",
+      "about": "`python -m X` and `uv run -m X` run module X, a file under a module root.",
+      "hint": "-m ",
+      "search": "\\b(?:uv run(?: python3?)?|python3?)\\s+-m\\s+([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*)",
+      "to": "{1:module}.py | {1:module}/__init__.py | {1:module}/__main__.py",
+      "resolve": "roots",
+      "origin": {"date": "2026-10-16", "window": "release",
+                 "why": "code-graph spike Q09: a shell script ran `uv run python -m <pkg>.gate` and a pipeline ran `uv run -m <pkg>.ingest`; neither graph tool linked the script to the module file"},
+      "test": {"file": "app/run.sh", "text": "cd app && uv run -m pkg.tool all", "roots": ["app"],
+               "expect": ["app/pkg/tool.py", "app/pkg/tool/__init__.py", "app/pkg/tool/__main__.py"]}
+    },
+    {
+      "name": "template-placeholder",
+      "about": "A template's {{NAME}}/path names a file under the directory the placeholder stands for.",
+      "hint": "{{",
+      "search": "\\{\\{([A-Z][A-Z0-9_]*)\\}\\}/([\\w./-]+)",
+      "to": "{1:map}/{2}",
+      "resolve": "tree",
+      "map": "config:context.placeholders",
+      "origin": {"date": "2026-10-16", "window": "release",
+                 "why": "code-graph spike Q09 and Q11: a .md.tmpl ran `python3 {{ENGINE}}/<dir>/<check>.py`; neither graph tool reads templates"},
+      "test": {"file": "docs/job.md.tmpl", "text": "python3 {{LIB}}/check.py", "map": {"LIB": "lib"},
+               "expect": ["lib/check.py"]}
+    },
+    {
+      "name": "python-path-join",
+      "about": "A Python path join of quoted segments, ROOT / \"a\" / \"b.py\", names the file a/b.py.",
+      "hint": "\" / \"",
+      "search": "((?:[\"'][\\w.-]+[\"']\\s*/\\s*)+[\"'][\\w.-]+\\.(?:py|sh)[\"'])",
+      "in": ["*.py"],
+      "to": "{1:join}",
+      "resolve": "suffix",
+      "origin": {"date": "2026-10-16", "window": "release",
+                 "why": "code-graph spike Q10: two in-repo invokers of a hook ran it as ROOT / \"hooks\" / \"<hook>.py\"; neither graph tool linked them"},
+      "test": {"file": "tools/call.py", "text": "hook = ROOT / \"hooks\" / \"run.py\"", "expect": ["hooks/run.py"]}
+    },
+    {
+      "name": "shell-beside",
+      "about": "A shell script that runs python3 \"$(dirname \"${BASH_SOURCE[0]}\")/x.py\" runs the x.py beside it.",
+      "hint": "BASH_SOURCE",
+      "search": "python3?\\s+\"?\\$\\(dirname\\s+\"?\\$\\{BASH_SOURCE(?:\\[0\\])?\\}\"?\\)/([\\w./-]+\\.py)",
+      "to": "{1}",
+      "resolve": "beside",
+      "origin": {"date": "2026-10-16", "window": "release",
+                 "why": "code-graph spike Q09: a sourced shell library ran the Python helper beside it through $(dirname \"${BASH_SOURCE[0]}\"); neither graph tool linked them"},
+      "test": {"file": "tools/lib/x.sh", "text": "python3 \"$(dirname \"${BASH_SOURCE[0]}\")/state_json.py\" \"$@\"",
+               "expect": ["tools/lib/state_json.py"]}
+    }
+  ]
+}
