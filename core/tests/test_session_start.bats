@@ -811,3 +811,63 @@ open(sys.argv[2], "w").close(); time.sleep(20)' "$DAEDALUS_HOME/state/leases/.lo
   [ $((t1 - t0)) -lt 16 ] || { echo "the hook took $((t1 - t0)) s"; return 1; }
   case "$(first_line)" in "Daedalus session orientation: "*) : ;; *) first_line; return 1 ;; esac
 }
+
+ctx() { printf '%s' "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'; }
+# a home that pulled 0.7.0 whose upgrade stops on an in-flight branch at the first start: state/leases/ exists, no stamp
+pending_stopped_home() {
+  cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"
+  git -C "$T" checkout -q -b feat/x; printf 'x\n' > "$T/x.txt"; git -C "$T" add -A
+  git -C "$T" -c user.email=t@x -c user.name=t commit -q -m "in flight"
+}
+
+@test "a start while the upgrade is pending holds no window but is told its session log — reserved under the lease lock — and that it can take the pen at the close when none is live; no window file, no lease branch, no worktree is made" {
+  pending_stopped_home
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1 startup; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(ctx)"
+  case "$c" in *"Your session log for today is vault/sessions/$(date +%Y/%m)/$(date +%Y-%m-%d)-001.md"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"At the close, when no live session holds the pen, \`core/lease.sh prime take\` gives this session the pen for hot.md and \`core/vault-commit.sh\` — no window is made."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"You are window"*) echo "$c"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/state/leases" ]
+  [ -z "$(cd "$DAEDALUS_HOME/state/leases" && ls | grep -v '^unwindowed.json$')" ] || { ls "$DAEDALUS_HOME/state/leases"; return 1; }
+  grep -q '"s1"' "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  ! git -C "$T" rev-parse -q --verify refs/heads/lease/01 >/dev/null
+  [ -z "$(ls "$DAEDALUS_HOME/worktrees" 2>/dev/null)" ]
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" -eq 1 ]
+  run start s1 compact; c="$(ctx)"
+  case "$c" in *"-001.md"*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "a start while the upgrade is pending and state/leases/ does not exist yet reserves nothing and creates nothing; it says no number can be reserved yet and that hot.md and the vault commit work now" {
+  cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; mkdir -p "$DAEDALUS_HOME/state"
+  python3 -c 'import fcntl,os,sys,time
+fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(12)' "$DAEDALUS_HOME/state/.upgrade.lock" 3>&- &
+  holder=$!; sleep 0.3
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run env LEASE_TEST_HOOK_BUDGET=15 bash -c "$(declare -f start); start s1 startup"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -d "$DAEDALUS_HOME/state/leases" ]
+  c="$(ctx)"
+  case "$c" in *"Your session log for today is"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"no session-log number can be reserved yet; hot.md and \`core/vault-commit.sh\` work now"*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "a start while the upgrade is pending whose lease lock stays busy past the start budget writes no reservation and says so, naming core/lease.sh log — not claim, which is refused until the upgrade finishes" {
+  pending_stopped_home
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  holder="$(python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close(); time.sleep(25)' "$DAEDALUS_HOME/state/leases/.lock" "$BATS_TEST_TMPDIR/held" 3>&- </dev/null >/dev/null 2>&1 & echo "$!")"
+  printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
+  i=0; while [ ! -e "$BATS_TEST_TMPDIR/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  LEASE_TEST_HOOK_BUDGET=16 run start s1 startup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(ctx)"
+  case "$c" in *"Your session log was not reserved at start: the lease lock stayed busy past the start budget"*"\`core/lease.sh log\`"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"Your session log for today is"*) echo "$c"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/unwindowed.json" ]
+}

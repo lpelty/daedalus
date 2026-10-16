@@ -3833,6 +3833,30 @@ def log_path_locked(root: Path, key: str, leases: Dict[str, dict], today: str, n
     return _log_file(today, n)
 
 
+# What a session that starts while the upgrade is pending (it holds no window) is told about its close.
+WINDOWLESS_PEN_AT_CLOSE = ("At the close, when no live session holds the pen, `core/lease.sh prime take` gives this "
+                           "session the pen for hot.md and `core/vault-commit.sh` — no window is made.")
+LOG_BUSY_AT_START = ("Your session log was not reserved at start: the lease lock stayed busy past the start budget. "
+                     "`core/lease.sh log` reserves it and prints the path.")
+# The upgrade has not made state/leases/ yet: no number can be reserved, and there is nothing to hold — hot.md and the
+# vault commit pass with no lease files. lease.sh says it for `log` and `prime`; a start in that state says it too.
+NO_LEASES_YET = ("the upgrade has not run, so no session-log number can be reserved yet; hot.md and "
+                 "`core/vault-commit.sh` work now. Ask the operator to start a session in this home, then run "
+                 "`core/lease.sh log` again.")
+
+
+def reserve_at_start(root: Path, sid: str, deadline: Optional[float] = None, new_day: bool = True) -> Tuple[str, bool]:
+    """A start that binds nothing (the upgrade is pending): the session's log
+    path, reserved in whichever store is its own (session_log_locked), and
+    whether it holds no window. The lock wait is bounded by `deadline`: still
+    busy then, Refused(LOG_BUSY_AT_START) with nothing written. Never called
+    when state/leases/ does not exist (lock() would make it)."""
+    with lock(root, deadline=deadline, busy=LOG_BUSY_AT_START):
+        leases = read_all(root)
+        path = session_log_locked(root, sid, leases, time.strftime("%Y-%m-%d"), new_day=new_day)
+        return path, lease_of_session(leases, sid)[0] is None
+
+
 def log_path(root: Path, sid: str, today: Optional[str] = None) -> str:
     """`core/lease.sh log`: the calling session's log path for today, reserved
     under the lock — for a window, for a session holding only the pen, and for

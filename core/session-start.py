@@ -200,6 +200,11 @@ def memory_note(root: Path) -> Optional[str]:
     return MEMORY_ABSENT
 
 
+LOG_LINE = ("Your session log for today is %s (the window goes in its frontmatter, never the filename); a restart "
+            "today continues that file under `## Continued HH:MM`, and a session that runs past midnight keeps it. "
+            "`core/lease.sh log` prints the path again.")
+
+
 def main() -> int:
     # A SIGTERM (a cancelled hook, a shutdown) becomes SystemExit, so
     # leaselib._run_bounded kills the running git's process group on its way
@@ -308,10 +313,7 @@ def main() -> int:
             elif b["took_pen"]:
                 bind_notes.append("You hold the pen (prime) now: hot.md, vault commits, promote.")
             if b.get("log"):
-                bind_notes.append("Your session log for today is %s (the window goes in its frontmatter, never the "
-                                  "filename); a restart today continues that file under `## Continued HH:MM`, and a "
-                                  "session that runs past midnight keeps it. `core/lease.sh log` prints the path again."
-                                  % b["log"])
+                bind_notes.append(LOG_LINE % b["log"])
             if lease_nn is None:
                 # §3.1: an unleased session that is not a visitor is told at start what to run
                 # (the board's own sentence, so the dedup below can recognise it).
@@ -320,6 +322,24 @@ def main() -> int:
             bind_notes.append(str(e))
         except Exception:
             pass
+    elif ll is not None and not visitor and sid and skip_bind:
+        # No window while the upgrade is pending, but the session still closes: its log number is reserved here
+        # under the lease lock (no session counts the directory), and it is told the pen is its at the close when
+        # no live session holds it. Not when state/leases/ is absent: making it is the upgrade's first step.
+        if (root / "state" / "leases").is_dir():
+            try:
+                path, windowless = ll.reserve_at_start(root, sid, deadline=started_at + ADD_BUDGET_SECS,
+                                                       new_day=str(payload.get("source", "")).lower()
+                                                       not in ("compact", "clear"))
+                bind_notes.append(LOG_LINE % path)
+                if windowless:
+                    bind_notes.append(ll.WINDOWLESS_PEN_AT_CLOSE)
+            except ll.Refused as e:
+                bind_notes.append(str(e))
+            except Exception:
+                pass
+        else:
+            bind_notes.append(ll.NO_LEASES_YET[:1].upper() + ll.NO_LEASES_YET[1:])
     elif visitor:
         bind_notes.append("This is a direct-call session; it holds no lease and cannot take the pen.")
     # The board at start (§4.3), rendered HERE after the bind: an event's hooks
