@@ -395,3 +395,17 @@ EOF
   done
   run git -C "$DAEDALUS_HOME" check-ignore -q --no-index CLAUDE.md; [ "$status" -ne 0 ]
 }
+
+@test "config.example.yaml ships a context: block commented out, which cfg and cfg_pairs read once uncommented; recall.ruff is gone" {
+  ex="$DAEDALUS_HOME/config.example.yaml"
+  grep -q '^# context:' "$ex"
+  run grep -q '^context:' "$ex"; [ "$status" -ne 0 ]
+  run grep -q 'ruff' "$ex"; [ "$status" -ne 0 ]
+  { cat "$TESTCFG"; sed -n '/^# context:/,/^$/p' "$ex" | sed 's/^# //; s/^#$//'; } > "$BATS_TEST_TMPDIR/c3.yaml"
+  export DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c3.yaml"
+  [ "$(cfg context.graph)" = "/abs/path/to/crg/.venv/bin/code-review-graph" ]
+  [ "$(cfg context.module_roots)" = "engine" ]
+  [ "$(cfg_pairs context.placeholders)" = "$(printf 'ENGINE\tengine')" ]
+  [ "$(cfg context.graph_budget)" = "90" ]
+  [ "$(cfg context.build_timeout)" = "80" ]
+}

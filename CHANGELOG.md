@@ -4,6 +4,57 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.9.0 (draft) — code context at implementation time
+
+**In short.** A new command, `core/context.py`, answers "what else does this
+change touch?" before the agent changes code. It merges an optional code
+graph, `git grep` and a few rules. It runs only when invoked, never while you
+brainstorm, plan or write a spec unless you ask. This section is a draft: the
+release sets its heading and VERSION, which stays 0.8.0 until then.
+
+**What changed.**
+- `core/context.py` has five questions: `callers`, `importers`, `tests`,
+  `reach` and `grep`. Each answer labels every file: both, graph only, grep
+  only, or the rule that named it.
+- The code graph is Code Review Graph, PyPI `code-review-graph`, pinned at
+  2.3.9. It is optional, like frame-jack: without it the answers come from
+  `git grep` and the rules.
+- It runs only when invoked. No hook calls it, nothing builds an index at
+  session start, and nothing refreshes in the background.
+- In a window, the first query builds that window's index. Every later query
+  updates it first, inside one 90 second budget. A build that fails is not
+  retried until `rebuild`.
+- Four rules ship for the links neither source sees: `python -m X`, template
+  placeholders, Python path joins, and a shell script running the Python file
+  beside it. Each came from a real miss in a trial.
+- A deployment's own rules live in `vault/context-rules.json`. Rules only add
+  candidates, and each one has its own test.
+- Promote now compares what the window changed, and the tests that failed in
+  its gate runs, with what its queries named. Anything left is a miss, logged
+  in `state/code-context/misses.jsonl`.
+- The edit-time hook `core/code-context.py` is gone from
+  `.claude/settings.json`. The file stays one release as a no-op, so a copy of
+  the hook left in a local settings file cannot block edits.
+- `recall.ruff` is no longer read. The Bash guard refuses `code-review-graph`
+  run directly: `core/context.py` is its only caller.
+
+**What you will see.**
+- Doctor has a new line: `NOTE code context: no code graph configured`. The
+  graph is optional, and the line says so.
+- The promote block's record paragraph ends with one more line, starting
+  `Code context:`. It names files no query named, or says every one was.
+- When a kind of miss repeats, the agent may add a rule and tells you in one
+  line: `Added code-context rule <name>: <why>; its test passes.`
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. The update installs nothing for the graph. Only if you want
+it, install Code Review Graph 2.3.9 once per machine, in its own virtual
+environment. Then paste the `context:` block into `config.yaml`. README "Code
+context" has every step, and the commands of the tool never to run.
+
+**How to tell you have it.** `python3 core/context.py rules --check` ends
+`4 rules, 0 fail`. `core/doctor.sh` prints a `code context` line.
+
 ## v0.8.0 — frame-jack, a switch for the AMI
 
 **In short.** A new switch, `/frame-jack on`, `off` and `status`, runs a small

@@ -110,6 +110,7 @@ it.
 | (a background clone finished) | — | The board says "04 (spawned) — FINISHED …"; when the operator next asks what is open, repeat it and wait for "promote 4" or "release 4". |
 | "Hand the pen to window 3" | window 03 | `core/lease.sh prime take --reason "<their whole message>"`. Said to the prime instead: "Say that to window 03 — the pen is taken, never given." |
 | "Message window 2 that …" | any window | Send it (below) and repeat the reply word for word when it comes. |
+| "What does this change touch?" / "use the code graph on X" | that window | `python3 core/context.py reach <X>`; repeat its lines word for word, then say which ones you will read. When this comes during planning, it is the operator asking, so it runs. |
 
 ## Messages between windows
 
@@ -499,6 +500,49 @@ Trunk is reached only through promote (below): commit on your window's
 branch, and never push to trunk or commit on it yourself — the guard and
 git's own pre-push hook both refuse it. The trunk is `target.branch` in
 `config.yaml`, never assumed to be `main`.
+
+## Code context
+
+`core/context.py` answers "what else does this change touch?" for the target:
+`python3 core/context.py callers <file>::<function>`, `importers <file>`,
+`tests <file>` (or `<file>::<function>`), `reach <file>` (or
+`<file>::<function>`), and `grep "<text>"`. Add `--json` for structure. Each
+answer merges the code graph (when the deployment installed it), `git grep`
+and the rules, and labels every file: both, graph only, grep only, or
+rule:<name>.
+
+Run it in your window when you are about to change code: before the first
+edit of a task, and again when the change reaches a file you have not asked
+about. That is the only time it runs on its own initiative. No hook calls it,
+nothing runs it at session start, and nothing refreshes it in the background;
+the index is brought up to date inside the query. While brainstorming,
+planning or writing a spec, run it only when the operator asks you to. Never
+run `code-review-graph` yourself: `core/context.py` is its only caller, and
+the Bash guard refuses the direct form. If the header says the first build
+failed, run the `rebuild --timeout` line it names, with a Bash timeout at
+least that long.
+
+What it lists are candidates, not answers. Read each file, and let the tests
+decide. A file the graph alone names may be a false edge; a file only grep
+names may be a comment.
+
+Your queries are recorded for your window. At promote, the files your window
+changed and the tests that failed in its gate runs are compared with what
+your queries named. Anything none of them named is a miss, logged in
+`state/code-context/misses.jsonl` with the kind of link that was missed
+(template path, uv run -m, manifest/config key, python path join, shell
+python invocation, other). A changed file with no link to anything you asked
+about is logged as unasked: you changed it without asking about anything
+near it. Promote's record ends with one line about it; it is part of the
+block you repeat.
+
+When that line says a kind was also missed in earlier windows, you may add a
+rule to `vault/context-rules.json` that would have caught it, with an origin
+(date, window, why) and a test made from the line that was missed. Then run
+`python3 core/context.py rules --check` until it passes. A rule can only add
+candidates. You need no approval; tell the operator in one line ("Added
+code-context rule <name>: <why>; its test passes.") and put the same line in
+your session log.
 
 ## Promote
 

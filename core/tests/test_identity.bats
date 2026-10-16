@@ -789,9 +789,10 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   printf '%s\n' "$csec" | grep -qE '^#   command: /' || { echo "command is not an absolute placeholder"; return 1; }
   # CHANGELOG: v0.8.0, the newest release, the first heading, above v0.7.5; its
   # shadow sentence and the bar; how it arrives is daedalus update, and nothing moves until /frame-jack on
-  [ "$(grep -m1 '^## ' "$H/CHANGELOG.md")" = "## v0.8.0 — frame-jack, a switch for the AMI" ] \
-    || { echo "CHANGELOG's first section is not frame-jack's v0.8.0"; return 1; }
-  [ "$(grep '^## ' "$H/CHANGELOG.md" | sed -n 2p)" = "## v0.7.5 — the lease board stays drawn when git is slow" ]
+  # (a "## vX.Y.Z (draft) — " section above it is the next release, not yet released)
+  [ "$(grep '^## ' "$H/CHANGELOG.md" | grep -v '^## v[0-9.]* (draft) — ' | head -1)" = "## v0.8.0 — frame-jack, a switch for the AMI" ] \
+    || { echo "CHANGELOG's first released section is not frame-jack's v0.8.0"; return 1; }
+  [ "$(grep '^## ' "$H/CHANGELOG.md" | grep -v '^## v[0-9.]* (draft) — ' | sed -n 2p)" = "## v0.7.5 — the lease board stays drawn when git is slow" ]
   ! grep -q '^#### .*frame-jack' "$H/CHANGELOG.md" || { echo "a frame-jack part is still dated under an older release"; return 1; }
   ch="$(awk '/^## v0.8.0 — frame-jack/{f=1; print; next} f&&/^## /{exit} f' "$H/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
   for s in 'shadow' 'never acts' '0.95' '0.60' '0.15' '0.85' '0.05' '400 ms' 'Daedalus updated 0.7.5 -> 0.8.0; doctor OK.' 'daedalus update' 'ask_destructive' 'off by default' \
@@ -805,6 +806,58 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$ch"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.8.0 section:"; echo "$output"; return 1; }
   # none of the four names the company, and none carries a spec section code
   for t in "$rsec" "$rows" "$gsec" "$csec" "$ch"; do
+    ! printf '%s' "$t" | grep -qi 'smartsheet' || { echo "the company is named"; return 1; }
+    ! printf '%s' "$t" | grep -qE '§[0-9]' || { echo "a section code in operator-facing text: $(printf '%s' "$t" | grep -oE '.{30}§[0-9]+.{0,10}' | head -1)"; return 1; }
+  done
+}
+
+@test "code context is documented: CLAUDE.md's Code context section names core/context.py, runs it only at implementation time in the words of the design, and has Daedalus add rules with a test and report them; the operator row; README's section after Direct calls; the CHANGELOG draft above v0.8.0; no company, no section code, short CHANGELOG sentences" {
+  H="$DAEDALUS_HOME"
+  gs="$(grep -n '^## Gates and evidence' "$H/CLAUDE.md" | cut -d: -f1)"
+  cc="$(grep -n '^## Code context' "$H/CLAUDE.md" | cut -d: -f1)"
+  pr="$(grep -n '^## Promote' "$H/CLAUDE.md" | cut -d: -f1)"
+  [ -n "$cc" ] && [ "$cc" -gt "$gs" ] && [ "$cc" -lt "$pr" ] || { echo "CLAUDE.md's Code context section is not between Gates and evidence and Promote"; return 1; }
+  csec="$(awk '/^## Code context/{f=1; next} f&&/^## /{exit} f' "$H/CLAUDE.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in 'python3 core/context.py callers <file>::<function>' 'importers <file>' 'grep "<text>"' '--json' \
+           'both, graph only, grep only, or rule:<name>' \
+           'Run it in your window when you are about to change code' \
+           'That is the only time it runs on its own initiative.' \
+           'No hook calls it, nothing runs it at session start, and nothing refreshes it in the background' \
+           'While brainstorming, planning or writing a spec, run it only when the operator asks you to.' \
+           'Never run `code-review-graph` yourself' 'candidates, not answers' 'state/code-context/misses.jsonl' \
+           'unasked' 'vault/context-rules.json' 'with an origin (date, window, why) and a test' \
+           'python3 core/context.py rules --check' 'A rule can only add candidates.' 'You need no approval' \
+           'Added code-context rule <name>: <why>; its test passes.' 'session log'; do
+    case "$csec" in *"$s"*) : ;; *) echo "CLAUDE.md's Code context section lacks: $s"; return 1 ;; esac
+  done
+  row="$(grep -F '| "What does this change touch?"' "$H/CLAUDE.md")"
+  for s in 'python3 core/context.py reach <X>' 'word for word' 'during planning, it is the operator asking'; do
+    case "$row" in *"$s"*) : ;; *) echo "the operator row lacks: $s"; return 1 ;; esac
+  done
+  dc="$(grep -n '^## Direct calls' "$H/README.md" | head -1 | cut -d: -f1)"
+  rc="$(grep -n '^## Code context (`core/context.py`)' "$H/README.md" | head -1 | cut -d: -f1)"
+  fj="$(grep -n '^## Frame-jack (the AMI)' "$H/README.md" | head -1 | cut -d: -f1)"
+  [ -n "$rc" ] && [ "$rc" -gt "$dc" ] && [ "$rc" -lt "$fj" ] || { echo "README's Code context section is not right after Direct calls"; return 1; }
+  rsec="$(awk '/^## Code context \(`core\/context.py`\)/{f=1; print; next} f&&/^## /{exit} f' "$H/README.md")"
+  for s in '### Install' 'uv venv --python 3.12' "code-review-graph==2.3.9" 'code-review-graph 2.3.9' 'context:' \
+           'never register its MCP server' 'install' 'init' 'register' 'daemon' 'watch' 'better-code-review-graph' \
+           'only when' 'state/code-context/' 'core/context-rules.json' 'vault/context-rules.json' 'only add' \
+           'Code context:' 'misses.jsonl' 'rules --check' 'NOTE     code context:' 'OK       code context:'; do
+    case "$rsec" in *"$s"*) : ;; *) echo "README's Code context section lacks: $s"; return 1 ;; esac
+  done
+  [ "$(grep -m1 '^## ' "$H/CHANGELOG.md")" = "## v0.9.0 (draft) — code context at implementation time" ] \
+    || { echo "CHANGELOG's first section is not the v0.9.0 draft"; return 1; }
+  ch="$(awk '/^## v0.9.0 \(draft\) — /{f=1; print; next} f&&/^## /{exit} f' "$H/CHANGELOG.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in '**In short.**' '**What changed.**' '**What you will see.**' '**How to take it.**' '**How to tell you have it.**' \
+           'core/context.py' 'brainstorm' 'code-review-graph' '2.3.9' 'optional' 'daedalus update' 'Code context:'; do
+    case "$ch" in *"$s"*) : ;; *) echo "the CHANGELOG draft lacks: $s"; return 1 ;; esac
+  done
+  run python3 -c 'import re, sys
+text = re.sub(r"`[^`]*`", "X", sys.argv[1])
+long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
+print("\n".join(long)); sys.exit(1 if long else 0)' "$ch"
+  [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.9.0 draft:"; echo "$output"; return 1; }
+  for t in "$csec" "$row" "$rsec" "$ch"; do
     ! printf '%s' "$t" | grep -qi 'smartsheet' || { echo "the company is named"; return 1; }
     ! printf '%s' "$t" | grep -qE '§[0-9]' || { echo "a section code in operator-facing text: $(printf '%s' "$t" | grep -oE '.{30}§[0-9]+.{0,10}' | head -1)"; return 1; }
   done

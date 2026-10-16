@@ -961,6 +961,131 @@ is a discussion, not a work order. With a `memory:` block, the launcher
 captures the call afterwards with the caller and the callee as the speakers;
 the called session's own capture stands down.
 
+## Code context (`core/context.py`)
+
+`core/context.py` answers "what else does this change touch?" for the
+target, so the agent can read those files before it changes one:
+
+```bash
+python3 core/context.py callers app/core.py::helper   # or a bare function name
+python3 core/context.py importers app/core.py
+python3 core/context.py tests app/core.py             # or app/core.py::helper
+python3 core/context.py reach app/core.py             # or app/core.py::helper
+python3 core/context.py grep "some text"
+```
+
+Add `--json` for one JSON object an agent can read. Every answer merges three
+sources, file by file, and labels each file: `both` (the code graph and
+`git grep` named it), `graph only`, `grep only`, or `rule:<name>` when only a
+rule (below) named it. They are candidates, not answers:
+
+```
+reach app/core.py — window 02, repo app; graph updated (0.4 s)
+both          app/user.py:3
+graph only    tests/test_core.py:12
+grep only     templates/job.md.tmpl:1
+rule:python-path-join  tools/call.py:9  ROOT / "app" / "core.py"
+4 files: 1 both, 1 graph only, 1 grep only, 1 rule (python-path-join 1). These are candidates, not answers: read each file, and let the tests decide.
+```
+
+It runs only when someone invokes it. No hook calls it, nothing builds an
+index at session start, and nothing refreshes in the background. The agent
+runs it in its window when it is about to change code; while brainstorming,
+planning or writing a spec it runs only when you ask. Inside a window the
+first query builds the window's index and every later query updates it, all
+inside one time budget (`context.graph_budget`, 90 s). Outside a window (your
+own shell, a direct call) it answers from `git grep` and the rules over
+`target/` and writes nothing. The index and the logs live under
+`state/code-context/`: one index per window and repo, removed once the window
+is swept.
+
+The code graph is optional. It is Code Review Graph, version 2.3.9, which
+reads Python calls, imports and tests. Without it every answer comes from
+`git grep` and the rules, and the header says so once. Neither source sees
+everything: YAML keys, templates, shell scripts that run Python, and Python
+run by path or with `-m` are what the rules are for.
+
+### Install (optional, once per machine)
+
+```bash
+mkdir -p ~/crg && cd ~/crg
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python 'code-review-graph==2.3.9'
+.venv/bin/code-review-graph -v        # code-review-graph 2.3.9
+```
+
+Then paste the `context:` block from `config.example.yaml` into `config.yaml`,
+with `graph` set to the absolute path of `.venv/bin/code-review-graph`:
+
+```yaml
+context:
+  graph: /abs/path/to/crg/.venv/bin/code-review-graph
+  placeholders: ENGINE=engine
+```
+
+- The venv is about 444 MB (the tree-sitter language pack). An index is about
+  35 MB per window and repo on a 280-file target.
+- The package is PyPI `code-review-graph`, MIT licensed, from
+  github.com/tirth8205/code-review-graph. The similarly named
+  `better-code-review-graph` is a different project.
+- Never run its `install`, `init`, `register`, `daemon`, `serve`/`mcp` or
+  `watch` commands, and never register its MCP server. They write MCP entries,
+  hooks, skills and rule files into your coding tools' configuration, or a
+  registry under your home. `core/context.py` runs only `build`, `update`,
+  `query` and `impact`, with `HOME`, `CRG_HOME` and `CRG_DATA_DIR` pointed
+  under `state/code-context/`, and the Bash guard refuses the agent's own
+  direct call of the tool.
+- Any other version is treated as not installed: doctor says which version it
+  found.
+
+### Rules
+
+A rule maps a convention to the file it names, for the links neither the
+graph nor `git grep` resolves. Rules only add candidates; nothing can remove
+one.
+
+- `core/context-rules.json` ships with the release: `module-run`
+  (`python -m X`, `uv run -m X`), `template-placeholder` (`{{NAME}}/x.py` in a
+  template, with the directories in `context.placeholders`),
+  `python-path-join` (`ROOT / "a" / "b.py"`) and `shell-beside`
+  (`python3 "$(dirname "${BASH_SOURCE[0]}")/x.py"`).
+- `vault/context-rules.json` holds this deployment's own rules. The agent may
+  add one when a kind of miss repeats, with where it came from and a test
+  made from the line that was missed; it tells you in one line. `daedalus
+  update` never touches the file.
+- Each rule has its own test. `python3 core/context.py rules --check` runs
+  them all; a rule whose test fails is skipped, with one line saying so.
+
+### Misses at promote
+
+Each query in a window is recorded. When the window is promoted, the files it
+changed and the tests that failed in its gate runs are compared with what its
+queries named, and the record paragraph of the promote block gains one line:
+
+```
+Code context: 2 changed files no query named — templates/job.md.tmpl (template path, also missed in 2 earlier windows), bin/tool.py (other); the log is state/code-context/misses.jsonl.
+```
+
+A file the window changed without asking about anything near it is counted
+as unasked, not as a miss of the tool. The line never stops a promote. Every
+miss is a row in `state/code-context/misses.jsonl`, with the kind of link
+that was missed.
+
+### Doctor
+
+`core/doctor.sh` prints one or more code-context lines, never a MISSING:
+
+```
+OK       code context: code-review-graph 2.3.9 at /abs/path/to/crg/.venv/bin/code-review-graph; 4 release rules, 0 deployment rules; every rule test passes
+NOTE     code context: no code graph configured (context.graph in config.yaml), so answers come from git grep and the rules (optional; see "Code context" in README.md)
+NOTE     code context: rule template-placeholder has no placeholders to map (context.placeholders in config.yaml), so it adds nothing
+```
+
+Doctor runs the graph's `-v` and the rules' own tests only; it never builds
+or reads an index. It also notes a leftover `recall.ruff` line and a
+`.claude/settings.local.json` entry that still runs `core/code-context.py`,
+the edit-time hook 0.9.0 removed.
+
 ## Frame-jack (the AMI)
 
 Frame-jack is an on/off switch for the AMI (Artificial Machine Intelligence):

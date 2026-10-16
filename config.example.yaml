@@ -174,6 +174,29 @@ recall:
   # Absolute paths and ".." are rejected.
   store: state/chroma
 
+# Code context (optional) — core/context.py (README "Code context"). Without
+# this block it answers from git grep and the rules. Uncomment to use.
+# context:
+#   # Comments on their own lines only: cfg does not strip inline comments.
+#   # The code-review-graph executable, absolute: the one inside the virtual
+#   # environment it was installed into, version 2.3.9. Never a bare name on PATH.
+#   graph: /abs/path/to/crg/.venv/bin/code-review-graph
+#   # Directories, relative to the target root, that `python -m X` and
+#   # `uv run -m X` resolve X under; comma separated. Left out: the target
+#   # root plus every directory holding a tracked pyproject.toml.
+#   module_roots: engine
+#   # Template placeholders and the directory each stands for, relative to
+#   # the target root: NAME=dir, comma separated. Left out: the
+#   # template-placeholder rule adds nothing, and doctor says so.
+#   placeholders: ENGINE=engine
+#   # Seconds all graph work in one query may take, so the query returns
+#   # inside a default 120 s tool call. Default 90.
+#   graph_budget: 90
+#   # Seconds the first index build in a window may take, at most
+#   # graph_budget. Default 80. A bigger target: run
+#   # python3 core/context.py rebuild --timeout 600 once per window.
+#   build_timeout: 80
+
 leases:
   # How long a window may go without a prompt before the board calls it
   # "quiet" (a live terminal the operator left open). Never swept without
