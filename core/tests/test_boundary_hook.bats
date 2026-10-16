@@ -749,8 +749,8 @@ edit_brief_true() { printf 'boundary:\n  edit_brief: true\n' >> "$DAEDALUS_HOME/
 
 @test "settings.local.json: an Edit(...) deny there (no leases) protects the path on the Bash leg and shows at Stop like a tracked deny; settings.json's denies still count" {
   export PYTHONDONTWRITEBYTECODE=1      # the guard's imports must not leave core/__pycache__ dirt for the Stop to see
-  cp "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
-  git -C "$DAEDALUS_HOME" add core/guard-bash.py; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m guard
+  cp "$SRC/guard-bash.py" "$SRC/amilib.py" "$DAEDALUS_HOME/core/"
+  git -C "$DAEDALUS_HOME" add core/guard-bash.py core/amilib.py; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m guard
   printf '{"permissions":{"deny":["Edit(//elsewhere/**)","Edit(/notes/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
   printf '{"hook_event_name":"SessionStart","session_id":"s7","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
   bash_as() { printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"s7","cwd":"%s","tool_input":{"command":%s}}' "$DAEDALUS_HOME" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1")" | python3 "$DAEDALUS_HOME/core/guard-bash.py"; }

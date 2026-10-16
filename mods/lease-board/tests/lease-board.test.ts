@@ -573,3 +573,10 @@ test('maxRows reached: the AMI line is drawn and it takes one window row — it 
   expect(t[2]).toBe('+3 more windows')
   expect(t[3]).toBe(AMI_ON)
 })
+
+test('the AMI line says "1 time", not "1 times"', async ($, on) => {
+  stubs(on, () => ok(withAmi({ would_ask: 1 })), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: AMI_ON.replace('7 times', '1 time') })).toBeDefined()
+})

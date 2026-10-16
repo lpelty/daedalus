@@ -122,7 +122,7 @@ function amiText(a, nowMs) {
         count(a.asked) + ' asked',
         q.destructive === false && count(a.would_ask) === 0
           ? 'destructive question off'
-          : 'would have asked you ' + count(a.would_ask) + ' times',
+          : 'would have asked you ' + count(a.would_ask) + (count(a.would_ask) === 1 ? ' time' : ' times'),
         q.suite === false && count(a.would_shorten) === 0
           ? 'suite question off'
           : 'would have shortened ' + count(a.would_shorten),

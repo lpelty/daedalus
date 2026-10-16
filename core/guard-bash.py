@@ -3069,6 +3069,10 @@ def main() -> int:
                                          guard="allow" if not contexts else contexts[0][:80],
                                          deadline=ami_deadline,
                                          segments=lambda: segments_of(cmd, cwd, g))
+        except ModuleNotFoundError as e:
+            if e.name != "amilib":   # a home without core/amilib.py has no AMI to run: nothing to say
+                print("daedalus: the AMI tier could not run (%r); the command goes on as the guard decided." % e,
+                      file=sys.stderr)
         except Exception as e:
             try:
                 amilib.row_unanswered(root, sid, payload, "error %s" % type(e).__name__, "destructive",
