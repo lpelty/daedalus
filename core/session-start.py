@@ -359,7 +359,9 @@ def main() -> int:
         try:
             # the same deadline as the bind, or one second from now when that
             # is later: the board's lock wait is bounded too (Decision 18)
-            board = ll.board_for(root, sid, visitor, deadline=max(started_at + ADD_BUDGET_SECS, time.time() + 1))
+            # (v0.7.5: and so are the swept-window checks — the start's larger budget usually fills the cache)
+            board_deadline = max(started_at + ADD_BUDGET_SECS, time.time() + 1)
+            board = ll.board_for(root, sid, visitor, deadline=board_deadline, check_deadline=board_deadline)
         except ll.Refused as e:
             # a corrupt lease file must not make the board vanish (that reads as "no leases"):
             # say the sentence lease.sh refuses with — it names the file and the fix

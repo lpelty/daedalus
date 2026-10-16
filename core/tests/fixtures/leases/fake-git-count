@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A git that records every call, then delegates to the real git. Each call appends one line to $GIT_LOG:
-#   <the -C directory><TAB><subcommand and its arguments>
-# (the -c pairs and other global options are left out, so a test counts subcommands per repo).
+#   <the -C directory><TAB><subcommand and its arguments><TAB><the whole argv>
+# (the second field leaves out the -c pairs and other global options, so a test counts subcommands per repo).
 # FAKE_GIT_SLEEP_ON  space-separated tokens; a call matching one sleeps FAKE_GIT_SLEEP seconds first.
 #                    A token is a subcommand (`log`), or `<subcommand>:<argument prefix>` (`for-each-ref:--merged`
 #                    matches only a for-each-ref given an argument starting --merged).
@@ -34,7 +34,7 @@ while [ $i -lt $n ]; do
   fi
   i=$((i + 1))
 done
-[ -z "${GIT_LOG:-}" ] || printf '%s\t%s%s\n' "$cdir" "$sub" "$rest" >> "$GIT_LOG"
+[ -z "${GIT_LOG:-}" ] || printf '%s\t%s%s\t%s\n' "$cdir" "$sub" "$rest" "$*" >> "$GIT_LOG"
 matches() {   # matches <tokens> <dir suffix>
   local t name pre
   if [ -n "$2" ]; then case "$cdir" in *"$2") : ;; *) return 1 ;; esac; fi

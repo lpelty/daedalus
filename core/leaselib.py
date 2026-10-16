@@ -77,6 +77,7 @@ LOCK_BUSY_AT_START = ("This window was not bound at start: the lease lock stayed
                       "`core/lease.sh` command or another window's start was holding it). Run `core/lease.sh claim "
                       "<NN>` with your window's number, or `core/lease.sh create` and claim the number it prints.")
 BOARD_LOCK_BUSY = "the lease lock stayed busy past the start budget; the board renders at your next prompt"
+BOARD_LOCK_BUSY_PROMPT = "the lease lock stayed busy (a window is being made or swept); the board draws at your next prompt"
 
 
 def leases_dir(root: Path) -> Path:
@@ -773,8 +774,10 @@ def require_trunk_ref(target_repo: Path, repo: str, trunk: str) -> None:
     unpromoted commits were silently adopted by the next session (§4.2)."""
     code, _, _ = v.run(["git", "-C", str(target_repo), "rev-parse", "--verify", "-q", remote_ref(trunk)])
     if code != 0:
-        raise Refused("target/%s has no origin/%s — check config target.branch, or run git -C target/%s fetch origin"
-                      % (repo, trunk, repo))
+        raise Refused(TRUNK_REF_MISSING % (repo, trunk, repo))
+
+
+TRUNK_REF_MISSING = "target/%s has no origin/%s — check config target.branch, or run git -C target/%s fetch origin"
 
 
 def waiting_work(target_repo: Path, trunk: str, nn: str, timeout: int = 20) -> list:
@@ -796,13 +799,174 @@ def waiting_work(target_repo: Path, trunk: str, nn: str, timeout: int = 20) -> l
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot tell whether %s has unpromoted work in %s (git merge-base against origin/%s failed: %s)"
                       % (branch, target_repo.name, trunk, last[0]))
-    code, out, err = v.run(["git", "-C", str(target_repo), "log", "--format=%s",
+    code, out, err = v.run(["git", "-C", str(target_repo), "log", LOG_RECORD,
                             "%s..refs/heads/%s" % (remote_ref(trunk), branch)], timeout=timeout)
     if code != 0:
         last = err.strip().splitlines()[-1:] or ["no output"]
         raise Refused("cannot list %s's unpromoted work in %s (git log origin/%s..%s failed: %s)"
                       % (branch, target_repo.name, trunk, branch, last[0]))
-    return [ln for ln in out.splitlines() if ln.strip()]
+    return log_subjects(out)
+
+
+# One record per commit: the SHA, a tab, the subject. Records are counted, never subject lines: `--format=%s` prints
+# an empty line for a commit made with --allow-empty-message, and a filter on blank lines read that commit as
+# "nothing waiting" — free_number handed its number out over it and reclaim removed its lease (v0.7.5 review, R1).
+LOG_RECORD = "--format=%H%x09%s"
+NO_SUBJECT = "(no subject)"
+
+
+def log_subjects(out: str) -> list:
+    """The subjects of `git log LOG_RECORD` output, one per record; an empty subject is NO_SUBJECT."""
+    subs = []
+    for ln in out.splitlines():
+        sha, tab, subj = ln.partition("\t")
+        if tab and sha.strip():
+            subs.append(subj if subj.strip() else NO_SUBJECT)
+    return subs
+
+
+# --- The board's check path (v0.7.5) -----------------------------------------
+# Every git call here is told apart as an answer, an error or a cut-off (by the exception, never by stderr text), and
+# runs at SHAs once the tips are listed, so a ref moving in between can never mix two tips into one answer.
+
+MIN_CALL_SECS = 0.2      # fewer seconds left than this before a deadline: no git call is started
+
+
+def _left_f(deadline: Optional[float], cap: float) -> float:
+    """Seconds (a float) the next git call may take: `cap`, or what is left before `deadline` when that comes
+    sooner; 0.0 = no time left. _left gives whole seconds to the callers that want them."""
+    if deadline is None:
+        return cap
+    return max(0.0, min(cap, deadline - time.time()))
+
+
+def _git_t(repo: Path, *args: str, timeout: float) -> Tuple[int, str, str, bool]:
+    """(code, stdout, stderr, timed_out). v.run folds a timeout and a missing git into one 127, so a cut-off could not
+    be told from an error (v0.7.5 review, R8); here it is the exception that says so."""
+    try:
+        r = subprocess.run(git_argv(repo, *args), capture_output=True, text=True, errors="replace",
+                           timeout=max(timeout, 0.01))
+        return r.returncode, r.stdout, r.stderr, False
+    except subprocess.TimeoutExpired:
+        return 127, "", "cut off", True
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, "", str(e), False
+
+
+def _last_line(err: str) -> str:
+    return (err.strip().splitlines() or ["no output"])[-1]
+
+
+class CheckCut(Refused):
+    """A git call on the check path cut off by its deadline."""
+
+
+class ListFailed(Refused):
+    """A repo's tip listing failed (not a cut-off); the message is the reason."""
+
+
+_LEASE_REF = re.compile(r"refs/heads/lease/([0-9]{2})")
+ORIGIN_HEAD = "refs/remotes/origin/HEAD"
+
+
+def _common_git_dir(target: Path) -> Optional[Path]:
+    """A repo's common git dir, read without git (gitrepository-layout): target/.git when it is a directory; when it
+    is a gitfile, the gitdir: it names, then that directory's commondir file if present. None when it cannot be read."""
+    g = target / ".git"
+    try:
+        if g.is_dir():
+            gd = g
+        elif g.is_file():
+            txt = g.read_text().strip()
+            if not txt.startswith("gitdir:"):
+                return None
+            gd = Path(txt[len("gitdir:"):].strip())
+            gd = gd if gd.is_absolute() else target / gd
+        else:
+            return None
+        cd = gd / "commondir"
+        if cd.is_file():
+            c = Path(cd.read_text().strip())
+            gd = c if c.is_absolute() else gd / c
+        return gd if gd.is_dir() else None
+    except (OSError, ValueError):
+        return None
+
+
+def history_view(target: Path, replace: list) -> Optional[str]:
+    """The repo's view of history beyond the SHAs (spec §3.1): its refs/replace/ refs, and the size and mtime of
+    info/grafts and shallow in the common git dir. Any change misses every cached answer of the repo. None when the
+    layout cannot be read: nothing is cached for that repo, it is always checked live."""
+    gd = _common_git_dir(target)
+    if gd is None:
+        return None
+    h = hashlib.sha256()
+    for line in sorted(replace):
+        h.update((line + "\n").encode())
+    for name in ("info/grafts", "shallow"):
+        try:
+            st = os.stat(str(gd / name))
+            h.update(("%s %d %d\n" % (name, st.st_size, st.st_mtime_ns)).encode())
+        except FileNotFoundError:
+            h.update(("%s 0 0\n" % name).encode())
+        except OSError:
+            return None
+    return h.hexdigest()[:20]
+
+
+def _resolve_tips(target: Path, repo: str, trunk: Optional[str], timeout: float = 20) -> Optional[dict]:
+    """One `git for-each-ref` for a repo: every lease/<NN> tip, the trunk's tip, and the replace refs (for
+    history_view). `trunk` None: a nested repo's trunk is origin/HEAD's target, as trunk_of tells it, and a missing
+    or dangling origin/HEAD (git does not list a broken symref) returns None — the repo is skipped. Lines are
+    matched by exact refname. {"trunk", "trunk_sha" (None when origin/<trunk> is absent), "tips": {NN: sha},
+    "view"}. Raises CheckCut when cut off, ListFailed when the listing fails: an answer we do not have is never
+    "no swept windows" (v0.7.5 review, R4)."""
+    pats = ["refs/heads/lease/", "refs/replace/"] + ([remote_ref(trunk)] if trunk else [ORIGIN_HEAD])
+    code, out, err, cut = _git_t(target, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", *pats,
+                                 timeout=timeout)
+    if cut:
+        raise CheckCut("cut off")
+    if code != 0:
+        raise ListFailed("git for-each-ref failed: %s" % _last_line(err))
+    tips: Dict[str, str] = {}
+    replace, trunk_sha, head = [], None, None
+    for ln in out.splitlines():
+        parts = ln.split(" ")
+        if len(parts) < 2:
+            continue
+        sha, ref, sym = parts[0], parts[1], (parts[2] if len(parts) > 2 else "")
+        m = _LEASE_REF.fullmatch(ref)
+        if m:
+            if valid_id(m.group(1)):
+                tips[m.group(1)] = sha
+        elif ref.startswith("refs/replace/"):
+            replace.append("%s %s" % (ref, sha))
+        elif trunk and ref == remote_ref(trunk):
+            trunk_sha = sha
+        elif not trunk and ref == ORIGIN_HEAD:
+            head = (sym, sha)
+    if not trunk:
+        if not head or not head[0].startswith("refs/remotes/origin/"):
+            return None
+        trunk, trunk_sha = head[0][len("refs/remotes/origin/"):], head[1]
+    return {"trunk": trunk, "trunk_sha": trunk_sha, "tips": tips, "view": history_view(target, replace)}
+
+
+def _log_at(target: Path, trunk_sha: str, tip_sha: str, timeout: float) -> Tuple[int, list, str, bool]:
+    """The commits on tip_sha that trunk_sha does not contain, at SHAs: (code, subjects, stderr, timed_out).
+    No record = contained (the same predicate as merge-base --is-ancestor, spec §2.2)."""
+    code, out, err, cut = _git_t(target, "log", LOG_RECORD, "%s..%s" % (trunk_sha, tip_sha), timeout=timeout)
+    return code, (log_subjects(out) if code == 0 and not cut else []), err, cut
+
+
+def waiting_work_at(target: Path, trunk_sha: str, tip_sha: str, timeout: float = 20) -> list:
+    """waiting_work at SHAs resolved beforehand (_resolve_tips): a commit landing in between cannot be judged under
+    the old tip's name. Refused on any failure: cannot tell is never "nothing"."""
+    code, subs, err, cut = _log_at(target, trunk_sha, tip_sha, timeout)
+    if cut or code != 0:
+        raise Refused("cannot list unpromoted work in %s (git log %s..%s failed: %s)"
+                      % (target.name, trunk_sha[:12], tip_sha[:12], "cut off" if cut else _last_line(err)))
+    return subs
 
 
 def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: Dict[str, str]) -> str:
@@ -1439,9 +1603,9 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
             break                               # out of time: the rest are kept, as they were
         why = "its session (pid %s) has ended" % lease.get("pid")
         lease_trunks = lease.get("trunks") or trunks
+        seeds = {}
         try:
-            if any(waiting_work(root / "target" / repo, trunk, nn, timeout=budget)
-                   for repo, trunk in lease_trunks.items()):
+            if any(_reclaim_waiting(root, repo, trunk, nn, budget, seeds) for repo, trunk in lease_trunks.items()):
                 continue
             if any(dirty_files(root / "worktrees" / nn / repo, timeout=budget) for repo in lease_trunks):
                 continue
@@ -1449,9 +1613,34 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
             continue
         _remove_lease_files(root, nn)
         del leases[nn]
+        # v0.7.5 (spec §3.2): what reclaim proved goes into the board's cache, at the SHAs and history view it was
+        # proved at and for exactly the repos it checked, so the reclaimed number costs the board nothing until a
+        # tip moves. Under this lock, but taking none of its own; a failed write never fails the reclaim.
+        if seeds:
+            write_unpromoted_cache(root, seeds)
         out.append((nn, "Reclaimed window %s: %s, its worktree is clean and nothing is unpromoted; the number is free again."
                     % (nn, why)))
     return out
+
+
+def _reclaim_waiting(root: Path, repo: str, trunk: str, nn: str, budget: int, seeds: dict) -> list:
+    """reclaim's waiting_work for one repo, at SHAs resolved first (a commit landing in between is never judged under
+    the old tip). [] when lease/<NN> is absent; Refused when anything cannot be told. A [] at a known history view
+    adds its cache entry to `seeds`."""
+    target = root / "target" / repo
+    try:
+        info = _resolve_tips(target, repo, trunk, timeout=budget)
+    except Refused as e:
+        raise Refused("cannot tell whether lease/%s has unpromoted work in %s (%s)" % (nn, repo, e))
+    tip = (info or {}).get("tips", {}).get(nn)
+    if tip is None:
+        return []
+    if not info["trunk_sha"]:
+        raise Refused(TRUNK_REF_MISSING % (repo, trunk, repo))
+    subs = waiting_work_at(target, info["trunk_sha"], tip, timeout=budget)
+    if not subs and info["view"]:
+        seeds[_cache_key(nn, repo)] = _cache_entry(tip, info["trunk_sha"], info["view"], [])
+    return subs
 
 
 def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
@@ -3943,14 +4132,17 @@ def orientation(root: Path, sid: Optional[str], visitor: bool = False, deadline:
 
 # --- The observed changed set (§4.1) ------------------------------------------
 
-def _listing(repo_path: Path, repo: str, nn: str, *args: str) -> list:
+def _listing(repo_path: Path, repo: str, nn: str, *args: str, deadline: Optional[float] = None) -> list:
     """One NUL-separated git listing as a list of literal repo-relative paths.
     -z keeps a path with accents, quotes, backslashes or control characters
     literal (core.quotePath would C-quote it, and the boundary check could
     never match it against another window's set). A listing that fails is
     an answer we do not have, never an empty set: refuse, naming the window
     and the command, so the caller keeps the last computed set."""
-    code, out, err = _git(repo_path, *args)
+    t = _left_f(deadline, 20)
+    if t < MIN_CALL_SECS:
+        raise Refused("window %s's changed set could not be recomputed in time; the last computed set is kept." % nn)
+    code, out, err = _git(repo_path, *args, timeout=t)
     if code != 0:
         last = (err.strip().splitlines() or ["no output"])[-1]
         raise Refused("window %s's changed set could not be recomputed (git %s failed in %s: %s); "
@@ -3958,7 +4150,7 @@ def _listing(repo_path: Path, repo: str, nn: str, *args: str) -> list:
     return [p for p in out.split("\0") if p]
 
 
-def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
+def compute_changed(root: Path, nn: str, lease: dict, previous: dict, deadline: Optional[float] = None) -> dict:
     """{"<repo>": {"<repo-relative path>": "<first-seen stamp>"}} — per repo of
     the lease's worktree, the union of committed/staged work on the lease
     branch (diff against merge-base origin/<trunk>..HEAD), unstaged
@@ -3978,10 +4170,10 @@ def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
         if not repo_path.is_dir():
             continue
         paths: set = set()
-        mb = _listing(repo_path, repo, nn, "merge-base", "origin/" + trunk, "HEAD")
-        paths.update(_listing(repo_path, repo, nn, "diff", "--name-only", "-z", mb[0].strip()))
-        paths.update(_listing(repo_path, repo, nn, "diff", "--name-only", "-z"))
-        paths.update(_listing(repo_path, repo, nn, "ls-files", "--others", "--exclude-standard", "-z"))
+        mb = _listing(repo_path, repo, nn, "merge-base", "origin/" + trunk, "HEAD", deadline=deadline)
+        paths.update(_listing(repo_path, repo, nn, "diff", "--name-only", "-z", mb[0].strip(), deadline=deadline))
+        paths.update(_listing(repo_path, repo, nn, "diff", "--name-only", "-z", deadline=deadline))
+        paths.update(_listing(repo_path, repo, nn, "ls-files", "--others", "--exclude-standard", "-z", deadline=deadline))
         # a nested repo's paths never belong to the outer set
         nested_prefixes = [r[len(repo) + 1:] + "/" for r in lease.get("trunks", {}) if r.startswith(repo + "/")]
         prev = previous.get(repo, {}) if isinstance(previous.get(repo), dict) else {}
@@ -3990,13 +4182,14 @@ def compute_changed(root: Path, nn: str, lease: dict, previous: dict) -> dict:
     return out
 
 
-def recompute_changed(root: Path, nn: str, lease: Optional[dict] = None) -> dict:
+def recompute_changed(root: Path, nn: str, lease: Optional[dict] = None, deadline: Optional[float] = None) -> dict:
     """Read the sidecar, compute, write (tmp + os.replace). Takes no lock. A
     Refused from the listings propagates before the write, so the sidecar
-    on disk is untouched."""
+    on disk is untouched. `deadline` (the prompt hook's check deadline): each
+    listing gets what is left, and a cut-off is that Refused."""
     if lease is None:
         lease = read_lease(root, nn) or {}
-    changed = compute_changed(root, nn, lease, read_changed(root, nn))
+    changed = compute_changed(root, nn, lease, read_changed(root, nn), deadline=deadline)
     write_changed(root, nn, changed)
     return changed
 
@@ -4322,12 +4515,14 @@ def _ago(ts: Optional[float], now: float) -> str:
     return time.strftime("%H:%M", time.localtime(ts))
 
 
-def last_commit_subject(root: Path, lease: dict, nn: str) -> str:
+def last_commit_subject(root: Path, lease: dict, nn: str, deadline: Optional[float] = None) -> Optional[str]:
     """The subject of the newest commit on the lease branch that origin/<trunk>
     does not contain — the outer repo first, then each nested one. A repo whose
     worktree is not made yet is read at lease/<NN> in target/<repo>: an adopted
     window holds its commits there before it has a worktree (release-candidate
-    red team, finding 1)."""
+    red team, finding 1). `deadline` (the prompt hook's render deadline, v0.7.5):
+    None when it is reached or a call is cut off — "not read this time", never
+    "no commits yet", which is a claim about the branch."""
     base = root / str(lease.get("worktree") or ("worktrees/%s" % nn))
     for repo, trunk in (lease.get("trunks") or {}).items():
         if (base / repo).is_dir():
@@ -4336,7 +4531,15 @@ def last_commit_subject(root: Path, lease: dict, nn: str) -> str:
             where, tip = root / "target" / repo, "refs/heads/lease/%s" % nn
         else:
             continue
-        code, out, _ = _git(where, "log", "-1", "--format=%s", "%s..%s" % (remote_ref(trunk), tip))
+        if deadline is None:
+            code, out, _ = _git(where, "log", "-1", "--format=%s", "%s..%s" % (remote_ref(trunk), tip))
+        else:
+            t = _left_f(deadline, 20)
+            if t < MIN_CALL_SECS:
+                return None
+            code, out, _, cut = _git_t(where, "log", "-1", "--format=%s", "%s..%s" % (remote_ref(trunk), tip), timeout=t)
+            if cut:
+                return None
         if code == 0 and out.strip():
             return out.strip().splitlines()[0]
     return ""
@@ -4373,8 +4576,8 @@ def registry_live_map() -> Dict[str, list]:
 
 
 def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], changed: Dict[str, dict],
-                 waiting: Dict[str, list], states: Dict[str, str], now: float, visitor: bool = False,
-                 live_map: Optional[Dict[str, list]] = None) -> str:
+                 waiting: "Waiting", states: Dict[str, str], now: float, visitor: bool = False,
+                 live_map: Optional[Dict[str, list]] = None, render_deadline: Optional[float] = None) -> str:
     """The board text (§4.3). Pure over its inputs except one `git log` per
     repo of each non-stale lease and one `cfg` for the reader's trunk. states:
     liveness per number, computed ONCE by the caller (board_for); live_map:
@@ -4445,8 +4648,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
                 parts.append("%d changed: %s" % (len(paths), shown))
             else:
                 parts.append("0 changed")
-            subj = last_commit_subject(root, d, nn)
-            parts.append('last commit "%s"' % subj if subj else "no commits yet")
+            subj = last_commit_subject(root, d, nn, deadline=render_deadline)
+            parts.append(LAST_COMMIT_NOT_READ if subj is None else 'last commit "%s"' % subj if subj else "no commits yet")
             if d.get("worktree_ready") is False:
                 parts.append(NO_WORKTREE_YET % (nn, nn))
             if d.get("note"):
@@ -4469,10 +4672,7 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
         if peer and peer != "daedalus-%s" % nn:
             parts.append("peer name %s (not a window number)" % peer)
         lines.append("%s — %s" % (label, " — ".join(parts)))
-    for nn in sorted(waiting):
-        subs = waiting[nn]
-        lines.append("- %s — swept, %d unpromoted commit%s waiting (%s): say 'this is window %s' to a window to continue it, or 'delete %s's work'"
-                     % (nn, len(subs), "" if len(subs) == 1 else "s", _quoted(subs), nn, nn))
+    lines.extend(waiting_lines(waiting))
     if not registry_present():
         lines.append("(no session registry on this build: liveness is by heartbeat only, peer names are unknown, no window numbers itself "
                      "and nobody takes the pen at start — launch each window with DAEDALUS_LEASE=<NN> and run `core/lease.sh prime take` from the one that should hold it)")
@@ -4489,32 +4689,291 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
     return "\n".join(lines)
 
 
-def waiting_numbers(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
+# --- The unpromoted-work cache (v0.7.5, spec §3.1) ------------------------------
+# state/leases/unpromoted.cache: per (window, repo), the answer of `git log <trunk sha>..<tip sha>`, keyed on both SHAs
+# and the repo's history_view. Commits are content-addressed: for a fixed pair the answer can never change, so a ref
+# moving changes the key, never the value. Only the board reads it; every command that ACTS on the answer (free_number,
+# claim, delete, waiting-work) keeps its live check. No .json suffix: read_all and every lease-file reader never see it.
+
+UNPROMOTED_CACHE = "unpromoted.cache"
+CACHE_TMP_PREFIX = ".unpromoted-"
+CACHE_TMP_MAX_AGE = 60      # seconds; a temp this old was left by a writer killed before its os.replace
+
+
+def unpromoted_cache_path(root: Path) -> Path:
+    return leases_dir(root) / UNPROMOTED_CACHE
+
+
+def _cache_entry_ok(e: object) -> bool:
+    return (isinstance(e, dict) and all(isinstance(e.get(k), str) and e.get(k) for k in ("tip", "trunk", "view"))
+            and isinstance(e.get("subjects"), list) and all(isinstance(x, str) for x in e["subjects"])
+            and isinstance(e.get("at"), (int, float)) and not isinstance(e.get("at"), bool))
+
+
+def read_unpromoted_cache(root: Path) -> Tuple[dict, dict]:
+    """(entries, cut) from the cache file. Unreadable, not JSON, a wrong version or a wrong shape is empty for what
+    is bad (an entry with a missing or ill-typed field is dropped, the rest kept): every such lookup misses, and the
+    next write replaces the file. Never a Refused, never on stderr."""
+    try:
+        d = json.loads(unpromoted_cache_path(root).read_bytes())
+    except (OSError, ValueError, RecursionError):
+        return {}, {}
+    if not isinstance(d, dict) or d.get("v") != 1:
+        return {}, {}
+    ents = d.get("entries") if isinstance(d.get("entries"), dict) else {}
+    cut = d.get("cut") if isinstance(d.get("cut"), dict) else {}
+    return ({k: e for k, e in ents.items() if _cache_entry_ok(e)},
+            {k: c for k, c in cut.items() if isinstance(c, str) and c})
+
+
+def write_unpromoted_cache(root: Path, fresh: dict, keep=None, cut_set: Optional[dict] = None,
+                           cut_drop: tuple = ()) -> None:
+    """Merge `fresh` entries over the file as it is now (newer `at` wins per pair), drop entries `keep` rejects, set
+    and drop `cut` markers, and replace the file (temp + os.replace). No lock: the lease lock stays free for creates
+    and sweeps; two racing writers lose at most one's fresh entries, never correctness (every entry is a pure
+    function of its key). Never makes state/leases/ (readers never make it, plan 5 Decision 13). A failed write is
+    ignored: the board still draws what it computed."""
+    d = leases_dir(root)
+    if not d.is_dir():
+        return
+    now = time.time()
+    try:
+        for t in d.glob(CACHE_TMP_PREFIX + "*.tmp"):
+            try:
+                if now - t.stat().st_mtime > CACHE_TMP_MAX_AGE:
+                    t.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+    entries, cut = read_unpromoted_cache(root)
+    for k, e in fresh.items():
+        old = entries.get(k)
+        if old is None or old.get("at", 0) <= e["at"]:
+            entries[k] = e
+    if keep is not None:
+        entries = {k: e for k, e in entries.items() if keep(k)}
+    for r in cut_drop:
+        cut.pop(r, None)
+    cut.update(cut_set or {})
+    body = json.dumps({"v": 1, "entries": entries, "cut": cut}, sort_keys=True)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(d), prefix=CACHE_TMP_PREFIX, suffix=".tmp")
+    except OSError:
+        return
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.replace(tmp, str(unpromoted_cache_path(root)))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _cache_key(nn: str, repo: str) -> str:
+    return "%s %s" % (nn, repo)
+
+
+def _cache_entry(tip: str, trunk_sha: str, view: str, subjects: list) -> dict:
+    return {"tip": tip, "trunk": trunk_sha, "view": view, "subjects": list(subjects), "at": time.time()}
+
+
+class Waiting:
+    """What the board knows about swept windows (spec §3.3). waiting: NN -> subjects, outer repo first;
+    incomplete: the NNs of `waiting` not every repo answered for (drawn "at least N"); unchecked: NNs with no answer
+    this time; unlisted: repo -> why its lease branches were not listed; errors: NN -> (repo, trunk, last stderr
+    line) of a git error that is not a cut-off."""
+
+    def __init__(self) -> None:
+        self.waiting: Dict[str, list] = {}
+        self.incomplete: set = set()
+        self.unchecked: list = []
+        self.unlisted: Dict[str, str] = {}
+        self.errors: Dict[str, tuple] = {}
+
+    def empty(self) -> bool:
+        return not (self.waiting or self.unchecked or self.unlisted or self.errors)
+
+
+LAST_COMMIT_NOT_READ = "last commit not read this time"
+SWEPT_UNCHECKED = ("- %s — swept; not checked for unpromoted work this time — the next prompt finishes the check, "
+                   "or run `core/lease.sh list` to check now")
+SWEPT_AT_LEAST = ("- %s — swept, at least %d unpromoted commit%s waiting (%s); not every repo was checked this time: say "
+                  "'this is window %s' to a window to continue it, or 'delete %s's work', or run `core/lease.sh list` "
+                  "for the full count")
+CANNOT_TELL = "cannot tell whether lease/%s has unpromoted work in %s (git log origin/%s..lease/%s failed: %s)"
+SWEPT_CANNOT_TELL = "- %s — swept; %s; run `git -C target/%s log -1 refs/heads/lease/%s` to see the error"
+REPO_UNLISTED = "- target/%s's lease branches were not listed this time (%s); run `core/lease.sh list` to check them"
+
+
+def waiting_lines(w: "Waiting") -> list:
+    """The board's lines for swept windows (spec §3.3): waiting work (exact, or "at least" when not every repo
+    answered — known work is never demoted to "not checked"), a git error on the window's own line, the windows not
+    checked this time, then each repo that could not be listed. Every line that is not an answer names a command
+    that works in every state the board draws in."""
+    lines = []
+    for nn in sorted(w.waiting):
+        subs = w.waiting[nn]
+        if nn in w.incomplete:
+            lines.append(SWEPT_AT_LEAST % (nn, len(subs), "" if len(subs) == 1 else "s", _quoted(subs), nn, nn))
+        else:
+            lines.append("- %s — swept, %d unpromoted commit%s waiting (%s): say 'this is window %s' to a window to continue it, or 'delete %s's work'"
+                         % (nn, len(subs), "" if len(subs) == 1 else "s", _quoted(subs), nn, nn))
+    for nn in sorted(w.errors):
+        repo, trunk, last = w.errors[nn]
+        lines.append(SWEPT_CANNOT_TELL % (nn, CANNOT_TELL % (nn, repo, trunk, nn, last), repo, nn))
+    for nn in sorted(w.unchecked):
+        lines.append(SWEPT_UNCHECKED % nn)
+    for repo in sorted(w.unlisted):
+        lines.append(REPO_UNLISTED % (repo, w.unlisted[repo]))
+    return lines
+
+
+def waiting_numbers(root: Path, leases: Dict[str, dict], deadline: Optional[float] = None,
+                    write: bool = True) -> Waiting:
     """Swept numbers whose lease/<NN> still carries unpromoted commits (§4.2), in any target repo — the outer one
     and each nested one, as free_number judges them (release-candidate review 2, finding 7: a nested window's work
     was held back from new windows and named nowhere). Subjects of every repo, outer first. A nested repo whose
-    trunk cannot be told is skipped (promote's doctor row names it); the outer one's failure is raised."""
-    out: Dict[str, list] = {}
+    trunk cannot be told is skipped (promote's doctor row names it); the outer one's missing origin/<trunk> is
+    raised when it has a swept window to judge.
+
+    v0.7.5 (spec §3.1, §3.3): one `for-each-ref` per repo lists every tip; answers come from the unpromoted-work
+    cache when both SHAs and the history view match; misses are judged by one `for-each-ref --merged=<trunk sha>`
+    per repo with two or more of them (phase A), then by one `log <trunk sha>..<tip sha>` per pair still open,
+    window by window (phase B). `deadline`: no git call starts with fewer than MIN_CALL_SECS left, each gets what
+    is left, and what was not reached is `unchecked` — answers already computed are written first, so the next
+    prompt starts where this one stopped. A phase A cut off, or one that left windows to phase B, leaves a `cut`
+    marker for (repo, trunk SHA), so the repo goes straight to phase B until its trunk moves: progress is monotone. `write`
+    False (doctor) reads the cache and never writes it."""
+    res = Waiting()
     outer, trunk0 = target_name(root), v.target_branch(root)
-    for repo in repos_of(root):
+    repos = repos_of(root)
+    entries, cut = read_unpromoted_cache(root)
+    listed: Dict[str, dict] = {}
+    for repo in repos:
         target = root / "target" / repo
-        if repo != outer:
-            if not target.is_dir():
-                continue
-            try:
-                trunk = trunk_of(root / "target", repo, trunk0)
-            except Refused:
-                continue
+        if not target.is_dir():
+            continue
+        t = _left_f(deadline, 20)
+        if t < MIN_CALL_SECS:
+            res.unlisted[repo] = "cut off"
+            continue
+        try:
+            info = _resolve_tips(target, repo, trunk0 if repo == outer else None, timeout=t)
+        except CheckCut:
+            res.unlisted[repo] = "cut off"
+            continue
+        except ListFailed as e:
+            res.unlisted[repo] = str(e)
+            continue
+        if info is None:
+            continue
+        info["swept"] = {nn: sha for nn, sha in info["tips"].items() if nn not in leases}
+        if info["trunk_sha"] is None:
+            if info["swept"]:
+                raise Refused(TRUNK_REF_MISSING % (repo, info["trunk"], repo))
+            continue
+        listed[repo] = info
+    order = {repo: i for i, repo in enumerate(repos)}
+    answers: Dict[tuple, list] = {}
+    fresh: Dict[str, dict] = {}
+    misses: Dict[str, list] = {}
+    numbers = set()
+    for repo, info in listed.items():
+        for nn, tip in sorted(info["swept"].items()):
+            numbers.add(nn)
+            e = entries.get(_cache_key(nn, repo))
+            if info["view"] and e and (e["tip"], e["trunk"], e["view"]) == (tip, info["trunk_sha"], info["view"]):
+                answers[(nn, repo)] = list(e["subjects"])
+            else:
+                misses.setdefault(repo, []).append(nn)
+    for k in entries:
+        nn, _, repo = k.partition(" ")
+        if repo in res.unlisted and valid_id(nn) and nn not in leases:
+            numbers.add(nn)
+
+    def answer(nn: str, repo: str, subs: list) -> None:
+        answers[(nn, repo)] = subs
+        info = listed[repo]
+        if info["view"]:
+            fresh[_cache_key(nn, repo)] = _cache_entry(info["swept"][nn], info["trunk_sha"], info["view"], subs)
+
+    cut_set: Dict[str, str] = {}
+    cut_drop = {r for r, c in cut.items() if r not in order or (r in listed and listed[r]["trunk_sha"] != c)}
+    stopped = False
+    # Phase A, per repo: which missed refs the trunk already contains, in one walk.
+    for repo in sorted(misses, key=order.get):
+        info, nns = listed[repo], misses[repo]
+        if len(nns) < 2 or cut.get(repo) == info["trunk_sha"]:
+            continue
+        t = _left_f(deadline, 20)
+        if t < MIN_CALL_SECS:
+            stopped = True
+            break
+        code, out, _, was_cut = _git_t(root / "target" / repo, "for-each-ref", "--merged=" + info["trunk_sha"],
+                                       "--format=%(objectname) %(refname)",
+                                       *["refs/heads/lease/" + nn for nn in nns], timeout=t)
+        if was_cut:
+            cut_set[repo] = info["trunk_sha"]
+            continue
+        if code != 0:
+            continue                    # a shortcut only: phase B judges these by the same predicate
+        contained = {ref: sha for sha, ref in (ln.split(" ", 1) for ln in out.splitlines() if " " in ln)}
+        for nn in nns:
+            if contained.get("refs/heads/lease/" + nn) == info["swept"][nn]:     # at the SHA listed, never a newer tip
+                answer(nn, repo, [])
+        # The marker also stands when the walk finished but left windows to phase B: their answers land one window at
+        # a time, and a prompt that spent its time repeating the same walk would never reach them (built, not spec).
+        if any((nn, repo) not in answers for nn in nns):
+            cut_set[repo] = info["trunk_sha"]
         else:
-            trunk = trunk0
-        _, refs, _ = _git(target, "for-each-ref", "--format=%(refname)", "refs/heads/lease/")
-        for ref in refs.splitlines():
-            nn = ref.strip()[len("refs/heads/lease/"):]
-            if valid_id(nn) and nn not in leases:
-                subs = waiting_work(target, trunk, nn)
-                if subs:
-                    out.setdefault(nn, []).extend(subs)
-    return out
+            cut_drop.add(repo)
+    # Phase B, window by window, each across its repos.
+    for nn, repo in sorted(((nn, repo) for repo, nns in misses.items() for nn in nns),
+                           key=lambda p: (p[0], order[p[1]])):
+        if stopped:
+            break
+        if (nn, repo) in answers or nn in res.errors:
+            continue
+        t = _left_f(deadline, 20)
+        if t < MIN_CALL_SECS:
+            break
+        info = listed[repo]
+        code, subs, err, was_cut = _log_at(root / "target" / repo, info["trunk_sha"], info["swept"][nn], t)
+        if was_cut:
+            break
+        if code != 0:
+            res.errors[nn] = (repo, info["trunk"], _last_line(err))
+            continue
+        answer(nn, repo, subs)
+    for nn in sorted(numbers):
+        if nn in res.errors:
+            continue
+        subs, complete = [], not res.unlisted
+        for repo in sorted(listed, key=order.get):
+            if nn in listed[repo]["swept"]:
+                got = answers.get((nn, repo))
+                if got is None:
+                    complete = False
+                else:
+                    subs.extend(got)
+        if subs:
+            res.waiting[nn] = subs
+            if not complete:
+                res.incomplete.add(nn)
+        elif not complete:
+            res.unchecked.append(nn)
+    if write:
+        def keep(k: str) -> bool:
+            nn, _, repo = k.partition(" ")
+            if nn in leases or repo not in order:
+                return False                  # live again, or no longer a target repo
+            return not (repo in listed and nn not in listed[repo]["tips"])     # its branch is gone (listed repos only)
+        if fresh or cut_set or (cut_drop & set(cut)) or any(not keep(k) for k in entries):
+            write_unpromoted_cache(root, fresh, keep, cut_set, tuple(cut_drop))
+    return res
 
 
 def swept_loose(root: Path, leases: Dict[str, dict]) -> Dict[str, list]:
@@ -4583,7 +5042,8 @@ def announce_pushed(root: Path, sid: Optional[str]) -> list:
 
 
 def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False,
-              deadline: Optional[float] = None, with_mine: bool = False):
+              deadline: Optional[float] = None, with_mine: bool = False, check_deadline: Optional[float] = None,
+              render_deadline: Optional[float] = None, busy: str = BOARD_LOCK_BUSY):
     """The duties of §4.3 in one call: recompute the reader's changed set
     (every lease's for `list`/`status` — a shell has no budget), touch the
     reader's heartbeat, refresh stored pid/proc_started/peer_name from the
@@ -4592,20 +5052,26 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     from the operator's shell (announce_pushed). Never binds, numbers or takes the pen
     (§4.2). '' when no numbered lease exists. Never called while the lock is
     held (it takes the lock itself, twice); the git and ps work runs outside it.
-    `deadline` bounds both lock acquires (SessionStart only, §4.2): still busy
-    then, it raises Refused(BOARD_LOCK_BUSY), which the hook renders as
-    BOARD_UNRENDERED."""
-    with lock(root, shared=True, deadline=deadline, busy=BOARD_LOCK_BUSY):
+    `deadline` bounds both lock acquires (SessionStart and the prompt hook):
+    still busy then, it raises Refused(busy). v0.7.5: `check_deadline` bounds
+    the swept-window checks and the reader's changed-set recompute (what is not
+    reached is drawn "not checked this time"); `render_deadline` bounds the
+    render's `git log -1` calls. A shell passes neither: it has no budget."""
+    with lock(root, shared=True, deadline=deadline, busy=busy):
         leases = read_all(root)
     mine, _ = lease_of_session(leases, sid or "")
-    if not any(k != "prime" for k in leases) and not waiting_numbers(root, leases):
-        # with no window open, swept work still waiting is still listed (review 2, finding 7)
-        return ("", mine) if with_mine else ""
+    wr = None
+    if not any(k != "prime" for k in leases):
+        # with no window open, swept work still waiting is still listed (review 2, finding 7) — and so is work
+        # that could not be checked in time: "not checked" is never "no board" (v0.7.5 review, R10)
+        wr = waiting_numbers(root, leases, deadline=check_deadline)
+        if wr.empty():
+            return ("", mine) if with_mine else ""
     for nn, d in leases.items():
         if nn == "prime" or not (recompute_all or nn == mine):
             continue
         try:
-            recompute_changed(root, nn, d)
+            recompute_changed(root, nn, d, deadline=check_deadline)
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e)     # the last computed set is kept (§4.1)
     if mine:
@@ -4613,7 +5079,7 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     now, quiet_after = time.time(), stale_after_secs(root)
     states = {nn: liveness(root, nn, d, now, quiet_after) for nn, d in leases.items() if nn != "prime"}   # computed ONCE
     live_map = registry_live_map()                                                                          # read ONCE
-    with lock(root, deadline=deadline, busy=BOARD_LOCK_BUSY):
+    with lock(root, deadline=deadline, busy=busy):
         leases = read_all(root)
         for nn, d in leases.items():
             if nn != "prime" and d.get("session_id"):
@@ -4621,8 +5087,10 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
                 self_rebind(root, str(d["session_id"]), leases=leases, live=live_map.get(str(d["session_id"]), []))
         leases = read_all(root)
         changed = {nn: read_changed(root, nn) for nn in leases if nn != "prime"}
-    text = render_board(root, sid, leases, changed, waiting_numbers(root, leases), states, now, visitor=visitor,
-                        live_map=live_map)
+    if wr is None:
+        wr = waiting_numbers(root, leases, deadline=check_deadline)
+    text = render_board(root, sid, leases, changed, wr, states, now, visitor=visitor, live_map=live_map,
+                        render_deadline=render_deadline)
     announced = announce_pushed(root, sid) if not visitor else []
     text = "\n".join(announced + [text]) if announced else text
     return (text, mine) if with_mine else text
@@ -4689,14 +5157,24 @@ def doctor_lines(root: Path) -> list:
                          "(core/lease.sh claim %s) to make it"
                          % (nn, " (adopted from %s)" % d["adopted_from"] if d.get("adopted_from") else "", nn, nn))
     try:
-        waiting = waiting_numbers(root, leases)
+        wr = waiting_numbers(root, leases, write=False)     # doctor is a diagnostic: it reads the cache, never writes it
     except Refused as e:
-        waiting = {}
+        wr = Waiting()
         lines.append("NOTE     leases: cannot tell whether a swept number still has unpromoted work (%s)" % e)
-    for nn in sorted(waiting):
-        k = len(waiting[nn])
+    for nn in sorted(wr.waiting):
+        k = len(wr.waiting[nn])
         lines.append("NOTE     leases: %s swept with %d unpromoted commit%s waiting — say \"this is window %s\" to a window "
                      "to continue it, or \"delete %s's work\"" % (nn, k, "" if k == 1 else "s", nn, nn))
+    for nn in sorted(wr.errors):
+        repo, trunk, last = wr.errors[nn]
+        lines.append("NOTE     leases: cannot tell whether a swept number still has unpromoted work (%s); run "
+                     "git -C target/%s log -1 refs/heads/lease/%s to see the error" % (CANNOT_TELL % (nn, repo, trunk, nn, last), repo, nn))
+    for nn in sorted(wr.unchecked):
+        lines.append("NOTE     leases: %s swept, not checked for unpromoted work (a git call was cut off); run "
+                     "core/lease.sh list to check it" % nn)
+    for repo in sorted(wr.unlisted):
+        lines.append("NOTE     leases: target/%s's lease branches could not be listed (%s); run core/lease.sh list "
+                     "to check them" % (repo, wr.unlisted[repo]))
     for where, paths in sorted(swept_loose(root, leases).items()):
         nn = where.split("/", 1)[0]
         lines.append("NOTE     leases: worktrees/%s holds uncommitted or untracked files of swept window %s (%s) — say "
@@ -5224,6 +5702,20 @@ def main(argv: list) -> int:
             return _refused(lambda: rebase(root, args[0], sid))
         if cmd == "split":
             return _refused(lambda: split(root, args[0], sid, _after("--repo")))
+    if cmd == "_test-waiting":   # fixture helper for the suites; never used by a hook (v0.7.5 check path)
+        # _test-waiting tips <repo> [trunk] | _test-waiting at <repo> <trunk sha> <tip sha>
+        try:
+            target = root / "target" / args[1]
+            if args[0] == "tips":
+                info = _resolve_tips(target, args[1], args[2] if len(args) > 2 else None)
+                if info is not None and not info["trunk_sha"]:
+                    raise Refused(TRUNK_REF_MISSING % (args[1], info["trunk"], args[1]))
+                print(json.dumps(info, sort_keys=True))
+            else:
+                print(json.dumps(waiting_work_at(target, args[2], args[3])))
+            return 0
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
     if cmd == "_test-write":     # fixture helper for the suites; never used by a hook
         try:
             write_lease(root, args[0], json.loads(args[1]), exclusive="--exclusive" in args)

@@ -14,7 +14,11 @@ Emits nothing when no lease files exist. A lease file that cannot be read
 is reported as the board (one line naming the file and the fix — the same
 sentence lease.sh refuses with), never swallowed: a board that vanishes reads
 as "no leases", and the session starts guessing (§4.3). Silent only on its
-own unexpected failure. 2 s internal budget under the 5 s hook timeout.
+own unexpected failure. Under the 5 s hook timeout (v0.7.5, PROP-025): the
+swept-window checks, the lock waits and the reader's changed set get a 2.5 s
+deadline, the render's git 3.5 s; what the checks did not reach is drawn "not
+checked this time", never a board that vanishes. A 4 s alarm is a backstop for
+a hang anywhere else, and says so in one line naming `core/lease.sh list`.
 """
 from __future__ import annotations
 
@@ -22,20 +26,30 @@ import json
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
 import leaselib as ll  # noqa: E402
 
-BUDGET_SECS = 2
+CHECK_SECS = 2.5        # the swept-window checks, both lock waits and the reader's changed set
+RENDER_SECS = 3.5       # the render's `git log -1` per repo of each non-stale window
+BACKSTOP_SECS = 4       # whole seconds (signal.alarm); 1 s under Claude Code's 5 s kill
+BOARD_OVERRUN = "The lease board was not drawn in time at this prompt; run `core/lease.sh list` to see it now"
+
+
+class BoardOverrun(BaseException):
+    """The backstop. Deliberately not an OSError or an Exception: v.run caught the old alarm's TimeoutError as a git
+    failure, and the board named whichever window's git call was in flight (PROP-025)."""
 
 
 def _on_alarm(signum, frame):
-    raise TimeoutError("lease-board budget")
+    raise BoardOverrun()
 
 
 def main() -> int:
+    start = time.time()
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
@@ -52,16 +66,22 @@ def main() -> int:
     sid = v.export_session(payload)
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     signal.signal(signal.SIGALRM, _on_alarm)
-    signal.alarm(BUDGET_SECS)
+    signal.alarm(BACKSTOP_SECS)
     mine = None
     try:
-        text, mine = ll.board_for(v.ROOT, sid, visitor, with_mine=True)
+        try:
+            text, mine = ll.board_for(v.ROOT, sid, visitor, with_mine=True, deadline=start + CHECK_SECS,
+                                      check_deadline=start + CHECK_SECS, render_deadline=start + RENDER_SECS,
+                                      busy=ll.BOARD_LOCK_BUSY_PROMPT)
+        finally:
+            signal.alarm(0)
+    except BoardOverrun:
+        text = BOARD_OVERRUN                 # a board that vanishes reads as "no leases" (v0.7.5 review, R9)
     except ll.Refused as e:
-        text = ll.BOARD_UNRENDERED % e       # the operator sentence names the file and the fix
+        # the busy lock is its own sentence; any other names the file and the fix
+        text = str(e) if str(e) == ll.BOARD_LOCK_BUSY_PROMPT else ll.BOARD_UNRENDERED % e
     except Exception:
         return 0
-    finally:
-        signal.alarm(0)
     # §14: while the stamp differs from VERSION, the upgrade's line leads the board on every prompt, even when
     # no window is open (board_for returns '' then); so does the line naming the upgrade's safety copy of target/
     # until the operator forgets it. Absent upgrade.py (a fixture) or any failure: no line.
