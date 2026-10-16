@@ -45,7 +45,8 @@ it with the cause.
 - A git error on one window is on that window's line, with the command that
   shows the error. The other windows still draw.
 - While a window is being made or swept, the board says the lock is busy and
-  draws at the next prompt. Before, it was silent.
+  draws at the next prompt; `core/lease.sh list` waits for it. Before, it was
+  silent.
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
 in a terminal. It prints `Daedalus updated 0.7.4 -> 0.7.5; doctor OK.` There

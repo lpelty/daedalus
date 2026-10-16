@@ -87,7 +87,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   sleep 0.5
   t0="$(now)"; run board sA; t1="$(now)"; kill "$holder" 2>/dev/null || true
   [ "$status" -eq 0 ]; under "$t0" "$t1" 3.3 "busy prompt"
-  [ "$(ctx)" = "the lease lock stayed busy (a window is being made or swept); the board draws at your next prompt" ] || { ctx; return 1; }
+  [ "$(ctx)" = "the lease lock stayed busy (a window is being made or swept); the board draws at your next prompt, or run \`core/lease.sh list\` to wait for it" ] || { ctx; return 1; }
 }
 
 # --- Task 3: tips at SHAs, waiting_work_at ---------------------------------------------------------------------------
@@ -280,6 +280,8 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
 
 # --- Task 6: the partial board ----------------------------------------------------------------------------------------
 
+# cache_count — how many (window, repo) answers the cache file holds; 0 when there is none
+cache_count() { python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["entries"]))' "$(CACHE)" 2>/dev/null || echo 0; }
 # complete_count — how many swept windows the board in $output draws with an exact count
 complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted commits? waiting' || true; }
 
@@ -292,12 +294,15 @@ complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted comm
   for nn in 02 03 04 05 06 07; do
     case "$c" in *"- $nn — swept, "*"waiting ("*|*"$(UNCHECKED_LINE $nn)"*) : ;; *) echo "no line for $nn: $c"; return 1 ;; esac
   done
-  prev="$(complete_count)"; p=1
+  # 24 pairs x 0.4 s is about 10 s of log, about 2 s of it per prompt: the bound is 10 prompts, and every prompt
+  # short of the end must add answers to the cache (a stalled "at least" window fails here, not only a stalled count)
+  prev="$(complete_count)"; p=1; pairs="$(cache_count)"
   while ctx | grep -qE 'not checked|at least'; do
     p=$((p + 1)); [ "$p" -le 10 ] || { echo "never finished"; ctx; return 1; }
     t0="$(now)"; run board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 4.5 "prompt $p"
-    n="$(complete_count)"; [ "$n" -gt "$prev" ] || ctx | grep -qE '^- [0-9]{2} — swept, at least' || { echo "no progress at prompt $p"; ctx; return 1; }
-    [ "$n" -ge "$prev" ] || { echo "went back at prompt $p"; return 1; }; prev="$n"
+    n="$(complete_count)"; m="$(cache_count)"
+    [ "$m" -gt "$pairs" ] || { echo "no answer added at prompt $p ($pairs pairs)"; ctx; return 1; }
+    [ "$n" -ge "$prev" ] || { echo "went back at prompt $p"; return 1; }; prev="$n"; pairs="$m"
   done
   printf '# finished at prompt %s\n' "$p" >&3
   [ "$prev" -eq 6 ]
@@ -348,6 +353,15 @@ complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted comm
     n="$(complete_count)"; [ "$n" -gt "$prev" ] || [ "$n" -eq 6 ] || { echo "no progress at prompt $p"; ctx; return 1; }; prev="$n"
   done
   [ "$prev" -eq 6 ] || { ctx; return 1; }
+  # every miss of the repo answered: the marker goes, so a later miss at the same trunk SHA gets its walk again
+  cache_check "'thing/sub' not in d['cut']"
+  unset FAKE_GIT_SLEEP_ON
+  for nn in 02 03; do
+    W="$DAEDALUS_HOME/worktrees/$nn/thing/sub"; printf 'more\n' >> "$W/more.txt"; git -C "$W" add more.txt
+    git -C "$W" -c user.email=t@x -c user.name=t commit -q -m "more $nn"
+  done
+  : > "$GIT_LOG"; timed_board sA
+  grep -q $'/target/thing/sub\tfor-each-ref --merged' "$GIT_LOG" || { cat "$GIT_LOG"; return 1; }
 }
 
 @test "partial board (d): no numbered lease, 2 swept windows, every check cut off — a board is drawn (head and 'not checked' lines), never nothing" {
@@ -400,4 +414,47 @@ start_hook() { hook_json SessionStart "$1" | python3 "$DAEDALUS_HOME/core/sessio
   : > "$GIT_LOG"; run board sX; [ "$(listings)" -eq 2 ] || { cat "$GIT_LOG"; return 1; }
   : > "$GIT_LOG"; run board sX; [ "$(listings)" -eq 2 ] && [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
   case "$(ctx)" in *"- 01 — swept, 2 unpromoted commits waiting"*"- 02 — swept, 2 unpromoted commits waiting"*) : ;; *) ctx; return 1 ;; esac
+}
+
+# --- Review fixes (v0.7.5 review 2) -------------------------------------------------------------------------------
+
+@test "reclaim: a stale lease whose recorded repo is no longer in target/ is reclaimed, as on 2d3bc0c — a repo that is not there holds no work" {
+  LS create >/dev/null; bind_live 01 sA; LS create >/dev/null
+  set_lease 02 'dict(session_id="sB", pid=1, proc_started=1, trunks=dict(d["trunks"], **{"thing/gone": "main"}))'
+  run LS create; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Reclaimed window 02"*) : ;; *) echo "kept over a repo that is not there: $output"; return 1 ;; esac
+}
+
+@test "the reader's changed set cannot spend the whole check deadline: with its git slow, the tip listings still run and the swept window is counted" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; swept_with_work 02
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="merge-base diff ls-files" FAKE_GIT_SLEEP=1
+  t0="$(now)"; run --separate-stderr board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 4.5 "prompt"
+  case "$stderr" in *"window 01's changed set could not be recomputed"*) : ;; *) echo "the recompute was not cut: $stderr"; return 1 ;; esac
+  c="$(ctx)"
+  case "$c" in *"were not listed this time"*) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 02 — swept, 2 unpromoted commits waiting ("*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "while the upgrade is pending, a session holding a window is not told the windowless close when its board was not drawn (lock busy)" {
+  LS create >/dev/null; bind_live 01 sA
+  printf '9.9.9\n' > "$DAEDALUS_HOME/VERSION"
+  python3 -c 'import fcntl,os,sys,time
+fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(8)' "$DAEDALUS_HOME/state/leases/.lock" 3>&- </dev/null >/dev/null 2>&1 &
+  holder=$!; printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
+  sleep 0.5
+  run board sA; kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]; c="$(ctx)"
+  case "$c" in *"the lease lock stayed busy"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"9.9.9"*) : ;; *) echo "no pending line: $c"; return 1 ;; esac
+  case "$c" in *"At its close, \`core/lease.sh log\`"*) echo "windowless close shown to window 01: $c"; return 1 ;; esac
+}
+
+@test "split: a nested repo whose only unpromoted commit has an empty message moves to a new window, never 'do not apply cleanly'" {
+  LS create >/dev/null; LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/02/thing/sub"; printf 'e\n' >> "$W/e.txt"; git -C "$W" add e.txt
+  git -C "$W" -c user.email=t@x -c user.name=t commit -q --allow-empty-message -m ""
+  run env GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x bash "$DAEDALUS_HOME/core/lease.sh" split 02 --repo sub
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 03 now holds window 02's commits in thing/sub (1: \"(no subject)\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$DAEDALUS_HOME/worktrees/03/thing/sub/e.txt" ]
 }

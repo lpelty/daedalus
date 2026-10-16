@@ -16,9 +16,10 @@ sentence lease.sh refuses with), never swallowed: a board that vanishes reads
 as "no leases", and the session starts guessing (§4.3). Silent only on its
 own unexpected failure. Under the 5 s hook timeout (v0.7.5, PROP-025): the
 swept-window checks, the lock waits and the reader's changed set get a 2.5 s
-deadline, the render's git 3.5 s; what the checks did not reach is drawn "not
-checked this time", never a board that vanishes. A 4 s alarm is a backstop for
-a hang anywhere else, and says so in one line naming `core/lease.sh list`.
+deadline (the changed set at most half of what is left of it), the render's
+git 3.5 s; what the checks did not reach is drawn "not checked this time",
+never a board that vanishes. A 4 s alarm is a backstop for a hang anywhere
+else, and says so in one line naming `core/lease.sh list`.
 """
 from __future__ import annotations
 
@@ -67,12 +68,13 @@ def main() -> int:
     visitor = bool(os.environ.get("DIRECT_CALL_ID"))
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.alarm(BACKSTOP_SECS)
-    mine = None
+    mine, drawn = None, False
     try:
         try:
             text, mine = ll.board_for(v.ROOT, sid, visitor, with_mine=True, deadline=start + CHECK_SECS,
                                       check_deadline=start + CHECK_SECS, render_deadline=start + RENDER_SECS,
-                                      busy=ll.BOARD_LOCK_BUSY_PROMPT)
+                                      busy=ll.BOARD_LOCK_BUSY_PROMPT, recompute_share=ll.RECOMPUTE_SHARE)
+            drawn = True
         finally:
             signal.alarm(0)
     except BoardOverrun:
@@ -93,6 +95,11 @@ def main() -> int:
         if pend:            # no window is made until the stamp is written (session-start.py)
             lead.append(up.WINDOWS_WAIT_BOARD)
             # how a session holding no window closes; the board itself ends with it whenever a window is open
+            if sid and not visitor and mine is None and not drawn:
+                try:            # no board, so no `mine`: the lease files say whether this session holds a window
+                    mine, _ = ll.lease_of_session(ll.read_all(v.ROOT, prune_empty=False), sid)   # a read only, no lock
+                except Exception:
+                    pass
             if sid and not visitor and mine is None and ll.WINDOWLESS_CLOSE not in text:
                 lead.append(ll.WINDOWLESS_CLOSE)
         lead.append(up.snapshot_line(v.ROOT))

@@ -77,7 +77,8 @@ LOCK_BUSY_AT_START = ("This window was not bound at start: the lease lock stayed
                       "`core/lease.sh` command or another window's start was holding it). Run `core/lease.sh claim "
                       "<NN>` with your window's number, or `core/lease.sh create` and claim the number it prints.")
 BOARD_LOCK_BUSY = "the lease lock stayed busy past the start budget; the board renders at your next prompt"
-BOARD_LOCK_BUSY_PROMPT = "the lease lock stayed busy (a window is being made or swept); the board draws at your next prompt"
+BOARD_LOCK_BUSY_PROMPT = ("the lease lock stayed busy (a window is being made or swept); the board draws at your next "
+                          "prompt, or run `core/lease.sh list` to wait for it")
 
 
 def leases_dir(root: Path) -> Path:
@@ -830,6 +831,7 @@ def log_subjects(out: str) -> list:
 # runs at SHAs once the tips are listed, so a ref moving in between can never mix two tips into one answer.
 
 MIN_CALL_SECS = 0.2      # fewer seconds left than this before a deadline: no git call is started
+RECOMPUTE_SHARE = 0.5    # at a prompt: the most of what is left of the check deadline the reader's changed set may use
 
 
 def _left_f(deadline: Optional[float], cap: float) -> float:
@@ -1628,6 +1630,8 @@ def _reclaim_waiting(root: Path, repo: str, trunk: str, nn: str, budget: int, se
     the old tip). [] when lease/<NN> is absent; Refused when anything cannot be told. A [] at a known history view
     adds its cache entry to `seeds`."""
     target = root / "target" / repo
+    if not target.is_dir():
+        return []           # as on 2d3bc0c (rev-parse could not run there): a repo that is not there holds no work
     try:
         info = _resolve_tips(target, repo, trunk, timeout=budget)
     except Refused as e:
@@ -2469,7 +2473,7 @@ def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
         if data.get("worktree_ready") is False or key not in new_trunks or not dest.is_dir():
             _discard_locked(root, new_nn, new_trunks)
             raise Refused("window %s's worktree for %s could not be made; nothing was split" % (new_nn, key))
-        code, _, err = _git(dest, "cherry-pick", "%s..refs/heads/lease/%s" % (remote_ref(ntrunk), nn), timeout=300)
+        code, _, err = _git(dest, "cherry-pick", "--allow-empty-message", "%s..refs/heads/lease/%s" % (remote_ref(ntrunk), nn), timeout=300)
         if code != 0:
             _git(dest, "cherry-pick", "--abort")
             _discard_locked(root, new_nn, new_trunks)
@@ -4845,7 +4849,8 @@ def waiting_numbers(root: Path, leases: Dict[str, dict], deadline: Optional[floa
     window by window (phase B). `deadline`: no git call starts with fewer than MIN_CALL_SECS left, each gets what
     is left, and what was not reached is `unchecked` — answers already computed are written first, so the next
     prompt starts where this one stopped. A phase A cut off, or one that left windows to phase B, leaves a `cut`
-    marker for (repo, trunk SHA), so the repo goes straight to phase B until its trunk moves: progress is monotone. `write`
+    marker for (repo, trunk SHA), so the repo goes straight to phase B until its trunk moves or every miss of it is
+    answered: progress is monotone. `write`
     False (doctor) reads the cache and never writes it."""
     res = Waiting()
     outer, trunk0 = target_name(root), v.target_branch(root)
@@ -4948,6 +4953,12 @@ def waiting_numbers(root: Path, leases: Dict[str, dict], deadline: Optional[floa
             res.errors[nn] = (repo, info["trunk"], _last_line(err))
             continue
         answer(nn, repo, subs)
+    # A repo whose misses are all answered needs its marker no more: it goes, so a later miss at the same trunk SHA
+    # gets its walk again (a marker kept until the trunk moved cost a log per new miss; v0.7.5 review 2).
+    for repo in set(cut) | set(cut_set):
+        if repo in listed and all((nn, repo) in answers for nn in misses.get(repo, [])):
+            cut_set.pop(repo, None)
+            cut_drop.add(repo)
     for nn in sorted(numbers):
         if nn in res.errors:
             continue
@@ -5043,7 +5054,7 @@ def announce_pushed(root: Path, sid: Optional[str]) -> list:
 
 def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool = False,
               deadline: Optional[float] = None, with_mine: bool = False, check_deadline: Optional[float] = None,
-              render_deadline: Optional[float] = None, busy: str = BOARD_LOCK_BUSY):
+              render_deadline: Optional[float] = None, busy: str = BOARD_LOCK_BUSY, recompute_share: float = 1.0):
     """The duties of §4.3 in one call: recompute the reader's changed set
     (every lease's for `list`/`status` — a shell has no budget), touch the
     reader's heartbeat, refresh stored pid/proc_started/peer_name from the
@@ -5054,8 +5065,10 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
     held (it takes the lock itself, twice); the git and ps work runs outside it.
     `deadline` bounds both lock acquires (SessionStart and the prompt hook):
     still busy then, it raises Refused(busy). v0.7.5: `check_deadline` bounds
-    the swept-window checks and the reader's changed-set recompute (what is not
-    reached is drawn "not checked this time"); `render_deadline` bounds the
+    the swept-window checks and the reader's changed-set recompute (which gets
+    at most `recompute_share` of what is left of it; the prompt hook passes
+    RECOMPUTE_SHARE; what is not reached is drawn "not checked this time");
+    `render_deadline` bounds the
     render's `git log -1` calls. A shell passes neither: it has no budget."""
     with lock(root, shared=True, deadline=deadline, busy=busy):
         leases = read_all(root)
@@ -5067,11 +5080,14 @@ def board_for(root: Path, sid: Optional[str], visitor: bool, recompute_all: bool
         wr = waiting_numbers(root, leases, deadline=check_deadline)
         if wr.empty():
             return ("", mine) if with_mine else ""
+    # at a prompt the reader's changed set gets at most half of what is left of the check deadline: on its own it
+    # could spend all of it on every prompt, and then no tip listing would ever start (v0.7.5 review 2)
+    rc_deadline = None if check_deadline is None else time.time() + recompute_share * max(0.0, check_deadline - time.time())
     for nn, d in leases.items():
         if nn == "prime" or not (recompute_all or nn == mine):
             continue
         try:
-            recompute_changed(root, nn, d, deadline=check_deadline)
+            recompute_changed(root, nn, d, deadline=rc_deadline)
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e)     # the last computed set is kept (§4.1)
     if mine:
