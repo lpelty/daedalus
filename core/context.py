@@ -278,6 +278,8 @@ def parse_subject(verb: str, arg: str, tree: Tree) -> Subject:
     if verb == "importers" and sym:
         raise Usage("importers takes a file, not a function: python3 core/context.py importers <file>")
     if sym is not None and not re.fullmatch(r"[A-Za-z_][\w.]*", sym):
+        if verb == "callers" and f is None:
+            raise Usage("callers needs a function: python3 core/context.py callers <file>::<function> or <function>")
         raise Usage("%s is not a function name." % sym)
     if f is None:
         return Subject([], sym, tree.outer, "")
@@ -709,7 +711,8 @@ class Index:
                                    remaining(deadline))
         if to:
             raise Budget()
-        i = out.find("{")
+        m = re.search(r"(?m)^\{", out)        # the first line that opens the object; an INFO line may hold a brace
+        i = m.start() if m else -1
         if rc != 0 or i < 0:
             raise GraphFail("the graph answer could not be read (%s)" % (
                 "exit %s" % rc if rc != 0 else "not JSON"))
@@ -1833,6 +1836,9 @@ def main(argv: List[str]) -> int:
         raise Usage(USAGE)
     except Usage as e:
         print(str(e))
+        return 2
+    except Exception as e:      # exit codes are 0 and 2 only (§5); never a traceback for the agent to parse
+        print("core/context.py could not answer (%s: %s)." % (type(e).__name__, " ".join(str(e).split())[:200]))
         return 2
 
 
