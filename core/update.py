@@ -77,6 +77,13 @@ NOTHING = "Nothing in this home was changed."
 USAGE = "usage: daedalus update | daedalus version   (python3 core/update.py <verb> --home <absolute path>)"
 SELF = Path("core") / "update.py"
 JOURNAL = "SOUL.md"     # the deployment's journal: modified in the working tree, kept across the move
+GITIGNORE = ".gitignore"
+# distcheck.DIST_PATHS, carried here because this script never imports the old home's code (a test pins the two):
+# a path under these is code that runs as the release in every window, so it is never a deployment's own path
+DIST_PATHS = ("core", "CLAUDE.md", ".claude/settings.json", "mods")
+REFUSED_LIST = Path("state") / "update-refused.txt"
+NOT_UPDATED = "Not updated: "
+MOST = 3                # a refusal names at most this many paths; the full list goes to state/update-refused.txt
 
 
 class Refuse(Exception):
@@ -223,8 +230,8 @@ def pick_remote(home: Path, branch: Optional[str]) -> Tuple[str, str]:
     if not match:
         add = configured or RELEASE_URL
         listed = ", ".join("%s → %s" % (n, urls[n] or "no address") for n in names) or "none"
-        raise Refuse("No remote of this home has the release's address %s (remotes: %s); add it with git remote add "
-                     "daedalus %s, then run daedalus update again. %s" % (want, listed, add, NOTHING))
+        raise Refuse("Not updated: no remote of this home has the release's address %s (remotes: %s); add it with git "
+                     "remote add daedalus %s, then run daedalus update again. %s" % (want, listed, add, NOTHING))
     if len(match) == 1:
         return match[0], urls[match[0]]
     tracking = (_cfg_lines(home, "--local", "--get", "branch.%s.remote" % branch) or [""])[0] if branch else ""
@@ -288,7 +295,7 @@ def live_sessions(home: Path) -> List[str]:
             import upgrade as up
             _LIVE["fn"] = up._live_sessions
         except Exception:
-            raise Refuse("Not updating: this home predates v0.7.0 (its core/upgrade.py has no liveness check); "
+            raise Refuse("Not updated: this home predates v0.7.0 (its core/upgrade.py has no liveness check); "
                          "update it with git. " + NOTHING)
     return list(_LIVE["fn"](home))
 
@@ -299,12 +306,44 @@ def _join(words: List[str]) -> str:
     return ", ".join(words[:-1]) + " and " + words[-1]
 
 
+def summarise(home: Path, paths: List[str]) -> str:
+    """A list of paths in a refusal's one line: the path itself when there is one; else the count, the first
+    directory when at least two thirds share it, and at most three examples. With more than three, the full list is
+    written (overwritten) to state/update-refused.txt, which the words name. A refusal never prints a wall of paths."""
+    paths = list(paths)
+    if len(paths) == 1:
+        return paths[0]
+    tops: Dict[str, int] = {}
+    for q in paths:
+        if "/" in q:
+            tops[q.split("/", 1)[0]] = tops.get(q.split("/", 1)[0], 0) + 1
+    top = max(tops, key=lambda k: tops[k]) if tops else None
+    under = " under %s/" % top if top and tops[top] * 3 >= len(paths) * 2 else ""
+    words = "%d files%s (%s)" % (len(paths), under, ", ".join(paths[:MOST]) + (", …" if len(paths) > MOST else ""))
+    if len(paths) > MOST:
+        try:
+            (home / "state").mkdir(parents=True, exist_ok=True)
+            (home / REFUSED_LIST).write_text("\n".join(paths) + "\n")
+            words += "; the full list is in %s" % REFUSED_LIST.as_posix()
+        except OSError:
+            pass
+    return words
+
+
+def _names_in_words(names: List[str]) -> str:
+    """Live sessions, by name: at most three, then "and N more"."""
+    if len(names) <= MOST:
+        return _join(names)
+    return "%s and %d more" % (", ".join(names[:MOST]), len(names) - MOST)
+
+
 def refuse_if_live(home: Path, tail: str = NOTHING) -> None:
     live = live_sessions(home)
     if live:
         one = len(live) == 1
-        raise Refuse("Not updating: %d Daedalus session%s live in this home — %s. Close %s, then run daedalus update "
-                     "again. %s" % (len(live), " is" if one else "s are", _join(live), "it" if one else "them", tail))
+        raise Refuse("Not updated: %d Daedalus session%s live in this home — %s. Close %s, then run daedalus update "
+                     "again. %s" % (len(live), " is" if one else "s are", _names_in_words(live), "it" if one else "them",
+                                    tail))
 
 
 # --- the move ------------------------------------------------------------------------------------------------------
@@ -348,10 +387,10 @@ RULE_KINDS = ("allow", "deny", "ask")
 BRIEF_DENY = "Edit(CLAUDE.md)"      # Edit(/CLAUDE.md) in any anchor, normalised
 ZERO = "0" * 40                     # git's name for "no blob": the path is absent
 AUTO_MODE_LINE = "Editing CLAUDE.md in the Daedalus home"   # the v0.7.2 README's auto-mode line
-IN_PROGRESS = (("MERGE_HEAD", "a merge", "git merge --abort"), ("rebase-merge", "a rebase", "git rebase --abort"),
-               ("rebase-apply", "a rebase", "git rebase --abort"),
-               ("CHERRY_PICK_HEAD", "a cherry-pick", "git cherry-pick --abort"),
-               ("REVERT_HEAD", "a revert", "git revert --abort"), ("BISECT_LOG", "a bisect", "git bisect reset"))
+# an operation git has half done; the refusal says to finish it — never to abort it, which throws away any conflict
+# resolution not yet committed
+IN_PROGRESS = (("MERGE_HEAD", "a merge"), ("rebase-merge", "a rebase"), ("rebase-apply", "a rebase"),
+               ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert"), ("BISECT_LOG", "a bisect"))
 _MISSING = object()
 
 
@@ -476,11 +515,11 @@ def _names(res: Tuple[int, str, str]) -> List[str]:
 
 
 def in_progress(home: Path) -> Optional[str]:
-    """The clause naming an operation git has half done in this home, and the command that clears it."""
-    for name, what, cmd in IN_PROGRESS:
+    """The clause naming an operation git has half done in this home."""
+    for name, what in IN_PROGRESS:
         gp = git(home, "rev-parse", "--git-path", name)[1].strip()
         if gp and (Path(gp) if os.path.isabs(gp) else home / gp).exists():
-            return "%s is in progress in this home; finish it or run %s" % (what, cmd)
+            return "%s is in progress in this home; finish it" % what
     gp = git(home, "rev-parse", "--git-path", "index.lock")[1].strip()
     if gp and (Path(gp) if os.path.isabs(gp) else home / gp).exists():
         return ("git's index lock (%s) is held; once no git command is running in this home, remove that file" % gp)
@@ -493,14 +532,22 @@ def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[
     nor the release's (an older release's copy, checked out on purpose). SOUL.md is the deployment's, never
     classified (Decision 15). An absent file is a release's state when the merge base or the release lacks it too
     (a path a later release added, or one the release deleted); a deletion of a file both have is local. Also:
-    untracked files at paths the release has."""
+    untracked files at paths the release has. A deployment path — tracked here, never on the release's history,
+    not under DIST_PATHS (a vault the home tracks is the case doctor knows) — is the deployment's own: never local,
+    carried by merging (deployment)."""
     th, tt, tb = tree(home, head), tree(home, target), tree(home, base)
     changed = sorted(set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", target)))
                      | set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", head, target))))
-    wt = worktree_blobs(home, changed + ([JOURNAL] if JOURNAL not in changed else []))
+    code, out, err = git(home, "ls-files", "-z")
+    if code != 0:
+        raise Unmovable("git could not list tracked files (%s)" % _last(err))
+    indexed = set(p for p in out.split("\0") if p)
+    deployment = sorted(p for p in changed if is_deployment_path(p, th, indexed, hist, tt))
+    dep = set(deployment)
+    wt = worktree_blobs(home, [p for p in changed if p not in dep] + ([JOURNAL] if JOURNAL not in changed else []))
     local, pinned = [], []
     for p in changed:
-        if p == JOURNAL:
+        if p == JOURNAL or p in dep:
             continue
         seen = hist.get(p, set())
 
@@ -517,15 +564,100 @@ def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[
     untracked = {p for p in out.split("\0") if p and p in tt}
     # an ignored file at a path the release adds is as untracked as any other: the reset or the fast-forward
     # would write over it, and no backup holds it
-    code, out, err = git(home, "ls-files", "-z")
-    if code != 0:
-        raise Unmovable("git could not list tracked files (%s)" % _last(err))
-    indexed = set(p for p in out.split("\0") if p)
     untracked |= {p for p in tt if p not in th and p not in indexed and os.path.lexists(str(home / p))}
     untracked = sorted(untracked)
-    dirty = [p for p in changed if wt.get(p, ZERO) != th.get(p, ZERO)]
+    dirty = [p for p in changed if p not in dep and wt.get(p, ZERO) != th.get(p, ZERO)]
     return {"head": th, "target": tt, "base": tb, "changed": changed, "wt": wt, "local": local, "pinned": pinned,
-            "untracked": untracked, "dirty": dirty}
+            "untracked": untracked, "dirty": dirty, "deployment": deployment}
+
+
+def _under_dist(p: str) -> bool:
+    return any(p == d or p.startswith(d + "/") for d in DIST_PATHS)
+
+
+def is_deployment_path(p: str, th: Dict[str, str], indexed: Set[str], hist: Dict[str, Set[str]],
+                       tt: Dict[str, str]) -> bool:
+    """Tracked at HEAD or in the index, never present on the release's history, and not distribution code."""
+    return (p in th or p in indexed) and p not in hist and p not in tt and not _under_dist(p)
+
+
+def deployment_paths(home: Path, ref: Optional[str] = None) -> List[str]:
+    """The paths at this home's HEAD that belong to the deployment (is_deployment_path), judged against `ref`, else
+    the release's trunk as last fetched (no network). With no release ref in this home at all, the vault the home
+    repository tracks (the layout doctor knows). For upgrade.py's rollback, which must not check out a release that
+    would take them out of the working tree."""
+    ref = ref or _offline_trunk(home)
+    if not ref:
+        code, out, _ = git(home, "ls-files", "-z", "--", "vault")
+        return sorted(p for p in out.split("\0") if p) if code == 0 else []
+    th, tt = tree(home, "HEAD"), tree(home, ref)
+    hist = history(home, ref)
+    return sorted(p for p in th if is_deployment_path(p, th, set(), hist, tt))
+
+
+GITIGNORE_MARK = "# This home's own lines, kept here by daedalus update (a release's .gitignore never had them):"
+
+
+def ignores(text: str, names: List[str]) -> Dict[str, bool]:
+    """name -> whether a top-level .gitignore of `text` ignores it (a name ending in / is a directory), judged by git
+    itself in a scratch repository: no other ignore source, no file of the home."""
+    out: Dict[str, bool] = {}
+    tmp = tempfile.mkdtemp(prefix="daedalus-ignore-")
+    try:
+        if subprocess.run(["git", "init", "-q", tmp], stdin=subprocess.DEVNULL, capture_output=True,
+                          env=_env()).returncode != 0:
+            raise Unmovable("git could not make a scratch repository to read .gitignore")
+        Path(tmp, GITIGNORE).write_text(text)
+        for n in names:
+            if n.endswith("/"):
+                Path(tmp, n).mkdir(parents=True, exist_ok=True)
+            r = subprocess.run(["git", "-C", tmp, "-c", "core.excludesFile=/dev/null", "check-ignore", "--no-index",
+                                "-q", "--", n.rstrip("/")], stdin=subprocess.DEVNULL, capture_output=True, env=_env())
+            out[n] = r.returncode == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out
+
+
+def carried_gitignore(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]]) -> Optional[str]:
+    """Merge mode's .gitignore: the release's copy, then a marked block of this home's lines no release's .gitignore
+    ever had, plus an un-ignore for each top-level name of a deployment path the home does not ignore and the release
+    would — later rules win, so the block keeps its precedence over the release's lines. Never three-way merged: two
+    sides appending at the end would conflict at every release. None when this home's copy is the release's. Raises
+    Unmovable when the result would ignore a deployment path differently from this home's copy (nothing is written)."""
+    rel = blob_text(home, c["target"].get(GITIGNORE, ZERO)) or ""
+    wt_path = home / GITIGNORE
+    mine = _read(wt_path) if wt_path.is_file() else (blob_text(home, c["head"].get(GITIGNORE, ZERO)) or "")
+    mine = mine or ""
+    if mine == rel:
+        return None
+    known = set()
+    for b in sorted(hist.get(GITIGNORE, set())):
+        for ln in (blob_text(home, b) or "").splitlines():
+            known.add(ln.rstrip())
+    rel_lines = {ln.rstrip() for ln in rel.splitlines()}
+    own: List[str] = []
+    for ln in mine.splitlines():
+        r = ln.rstrip()
+        if r.strip() and r != GITIGNORE_MARK and r not in known and r not in rel_lines and r not in own:
+            own.append(r)
+    names = sorted({(p.split("/", 1)[0] + "/") if "/" in p else p for p in c["deployment"]})
+    def build(lines: List[str]) -> str:
+        body = rel if (not rel or rel.endswith("\n")) else rel + "\n"
+        return body + (("\n" if body else "") + GITIGNORE_MARK + "\n" + "\n".join(lines) + "\n" if lines else "")
+    was = ignores(mine, names) if names else {}
+    trial = ignores(build(own), names) if names else {}
+    for n in names:
+        if trial[n] and not was[n]:
+            un = "!/%s" % n
+            if un not in own:
+                own.append(un)
+    new = build(own)
+    if names and ignores(new, names) != was:
+        wrong = [n for n, v in ignores(new, names).items() if v != was[n]]
+        raise Unmovable("this home's .gitignore cannot be carried over the release's without changing what it ignores "
+                        "(%s)" % _join(wrong[:MOST]))
+    return new
 
 
 # --- settings (§4.3 "Settings") --------------------------------------------------------------------------------------
@@ -904,7 +1036,7 @@ def restore(home: Path, orig_head: str, branch: str, bdir: Path, moved_before_me
     if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] != 0:
         # without the branch nothing could put the working tree's edits back after a reset: leave the files alone
         problems.append("the tracked files, left as they are because the backup branch %s does not exist" % branch)
-    elif step(git(home, "reset", "--quiet", "--hard", orig_head, timeout=600), "git reset to the original HEAD"):
+    elif step(git(home, "reset", "--quiet", "--hard", orig_head, timeout=600), "putting back the original HEAD"):
         if step(git(home, "checkout", branch, "--", ".", timeout=600), "the original files from the backup branch"):
             for p in _names(git(home, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", orig_head,
                                 branch)):
@@ -939,19 +1071,21 @@ def _write(path: Path, text: str) -> None:
     os.replace(str(tmp), str(path))
 
 
-def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], head: str, target: str,
-                      branch_name: str, remote: str, trunk: str) -> Tuple[str, List[str]]:
-    """The local-layer migration, then the reset to the release, SOUL.md's journal written back; a failure from
-    the backup to the end restores the home. Returns the clause for the one line, and the report sentences."""
+def _new_stamp(home: Path) -> str:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     n = 1
     while (home / BACKUPS / stamp).exists() or \
             git(home, "rev-parse", "-q", "--verify", "refs/heads/local/before-update-" + stamp)[0] == 0:
         n += 1
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-%d" % n
-    branch = "local/before-update-" + stamp
-    bdir_rel = (BACKUPS / stamp).as_posix()
-    bdir = home / BACKUPS / stamp
+    return stamp
+
+
+def plan_local_layer(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], stamp: str, branch: str,
+                     bdir_rel: str) -> Dict[str, Any]:
+    """What the local-layer migration moves, read and judged before anything is written (Unmovable ends it with
+    nothing changed): the local settings, the local brief, config.yaml's edit_brief line, SOUL.md's journal, and the
+    sentences to report. Both moves (reset and merge) take this plan."""
     th, tt, tb = c["head"], c["target"], c["base"]
 
     def at(path: str, which: Dict[str, str]) -> Optional[str]:
@@ -960,7 +1094,6 @@ def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
     def versions(path: str) -> List[str]:
         return [t for t in (blob_text(home, b) for b in sorted(hist.get(path, set()))) if t is not None]
 
-    # what moves: read and judged before anything is written (Unmovable ends it with nothing changed)
     reports: List[str] = []
     local_settings = None
     before_path = home / BEFORE_MERGE
@@ -993,69 +1126,272 @@ def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
         soul = (home / JOURNAL).read_bytes()
     except OSError:
         pass
-    keep_soul = soul is not None and git_blob_of(home, soul) != tt.get(JOURNAL, ZERO)
-    soul_release = keep_soul and tt.get(JOURNAL, ZERO) != tb.get(JOURNAL, ZERO) and JOURNAL in tt
     if c["pinned"]:
         if len(c["pinned"]) == 1:
             reports.append("%s held an older release's copy; the release's copy replaces it" % c["pinned"][0])
         else:
-            reports.append("%s held older releases' copies; the release's copies replace them" % _join(c["pinned"]))
-    staged = git(home, "diff", "--cached", "--quiet")[0] != 0
+            reports.append("%s held older releases' copies; the release's copies replace them" % summarise(home, c["pinned"]))
+    return {"local_settings": local_settings, "brief_text": brief_text, "config_text": config_text, "soul": soul,
+            "soul_release_text": at(JOURNAL, tt), "reports": reports,
+            "staged": git(home, "diff", "--cached", "--quiet")[0] != 0}
 
-    moved_before_merge = False
-    old = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+
+def _backup_or_refuse(home: Path, head: str, branch: str, bdir: Path, stamp: str) -> None:
     try:
-        try:
-            make_backup(home, head, branch, bdir, stamp)
-        except (MoveFailed, OSError) as e:
-            # nothing in the home has been touched yet: no reset (it would wipe the uncommitted edits the backup
-            # was for), and no half-made backup left to be mistaken for a whole one
-            if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0:
-                git(home, "branch", "-D", branch)
-            shutil.rmtree(str(bdir), ignore_errors=True)
-            raise Refuse("Not updating: %s; the backup could not be made, so nothing in this home was changed." % e)
-        try:
-            if soul_release:
-                _write(bdir / "SOUL.release.md", at(JOURNAL, tt) or "")
-            if local_settings is not None:
-                _write(home / LOCAL_SETTINGS, json.dumps(local_settings, indent=2) + "\n")
-            if brief_text is not None:
-                _write(home / LOCAL_BRIEF, brief_text)
-            if config_text is not None:
-                _write(home / CONFIG, config_text)
-            if before_path.is_file():
-                shutil.move(str(before_path), str(bdir / BEFORE_MERGE.name))
-                moved_before_merge = True
-            _out(git(home, "reset", "--quiet", "--hard", target, timeout=600),
-                 "git reset to %s/%s" % (remote, trunk))
-            if keep_soul:
-                (home / JOURNAL).write_bytes(soul)
-            set_tracking(home, branch_name, remote, trunk)
-        except (MoveFailed, OSError, Unmovable) as e:
-            problems = restore(home, head, branch, bdir, moved_before_merge)
-            have = [w for w, ok in ((branch, git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0),
-                                    (bdir_rel + "/", bdir.is_dir())) if ok]
-            back = ("this home is back as it was (HEAD %s, its files and its local-layer files restored%s)"
-                    % (head[:7], "; changes that were staged come back unstaged" if staged else ""))
-            if problems:
-                back = "restoring this home also failed for %s — put those back from the backup" % "; ".join(problems)
-            where = ("the backup is at %s" % " and ".join(have)) if have else "no backup of this home survives"
-            raise Refuse("Not updating: %s; %s; %s." % (e, back, where))
-    finally:
-        for s, h in old.items():
-            signal.signal(s, h)
-    moved = [p for p, w in ((LOCAL_SETTINGS, local_settings), (LOCAL_BRIEF, brief_text)) if w is not None]
-    where = "backup at %s and %s/" % (branch, bdir_rel)
-    clause = ("local edits moved to %s, %s" % (" and ".join(moved), where)) if moved else where
+        make_backup(home, head, branch, bdir, stamp)
+    except (MoveFailed, OSError) as e:
+        # nothing in the home has been touched yet: no reset (it would wipe the uncommitted edits the backup was
+        # for), and no half-made backup left to be mistaken for a whole one
+        if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0:
+            git(home, "branch", "-D", branch)
+        shutil.rmtree(str(bdir), ignore_errors=True)
+        raise Refuse(NOT_UPDATED + "%s; the backup could not be made, so nothing in this home was changed." % e)
+
+
+def _write_local_layer(home: Path, plan: Dict[str, Any], bdir: Path, soul_release: bool) -> bool:
+    """The local-layer files the plan names, and settings-before-merge.json moved into the backup; True when it
+    was moved."""
+    if soul_release:
+        _write(bdir / "SOUL.release.md", plan["soul_release_text"] or "")
+    if plan["local_settings"] is not None:
+        _write(home / LOCAL_SETTINGS, json.dumps(plan["local_settings"], indent=2) + "\n")
+    if plan["brief_text"] is not None:
+        _write(home / LOCAL_BRIEF, plan["brief_text"])
+    if plan["config_text"] is not None:
+        _write(home / CONFIG, plan["config_text"])
+    if (home / BEFORE_MERGE).is_file():
+        shutil.move(str(home / BEFORE_MERGE), str(bdir / BEFORE_MERGE.name))
+        return True
+    return False
+
+
+def _restored_refusal(home: Path, e: Exception, head: str, branch: str, bdir: Path, bdir_rel: str, staged: bool,
+                      problems: List[str], what: str = "") -> Refuse:
+    have = [w for w, ok in ((branch, git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0),
+                            (bdir_rel + "/", bdir.is_dir())) if ok]
+    back = ("this home is back as it was (HEAD %s, its files and its local-layer files restored%s)"
+            % (head[:7], "; changes that were staged come back unstaged" if staged else ""))
+    if problems:
+        shown = problems[:MOST] + (["and %d more" % (len(problems) - MOST)] if len(problems) > MOST else [])
+        back = "restoring this home also failed for %s — put those back from the backup" % "; ".join(shown)
+    where = ("the backup is at %s" % " and ".join(have)) if have else "no backup of this home survives"
+    return Refuse(NOT_UPDATED + "%s; %s; %s." % (what or e, back, where))
+
+
+def _notes(plan: Dict[str, Any], soul_release: bool, bdir_rel: str) -> List[str]:
     notes = []
-    if config_text is not None:
+    if plan["config_text"] is not None:
         notes.append("This home had removed the CLAUDE.md deny, so boundary.edit_brief is now true in config.yaml: "
                      "Daedalus edits CLAUDE.local.md, and since config.yaml changed, each window re-runs core/gates.sh "
                      "before its next claim")
     if soul_release:
         notes.append("the release changed SOUL.md; this home's journal is kept, and the release's copy is in "
                      "%s/SOUL.release.md" % bdir_rel)
-    return clause, notes + reports
+    return notes + plan["reports"]
+
+
+def _moved(plan: Dict[str, Any]) -> List[str]:
+    return [p for p, k in ((LOCAL_SETTINGS, "local_settings"), (LOCAL_BRIEF, "brief_text")) if plan[k] is not None]
+
+
+def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], head: str, target: str,
+                      branch_name: str, remote: str, trunk: str) -> Tuple[str, List[str]]:
+    """The local-layer migration, then the reset to the release, SOUL.md's journal written back; a failure from
+    the backup to the end restores the home. Returns the move's sentence and the report sentences."""
+    stamp = _new_stamp(home)
+    branch = "local/before-update-" + stamp
+    bdir_rel = (BACKUPS / stamp).as_posix()
+    bdir = home / BACKUPS / stamp
+    tt, tb = c["target"], c["base"]
+    plan = plan_local_layer(home, c, hist, stamp, branch, bdir_rel)
+    soul = plan["soul"]
+    keep_soul = soul is not None and git_blob_of(home, soul) != tt.get(JOURNAL, ZERO)
+    soul_release = keep_soul and tt.get(JOURNAL, ZERO) != tb.get(JOURNAL, ZERO) and JOURNAL in tt
+    moved_before_merge = False
+    old = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        _backup_or_refuse(home, head, branch, bdir, stamp)
+        try:
+            moved_before_merge = _write_local_layer(home, plan, bdir, soul_release)
+            _out(git(home, "reset", "--quiet", "--hard", target, timeout=600),
+                 "moving this home to %s/%s" % (remote, trunk))
+            if keep_soul:
+                (home / JOURNAL).write_bytes(soul)
+            set_tracking(home, branch_name, remote, trunk)
+        except (MoveFailed, OSError, Unmovable) as e:
+            problems = restore(home, head, branch, bdir, moved_before_merge)
+            raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems)
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    moved = _moved(plan)
+    where = "backup at %s and %s/" % (branch, bdir_rel)
+    line = ("Local edits moved to %s; %s." % (" and ".join(moved), where)) if moved else "Backup at %s." % where[10:]
+    return line, _notes(plan, soul_release, bdir_rel)
+
+
+class MergeConflict(Exception):
+    """The release's merge would conflict in these paths."""
+
+    def __init__(self, paths: List[str]) -> None:
+        super().__init__(", ".join(paths))
+        self.paths = paths
+
+
+def _merge_env(home: Path) -> Dict[str, str]:
+    env = {"GIT_MERGE_AUTOEDIT": "no"}
+    env.update(_ident(home))
+    return env
+
+
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+
+
+def restore_merge(home: Path, orig_head: str, branch: str, bdir: Path, moved_before_merge: bool,
+                  paths: List[str]) -> List[str]:
+    """Merge mode's restore: the branch back to the original HEAD without touching a file (reset --soft, then the
+    index), then only the paths the move wrote put back from the backup branch — those it lacks, which the move
+    added, removed — then the local layer, as restore does. A deployment path is never named: the move never wrote
+    one, so a write to the vault made while the update ran (an editor, a sync client, a hook) is kept."""
+    problems = []
+
+    def step(res: Tuple[int, str, str], what: str) -> bool:
+        if res[0] != 0:
+            problems.append("%s (%s)" % (what, _last(res[2] or res[1])))
+            return False
+        return True
+    gp = git(home, "rev-parse", "--git-path", "MERGE_HEAD")[1].strip()
+    if gp and (Path(gp) if os.path.isabs(gp) else home / gp).exists():
+        step(git(home, "merge", "--abort", timeout=600), "ending the release's merge")
+    if step(git(home, "reset", "-q", "--soft", orig_head), "the branch back at the original HEAD"):
+        step(git(home, "reset", "-q"), "unstaging the original changes")
+    if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] != 0:
+        problems.append("the release's files, left as they are because the backup branch %s does not exist" % branch)
+    else:
+        try:
+            kept = tree(home, branch)
+        except Unmovable as e:
+            kept = None
+            problems.append("the release's files (%s)" % e)
+        if kept is not None:
+            back = [p for p in paths if p in kept]
+            for i in range(0, len(back), 200):
+                step(git(home, "checkout", branch, "--", *back[i:i + 200], timeout=600),
+                     "the original files from the backup branch")
+            for p in paths:
+                if p not in kept and os.path.lexists(str(home / p)):
+                    try:
+                        (home / p).unlink()
+                    except OSError as e:
+                        problems.append("%s (%s)" % (p, e))
+            step(git(home, "reset", "-q"), "unstaging the original changes")
+    for rel, name in COPIES:
+        if rel not in LOCAL_LAYER:
+            continue
+        try:
+            if (bdir / name).is_file():
+                (home / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(bdir / name), str(home / rel))
+            elif (bdir / (name + ".absent")).exists() and (home / rel).exists():
+                (home / rel).unlink()
+        except OSError as e:
+            problems.append("%s (%s)" % (rel, e))
+    if moved_before_merge:
+        try:
+            shutil.move(str(bdir / BEFORE_MERGE.name), str(home / BEFORE_MERGE))
+        except OSError as e:
+            problems.append("%s (%s)" % (BEFORE_MERGE, e))
+    return problems
+
+
+def migrate_and_merge(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], head: str, target: str,
+                      branch_name: str, gitignore_text: Optional[str], ver: str) -> Tuple[str, List[str], bool]:
+    """Merge mode, for a home that tracks paths no release has (its vault): the backup, the local layer, then one
+    local commit that sets every release path to the release's copy (the migrated CLAUDE.md and settings, pinned
+    and dirty copies) and writes the carried .gitignore, then the release merged into the home's branch, SOUL.md
+    and .gitignore resolved to ours. Never a reset of the working tree, never a deployment path written, never the
+    branch's tracking moved: the home keeps its history and pushes to its own remote. A failure restores
+    (restore_merge). Returns the move's sentence, the reports, and whether the release was already merged."""
+    stamp = _new_stamp(home)
+    branch = "local/before-update-" + stamp
+    bdir_rel = (BACKUPS / stamp).as_posix()
+    bdir = home / BACKUPS / stamp
+    th, tt, tb = c["head"], c["target"], c["base"]
+    dep = set(c["deployment"])
+    plan = plan_local_layer(home, c, hist, stamp, branch, bdir_rel)
+    soul = plan["soul"]
+    soul_release = soul is not None and JOURNAL in tt and tt.get(JOURNAL, ZERO) != tb.get(JOURNAL, ZERO) \
+        and git_blob_of(home, soul) != tt.get(JOURNAL, ZERO)
+    soul_dirty = soul is not None and git_blob_of(home, soul) != th.get(JOURNAL, ZERO)
+    setting = [p for p in c["changed"] if p not in dep and p not in (JOURNAL, GITIGNORE)]
+    written = sorted(set(setting) | {JOURNAL, GITIGNORE})
+    moved_before_merge = False
+    already = False
+    old = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        _backup_or_refuse(home, head, branch, bdir, stamp)
+        try:
+            moved_before_merge = _write_local_layer(home, plan, bdir, soul_release)
+            _out(git(home, "reset", "-q"), "unstaging this home's changes")
+            # the migration commit: every release path the release's copy, the carried .gitignore
+            in_t = [p for p in setting if p in tt]
+            for i in range(0, len(in_t), 200):
+                _out(git(home, "checkout", target, "--", *in_t[i:i + 200], timeout=600), "setting the release's files")
+            for p in setting:
+                if p not in tt:
+                    _out(git(home, "rm", "-q", "--cached", "--ignore-unmatch", "--", p), "leaving out %s" % p)
+                    if os.path.lexists(str(home / p)):
+                        (home / p).unlink()
+            if gitignore_text is not None and _read(home / GITIGNORE) != gitignore_text:
+                _write(home / GITIGNORE, gitignore_text)
+            if (home / GITIGNORE).is_file() and git_blob_of(home, (home / GITIGNORE).read_bytes()) != th.get(GITIGNORE, ZERO):
+                _out(git(home, "add", "--", GITIGNORE), "staging .gitignore")
+            if git(home, "diff", "--cached", "--quiet")[0] != 0:
+                _out(git(home, *NO_HOOKS, "commit", "--no-verify", "-q", "-m",
+                         "daedalus update %s: local edits moved to the local layer; release files set to %s"
+                         % (stamp, ver), env=_ident(home), timeout=600), "the migration commit")
+            mig = _out(git(home, "rev-parse", "--verify", "HEAD"), "reading HEAD").strip()
+            already = git(home, "merge-base", "--is-ancestor", target, mig)[0] == 0
+            if not already:
+                if soul_dirty and tt.get(JOURNAL, ZERO) != tb.get(JOURNAL, ZERO) and JOURNAL in th:
+                    _out(git(home, "checkout", "HEAD", "--", JOURNAL), "setting SOUL.md aside for the merge")
+                written = sorted(set(written) | {p for p in _names(git(home, "diff", "--name-only", "-z",
+                                                                       "--no-renames", mig, target)) if p not in dep})
+                code, out, err = git(home, *NO_HOOKS, "-c", "rerere.enabled=false", "-c", "merge.renames=false",
+                                     "merge", "--no-ff", "--no-commit", "--no-edit", target, env=_merge_env(home),
+                                     timeout=600)
+                conflicts = _names(git(home, "diff", "--name-only", "-z", "--diff-filter=U"))
+                if [p for p in conflicts if p not in (JOURNAL, GITIGNORE)]:
+                    raise MergeConflict([p for p in conflicts if p not in (JOURNAL, GITIGNORE)])
+                if code != 0 and not conflicts:
+                    raise MoveFailed("merging the release failed (%s)" % _last(err or out))
+                mt = tree(home, mig)
+                for p in (JOURNAL, GITIGNORE):
+                    if p in mt:
+                        _out(git(home, "checkout", mig, "--", p), "keeping this home's %s" % p)
+                        _out(git(home, "add", "--", p), "keeping this home's %s" % p)
+                _out(git(home, *NO_HOOKS, "commit", "--no-verify", "-q", "-m",
+                         "daedalus update %s: merge release %s (%s) into %s" % (stamp, ver, target[:7], branch_name),
+                         env=_ident(home), timeout=600), "the merge commit")
+            if soul is not None:
+                (home / JOURNAL).write_bytes(soul)
+        except MergeConflict as e:
+            problems = restore_merge(home, head, branch, bdir, moved_before_merge, written)
+            raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems,
+                                    "merging the release would conflict in %s" % summarise(home, e.paths))
+        except (MoveFailed, OSError, Unmovable) as e:
+            problems = restore_merge(home, head, branch, bdir, moved_before_merge, written)
+            raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems)
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    moved = _moved(plan)
+    where = "backup at %s and %s/" % (branch, bdir_rel)
+    did = ("the release was merged already; this home's history is kept" if already else
+           "merged the release into %s; this home's history is kept" % branch_name)
+    line = (("Local edits moved to %s; %s; %s." % (" and ".join(moved), did, where)) if moved
+            else "%s; %s." % (did[:1].upper() + did[1:], where))
+    return line, _notes(plan, soul_release, bdir_rel), already
 
 
 def git_blob_of(home: Path, data: bytes) -> str:
@@ -1169,22 +1505,25 @@ def _sentence(s: str) -> str:
     return s if s.endswith((".", "!", "?")) else s + "."
 
 
-def finish(home: Path, head: str, done: str = "", notes: Optional[List[str]] = None) -> Tuple[str, int]:
-    """The upgrade, then doctor, as the tail of the one line, and the exit code. `done` is said after head when
-    the upgrade finished; `notes` (what the move reports) follow, one sentence each."""
+def finish(home: Path, first: str, move: str = "", notes: Optional[List[str]] = None,
+           after: str = "") -> Tuple[List[str], int]:
+    """The upgrade, then doctor; the lines to print and the exit code. The first line is the result alone —
+    "<first>; doctor OK." when the upgrade finished and doctor is clean, else "<first>." — and every later line one
+    sentence: the move, `after` (said once the upgrade finished), the upgrade's stop, each doctor finding, the notes."""
+    later = [move] if move else []
     stop = run_upgrade(home)
     if stop:
-        line, code = "%s; the upgrade stopped: %s" % (head, stop), 2
+        lines, code = [first + "."] + later + ["The upgrade stopped: " + _sentence(stop)], 2
     else:
-        head += done
+        if after:
+            later.append(after)
         missing = run_doctor(home)
         if missing:
-            line, code = "%s; doctor names what needs attention: %s" % (head, " ".join(_sentence(m) for m in missing)), 2
+            lines, code = [first + "."] + later + ["Doctor: " + _sentence(m) for m in missing], 2
         else:
-            line, code = head + "; doctor OK.", 0
-    if notes:
-        line = _sentence(line) + " " + " ".join(_sentence(n[:1].upper() + n[1:]) for n in notes)
-    return line, code
+            lines, code = [first + "; doctor OK."] + later, 0
+    lines += [_sentence(n[:1].upper() + n[1:]) for n in (notes or [])]
+    return lines, code
 
 
 # --- the command on PATH: the shim (Decision 1, §4.1) and doctor's lines (§4.5) --------------------------------------
@@ -1415,100 +1754,144 @@ def doctor_lines(home: Path) -> List[str]:
 # --- the verbs -----------------------------------------------------------------------------------------------------
 
 def update(home: Path, handed_off: bool = False, lock_fd: Optional[int] = None) -> int:
+    """Every outcome leads with its result on the first line; a refusal is one line starting "Not updated:", exit 1."""
     fd = take_lock(home, lock_fd)
     if fd is None:
-        print("Not updating: another daedalus update is running in this home. " + NOTHING)
+        print(NOT_UPDATED + "another daedalus update is running in this home. " + NOTHING)
         return 1
     try:
-        line, code = _update(home, fd, handed_off)
+        lines, code = _update(home, fd, handed_off)
     except Refuse as e:
-        line, code = str(e), 1
+        lines, code = [_one_line(str(e))], 1
+    except Exception as e:      # outside a move (the move restores in its own try): a line, never a traceback
+        lines, code = [NOT_UPDATED + "an unexpected error (%s: %s); the move had not begun, so nothing in this home "
+                       "was changed; run daedalus update again, and if it says this again, report it."
+                       % (type(e).__name__, _one_line(str(e)) or "no message")], 1
     finally:
         os.close(fd)
-    if line is not None:
-        print(line)
+    if lines:
+        print("\n".join(lines))
     return code
 
 
-def _update(home: Path, fd: int, handed_off: bool) -> Tuple[Optional[str], int]:
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _refuse_paths(home: Path, c: Dict[str, Any], paths: List[str], fetched: str) -> Refuse:
+    """The refusal of release paths the update cannot carry: those the release now ships that differ here, and local
+    changes; one line, never a list, never advice that would lose what they hold."""
+    ships = [p for p in paths if p in c["target"] and p not in c["base"]
+             and (c["head"].get(p, ZERO) != ZERO or c["wt"].get(p, ZERO) != ZERO)]
+    rest = [p for p in paths if p not in ships]
+    if rest:
+        one = len(rest) == 1
+        return Refuse(NOT_UPDATED + "%s carr%s local changes the update cannot carry (it carries only CLAUDE.md, "
+                      ".claude/settings.json, SOUL.md and files no release has); %s"
+                      % (summarise(home, rest), "ies" if one else "y", fetched))
+    if len(ships) == 1:
+        what = "%s, a file the release now ships, differs" % ships[0]
+    else:
+        what = "%s the release now ships differ" % summarise(home, ships)
+    return Refuse(NOT_UPDATED + "%s in this home; move %s out of the release's way, then run daedalus update again; %s"
+                  % (what, "it" if len(ships) == 1 else "them", fetched))
+
+
+def _update(home: Path, fd: int, handed_off: bool) -> Tuple[List[str], int]:
     refuse_if_live(home)
     branch = current_branch(home)
     if not branch:
-        raise Refuse("Not updating: this home is not on a branch (its HEAD is detached); check out its branch, then "
+        raise Refuse(NOT_UPDATED + "this home is not on a branch (its HEAD is detached); check out its branch, then "
                      "run daedalus update again. " + NOTHING)
     remote, url = pick_remote(home, branch)
     problem = remote_problem(home, remote)
     if problem:
-        raise Refuse("Not updating: %s. %s" % (problem, NOTHING))
+        raise Refuse(NOT_UPDATED + "%s. %s" % (problem, NOTHING))
     trunk = remote_trunk(home, remote)
     ref = "refs/remotes/%s/%s" % (remote, trunk)
     code, _, err = git(home, "fetch", "--quiet", "--no-tags", remote, "+refs/heads/%s:%s" % (trunk, ref), timeout=600)
     if code != 0:
-        raise Refuse("Could not reach %s: %s. %s" % (url, _cause(err), NOTHING))
+        raise Refuse(NOT_UPDATED + "could not reach %s (%s). %s" % (url, _cause(err), NOTHING))
     git(home, "fetch", "--quiet", "--no-tags", remote, "refs/tags/v*:refs/tags/v*", timeout=300)   # tags: best effort
-    fetched = "fetched %s/%s, and nothing else in this home was changed." % (remote, trunk)
+    fetched = "it fetched %s/%s, and nothing else in this home was changed." % (remote, trunk)
     if not handed_off and not running_release_copy(home, ref):
         child = hand_off(home, ref, "update", fd)
         if child is not None:
-            return None, child      # the release's copy said its own one line
+            return [], child      # the release's copy said its own lines
     target = git(home, "rev-parse", "--verify", ref + "^{commit}")[1].strip()
     head = git(home, "rev-parse", "--verify", "HEAD")[1].strip()
     if not target or not head:
-        raise Refuse("Not updating: %s/%s or HEAD does not name a commit; %s" % (remote, trunk, fetched))
+        raise Refuse(NOT_UPDATED + "%s/%s or HEAD does not name a commit; %s" % (remote, trunk, fetched))
     stuck = in_progress(home)
     if stuck:
-        raise Refuse("Not updating: %s, then run daedalus update again; %s" % (stuck, fetched))
+        raise Refuse(NOT_UPDATED + "%s, then run daedalus update again; %s" % (stuck, fetched))
     try:
         hist = history(home, target)
         base = git(home, "merge-base", head, target)[1].strip()
         c = classify(home, head, target, base, hist)
     except Unmovable as e:
-        raise Refuse("Not updating: %s; %s" % (e, fetched))
+        raise Refuse(NOT_UPDATED + "%s; %s" % (e, fetched))
     if c["untracked"]:
         one = len(c["untracked"]) == 1
-        raise Refuse("Not updating: %s %s untracked here and the release adds %s; move %s aside, then run daedalus "
-                     "update again; %s" % (_join(c["untracked"]), "is" if one else "are", "it" if one else "them",
-                                           "it" if one else "them", fetched))
-    outside = [p for p in c["local"] if p not in MIGRATABLE]
+        raise Refuse(NOT_UPDATED + "%s %s untracked here where the release adds files; move %s out of the release's "
+                     "way, then run daedalus update again; %s"
+                     % (summarise(home, c["untracked"]), "is" if one else "are", "it" if one else "them", fetched))
+    dep = set(c["deployment"])
+    merging = bool(dep)       # a home that tracks paths no release has (its vault) takes releases by merging
+    carried = (GITIGNORE,) if merging else ()
+    outside = [p for p in c["local"] if p not in MIGRATABLE and p not in carried]
     if outside:
-        raise Refuse("Not updating: %s carr%s local changes daedalus update cannot move (it moves only CLAUDE.md and "
-                     ".claude/settings.json, and keeps SOUL.md); keep a copy elsewhere and undo them with git, then "
-                     "run daedalus update again; %s" % (_join(outside), "ies" if len(outside) == 1 else "y", fetched))
-    others = [p for p in c["changed"] if p != JOURNAL]
+        raise _refuse_paths(home, c, outside, fetched)
+    gitignore_text = None
+    if merging and GITIGNORE in c["changed"]:
+        try:
+            gitignore_text = carried_gitignore(home, c, hist)
+        except Unmovable as e:
+            raise Refuse(NOT_UPDATED + "%s; %s" % (e, fetched))
+    head_gi = blob_text(home, c["head"].get(GITIGNORE, ZERO))
+    gi_ours = (merging and gitignore_text is not None and head_gi == gitignore_text
+               and _read(home / GITIGNORE) == head_gi)
+    others = [p for p in c["changed"] if p != JOURNAL and p not in dep and not (p == GITIGNORE and gi_ours)]
     ver = home_version(home) or "unknown"
-    if head == target and not others:
+    contains = git(home, "merge-base", "--is-ancestor", target, head)[0] == 0
+    if contains and not others:
         if _stamp(home) == ver:
-            return "Daedalus is up to date (%s)." % ver, 0
+            return ["Daedalus is up to date (%s)." % ver], 0
         # up to date, but an earlier upgrade stopped: run it now, so a second run finishes it
-        return finish(home, "Daedalus is up to date (%s)" % ver, done="; the upgrade finished")
+        return finish(home, "Daedalus is up to date (%s)" % ver, after="The upgrade that had stopped has finished.")
     ancestor = git(home, "merge-base", "--is-ancestor", head, target)[0] == 0
     soul_dirty = c["wt"].get(JOURNAL, ZERO) != c["head"].get(JOURNAL, ZERO)
     soul_moves = c["head"].get(JOURNAL, ZERO) != c["target"].get(JOURNAL, ZERO)
     refuse_if_live(home, tail=fetched[0].upper() + fetched[1:])
     old = ver if ver != "unknown" else head[:7]
     notes: List[str] = []
-    if ancestor and not [p for p in c["dirty"] if p != JOURNAL] and not (soul_dirty and soul_moves):
+    move = ""
+    already = False
+    if not merging and ancestor and not [p for p in c["dirty"] if p != JOURNAL] and not (soul_dirty and soul_moves):
         code, msg = fast_forward(home, target)
         if code != 0:
-            raise Refuse("Not updating: git could not fast-forward to %s/%s (%s); %s"
+            raise Refuse(NOT_UPDATED + "git could not fast-forward to %s/%s (%s); %s"
                          % (remote, trunk, _last(msg), fetched))
         set_tracking(home, branch, remote, trunk)
-        clause = ""
     else:
+        new_ver = blob_text(home, c["target"].get("VERSION", ZERO))
+        new_ver = new_ver.split("\n", 1)[0].strip() if new_ver else target[:7]
         try:
-            clause, notes = migrate_and_reset(home, c, hist, head, target, branch, remote, trunk)
+            if merging:
+                move, notes, already = migrate_and_merge(home, c, hist, head, target, branch, gitignore_text, new_ver)
+            else:
+                move, notes = migrate_and_reset(home, c, hist, head, target, branch, remote, trunk)
         except Unmovable as e:
-            raise Refuse("Not updating: %s; %s" % (e, fetched))
-        clause = "; " + clause
+            raise Refuse(NOT_UPDATED + "%s; %s" % (e, fetched))
     auto = auto_mode_note(home)
     if auto:
         notes.append(auto)
     new = home_version(home) or target[:7]
-    if head == target:
-        line = "Daedalus is up to date (%s)" % new
+    if head == target or already:
+        first = "Daedalus is up to date (%s)" % new
     else:
-        line = "Daedalus updated %s -> %s" % (old, new if new != old else "%s (%s)" % (new, target[:7]))
-    return finish(home, line + clause, notes=notes)
+        first = "Daedalus updated %s -> %s" % (old, new if new != old else "%s (%s)" % (new, target[:7]))
+    return finish(home, first, move=move, notes=notes)
 
 
 def _stamp(home: Path) -> str:
@@ -1525,7 +1908,8 @@ def version(home: Path) -> int:
         parts.append("remote %s" % remote)
     except Refuse:
         pass
-    code, out, _ = git(home, "describe", "--tags", "--abbrev=0")
+    # --match: a merged home may carry tags of its own on local commits, and the nearest tag of any name wins describe
+    code, out, _ = git(home, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*")
     if code == 0 and out.strip():
         parts.append("tag %s" % out.strip())
     print("Daedalus %s (%s)" % (home_version(home) or "(no VERSION)", ", ".join(parts)))
@@ -1555,7 +1939,7 @@ def main(argv: List[str]) -> int:
     if home_arg is not None and os.path.isabs(home_arg) and args in (["--install-shim"], ["--doctor"]):
         home = Path(home_arg).resolve()
         if not (home / SELF).is_file():
-            print("%s is not a Daedalus home with core/update.py. %s" % (home, NOTHING))
+            print(NOT_UPDATED + "%s is not a Daedalus home with core/update.py. %s" % (home, NOTHING))
             return 1
         try:
             out = install_shim(home) if args == ["--install-shim"] else doctor_lines(home)
@@ -1569,7 +1953,7 @@ def main(argv: List[str]) -> int:
         return 2
     home = Path(home_arg).resolve()
     if not (home / ".git").exists() or not (home / "core").is_dir():
-        print("%s is not a Daedalus home (no .git or core/ there). %s" % (home, NOTHING))
+        print(NOT_UPDATED + "%s is not a Daedalus home (no .git or core/ there). %s" % (home, NOTHING))
         return 1
     if args[0] == "version":
         return version(home)

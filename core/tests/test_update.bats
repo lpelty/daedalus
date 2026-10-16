@@ -8,6 +8,7 @@
 bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
 load fixtures/update/replay.bash
+load fixtures/update/vault.bash
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -137,7 +138,9 @@ trunk_sha() { git -C "$1" rev-parse "refs/heads/${2:-main}"; }
 @test "update: doctor naming something ends the line with it, one sentence each, exit 2" {
   STUB_DOCTOR_MISSING="config: target.repo" run upd update
   [ "$status" -eq 2 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Daedalus updated $N -> $N1; doctor names what needs attention: config: target.repo.") : ;; *) echo "$output"; return 1 ;; esac
+  # the result leads; each finding is a later line, never appended to the first
+  [ "$output" = "Daedalus updated $N -> $N1.
+Doctor: config: target.repo." ] || { echo "$output"; return 1; }
 }
 
 @test "update: a remote named upstream with the release's address is used; with a fork named origin that the branch tracks and the release as upstream, upstream is used and the branch's tracking moves to it" {
@@ -166,7 +169,7 @@ trunk_sha() { git -C "$1" rev-parse "refs/heads/${2:-main}"; }
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "No remote of this home has the release's address $B/elsewhere (remotes: origin → $R); add it with git remote add daedalus $B/elsewhere.git, then run daedalus update again. Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: no remote of this home has the release's address $B/elsewhere (remotes: origin → $R); add it with git remote add daedalus $B/elsewhere.git, then run daedalus update again. Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }
 
@@ -195,7 +198,7 @@ PY
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: an address rewrite (insteadOf) turns $R into $B/evil.git. Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: an address rewrite (insteadOf) turns $R into $B/evil.git. Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }
 
@@ -206,7 +209,7 @@ PY
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: 1 Daedalus session is live in this home — window 01 (session sL). Close it, then run daedalus update again. Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: 1 Daedalus session is live in this home — window 01 (session sL). Close it, then run daedalus update again. Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
   [ ! -e "$B/log/upgrade.args" ]
 }
@@ -216,7 +219,7 @@ PY
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Could not reach $R: "*". Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: could not reach $R ("*"). Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ]
   # git's own cause, not the tail of its multi-line advice, and no doubled period
   case "$output" in *".."*|*": and the repository exists"*) echo "$output"; return 1 ;; esac
@@ -237,14 +240,15 @@ PY
   : > "$B/stop"
   STUB_STOP="$B/stop" run upd update
   [ "$status" -eq 2 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Daedalus updated $N -> $N1; the upgrade stopped: upgrade to $N1 incomplete: "*"then run daedalus update again") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Daedalus updated $N -> $N1."$'\n'"The upgrade stopped: upgrade to $N1 incomplete: "*"then run daedalus update again.") : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"start a session"*) echo "$output"; return 1 ;; esac
   [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
   [ "$(cat "$H/state/upgraded-to")" = "$N" ]
   rm "$B/stop"
   STUB_STOP="$B/stop" run upd update
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
-  [ "$output" = "Daedalus is up to date ($N1); the upgrade finished; doctor OK." ] || { echo "$output"; return 1; }
+  [ "$output" = "Daedalus is up to date ($N1); doctor OK.
+The upgrade that had stopped has finished." ] || { echo "$output"; return 1; }
   [ "$(cat "$H/state/upgraded-to")" = "$N1" ]
 }
 
@@ -273,7 +277,7 @@ PY
   [ -e "$B/go.started" ] || { cat "$B/first.out"; return 1; }
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  [ "$output" = "Not updating: another daedalus update is running in this home. Nothing in this home was changed." ] || { echo "$output"; return 1; }
+  [ "$output" = "Not updated: another daedalus update is running in this home. Nothing in this home was changed." ] || { echo "$output"; return 1; }
   run bash -c "printf '%s' '{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s9\",\"source\":\"startup\"}' | python3 '$H/core/session-start.py'"
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
   case "$output" in *"daedalus update is running in this home; close this session and start again once it prints its result"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -383,10 +387,12 @@ jq_py() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(jso
   orig="$(git -C "$H" rev-parse HEAD)"
   run upd update
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
-  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 3 ] || { echo "$output"; return 1; }
   stamp="$(git -C "$H" for-each-ref --format='%(refname:short)' refs/heads/local/ | sed -n 's#^local/before-update-##p')"
   [ -n "$stamp" ] || { git -C "$H" branch -a; return 1; }
-  case "$output" in "Daedalus updated $N -> $N1; local edits moved to .claude/settings.local.json and CLAUDE.local.md, backup at local/before-update-$stamp and state/update-backups/$stamp/; doctor OK. "*"boundary.edit_brief is now true in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "${lines[0]}" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "Local edits moved to .claude/settings.local.json and CLAUDE.local.md; backup at local/before-update-$stamp and state/update-backups/$stamp/." ] || { echo "$output"; return 1; }
+  case "${lines[2]}" in *"boundary.edit_brief is now true in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
   [ "$(git -C "$H" status --porcelain)" = " M SOUL.md" ] || { git -C "$H" status --porcelain; return 1; }
   grep -q '^## Journal: a committed entry$' "$H/SOUL.md"
@@ -417,13 +423,13 @@ jq_py() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(jso
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: core/lease.sh carries local changes daedalus update cannot move"*"fetched origin/main, and nothing else in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: core/lease.sh carries local changes the update cannot carry"*"fetched origin/main, and nothing else in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
   git -C "$H" commit -q -am "a local core edit"
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: core/lease.sh carries local changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: core/lease.sh carries local changes"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
   # pinned: README.md as an older release had it
   older_release
@@ -440,13 +446,13 @@ jq_py() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(jso
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: NEXT-RELEASE.md is untracked here and the release adds it"*"nothing else in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: NEXT-RELEASE.md is untracked here where the release adds files; move it out of the release's way"*"nothing else in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
   rm "$H/NEXT-RELEASE.md"
   git -C "$H" rev-parse HEAD > "$H/.git/MERGE_HEAD"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: a merge is in progress in this home; finish it or run git merge --abort"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: a merge is in progress in this home; finish it, then run daedalus update again;"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "migration settings, future release: a release that drops an allow rule and changes a hook's timeout moves only the deployment's own rule, and reports no deployment removal" {
@@ -530,13 +536,13 @@ PY
   diff_before="$(git -C "$H" diff HEAD)"; cached_before="$(git -C "$H" diff --cached)"
   sl="$(shasum < "$H/.claude/settings.local.json")"; cy="$(shasum < "$H/config.yaml")"
   real="$(command -v git)"; target="$(trunk_sha "$R")"; mkdir -p "$B/bin"
-  printf '#!/bin/bash\ncase " $* " in *" reset "*"--hard"*"%s"*) echo "fatal: injected reset failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' \
+  printf '#!/bin/bash\ncase " $* " in *" reset "*"--hard"*"%s"*) echo "fatal: injected failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' \
     "$target" "$real" > "$B/bin/git"
   chmod +x "$B/bin/git"
   PATH="$B/bin:$PATH" run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ]
-  case "$output" in "Not updating: "*"injected reset failure"*"this home is back as it was"*"local/before-update-"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: "*"injected failure"*"this home is back as it was"*"local/before-update-"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
   [ "$(git -C "$H" rev-parse HEAD)" != "$(git -C "$H" for-each-ref --format='%(objectname)' refs/heads/local/)" ]
   ! git -C "$H" log --format=%s | grep -q "daedalus update"
@@ -713,7 +719,7 @@ PY
   PATH="$B/bin:$PATH" run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ]
-  case "$output" in "Not updating: "*"injected commit-tree failure"*"the backup could not be made, so nothing in this home was changed"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: "*"injected commit-tree failure"*"the backup could not be made, so nothing in this home was changed"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"local/before-update-"*|*"update-backups"*) echo "$output"; return 1 ;; esac
   [ -z "$(git -C "$H" for-each-ref refs/heads/local/)" ]
   [ ! -e "$H/state/update-backups" ] || [ -z "$(ls -A "$H/state/update-backups")" ]
@@ -724,7 +730,7 @@ PY
   rm -rf "$H/state/update-backups"; : > "$H/state/update-backups"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: "*"the backup could not be made, so nothing in this home was changed"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: "*"the backup could not be made, so nothing in this home was changed"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"local/before-update-"*) echo "$output"; return 1 ;; esac
   [ -z "$(git -C "$H" for-each-ref refs/heads/local/)" ]
   [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
@@ -759,6 +765,185 @@ PY
   before="$(listing)"
   run upd update
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: NEXT-RELEASE.md is untracked here and the release adds it"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "Not updated: NEXT-RELEASE.md is untracked here where the release adds files"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+}
+
+# --- a home that keeps its vault in its own repository: merge mode (close-commits-and-vault-update design, B1) -------
+
+# py_update '<python>' — update.py's functions on $H (u is the module, home the path)
+py_update() { python3 -c 'import sys; sys.path.insert(0, sys.argv[2]); import update as u
+from pathlib import Path
+home = Path(sys.argv[1]); exec(sys.argv[3])' "$H" "$REPO/core" "$1"; }
+
+@test "classify: tracked vault files no release ever had are the deployment's, not local; .gitignore is local; a path the release once had and later deleted, and a local file under core/, are not the deployment's" {
+  older_release; tracked_vault_home
+  git -C "$H" fetch -q daedalus
+  printf 'kept\n' > "$H/LICENSE-OLD"; git -C "$H" add LICENSE-OLD; git -C "$H" commit -q -m "a root file of this home"
+  run py_update '
+t = u.git(home, "rev-parse", "daedalus/main")[1].strip(); h = u.git(home, "rev-parse", "HEAD")[1].strip()
+hist = u.history(home, t); base = u.git(home, "merge-base", h, t)[1].strip()
+c = u.classify(home, h, t, base, hist)
+print(len([p for p in c["deployment"] if p.startswith("vault/")]), "LICENSE-OLD" in c["deployment"])
+print(sorted(p for p in c["local"]))
+print([p for p in c["deployment"] if not p.startswith("vault/") and p != "LICENSE-OLD"])
+print(len(u.deployment_paths(home)))'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = "40 True" ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "['.claude/settings.json', '.gitignore', 'CLAUDE.md']" ] || { echo "$output"; return 1; }
+  [ "${lines[2]}" = "[]" ] || { echo "$output"; return 1; }
+  [ "${lines[3]}" = 41 ] || { echo "$output"; return 1; }
+  run py_update 'print(u.is_deployment_path("core/mine.sh", {"core/mine.sh": "x"}, set(), {}, {}), u.is_deployment_path("vault/a.md", {"vault/a.md": "x"}, set(), {}, {}), u.is_deployment_path("gone.md", {"gone.md": "x"}, set(), {"gone.md": {"y"}}, {}))'
+  [ "$output" = "False True False" ] || { echo "$output"; return 1; }
+}
+
+@test "merge mode: a home that tracks its vault takes the release by merging — its history kept, every vault file as it was (dirty and untracked too), the local layer migrated, the branch still following its own origin; a second run is up to date, and a later release merges again" {
+  older_release; tracked_vault_home
+  printf 'dirty edit\n' >> "$H/vault/notes/n3.md"; printf 'untracked\n' > "$H/vault/notes/new.md"
+  old="$(git -C "$H" rev-parse HEAD)"; before="$(vault_sums)"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  stamp="$(git -C "$H" for-each-ref --format='%(refname:short)' refs/heads/local/ | sed -n 's#^local/before-update-##p')"
+  [ "${lines[0]}" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "Local edits moved to .claude/settings.local.json and CLAUDE.local.md; merged the release into main; this home's history is kept; backup at local/before-update-$stamp and state/update-backups/$stamp/." ] || { echo "$output"; return 1; }
+  git -C "$H" merge-base --is-ancestor "$old" HEAD
+  git -C "$H" merge-base --is-ancestor "$(trunk_sha "$R")" HEAD
+  git -C "$H" diff --quiet "$(trunk_sha "$R")" HEAD -- . ':!vault' ':!.gitignore' ':!SOUL.md' || { git -C "$H" diff --stat "$(trunk_sha "$R")" HEAD; return 1; }
+  [ "$(vault_sums)" = "$before" ] || { diff <(printf '%s\n' "$before") <(vault_sums); return 1; }
+  grep -qx 'A line this home keeps in its brief.' "$H/CLAUDE.local.md"
+  grep -q 'echo this-home' "$H/.claude/settings.local.json"
+  [ "$(git -C "$H" config --get branch.main.remote)" = origin ]
+  [ "$(git -C "$H" log --first-parent --format=%s -2 | sed -n 2p)" = "daedalus update $stamp: local edits moved to the local layer; release files set to $N1" ] || { git -C "$H" log --first-parent --format=%s -3; return 1; }
+  case "$(git -C "$H" log -1 --format=%s)" in "daedalus update $stamp: merge release $N1 ("*") into main") : ;; *) git -C "$H" log -1 --format=%s; return 1 ;; esac
+  [ "$(git -C "$H" log --format=%s "$old..HEAD" --first-parent | wc -l | tr -d ' ')" = 2 ]
+  # .gitignore: the release's lines first, then this home's own; the vault is not ignored
+  [ -z "$(git -C "$H" check-ignore vault/notes/n1.md)" ]
+  grep -qx '!vault/' "$H/.gitignore"
+  cmp -s <(head -n "$(git -C "$R" show main:.gitignore | wc -l)" "$H/.gitignore") <(git -C "$R" show main:.gitignore)
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
+  # a later release merges again, both merges kept
+  git clone -q "$R" "$B/next"
+  python3 -c 'import sys; a = open(sys.argv[1]).read().strip().split("."); a[2] = str(int(a[2]) + 1); open(sys.argv[1], "w").write(".".join(a) + "\n")' "$B/next/VERSION"
+  N2="$(sed -n 1p "$B/next/VERSION")"; printf 'A file release %s adds.\n' "$N2" > "$B/next/LATER.md"
+  git -C "$B/next" add -A; git -C "$B/next" commit -q -m "v$N2"; git -C "$B/next" tag -a "v$N2" -m "v$N2"; git -C "$B/next" push -q origin main --tags
+  first="$(git -C "$H" rev-parse HEAD)"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "${lines[0]}" = "Daedalus updated $N1 -> $N2; doctor OK." ] || { echo "$output"; return 1; }
+  git -C "$H" merge-base --is-ancestor "$first" HEAD
+  [ "$(git -C "$H" log --merges --format=%s | grep -c '^daedalus update .*: merge release')" = 2 ]
+  [ "$(vault_sums)" = "$before" ] || { diff <(printf '%s\n' "$before") <(vault_sums); return 1; }
+  [ -f "$H/LATER.md" ]
+}
+
+@test "merge mode, nothing new from the release: a brief line added after the last merge is moved to the local layer by one local commit, and the first line says up to date" {
+  older_release; tracked_vault_home
+  run upd update; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '\nA second line of this home.\n' >> "$H/CLAUDE.md"; git -C "$H" commit -q -am "another brief line"
+  merges="$(git -C "$H" log --merges --oneline | wc -l)"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "${lines[0]}" = "Daedalus is up to date ($N1); doctor OK." ] || { echo "$output"; return 1; }
+  case "${lines[1]}" in "Local edits moved to CLAUDE.local.md; the release was merged already; this home's history is kept; backup at "*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" log --merges --oneline | wc -l)" = "$merges" ]
+  grep -qx 'A second line of this home.' "$H/CLAUDE.local.md"
+  cmp -s "$H/CLAUDE.md" <(git -C "$R" show main:CLAUDE.md)
+}
+
+@test "merge mode, SOUL.md: the release changes the journal and this home has committed and dirty entries — the journal stays this home's, still dirty, and the release's copy is in the backup" {
+  older_release
+  w="$B/rel-release"; printf '\nA line the release added to the journal.\n' >> "$w/SOUL.md"
+  git -C "$w" commit -q -am "release journal"; git -C "$w" push -q "$R" main
+  tracked_vault_home
+  printf '\n## A committed entry\n' >> "$H/SOUL.md"; git -C "$H" commit -q -am "journal"
+  printf '\n## A dirty entry\n' >> "$H/SOUL.md"
+  soul="$(shasum < "$H/SOUL.md")"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$(shasum < "$H/SOUL.md")" = "$soul" ]
+  git -C "$H" status --porcelain -- SOUL.md | grep -q '^ M SOUL.md$'
+  ls "$H"/state/update-backups/*/SOUL.release.md >/dev/null
+  case "$output" in *"the release's copy is in state/update-backups/"*"/SOUL.release.md."*) : ;; *) echo "$output"; return 1 ;; esac
+  ! git -C "$H" show HEAD:SOUL.md | grep -q 'A line the release added to the journal'
+}
+
+@test "merge mode, .gitignore: a home whose edit deleted the release's vault line comes out with the release's line and an un-ignore; a release that changes .gitignore merges with no conflict" {
+  older_release
+  w="$B/rel-release"; printf '\n# a rule the release added\n*.release-tmp\n' >> "$w/.gitignore"
+  git -C "$w" commit -q -am "release ignore rule"; git -C "$w" push -q "$R" main
+  git -C "$H" reset -q --hard older; git -C "$H" remote rename origin daedalus
+  sed -i '' '/^vault\/$/d' "$H/.gitignore"; git -C "$H" add .gitignore; git -C "$H" commit -q -m "no vault ignore"
+  mkdir -p "$H/vault"; printf 'v\n' > "$H/vault/a.md"; git -C "$H" add vault; git -C "$H" commit -q -m vault
+  before="$(vault_sums)"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  grep -qx 'vault/' "$H/.gitignore"; grep -qx '!/vault/' "$H/.gitignore"; grep -qx '\*.release-tmp' "$H/.gitignore"
+  [ -z "$(git -C "$H" check-ignore vault/a.md)" ]
+  [ "$(vault_sums)" = "$before" ]
+  [ -z "$(git -C "$H" status --porcelain -- .gitignore)" ]
+}
+
+@test "merge mode, conflicts and failures: a file the release now ships that differs here is refused before any backup; a failed merge commit restores the home exactly, and a vault file written while the update ran keeps its new bytes" {
+  older_release
+  w="$B/rel-release"; mkdir -p "$w/vault"; printf 'the release README\n' > "$w/vault/README.md"
+  git -C "$w" add -f vault/README.md; git -C "$w" commit -q -m "a release file under vault"; git -C "$w" push -q "$R" main
+  tracked_vault_home
+  printf 'this home README\n' > "$H/vault/README.md"; git -C "$H" add vault/README.md; git -C "$H" commit -q -m readme
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "Not updated: vault/README.md, a file the release now ships, differs in this home; move it out of the release's way, then run daedalus update again; it fetched daedalus/main, and nothing else in this home was changed." ] || { echo "$output"; return 1; }
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+  [ -z "$(ls "$H/state/update-backups" 2>/dev/null)" ]
+  # the release takes its vault file back out; the merge commit fails while a vault file changes
+  git -C "$w" rm -q vault/README.md; git -C "$w" commit -q -m "no vault file"; git -C "$w" push -q "$R" main
+  git -C "$H" reset -q --hard HEAD~1
+  printf 'kept dirty\n' >> "$H/vault/sessions/s2.md"
+  orig="$(git -C "$H" rev-parse HEAD)"; st="$(git -C "$H" status --porcelain --ignored -- . ':!state' ':!vault/sessions/s5.md')"; dh="$(git -C "$H" diff HEAD)"
+  real="$(command -v git)"; mkdir -p "$B/bin"
+  printf '#!/bin/bash\ncase " $* " in *" commit "*"merge release"*) printf "written during the update\\n" > "%s/vault/sessions/s5.md"; echo "fatal: injected failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' \
+    "$H" "$real" > "$B/bin/git"; chmod +x "$B/bin/git"
+  PATH="$B/bin:$PATH" run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "${#lines[@]}" = 1 ] || { echo "$output"; return 1; }
+  case "$output" in "Not updated: the merge commit failed (fatal: injected failure); this home is back as it was"*"local/before-update-"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
+  [ ! -e "$H/.git/MERGE_HEAD" ]
+  [ "$(cat "$H/vault/sessions/s5.md")" = "written during the update" ]
+  [ "$(git -C "$H" status --porcelain --ignored -- . ':!state' ':!vault/sessions/s5.md')" = "$st" ] || { git -C "$H" status --porcelain --ignored; return 1; }
+  [ "$(git -C "$H" diff HEAD -- . ':!vault/sessions/s5.md')" = "$dh" ]
+  [ ! -e "$H/CLAUDE.local.md" ]; [ ! -e "$H/.claude/settings.local.json" ]
+}
+
+@test "merge mode, still refused: an edit to core/close.sh in a home that tracks its vault is refused naming it, and nothing is changed" {
+  older_release; tracked_vault_home
+  printf '# local\n' >> "$H/core/close.sh"
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updated: core/close.sh carries local changes the update cannot carry"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+}
+
+@test "merge mode: daedalus version names the merged release's tag past a home's own tag; doctor's update lines name nothing missing; distcheck passes on the merged home" {
+  older_release; tracked_vault_home
+  git -C "$H" tag home-own-tag
+  run upd update; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  git -C "$H" tag later-own-tag
+  run upd version
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in "Daedalus $N1 ("*"remote daedalus, tag v$N1)") : ;; *) echo "$output"; return 1 ;; esac
+  DAEDALUS_NO_COMMAND=1 run python3 "$H/core/update.py" --doctor --home "$H"
+  [ "$status" -eq 0 ]; case "$output" in *MISSING*) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       tracked files: CLAUDE.md and .claude/settings.json carry no local edits"*) : ;; *) echo "$output"; return 1 ;; esac
+  run python3 "$H/core/distcheck.py" "$H" --for launch
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  git -C "$H" ls-files --error-unmatch vault >/dev/null 2>&1
+}
+
+@test "update.py carries distcheck's DIST_PATHS word for word" {
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import update, distcheck; assert update.DIST_PATHS == distcheck.DIST_PATHS, (update.DIST_PATHS, distcheck.DIST_PATHS)' "$REPO/core"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
