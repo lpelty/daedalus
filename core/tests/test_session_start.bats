@@ -839,6 +839,19 @@ pending_stopped_home() {
   case "$c" in *"-001.md"*) : ;; *) echo "$c"; return 1 ;; esac
 }
 
+@test "a headless session (entrypoint sdk-cli) that starts while the upgrade is pending reserves no session-log number and is not offered the pen, as outside a pending upgrade" {
+  pending_stopped_home
+  P="$(live_pid)"; registry_entry "$P" s1 interactive cli daedalus-xx
+  run start s1 startup; [ "$status" -eq 0 ] || { echo "$output"; return 1; }   # the interactive start the stop needs
+  H="$(live_pid)"; registry_entry "$H" sH interactive sdk-cli
+  run start sH startup; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c="$(ctx)"
+  case "$c" in *"Your session log for today is"*|*"At the close, when no live session holds the pen"*) echo "$c"; return 1 ;; esac
+  ! grep -q '"sH"' "$DAEDALUS_HOME/state/leases/unwindowed.json"
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/lease.sh" log
+  [ "$output" = "vault/sessions/$(date +%Y/%m)/$(date +%Y-%m-%d)-001.md" ] || { echo "$output"; return 1; }   # no gap left by the headless start
+}
+
 @test "a start while the upgrade is pending and state/leases/ does not exist yet reserves nothing and creates nothing; it says no number can be reserved yet and that hot.md and the vault commit work now" {
   cp "$BATS_TEST_DIRNAME/../upgrade.py" "$DAEDALUS_HOME/core/"
   printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; mkdir -p "$DAEDALUS_HOME/state"

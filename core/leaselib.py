@@ -1626,6 +1626,12 @@ def bind(root: Path, nn: str, sid: str, finish_worktree: bool = True, deadline: 
             fresh.pop("worktree_ready", None)
     write_lease(root, nn, fresh)
     heartbeat(root, nn)
+    # A session that took the pen holding no window is treeless only until it claims one (pen_without_tree):
+    # it keeps the pen, and from here on it is a window holding the pen, as after any claim.
+    prime = read_lease(root, "prime")
+    if prime and prime.get("taken_without_window") == sid:
+        prime.pop("taken_without_window", None)
+        write_lease(root, "prime", prime)
     return fresh
 
 
@@ -3787,22 +3793,33 @@ def unwindowed_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: 
 
 def carry_unwindowed_locked(root: Path, sid: str, nn: str, leases: Dict[str, dict], today: str) -> None:
     """A session that reserved its log while it held no window and now holds
-    window NN with no reservation of its own: the entry's logs move into the
-    lease and the entry is removed, so the session keeps the number it was
-    told — never two numbers. CALLER HOLDS THE LOCK. Nothing to carry reads
-    nothing more than unwindowed.json."""
+    window NN with no reservation of its own: the reservation moves into the
+    lease, so the session keeps the number it was told — never two numbers.
+    It comes from the session's unwindowed.json entry (the entry is removed),
+    or else from prime.json when this session holds the pen there (it took the
+    pen, or kept it, before it reserved; prime.json's logs are removed).
+    CALLER HOLDS THE LOCK."""
     lease = leases.get(nn)
-    if lease is None or _reservations(lease) or not lease_path(root, UNWINDOWED).exists():
+    if lease is None or _reservations(lease):
         return
-    unw = read_unwindowed(root)
-    entry = unw.get(sid)
-    logs = _reservations(entry) if isinstance(entry, dict) else {}
+    if lease_path(root, UNWINDOWED).exists():
+        unw = read_unwindowed(root)
+        entry = unw.get(sid)
+        logs = _reservations(entry) if isinstance(entry, dict) else {}
+        if logs:
+            lease["logs"] = logs
+            write_lease(root, nn, lease)
+            unw.pop(sid, None)
+            write_unwindowed(root, unw, today)
+            return
+    prime = leases.get("prime")
+    logs = _reservations(prime) if isinstance(prime, dict) and prime.get("session_id") == sid else {}
     if not logs:
         return
     lease["logs"] = logs
     write_lease(root, nn, lease)
-    unw.pop(sid, None)
-    write_unwindowed(root, unw, today)
+    prime.pop("logs", None)
+    write_lease(root, "prime", prime)
 
 
 def session_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: str, new_day: bool = False) -> str:

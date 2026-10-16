@@ -195,3 +195,35 @@ PY
   [ ! -e "$DAEDALUS_HOME/state/leases/unwindowed.json" ] || ! grep -q '"sW"' "$DAEDALUS_HOME/state/leases/unwindowed.json"
   run log_of sB; [ "$output" = "vault/sessions/$YM/$TODAY-002.md" ]
 }
+
+@test "a session that takes the pen with no window before its first lease.sh log keeps that one number when it later claims a window: the reservation moves out of prime.json into the window, and the claim ends the pen's no-window mark" {
+  printf '{"session_id":"sGone","history":[]}' > "$DAEDALUS_HOME/state/leases/prime.json"     # no live holder
+  pw="$(live_pid)"; registry_entry "$pw" sW interactive cli daedalus-xx
+  run env DAEDALUS_SESSION_ID=sW bash "$DAEDALUS_HOME/core/lease.sh" prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime taken_without_window)" = "sW" ]
+  run log_of sW; [ "$status" -eq 0 ]; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ] || { echo "$output"; return 1; }
+  run bash "$DAEDALUS_HOME/core/lease.sh" create; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run env DAEDALUS_SESSION_ID=sW bash "$DAEDALUS_HOME/core/lease.sh" claim 03; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime taken_without_window)" = "None" ] || { lease_json prime taken_without_window; return 1; }
+  [ "$(lease_json prime session_id)" = "sW" ]
+  run log_of sW; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 03 logs)" = "{'$TODAY': 1}" ]
+  [ "$(lease_json prime logs)" = "None" ] || { lease_json prime logs; return 1; }
+  run log_of sB; [ "$output" = "vault/sessions/$YM/$TODAY-002.md" ]        # 1 was never reserved twice
+}
+
+@test "the same through a compaction start after the stamp: the windowless pen holder's number in prime.json moves into the window the start numbers" {
+  printf '0.7.4\n' > "$DAEDALUS_HOME/VERSION"
+  rm -f "$DAEDALUS_HOME/state/leases/"0*; teardown_live
+  printf '{"session_id":"sGone","history":[]}' > "$DAEDALUS_HOME/state/leases/prime.json"
+  pw="$(live_pid)"; registry_entry "$pw" sW interactive cli daedalus-xx
+  run env DAEDALUS_SESSION_ID=sW bash "$DAEDALUS_HOME/core/lease.sh" prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run log_of sW; [ "$output" = "vault/sessions/$YM/$TODAY-001.md" ] || { echo "$output"; return 1; }
+  printf '0.7.4\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  run start sW compact; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  nn="$(DAEDALUS_SESSION_ID=sW python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease)"; [ -n "$nn" ] || { echo "not numbered: $output"; return 1; }
+  case "$output" in *"Your session log for today is vault/sessions/$YM/$TODAY-001.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json "$nn" logs)" = "{'$TODAY': 1}" ]
+  [ "$(lease_json prime logs)" = "None" ]
+  [ "$(lease_json prime taken_without_window)" = "None" ]
+}

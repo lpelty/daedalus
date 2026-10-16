@@ -325,8 +325,16 @@ def main() -> int:
     elif ll is not None and not visitor and sid and skip_bind:
         # No window while the upgrade is pending, but the session still closes: its log number is reserved here
         # under the lease lock (no session counts the directory), and it is told the pen is its at the close when
-        # no live session holds it. Not when state/leases/ is absent: making it is the upgrade's first step.
-        if (root / "state" / "leases").is_dir():
+        # no live session holds it. Not when state/leases/ is absent: making it is the upgrade's first step. Only a
+        # terminal window, the test auto-numbering uses: a headless start gets no number outside an upgrade either,
+        # so it burns none here and is not offered the pen.
+        try:
+            terminal = ll.is_terminal_window(sid)
+        except Exception:      # open in two terminals: the bind's own refusal says so; reserve nothing here
+            terminal = False
+        if not terminal:
+            pass
+        elif (root / "state" / "leases").is_dir():
             try:
                 path, windowless = ll.reserve_at_start(root, sid, deadline=started_at + ADD_BUDGET_SECS,
                                                        new_day=str(payload.get("source", "")).lower()

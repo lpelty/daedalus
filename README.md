@@ -378,8 +378,8 @@ It can still close. `core/lease.sh log` reserves its session-log number
 (kept in `state/leases/unwindowed.json`), and `core/lease.sh prime take` gives
 it the pen when no live session holds it — never from a live one. The pen
 gives it `vault/hot.md` and `core/vault-commit.sh`, not a tree: `target/`
-stays closed to it, and promote waits, until the upgrade finishes and it
-claims a window. When a live session holds the pen, the operator can commit
+stays closed to it until it claims a window, and promote waits until the
+upgrade finishes. When a live session holds the pen, the operator can commit
 the vault from their own shell: `cd <home> && core/vault-commit.sh`.
 
 The board is also on your screen. A Claude Code mod under `mods/lease-board/`

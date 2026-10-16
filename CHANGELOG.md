@@ -45,8 +45,9 @@ machine, which reported the stall this came from.
   test runs each one from that state.
 
 **What you will see.**
-- A session started while the upgrade is pending is told its session log at
-  start. It is also told that `core/lease.sh prime take` gives it the pen at
+- A session started in a terminal while the upgrade is pending is told its
+  session log at start; a headless one, as at any other time, is given no
+  number at start. It is also told that `core/lease.sh prime take` gives it the pen at
   the close.
 - The no-window sentence ends with the close: `core/lease.sh log`, then
   `core/lease.sh prime take` when no live session holds the pen.
