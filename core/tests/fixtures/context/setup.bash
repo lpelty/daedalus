@@ -74,3 +74,23 @@ expect_files() {
 }
 # state_listing — every path under state/ (to prove a run wrote nothing there).
 state_listing() { (cd "$DAEDALUS_HOME/state" && find . | sort); }
+
+# use_fake_graph [graph_budget] [build_timeout] — a copy of the fake code-review-graph (and its canned
+# 2.3.9 answers) under $BATS_TEST_TMPDIR/crg/, named in a context: block of config.yaml. CRG_LOG is its
+# call log; crg_knob NAME=value sets one of its knobs (fake-crg.env).
+use_fake_graph() {
+  CRG_DIR="$BATS_TEST_TMPDIR/crg/bin"; mkdir -p "$CRG_DIR"
+  cp "$BATS_TEST_DIRNAME/fixtures/context/fake-code-review-graph" "$CRG_DIR/code-review-graph"
+  cp -R "$BATS_TEST_DIRNAME/fixtures/context/crg-2.3.9" "$CRG_DIR/crg-2.3.9"
+  : > "$CRG_DIR/fake-crg.env"; CRG_LOG="$CRG_DIR/fake-crg.log"; : > "$CRG_LOG"
+  {
+    printf 'context:\n'
+    printf '  graph: %s\n' "$CRG_DIR/code-review-graph"
+    [ -z "${1:-}" ] || printf '  graph_budget: %s\n' "$1"
+    [ -z "${2:-}" ] || printf '  build_timeout: %s\n' "$2"
+  } >> "$DAEDALUS_HOME/config.yaml"
+  export CRG_DIR CRG_LOG
+}
+crg_knob() { printf '%s\n' "$1" >> "$CRG_DIR/fake-crg.env"; }
+# crg_verbs — the subcommand of every logged call, in order, one per line.
+crg_verbs() { grep '^argv ' "$CRG_LOG" | awk '{print $2}'; }

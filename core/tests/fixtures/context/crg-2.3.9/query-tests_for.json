@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "pattern": "tests_for",
+  "target": "/FIXTURE/pkg/core.py::helper",
+  "description": "Find all tests for a given function or class",
+  "summary": "Found 1 result(s) for tests_for('/FIXTURE/pkg/core.py::helper')",
+  "result_count": 1,
+  "results_omitted": 0,
+  "results": [
+    {"id": 41, "kind": "Test", "name": "test_helper", "qualified_name": "/FIXTURE/tests/test_core.py::test_helper",
+     "file_path": "/FIXTURE/tests/test_core.py", "line_start": 4, "line_end": 5, "language": "python",
+     "parent_name": null, "is_test": true, "indirect": false}
+  ],
+  "edges": [],
+  "confidence": "python getattr dispatch and decorator-based registration are not statically traced, so callers can be missing here"
+}

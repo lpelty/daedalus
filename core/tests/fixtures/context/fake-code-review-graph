@@ -1,0 +1,28 @@
+#!/bin/bash
+# A fake code-review-graph 2.3.9 for test_context_graph.bats. core/context.py runs it with an allowlisted
+# environment (no FAKE_* variables reach it), so its knobs are read from fake-crg.env beside the copy
+# the test runs, and every call is logged to fake-crg.log there:
+#   a line "argv <words…>", a line "cwd <dir>", one "env <NAME>=<value>" line per variable, a line "end <verb>".
+# Knobs: VERSION (what -v says), SLEEP_BUILD / SLEEP_UPDATE (seconds), FAIL_BUILD / FAIL_UPDATE (exit 1),
+# MALFORMED (query/impact print something that is not JSON).
+here="$(cd "$(dirname "$0")" && pwd)"
+[ -f "$here/fake-crg.env" ] && . "$here/fake-crg.env"
+log="$here/fake-crg.log"
+{ printf 'argv'; printf ' %s' "$@"; printf '\n'; printf 'cwd %s\n' "$PWD"; env | LC_ALL=C sort | sed 's/^/env /'; } >> "$log"
+repo=""; prev=""
+for a in "$@"; do [ "$prev" = "--repo" ] && repo="$a"; prev="$a"; done
+fix="$here/crg-2.3.9"
+answer() { if [ -n "${MALFORMED:-}" ]; then echo "Traceback: not json"; else sed "s|/FIXTURE|$repo|g" "$fix/$1.json"; fi; }
+case "$1" in
+  -v) echo "code-review-graph ${VERSION:-2.3.9}" ;;
+  build|update)
+    sleep "$( [ "$1" = build ] && echo "${SLEEP_BUILD:-0}" || echo "${SLEEP_UPDATE:-0}")"
+    if [ "$1" = build ] && [ -n "${FAIL_BUILD:-}" ]; then echo "end $1 fail" >> "$log"; exit 1; fi
+    if [ "$1" = update ] && [ -n "${FAIL_UPDATE:-}" ]; then echo "end $1 fail" >> "$log"; exit 1; fi
+    mkdir -p "$CRG_DATA_DIR"; printf 'db\n' > "$CRG_DATA_DIR/graph.db"; printf '*\n' > "$CRG_DATA_DIR/.gitignore"
+    echo "INFO: Progress: 7/7 files parsed" >&2 ;;
+  query) answer "query-$2" ;;
+  impact) answer impact ;;
+  *) echo "fake: unknown subcommand $1" >&2; echo "end $1" >> "$log"; exit 2 ;;
+esac
+echo "end $1" >> "$log"

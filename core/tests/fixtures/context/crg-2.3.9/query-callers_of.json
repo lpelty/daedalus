@@ -1,0 +1,18 @@
+{
+  "status": "ok",
+  "pattern": "callers_of",
+  "target": "/FIXTURE/pkg/core.py::helper",
+  "description": "Find all functions that call a given function",
+  "summary": "Found 2 call site(s) across 2 node(s) for callers_of('/FIXTURE/pkg/core.py::helper')",
+  "result_count": 2,
+  "results_omitted": 0,
+  "results": [
+    {"id": 11, "kind": "File", "name": "/FIXTURE/pkg/user.py", "qualified_name": "/FIXTURE/pkg/user.py",
+     "file_path": "/FIXTURE/pkg/user.py", "line_start": 1, "line_end": 3, "language": "python",
+     "parent_name": null, "is_test": false, "call_site": {"line": 3}},
+    {"id": 12, "kind": "Function", "name": "main", "qualified_name": "/FIXTURE/pkg/other.py::main",
+     "file_path": "/FIXTURE/pkg/other.py", "line_start": 1, "line_end": 1, "language": "python",
+     "parent_name": null, "is_test": false, "call_site": {"line": 1}}
+  ],
+  "edges": []
+}

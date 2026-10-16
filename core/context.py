@@ -479,13 +479,427 @@ class GraphInfo:
 NOT_INSTALLED = "not installed (context.graph in config.yaml)"
 
 
+class GraphFail(Exception):
+    """A graph call that did not give a usable answer: graph state `failed` for this answer only."""
+
+
+class Budget(Exception):
+    """The invocation's one deadline ran out: graph state `skipped` (time)."""
+
+
+def remaining(deadline: float) -> float:
+    return deadline - time.monotonic()
+
+
+def exe_problem(cfg: Cfg) -> Optional[str]:
+    if not cfg.graph:
+        return NOT_INSTALLED
+    p = cfg.graph
+    if not os.path.isabs(p) or not os.path.isfile(p) or not os.access(p, os.X_OK):
+        return "context.graph is %s, which is not an executable file" % p
+    return None
+
+
+def crg_env(root: Path, exe: str, data_dir: Optional[Path]) -> dict:
+    """The allowlist (§7): never the caller's environment, so no API key reaches the tool, cloud embeddings
+    cannot turn on, and ~/.code-review-graph is never written."""
+    home = cc_dir(root) / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    path = ["/usr/bin", "/bin", os.path.dirname(exe)]
+    git = shutil.which("git")
+    if git:
+        path.append(os.path.dirname(git))
+    seen: List[str] = []
+    for d in path:
+        if d not in seen:
+            seen.append(d)
+    env = {"PATH": ":".join(seen), "HOME": str(home), "CRG_HOME": str(home)}
+    if data_dir is not None:
+        env["CRG_DATA_DIR"] = str(data_dir)
+    for k in ("LANG", "LC_ALL", "TMPDIR"):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    return env
+
+
+def crg_run(exe: str, args: List[str], env: dict, cwd: Path, timeout: float) -> Tuple[int, str, str, bool]:
+    """(exit, stdout, stderr, timed out). Only the allowlisted subcommands; the whole process group is
+    killed at the timeout, so nothing is left running."""
+    if not args or args[0] not in ALLOWED:
+        raise GraphFail("code-review-graph %s is not a call core/context.py makes" % (args[:1] or ["?"])[0])
+    if timeout <= 0:
+        return 1, "", "", True
+    try:
+        proc = subprocess.Popen([exe] + args, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
+                                start_new_session=True)
+    except OSError as e:
+        raise GraphFail("it could not be started (%s)" % (e.strerror or e))
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err, False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, err = proc.communicate()
+        return proc.returncode if proc.returncode is not None else -9, out or "", err or "", True
+
+
+def read_json_file(p: Path) -> Optional[dict]:
+    try:
+        d = json.loads(p.read_text())
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_json_file(p: Path, data: dict) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(".%s.%d.tmp" % (p.name, os.getpid()))
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(str(tmp), str(p))
+
+
+def graph_version(root: Path, exe: str) -> Tuple[Optional[str], Optional[str]]:
+    """(version, problem). `-v` once per executable: cached in state/code-context/home/version.json,
+    keyed on the executable's path, size and mtime."""
+    cache = cc_dir(root) / "home" / "version.json"
+    try:
+        st = os.stat(exe)
+        key = {"path": exe, "size": st.st_size, "mtime": st.st_mtime}
+    except OSError as e:
+        return None, "context.graph is %s, which cannot be read (%s)" % (exe, e.strerror)
+    c = read_json_file(cache) or {}
+    if all(c.get(k) == key[k] for k in key) and c.get("version"):
+        ver = str(c["version"])
+    else:
+        rc, out, err, to = crg_run(exe, ["-v"], crg_env(root, exe, None), root, VERSION_TIMEOUT)
+        m = re.search(r"code-review-graph\s+(\S+)", out + "\n" + err)
+        if to or rc != 0 or not m:
+            return None, "%s -v did not answer with a version%s" % (
+                exe, " (timed out after %d s)" % VERSION_TIMEOUT if to else "")
+        ver = m.group(1)
+        try:
+            write_json_file(cache, dict(key, version=ver))
+        except OSError:
+            pass
+    if ver != PINNED:
+        return ver, "%s is code-review-graph %s, not the pinned %s" % (exe, ver, PINNED)
+    return ver, None
+
+
+def repo_key(repo: str) -> str:
+    return repo.replace("/", "__")
+
+
+class Lock:
+    """flock LOCK_EX on <repo-key>.lock, BESIDE the index directory (a rebuild deletes the directory; a lock
+    inside it would let a waiter lock a fresh inode and run alongside the build). Polls until the deadline."""
+
+    def __init__(self, path: Path) -> None:
+        self.path, self.fd = path, None
+
+    def take(self, deadline: float) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.05)
+
+    def release(self) -> None:
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+
+def build_failed_sentence(meta: dict) -> str:
+    return ("the first index build failed at %s (%s); python3 core/context.py rebuild --timeout 600 tries again "
+            "(give that Bash call a 600 s timeout)" % (meta.get("failed_at") or "?",
+                                                       meta.get("failed_reason") or "no reason recorded"))
+
+
+class Index:
+    """One window's index of one repo: state/code-context/<NN>/<repo-key>/ (CRG_DATA_DIR), its meta.json, and
+    its lock file beside it (§7). Caller holds the lock for every method but take()."""
+
+    def __init__(self, root: Path, where: Where, repo: str, repo_dir: Path, exe: str, version: str) -> None:
+        wdir = cc_dir(root) / str(where.window)
+        self.dir = wdir / repo_key(repo)
+        self.lock = Lock(wdir / (repo_key(repo) + ".lock"))
+        self.meta_path = self.dir / "meta.json"
+        self.repo, self.repo_dir, self.exe, self.root = repo, repo_dir, exe, root
+        self.want = {"lease": where.window, "lease_created": (where.lease or {}).get("created"),
+                     "worktree": str(repo_dir), "version": version}
+        self.env = crg_env(root, exe, self.dir)
+
+    def meta(self) -> Optional[dict]:
+        return read_json_file(self.meta_path)
+
+    def current(self, m: Optional[dict]) -> bool:
+        return m is not None and all(m.get(k) == self.want[k] for k in self.want)
+
+    def build(self, timeout: float) -> Tuple[bool, str, float]:
+        """Delete the index and build it. (ok, output, seconds); a failure is recorded in meta.json."""
+        shutil.rmtree(str(self.dir), ignore_errors=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        meta = dict(self.want, built_at=None, build_seconds=None, state="building", pid=os.getpid(),
+                    failed_reason=None)
+        write_json_file(self.meta_path, meta)
+        t0 = time.monotonic()
+        rc, out, err, to = crg_run(self.exe, ["build", "--repo", str(self.repo_dir)], self.env, self.repo_dir, timeout)
+        secs = time.monotonic() - t0
+        if to or rc != 0:
+            meta.update(state="build-failed", failed_at=time.strftime("%H:%M"),
+                        failed_reason=("timed out after %d s" % round(timeout) if to else
+                                       "exited %s: %s" % (rc, last_line(err or out) or "no output")))
+            write_json_file(self.meta_path, meta)
+            return False, out + err, secs
+        meta.update(state="ok", built_at=now_iso(), build_seconds=round(secs, 2), pid=None)
+        write_json_file(self.meta_path, meta)
+        return True, out + err, secs
+
+    def update(self, timeout: float) -> bool:
+        rc, _out, _err, to = crg_run(self.exe, ["update", "--repo", str(self.repo_dir)], self.env, self.repo_dir,
+                                     timeout)
+        return not to and rc == 0
+
+    def mark_stopped(self, m: dict) -> dict:
+        # The lock is ours, so the process that wrote `building` is gone (a kill releases its flock).
+        m.update(state="build-failed", failed_at=m.get("failed_at") or time.strftime("%H:%M"),
+                 failed_reason="did not finish (the process was stopped)", pid=None)
+        write_json_file(self.meta_path, m)
+        return m
+
+    def ready(self, cfg: Cfg, deadline: float) -> str:
+        """Bring the index up to date (§7 steps 3-4): 'built' | 'updated'; raises GraphFail / Budget."""
+        m = self.meta()
+        if m is not None and m.get("state") == "building":
+            m = self.mark_stopped(m)
+        if self.current(m) and m.get("state") == "build-failed":
+            raise GraphFail(build_failed_sentence(m))
+        if not self.current(m) or m.get("state") != "ok":
+            ok, _, _ = self.build(min(cfg.build_timeout, remaining(deadline)))
+            if not ok:
+                raise GraphFail(build_failed_sentence(self.meta() or {}))
+            return "built"
+        if self.update(remaining(deadline)):
+            return "updated"
+        if remaining(deadline) <= 0:
+            raise Budget()
+        ok, _, _ = self.build(min(cfg.build_timeout, remaining(deadline)))     # an update that fails: rebuild once
+        if not ok:
+            raise GraphFail(build_failed_sentence(self.meta() or {}))
+        return "rebuilt"
+
+    def ask(self, args: List[str], deadline: float) -> dict:
+        rc, out, err, to = crg_run(self.exe, args + ["--repo", str(self.repo_dir)], self.env, self.repo_dir,
+                                   remaining(deadline))
+        if to:
+            raise Budget()
+        i = out.find("{")
+        if rc != 0 or i < 0:
+            raise GraphFail("the graph answer could not be read (%s)" % (
+                "exit %s" % rc if rc != 0 else "not JSON"))
+        try:
+            d = json.loads(out[i:])
+        except ValueError:
+            raise GraphFail("the graph answer could not be read (not JSON)")
+        if not isinstance(d, dict):
+            raise GraphFail("the graph answer could not be read (not a JSON object)")
+        return d
+
+
+def last_line(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return lines[-1][:160] if lines else ""
+
+
+def _add(out: Dict[str, dict], tree: Tree, path: object, line: object, why: str) -> None:
+    if not isinstance(path, str) or not path:
+        return
+    rel = tree_rel(tree, path) if os.path.isabs(path) else posixpath.normpath(path)
+    if not rel or rel.startswith(".."):
+        return
+    h = out.setdefault(rel, {"lines": set(), "why": []})
+    if isinstance(line, int):
+        h["lines"].add(line)
+    if why not in h["why"]:
+        h["why"].append(why)
+
+
+def _line(node: dict) -> object:
+    cs = node.get("call_site")
+    if isinstance(cs, dict) and isinstance(cs.get("line"), int):
+        return cs["line"]
+    return node.get("line_start")
+
+
+def graph_hits(idx: Index, tree: Tree, verb: str, subj: Subject, deadline: float) -> Dict[str, dict]:
+    """The 2.3.9 calls of §5's table, and only the fields it names."""
+    out: Dict[str, dict] = {}
+    rel_in_repo = None
+    absf = None
+    if subj.file:
+        rel_in_repo = subj.file[len(subj.prefix) + 1:] if subj.prefix else subj.file
+        absf = str(idx.repo_dir / rel_in_repo)
+    target = ("%s::%s" % (absf, subj.symbol) if absf else subj.symbol) if subj.symbol else absf
+
+    def results(d: dict) -> List[dict]:
+        r = d.get("results")
+        return [x for x in r if isinstance(x, dict)] if isinstance(r, list) else []
+
+    def callers() -> None:
+        for r in results(idx.ask(["query", "callers_of", str(target)], deadline)):
+            _add(out, tree, r.get("file_path"), _line(r), "graph: callers of %s" % subj_text(subj))
+
+    def tests_for() -> None:
+        for r in results(idx.ask(["query", "tests_for", str(target)], deadline)):
+            if r.get("is_test"):
+                _add(out, tree, r.get("file_path"), r.get("line_start"), "graph: tests for %s" % subj_text(subj))
+
+    def importers() -> None:
+        d = idx.ask(["query", "importers_of", str(absf)], deadline)
+        lines: Dict[str, int] = {}
+        for e in d.get("edges") or []:
+            if isinstance(e, dict) and isinstance(e.get("source"), str) and isinstance(e.get("line"), int):
+                lines.setdefault(e["source"], e["line"])
+        for r in results(d):
+            f = r.get("importer") or r.get("file")
+            _add(out, tree, f, lines.get(f) if isinstance(f, str) else None, "graph: importers of %s" % subj.file)
+
+    def impact(tests_only: bool) -> None:
+        d = idx.ask(["impact", "--files", str(rel_in_repo), "--depth", str(IMPACT_DEPTH),
+                     "--max-results", str(IMPACT_MAX)], deadline)
+        why = "graph: impact of %s" % subj.file
+        if not tests_only:
+            for f in d.get("impacted_files") or []:
+                _add(out, tree, f, None, why)
+        for n in d.get("impacted_nodes") or []:
+            if isinstance(n, dict) and (n.get("is_test") or not tests_only):
+                _add(out, tree, n.get("file_path"), _line(n), why)
+
+    if verb == "callers":
+        callers()
+    elif verb == "importers":
+        importers()
+    elif verb == "tests":
+        tests_for() if subj.symbol else impact(True)
+    elif verb == "reach" and subj.symbol:
+        callers()
+        tests_for()
+    elif verb == "reach":
+        impact(False)
+        importers()
+    return out
+
+
+def subj_text(subj: Subject) -> str:
+    return "%s::%s" % (subj.file, subj.symbol) if subj.file and subj.symbol else (subj.symbol or subj.file or "")
+
+
 def graph_part(root: Path, cfg: Cfg, where: Where, verb: str, subj: Subject,
                deadline: float) -> Tuple[GraphInfo, Dict[str, dict]]:
     if where.window is None:
         return GraphInfo("skipped", "outside a window"), {}
     if verb == "grep":
         return GraphInfo("skipped", "grep asks git grep only"), {}
-    return GraphInfo("absent", NOT_INSTALLED), {}
+    problem = exe_problem(cfg)
+    if problem:
+        return GraphInfo("absent", problem), {}
+    t0 = time.monotonic()
+    exe = str(cfg.graph)
+    version = None
+    idx = None
+    try:
+        version, problem = graph_version(root, exe)
+        if problem:
+            return GraphInfo("absent", problem, version), {}
+        idx = Index(root, where, subj.repo, where.tree.repo_dir(subj.prefix), exe, str(version))
+        if not idx.lock.take(deadline):
+            return GraphInfo("skipped", "skipped (another query in this window held the index past the %d s "
+                                        "time budget)" % round(cfg.budget), version), {}
+        action = idx.ready(cfg, deadline)
+        hits = graph_hits(idx, where.tree, verb, subj, deadline)
+        return GraphInfo("present", None, version, time.monotonic() - t0, action), hits
+    except Budget:
+        return GraphInfo("skipped", "skipped (the %d s time budget ran out)" % round(cfg.budget), version,
+                         time.monotonic() - t0), {}
+    except GraphFail as e:
+        return GraphInfo("failed", str(e), version, time.monotonic() - t0), {}
+    except Exception as e:      # never fatal (§7): the answer still comes from grep and rules
+        return GraphInfo("failed", "the graph call failed (%s)" % type(e).__name__, version,
+                         time.monotonic() - t0), {}
+    finally:
+        if idx is not None:
+            idx.lock.release()
+
+
+def rebuild(root: Path, args: List[str]) -> int:
+    timeout = None
+    rest: List[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--timeout" and i + 1 < len(args):
+            timeout = _number(args[i + 1], 0) or None
+            if timeout is None:
+                raise Usage("--timeout takes a number of seconds: python3 core/context.py rebuild --timeout 600")
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    if len(rest) > 1:
+        raise Usage(USAGE)
+    cfg = read_config(root)
+    if not cfg.graph:
+        print("No code graph is configured (context.graph in config.yaml), so there is no index to rebuild.")
+        return 0
+    where = resolve_where(root, cfg)
+    if where.window is None:
+        print("This session holds no window, so there is no index to rebuild; run it from the window whose index "
+              "you want rebuilt.")
+        return 0
+    problem = exe_problem(cfg)
+    version = None
+    if not problem:
+        version, problem = graph_version(root, str(cfg.graph))
+    if problem:
+        print("The code graph cannot be used (%s), so there is no index to rebuild." % problem)
+        return 0
+    tree = where.tree
+    repo = rest[0] if rest else tree.outer
+    names = {name: pre for name, pre in tree.repos}
+    if repo not in names:
+        raise Usage("%s is not a repo of this tree; its repos are %s." % (repo, ", ".join(sorted(names))))
+    t = timeout or cfg.build_timeout
+    idx = Index(root, where, repo, tree.repo_dir(names[repo]), str(cfg.graph), str(version))
+    if not idx.lock.take(time.monotonic() + t):
+        print("Another query in window %s held the index of %s for %d s, so it was not rebuilt; try again."
+              % (where.window, repo, round(t)))
+        return 0
+    try:
+        ok, out, secs = idx.build(t)
+    finally:
+        idx.lock.release()
+    if not ok:
+        m = idx.meta() or {}
+        print("The code-context index for %s in window %s was not rebuilt (%s). python3 core/context.py rebuild "
+              "--timeout 600 tries again (give that Bash call a 600 s timeout)."
+              % (repo, where.window, m.get("failed_reason") or "the build failed"))
+        return 0
+    n = re.findall(r"(\d+)/(\d+) files parsed", out)
+    files = "%s files, " % n[-1][1] if n else ""
+    print("Rebuilt the code-context index for %s in window %s (%s%.1f s)." % (repo, where.window, files, secs))
+    return 0
 
 
 # --- the rules (§10) -----------------------------------------------------------------------------------
@@ -640,6 +1054,8 @@ def main(argv: List[str]) -> int:
             if len(args) != 2:
                 raise Usage(USAGE)
             return query(root, verb, args[1], want_json)
+        if verb == "rebuild":
+            return rebuild(root, args[1:])
         raise Usage(USAGE)
     except Usage as e:
         print(str(e))

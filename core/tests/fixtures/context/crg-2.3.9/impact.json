@@ -1,0 +1,29 @@
+{
+  "status": "ok",
+  "summary": "Blast radius for 1 changed file(s):\n  - 2 nodes directly changed\n  - 2 nodes impacted (within 2 hops)\n  - 2 additional files affected",
+  "changed_files": ["pkg/core.py"],
+  "changed_nodes": [
+    {"id": 1, "kind": "File", "name": "/FIXTURE/pkg/core.py", "qualified_name": "/FIXTURE/pkg/core.py",
+     "file_path": "/FIXTURE/pkg/core.py", "line_start": 1, "line_end": 2, "language": "python",
+     "parent_name": null, "is_test": false}
+  ],
+  "changed_nodes_omitted": 0,
+  "impacted_nodes": [
+    {"id": 11, "kind": "File", "name": "/FIXTURE/pkg/user.py", "qualified_name": "/FIXTURE/pkg/user.py",
+     "file_path": "/FIXTURE/pkg/user.py", "line_start": 1, "line_end": 3, "language": "python",
+     "parent_name": null, "is_test": false, "impact_score": 0.6, "call_site": {"line": 3}},
+    {"id": 41, "kind": "Test", "name": "test_helper", "qualified_name": "/FIXTURE/tests/test_core.py::test_helper",
+     "file_path": "/FIXTURE/tests/test_core.py", "line_start": 4, "line_end": 5, "language": "python",
+     "parent_name": null, "is_test": true, "impact_score": 0.5}
+  ],
+  "impacted_files": ["/FIXTURE/pkg/user.py", "/FIXTURE/tests/test_core.py", "/FIXTURE/pkg/other.py"],
+  "impacted_files_omitted": 0,
+  "edges": [],
+  "edges_omitted": 0,
+  "truncated": false,
+  "total_impacted": 2,
+  "nodes_omitted": 0,
+  "resolution": {},
+  "unresolved_call_sites": [],
+  "context_savings": {}
+}
