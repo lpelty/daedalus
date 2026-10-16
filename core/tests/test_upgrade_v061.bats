@@ -134,7 +134,8 @@ target_bytes() {    # every file under target/, git's own included, by content (
   case "$c" in *"a session started after that is numbered"*) echo "$c"; return 1 ;; esac
   case "$c" in *"You are window"*|*"you hold the pen"*|*"installed the pre-push hook"*|*"complete."*) echo "$c"; return 1 ;; esac
   [ "$(target_bytes)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_bytes); return 1; }
-  [ ! -e "$H/state/upgraded-to" ]; [ -z "$(ls "$H/state/leases" 2>/dev/null)" ]
+  # no window file and no pen: only this windowless session's log reservation (state/leases/unwindowed.json)
+  [ ! -e "$H/state/upgraded-to" ]; [ -z "$(ls "$H/state/leases" 2>/dev/null | grep -vx unwindowed.json)" ]
   [ ! -e "$T/.git/refs/heads/lease/01" ] && [ ! -e "$T/.git/hooks/pre-push" ] && [ ! -d "$T/.git/worktrees" ]
   ! grep -q 'branch "lease/' "$T/.git/config" "$T/sub/.git/config"
   # the open session's next prompt: the stop, then that windows open once the upgrade finishes
@@ -150,7 +151,7 @@ target_bytes() {    # every file under target/, git's own included, by content (
       || { echo "$cmd: $stderr"; return 1; }
   done
   [ "$(target_bytes)" = "$before" ] || { diff <(printf '%s\n' "$before") <(target_bytes); return 1; }
-  [ -z "$(ls "$H/state/leases" 2>/dev/null)" ]
+  [ -z "$(ls "$H/state/leases" 2>/dev/null | grep -vx unwindowed.json)" ]
   # "pick it up" is the one way in, and the next start finishes the upgrade and numbers itself
   pick_it_up
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
