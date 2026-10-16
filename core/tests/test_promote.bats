@@ -1086,3 +1086,14 @@ A=02-20261015-120000-aaa; B=02-20261015-120100-bbb
   run bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$output" = "Removed the promote scratch of window 02 ($A); the promotion records are kept." ]
 }
+
+@test "who: a window that took the pen at a vault commit while the upgrade was pending does not promote until the upgrade finishes; after the stamp it promotes as normal" {
+  work_on_02
+  printf '9.9.9\n' > "$DAEDALUS_HOME/VERSION"; rm -f "$DAEDALUS_HOME/state/upgraded-to"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sP","bound_at":"2026-01-01T00:00:00","history":[],"taken_while_pending":"9.9.9"}'
+  run as_prime bash "$PROMOTE" 02
+  refused "This session took the pen at a vault commit while the upgrade to 9.9.9 was pending: promote changes target/, which the upgrade's safety copy protects, so it waits until the upgrade finishes."
+  [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
+  printf '9.9.9\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}

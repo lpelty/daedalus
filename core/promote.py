@@ -183,6 +183,9 @@ def read_leases(root: Path) -> Dict[str, dict]:
 PROMOTE_WAITS = ("This session holds the pen but no window, and the upgrade to %s has not finished: promote changes "
                  "target/, which the upgrade's safety copy protects, so it waits until the upgrade finishes. hot.md "
                  "and `core/vault-commit.sh` work now.")
+PROMOTE_WAITS_TAKEN = ("This session took the pen at a vault commit while the upgrade to %s was pending: promote "
+                       "changes target/, which the upgrade's safety copy protects, so it waits until the upgrade "
+                       "finishes.")
 
 
 def who(root: Path, leases: Dict[str, dict]) -> dict:
@@ -204,6 +207,10 @@ def who(root: Path, leases: Dict[str, dict]) -> dict:
                    "or take the pen first." % me)
     if mine is None and ll.pending_version(root):
         raise Stop(PROMOTE_WAITS % ll.pending_version(root))
+    pending = ll.pending_version(root)
+    if pending and (leases.get("prime") or {}).get("taken_while_pending") == pending:
+        # a window from before the pull that picked up the pen at a vault commit (leaselib pen_for_commit)
+        raise Stop(PROMOTE_WAITS_TAKEN % pending)
     hint = os.environ.get("DAEDALUS_LEASE", "").strip()
     if hint and hint != (mine or ""):
         raise Stop("`DAEDALUS_LEASE=%s`, but this session is %s (the lease files are the truth). Unset the "

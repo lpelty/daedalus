@@ -2137,3 +2137,24 @@ PFC() { python3 "$LL" pen-for-commit; }
   [ "$rcs" = "0 3 " ] || { echo "$rcs"; cat "$BATS_TEST_TMPDIR"/*.out; return 1; }
   [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["history"]))' "$DAEDALUS_HOME/state/leases/prime.json")" = 1 ]
 }
+
+@test "the pending mark of a take at commit is dropped by a window's prime take and by first-up" {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  po="$(live_pid)"; win 01 sOld "$po"; kill "$po"; wait "$po" 2>/dev/null || true
+  pb="$(live_pid)"; registry_entry "$pb" sB; win 02 sB "$pb"
+  python3 "$LL" _test-write prime '{"session_id":"sOld","history":[],"taken_while_pending":"0.7.4"}'
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime taken_while_pending)" = None ]
+  kill "$pb"; wait "$pb" 2>/dev/null || true
+  python3 "$LL" _test-write prime '{"session_id":"sB","history":[],"taken_while_pending":"0.7.4"}'
+  pc="$(live_pid)"; registry_entry "$pc" sC
+  run python3 - "$DAEDALUS_HOME/core" "$DAEDALUS_HOME" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll
+from pathlib import Path
+root = Path(sys.argv[2])
+with ll.lock(root):
+    print(ll.first_up(root, "sC"))
+PY
+  [ "$output" = True ] || { echo "$output"; return 1; }
+  [ "$(lease_json prime session_id)" = sC ]; [ "$(lease_json prime taken_while_pending)" = None ]
+}
