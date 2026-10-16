@@ -109,6 +109,17 @@ def _last(text: str) -> str:
     return lines[-1] if lines else "no message"
 
 
+def _cause(text: str) -> str:
+    """git's own reason from a failed fetch: its first fatal:/error: line, not the advice it prints after, with no
+    closing period (the sentence adds its own)."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for ln in lines:
+        for tag in ("fatal:", "error:"):
+            if ln.startswith(tag):
+                return ln[len(tag):].strip().rstrip(".") or "no message"
+    return _last(text).rstrip(".") or "no message"
+
+
 def _cfg_lines(repo: Path, *args: str) -> List[str]:
     code, out, _ = git(repo, "config", *args)
     return out.splitlines() if code == 0 else []
@@ -1433,7 +1444,7 @@ def _update(home: Path, fd: int, handed_off: bool) -> Tuple[Optional[str], int]:
     ref = "refs/remotes/%s/%s" % (remote, trunk)
     code, _, err = git(home, "fetch", "--quiet", "--no-tags", remote, "+refs/heads/%s:%s" % (trunk, ref), timeout=600)
     if code != 0:
-        raise Refuse("Could not reach %s: %s. %s" % (url, _last(err), NOTHING))
+        raise Refuse("Could not reach %s: %s. %s" % (url, _cause(err), NOTHING))
     git(home, "fetch", "--quiet", "--no-tags", remote, "refs/tags/v*:refs/tags/v*", timeout=300)   # tags: best effort
     fetched = "fetched %s/%s, and nothing else in this home was changed." % (remote, trunk)
     if not handed_off and not running_release_copy(home, ref):

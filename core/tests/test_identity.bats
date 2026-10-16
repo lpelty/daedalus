@@ -483,7 +483,7 @@ _run_scan_in_fixture() {
 # written for the same operator — the house parts in order, the one line it prints, the first update's one
 # line and one sentence, and short sentences; no employer and no agent is named (the wide scan checks the file).
 @test "CHANGELOG: v0.7.3 is the newest release — in short, what went wrong, what changed, what you will see, the first update, how to tell; it thanks a deployment on a second machine, gives the one first-update line and the sentence for a local agent, and keeps every sentence to 30 words" {
-  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.3 — one command to update, and an upgrade that can finish" ]
+  [ "$(grep -m1 '^## ' "$DAEDALUS_HOME/CHANGELOG.md")" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
   sec="$(awk '/^## v0.7.3 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
   rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
   order=""

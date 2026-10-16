@@ -4,7 +4,7 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
-## v0.7.3 — one command to update, and an upgrade that can finish
+## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy
 
 **In short.** Taking a release is one command now. Close every Daedalus
 window, then type `daedalus update` in a terminal. It prints one line. Local
@@ -88,8 +88,8 @@ problems with its evidence.
   0.7.3: complete.`
 
 **The first update.** A home older than v0.7.3 has no `daedalus` command yet.
-Close every Daedalus window, then type this one line in a terminal, with your
-home's path in place of `~/daedalus`:
+This one time takes a longer line. Close every Daedalus window, then type it
+in a terminal, with your home's path in place of `~/daedalus`:
 
 ```
 python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus
@@ -98,8 +98,8 @@ python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main
 It names no remote, so it works whatever your remotes are called. Or say to
 an agent on that machine: "Close every Daedalus window, then run the
 first-update line from the Daedalus README's Upgrading section on GitHub,
-github.com/lpelty/daedalus." After that, `daedalus update` is the whole
-procedure. README, "Upgrading", says the same.
+github.com/lpelty/daedalus." Every later release is just `daedalus update`.
+README, "Upgrading", says the same.
 
 **How to tell you have it.** `cat VERSION` prints `0.7.3`. `daedalus version`
 prints `Daedalus 0.7.3 (home <your home>, remote <its name>, tag v0.7.3)`.

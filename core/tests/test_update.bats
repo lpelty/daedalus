@@ -218,6 +218,9 @@ PY
   [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
   case "$output" in "Could not reach $R: "*". Nothing in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ]
+  # git's own cause, not the tail of its multi-line advice, and no doubled period
+  case "$output" in *".."*|*": and the repository exists"*) echo "$output"; return 1 ;; esac
+  case "$output" in *"does not appear to be a git repository"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }
 
