@@ -942,6 +942,61 @@ print(len(u.deployment_paths(home)))'
   [ ! -e "$H/CLAUDE.local.md" ]; [ ! -e "$H/.claude/settings.local.json" ]
 }
 
+@test "merge mode: vault changes that were staged come out of the update unstaged, every byte kept, and a later line of the output says so with the count and at most three paths" {
+  older_release; tracked_vault_home
+  printf 'staged new\n' > "$H/vault/notes/staged.md"; git -C "$H" add vault/notes/staged.md
+  git -C "$H" rm -q vault/notes/n9.md
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "${lines[0]}" in "Daedalus updated $N -> $N1; doctor OK.") : ;; *) echo "$output"; return 1 ;; esac
+  printf '%s\n' "$output" | grep -qx "2 changes that were staged in this home's own files (vault/notes/n9.md, vault/notes/staged.md) are unstaged now, their files as they were; core/vault-commit.sh stages and commits them." || { echo "$output"; return 1; }
+  [ "$(cat "$H/vault/notes/staged.md")" = "staged new" ]; [ ! -e "$H/vault/notes/n9.md" ]
+  [ -z "$(git -C "$H" diff --cached --name-only)" ]
+}
+
+@test "an unexpected error inside the move restores the home like any failure: in merge mode with the release's merge begun, one line naming the error, the branch at its original HEAD, no merge left in progress, every vault file as it was; the next run updates" {
+  older_release; tracked_vault_home
+  printf 'dirty edit\n' >> "$H/vault/notes/n3.md"
+  orig="$(git -C "$H" rev-parse HEAD)"; sums="$(vault_sums)"; st="$(git -C "$H" status --porcelain --ignored -- . ':!state')"
+  DAEDALUS_UPDATE_TEST_RAISE=merge run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "${#lines[@]}" = 1 ] || { echo "$output"; return 1; }
+  case "$output" in "Not updated: an unexpected error (RuntimeError: injected by DAEDALUS_UPDATE_TEST_RAISE); this home is back as it was"*"local/before-update-"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"nothing in this home was changed"*|*Traceback*) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
+  [ ! -e "$H/.git/MERGE_HEAD" ]
+  [ "$(vault_sums)" = "$sums" ] || { diff <(printf '%s\n' "$sums") <(vault_sums); return 1; }
+  [ "$(git -C "$H" status --porcelain --ignored -- . ':!state')" = "$st" ] || { git -C "$H" status --porcelain --ignored; return 1; }
+  [ ! -e "$H/CLAUDE.local.md" ]; [ ! -e "$H/.claude/settings.local.json" ]
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "${lines[0]}" in "Daedalus updated $N -> $N1; doctor OK.") : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "an unexpected error inside the move restores the home in reset mode too; one raised after the move never says nothing was changed — it names where the branch moved, and the next run finishes the upgrade" {
+  printf '\nA line this home keeps.\n' >> "$H/CLAUDE.md"; git -C "$H" commit -q -am "a local brief line"
+  orig="$(git -C "$H" rev-parse HEAD)"; dh="$(git -C "$H" diff HEAD)"
+  DAEDALUS_UPDATE_TEST_RAISE=reset run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "${#lines[@]}" = 1 ] || { echo "$output"; return 1; }
+  case "$output" in "Not updated: an unexpected error (RuntimeError: injected by DAEDALUS_UPDATE_TEST_RAISE); this home is back as it was"*"local/before-update-"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]; [ "$(git -C "$H" diff HEAD)" = "$dh" ]; [ ! -e "$H/CLAUDE.local.md" ]
+  # after the move: the branch has moved, the upgrade has not run
+  git -C "$H" reset -q --hard "v$N"; git -C "$H" branch -q -D $(git -C "$H" for-each-ref --format='%(refname:short)' refs/heads/local/)
+  DAEDALUS_UPDATE_TEST_RAISE=finish run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "${#lines[@]}" = 1 ] || { echo "$output"; return 1; }
+  target="$(trunk_sha "$R")"; v="$(git -C "$H" rev-parse "v$N^{commit}")"
+  [ "$output" = "Not updated: an unexpected error (RuntimeError: injected by DAEDALUS_UPDATE_TEST_RAISE) stopped the update after this home's branch moved from ${v:0:7} to ${target:0:7}, before it finished; run daedalus update again, which finishes it, and if it says this again, report it." ] || { echo "$output"; return 1; }
+  [ "$(git -C "$H" rev-parse HEAD)" = "$target" ]
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "${lines[0]}" = "Daedalus is up to date ($N1); doctor OK." ] || { echo "$output"; return 1; }
+  # an error with the branch where it was says so, and never that nothing was changed
+  DAEDALUS_UPDATE_TEST_RAISE=classify run upd update
+  [ "$output" = "Not updated: an unexpected error (RuntimeError: injected by DAEDALUS_UPDATE_TEST_RAISE); this home's branch is still at ${target:0:7}; run daedalus update again, and if it says this again, report it." ] || { echo "$output"; return 1; }
+}
+
 @test "merge mode, still refused: an edit to core/close.sh in a home that tracks its vault is refused naming it, and nothing is changed" {
   older_release; tracked_vault_home
   printf '# local\n' >> "$H/core/close.sh"

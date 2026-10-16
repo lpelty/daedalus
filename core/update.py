@@ -71,7 +71,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # The release's address (Decision 20): a remote is the release's when its recorded URL normalises to this. A fork's
 # maintainer changes this one constant; a home that deliberately follows a mirror sets update.address instead.
@@ -534,6 +534,25 @@ def in_progress(home: Path) -> Optional[str]:
     return None
 
 
+def _test_raise(where: str) -> None:
+    """Test knob: DAEDALUS_UPDATE_TEST_RAISE=<where> raises an error that is not a refusal there (classify, inside
+    the reset or the release's merge, at the start of finish)."""
+    if os.environ.get("DAEDALUS_UPDATE_TEST_RAISE") == where:
+        raise RuntimeError("injected by DAEDALUS_UPDATE_TEST_RAISE")
+
+
+def _unexpected(e: BaseException) -> str:
+    return "an unexpected error (%s: %s)" % (type(e).__name__, _one_line(str(e)) or "no message")
+
+
+def _guarded(fn: Callable[[], List[str]]) -> List[str]:
+    """A restore's problems; a restore that itself raises is one problem, never a second error past the move."""
+    try:
+        return fn()
+    except Exception as e:      # the restore must always reach the refusal line
+        return ["the rest of the restore (%s)" % _unexpected(e)]
+
+
 def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[str]]) -> Dict[str, Any]:
     """Every path where the working tree or HEAD differs from the release (Decision 16). A path is local when its
     working-tree blob or its HEAD blob matches no version of it on the release's history; pinned when both are release copies but one is neither the merge base's
@@ -543,8 +562,7 @@ def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[
     untracked files at paths the release has. A deployment path — tracked here, never on the release's history,
     not under DIST_PATHS (a vault the home tracks is the case doctor knows) — is the deployment's own: never local,
     carried by merging (deployment)."""
-    if os.environ.get("DAEDALUS_UPDATE_TEST_RAISE") == "classify":     # test knob: an error that is not a refusal
-        raise RuntimeError("injected by DAEDALUS_UPDATE_TEST_RAISE")
+    _test_raise("classify")
     th, tt, tb = tree(home, head), tree(home, target), tree(home, base)
     changed = sorted(set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", target)))
                      | set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", head, target))))
@@ -1225,12 +1243,16 @@ def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
             moved_before_merge = _write_local_layer(home, plan, bdir, soul_release)
             _out(git(home, "reset", "--quiet", "--hard", target, timeout=600),
                  "moving this home to %s/%s" % (remote, trunk))
+            _test_raise("reset")
             if keep_soul:
                 (home / JOURNAL).write_bytes(soul)
             set_tracking(home, branch_name, remote, trunk)
         except (MoveFailed, OSError, Unmovable) as e:
-            problems = restore(home, head, branch, bdir, moved_before_merge)
+            problems = _guarded(lambda: restore(home, head, branch, bdir, moved_before_merge))
             raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems)
+        except Exception as e:      # any other error inside the move restores too: never a half-moved home
+            problems = _guarded(lambda: restore(home, head, branch, bdir, moved_before_merge))
+            raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems, _unexpected(e))
     finally:
         for s, h in old.items():
             signal.signal(s, h)
@@ -1337,11 +1359,14 @@ def migrate_and_merge(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
     written = sorted(set(setting) | {JOURNAL, GITIGNORE})
     moved_before_merge = False
     already = False
+    staged_dep: List[str] = []
     old = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
     try:
         _backup_or_refuse(home, head, branch, bdir, stamp)
         try:
             moved_before_merge = _write_local_layer(home, plan, bdir, soul_release)
+            staged_dep = [p for p in _names(git(home, "diff", "--cached", "--name-only", "-z", "--no-renames"))
+                          if p in dep]
             _out(git(home, "reset", "-q"), "unstaging this home's changes")
             # the migration commit: every release path the release's copy, the carried .gitignore
             in_t = [p for p in setting if p in tt]
@@ -1375,6 +1400,7 @@ def migrate_and_merge(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
                     raise MergeConflict([p for p in conflicts if p not in (JOURNAL, GITIGNORE)])
                 if code != 0 and not conflicts:
                     raise MoveFailed("merging the release failed (%s)" % _last(err or out))
+                _test_raise("merge")
                 mt = tree(home, mig)
                 for p in (JOURNAL, GITIGNORE):
                     if p in mt:
@@ -1386,12 +1412,15 @@ def migrate_and_merge(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
             if soul is not None:
                 (home / JOURNAL).write_bytes(soul)
         except MergeConflict as e:
-            problems = restore_merge(home, head, branch, bdir, moved_before_merge, written)
+            problems = _guarded(lambda: restore_merge(home, head, branch, bdir, moved_before_merge, written))
             raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems,
                                     "merging the release would conflict in %s" % summarise(home, e.paths))
         except (MoveFailed, OSError, Unmovable) as e:
-            problems = restore_merge(home, head, branch, bdir, moved_before_merge, written)
+            problems = _guarded(lambda: restore_merge(home, head, branch, bdir, moved_before_merge, written))
             raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems)
+        except Exception as e:      # any other error inside the move restores too: never a half-merged home
+            problems = _guarded(lambda: restore_merge(home, head, branch, bdir, moved_before_merge, written))
+            raise _restored_refusal(home, e, head, branch, bdir, bdir_rel, plan["staged"], problems, _unexpected(e))
     finally:
         for s, h in old.items():
             signal.signal(s, h)
@@ -1401,7 +1430,15 @@ def migrate_and_merge(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], 
            "merged the release into %s; this home's history is kept" % branch_name)
     line = (("Local edits moved to %s; %s; %s." % (" and ".join(moved), did, where)) if moved
             else "%s; %s." % (did[:1].upper() + did[1:], where))
-    return line, _notes(plan, soul_release, bdir_rel), already
+    notes = _notes(plan, soul_release, bdir_rel)
+    if staged_dep:      # the migration commit carries release paths only: a staged deployment change comes out unstaged
+        n = len(staged_dep)
+        shown = ", ".join(staged_dep[:MOST]) + (", …" if n > MOST else "")
+        notes.append(("1 change that was staged in this home's own files (%s) is unstaged now, its file as it was; "
+                      "core/vault-commit.sh stages and commits it" % shown) if n == 1 else
+                     ("%d changes that were staged in this home's own files (%s) are unstaged now, their files as they "
+                      "were; core/vault-commit.sh stages and commits them" % (n, shown)))
+    return line, notes, already
 
 
 def git_blob_of(home: Path, data: bytes) -> str:
@@ -1520,6 +1557,7 @@ def finish(home: Path, first: str, move: str = "", notes: Optional[List[str]] = 
     """The upgrade, then doctor; the lines to print and the exit code. The first line is the result alone —
     "<first>; doctor OK." when the upgrade finished and doctor is clean, else "<first>." — and every later line one
     sentence: the move, `after` (said once the upgrade finished), the upgrade's stop, each doctor finding, the notes."""
+    _test_raise("finish")
     later = [move] if move else []
     stop = run_upgrade(home)
     if stop:
@@ -1769,19 +1807,44 @@ def update(home: Path, handed_off: bool = False, lock_fd: Optional[int] = None) 
     if fd is None:
         print(NOT_UPDATED + "another daedalus update is running in this home. " + NOTHING)
         return 1
+    start = _head(home)
     try:
         lines, code = _update(home, fd, handed_off)
     except Refuse as e:
         lines, code = [_one_line(str(e))], 1
-    except Exception as e:      # outside a move (the move restores in its own try): a line, never a traceback
-        lines, code = [NOT_UPDATED + "an unexpected error (%s: %s); the move had not begun, so nothing in this home "
-                       "was changed; run daedalus update again, and if it says this again, report it."
-                       % (type(e).__name__, _one_line(str(e)) or "no message")], 1
+    except Exception as e:      # a line, never a traceback; it says what it reads, never that nothing changed
+        lines, code = [_unexpected_line(home, e, start)], 1
     finally:
         os.close(fd)
     if lines:
         print("\n".join(lines))
     return code
+
+
+def _head(home: Path) -> str:
+    try:
+        return git(home, "rev-parse", "-q", "--verify", "HEAD")[1].strip()
+    except Exception:           # read for the error line only: an unreadable HEAD is said as unknown
+        return ""
+
+
+def _unexpected_line(home: Path, e: BaseException, start: str) -> str:
+    """The line for an error that is not a refusal. A move restores the home in its own try, so this is reached
+    before a move, after one, or by a fast-forward: the line says where this home's branch is now, read now."""
+    now = _head(home)
+    try:
+        stuck = in_progress(home)
+    except Exception:
+        stuck = None
+    again = "run daedalus update again, and if it says this again, report it."
+    if start and now and now != start:
+        return (NOT_UPDATED + "%s stopped the update after this home's branch moved from %s to %s, before it finished; "
+                "%srun daedalus update again, which finishes it, and if it says this again, report it."
+                % (_unexpected(e), start[:7], now[:7], (stuck + ", then ") if stuck else ""))
+    where = ("this home's branch is still at %s" % now[:7]) if now and now == start else "this home's HEAD cannot be read"
+    if stuck:
+        return NOT_UPDATED + "%s; %s, but %s, then %s" % (_unexpected(e), where, stuck, again)
+    return NOT_UPDATED + "%s; %s; %s" % (_unexpected(e), where, again)
 
 
 def _one_line(text: str) -> str:
