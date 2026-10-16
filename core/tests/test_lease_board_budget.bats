@@ -277,3 +277,127 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
   W="$DAEDALUS_HOME/worktrees/02/thing"; printf 'later\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "later work"
   run board sA; case "$(ctx)" in *"- 02 — swept, 1 unpromoted commit waiting (\"later work\")"*) : ;; *) ctx; return 1 ;; esac
 }
+
+# --- Task 6: the partial board ----------------------------------------------------------------------------------------
+
+# complete_count — how many swept windows the board in $output draws with an exact count
+complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted commits? waiting' || true; }
+
+@test "partial board: 6 swept x 4 repos, empty cache, every check log sleeping 0.4 s — prompt 1 draws what it finished and the exact 'not checked' line for the rest within 3.3 s; later prompts finish monotonically; the end agrees with lease.sh list" {
+  four_repos 02 03 04 05 06 07
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:--format=%H" FAKE_GIT_SLEEP=0.4
+  t0="$(now)"; run board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 3.3 "prompt 1"
+  c="$(ctx)"; printf '# prompt 1:\n%s\n' "$(swept_lines | sed 's/^/#   /')" >&3
+  case "$c" in *"$(UNCHECKED_LINE 07)"*) : ;; *) echo "$c"; return 1 ;; esac
+  for nn in 02 03 04 05 06 07; do
+    case "$c" in *"- $nn — swept, "*"waiting ("*|*"$(UNCHECKED_LINE $nn)"*) : ;; *) echo "no line for $nn: $c"; return 1 ;; esac
+  done
+  prev="$(complete_count)"; p=1
+  while ctx | grep -qE 'not checked|at least'; do
+    p=$((p + 1)); [ "$p" -le 10 ] || { echo "never finished"; ctx; return 1; }
+    t0="$(now)"; run board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 4.5 "prompt $p"
+    n="$(complete_count)"; [ "$n" -gt "$prev" ] || ctx | grep -qE '^- [0-9]{2} — swept, at least' || { echo "no progress at prompt $p"; ctx; return 1; }
+    [ "$n" -ge "$prev" ] || { echo "went back at prompt $p"; return 1; }; prev="$n"
+  done
+  printf '# finished at prompt %s\n' "$p" >&3
+  [ "$prev" -eq 6 ]
+  unset FAKE_GIT_SLEEP_ON
+  run LS list; for nn in 02 03 04 05 06 07; do case "$output" in *"- $nn — swept, 4 unpromoted commits waiting"*) : ;; *) echo "$output"; return 1 ;; esac; done
+}
+
+@test "partial board: a git error that is not a cut-off in one nested repo is that window's own line, with the command that shows the error; the other windows draw" {
+  four_repos 02 03
+  git -C "$DAEDALUS_HOME/target/thing/sub2" update-ref -d refs/heads/lease/02
+  export PATH="$(count_git):$PATH" FAKE_GIT_FAIL_ON="log:--format=%H" FAKE_GIT_FAIL_IN="/thing/sub2"
+  run board sA; [ "$status" -eq 0 ]; c="$(ctx)"
+  case "$c" in *"- 03 — swept; cannot tell whether lease/03 has unpromoted work in thing/sub2 (git log origin/main..lease/03 failed: fatal: Unable to create '"*"index.lock': File exists.); run \`git -C target/thing/sub2 log -1 refs/heads/lease/03\` to see the error"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 02 — swept, 3 unpromoted commits waiting ("*) : ;; *) echo "$c"; return 1 ;; esac
+  run LL doctor-lines
+  case "$output" in *"NOTE     leases: cannot tell whether a swept number still has unpromoted work (cannot tell whether lease/03 has unpromoted work in thing/sub2"*"git -C target/thing/sub2 log -1 refs/heads/lease/03"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "partial board (a): known work is never demoted — the outer repo answered with work, the nested one cut off: 'at least 1 … not every repo was checked', never 'not checked'" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; swept_with_work 02
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:--format=%H" FAKE_GIT_SLEEP_IN="/thing/sub" FAKE_GIT_SLEEP=3
+  timed_board sA; c="$(ctx)"
+  case "$c" in *"- 02 — swept, at least 1 unpromoted commit waiting (\"work 02 in thing\"); not every repo was checked this time: say 'this is window 02' to a window to continue it, or 'delete 02's work', or run \`core/lease.sh list\` for the full count"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"not checked for unpromoted work"*) echo "$c"; return 1 ;; esac
+}
+
+@test "partial board (b): a nested repo whose listing is cut off is named, so a window whose only work is there (not yet cached) still has a line" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  W="$DAEDALUS_HOME/worktrees/02/thing/sub"; printf 'w\n' >> "$W/w.txt"; git -C "$W" add w.txt; git -C "$W" -c user.email=t@x -c user.name=t commit -q -m "only in sub"
+  rm -f "$DAEDALUS_HOME/state/leases/02."*
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="for-each-ref" FAKE_GIT_SLEEP_IN="/thing/sub" FAKE_GIT_SLEEP=3
+  timed_board sA; c="$(ctx)"
+  case "$c" in *"- target/thing/sub's lease branches were not listed this time (cut off); run \`core/lease.sh list\` to check them"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"$(UNCHECKED_LINE 02)"*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "partial board (c): phase A's --merged cut off in a repo with 6 misses writes the cut marker; from prompt 2 no prompt repeats it at that trunk SHA and every window completes" {
+  LS create >/dev/null; bind_live 01 sA; for i in 2 3 4 5 6 7; do LS create >/dev/null; done; swept_with_work 02 03 04 05 06 07
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="for-each-ref:--merged" FAKE_GIT_SLEEP_IN="/thing/sub" FAKE_GIT_SLEEP=3
+  : > "$GIT_LOG"; timed_board sA
+  grep -q $'/target/thing/sub\tfor-each-ref --merged' "$GIT_LOG"
+  sub_sha="$(git -C "$DAEDALUS_HOME/target/thing/sub" rev-parse refs/remotes/origin/main)"
+  cache_check "d['cut'].get('thing/sub') == '$sub_sha'"
+  prev=0
+  for p in 2 3 4; do
+    : > "$GIT_LOG"; timed_board sA
+    ! grep -q $'/target/thing/sub\tfor-each-ref --merged' "$GIT_LOG" || { echo "phase A repeated at prompt $p"; return 1; }
+    n="$(complete_count)"; [ "$n" -gt "$prev" ] || [ "$n" -eq 6 ] || { echo "no progress at prompt $p"; ctx; return 1; }; prev="$n"
+  done
+  [ "$prev" -eq 6 ] || { ctx; return 1; }
+}
+
+@test "partial board (d): no numbered lease, 2 swept windows, every check cut off — a board is drawn (head and 'not checked' lines), never nothing" {
+  LS create >/dev/null; LS create >/dev/null; swept_with_work 01 02
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:--format=%H" FAKE_GIT_SLEEP=3
+  timed_board sX; c="$(ctx)"
+  case "$c" in "Lease board (0 windows; you hold no lease):"*"$(UNCHECKED_LINE 01)"*"$(UNCHECKED_LINE 02)"*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "partial board (e): the render's git log -1 past RENDER_SECS reads 'last commit not read this time', never 'no commits yet'" {
+  LS create >/dev/null; bind_live 01 sA
+  W="$DAEDALUS_HOME/worktrees/01/thing"; printf 'c\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "a commit"
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:-1" FAKE_GIT_SLEEP=5
+  timed_board sA; c="$(ctx)"
+  case "$c" in *"- 01 (you) — 1 changed: a.txt — last commit not read this time — "*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+@test "partial board (f): a hang outside the checks (a ps that never answers) ends at the backstop with one line naming core/lease.sh list, exit 0, within 4.5 s, and leaves no process behind" {
+  LS create >/dev/null; bind_live 01 sA
+  shim="$BATS_TEST_TMPDIR/hang"; mkdir -p "$shim"; printf '#!/bin/sh\nexec sleep 31.7\n' > "$shim/ps"; chmod +x "$shim/ps"
+  export PATH="$shim:$PATH"
+  timed_board sA
+  [ "$(ctx)" = "The lease board was not drawn in time at this prompt; run \`core/lease.sh list\` to see it now" ] || { ctx; return 1; }
+  ! pgrep -fx "sleep 31.7" >/dev/null || { pgrep -flx "sleep 31.7"; pkill -fx "sleep 31.7"; return 1; }
+}
+
+# --- Task 7: the board at SessionStart ------------------------------------------------------------------------------
+
+start_hook() { hook_json SessionStart "$1" | python3 "$DAEDALUS_HOME/core/session-start.py"; }
+
+@test "SessionStart: with its larger budget the start's board checks every window and fills the cache; the next prompt is all hits; on an 8 s hook budget it shows 'not checked' lines rather than none" {
+  four_repos 02 03 04 05 06 07
+  export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:--format=%H" FAKE_GIT_SLEEP=0.4
+  run env LEASE_TEST_HOOK_BUDGET=8 bash -c "$(declare -f hook_json start_hook); start_hook sA"; [ "$status" -eq 0 ]
+  case "$(ctx)" in *"not checked for unpromoted work this time"*) : ;; *) ctx; return 1 ;; esac
+  rm -f "$(CACHE)"
+  run bash -c "$(declare -f hook_json start_hook); start_hook sA"; [ "$status" -eq 0 ]
+  c="$(ctx)"; case "$c" in *"not checked"*|*"at least"*) echo "$c"; return 1 ;; esac
+  for nn in 02 03 04 05 06 07; do case "$c" in *"- $nn — swept, 4 unpromoted commits waiting"*) : ;; *) echo "$c"; return 1 ;; esac; done
+  cache_check 'len(d["entries"]) == 24'
+  : > "$GIT_LOG"; timed_board sA
+  [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
+}
+
+# --- Task 8: one pass when no window is open ------------------------------------------------------------------------
+
+@test "no numbered lease and 2 swept windows: one tip listing per repo per prompt (the empty-board test and the render share one result)" {
+  LS create >/dev/null; LS create >/dev/null; swept_with_work 01 02
+  export PATH="$(count_git):$PATH"
+  : > "$GIT_LOG"; run board sX; [ "$(listings)" -eq 2 ] || { cat "$GIT_LOG"; return 1; }
+  : > "$GIT_LOG"; run board sX; [ "$(listings)" -eq 2 ] && [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
+  case "$(ctx)" in *"- 01 — swept, 2 unpromoted commits waiting"*"- 02 — swept, 2 unpromoted commits waiting"*) : ;; *) ctx; return 1 ;; esac
+}
