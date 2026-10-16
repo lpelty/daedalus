@@ -164,3 +164,44 @@ PY
   [ -z "$(ls -A "$FH")" ]
   [ ! -e "$FH/.code-review-graph" ]
 }
+
+@test "a session that only talks, plans and writes a spec runs no code-context layer: every hook in the release's settings.json fires, and the graph is never called and state/code-context/ never appears" {
+  use_fake_graph
+  cp "$BATS_TEST_DIRNAME/../../.claude/settings.json" "$DAEDALUS_HOME/.claude/settings.json"
+  mkdir -p "$DAEDALUS_HOME/vault/specs"
+  run python3 - "$DAEDALUS_HOME" <<'PY'
+import json, os, subprocess, sys
+home = sys.argv[1]
+cfg = json.load(open(os.path.join(home, ".claude", "settings.json")))
+env = dict(os.environ, CLAUDE_PROJECT_DIR=home, DAEDALUS_HOME=home)
+spec = os.path.join(home, "vault", "specs", "plan.md")
+base = {"session_id": "sC", "transcript_path": os.path.join(home, "no-transcript.jsonl"), "cwd": home}
+payloads = {
+    "SessionStart": [dict(base, source="startup")],
+    "UserPromptSubmit": [dict(base, prompt="let us brainstorm and plan the spec before any code")],
+    "PreToolUse": [dict(base, tool_name="Bash", tool_input={"command": "ls vault/specs"}),
+                   dict(base, tool_name="Write", tool_input={"file_path": spec, "content": "# plan\n"})],
+    "PostToolUse": [dict(base, tool_name="Bash", tool_input={"command": "ls vault/specs"}, tool_response={"stdout": ""})],
+    "PostToolUseFailure": [dict(base, tool_name="Bash", tool_input={"command": "false"})],
+    "Stop": [dict(base, stop_hook_active=False)],
+    "SessionEnd": [dict(base, reason="exit")],
+    "PreCompact": [dict(base, trigger="auto")],
+}
+ran = 0
+for event, entries in cfg["hooks"].items():
+    for e in entries:
+        for h in e["hooks"]:
+            for p in payloads.get(event, [dict(base)]):
+                try:
+                    subprocess.run(["bash", "-c", h["command"]], input=json.dumps(dict(p, hook_event_name=event)),
+                                   capture_output=True, text=True, env=env, timeout=60)
+                except subprocess.TimeoutExpired:
+                    pass
+                ran += 1
+print(ran)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" -ge 14 ]
+  [ ! -s "$CRG_LOG" ] || { echo "the graph was called:"; cat "$CRG_LOG"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/code-context" ]
+}

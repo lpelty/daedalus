@@ -261,3 +261,21 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "${lines[0]}" = "Code context: 2 changed files no query was near (unasked) — README.md, docs/x.md (3 of 4 predicted files came from rules alone); the log is state/code-context/misses.jsonl." ]
 }
+
+@test "end to end: window 02 asks reach about the file it then changes, also changes a template its query did not name, one gate run fails; the block's record ends with the miss naming the template (template path); the row is logged; the transcribed yes confirms" {
+  run env CLAUDE_CODE_SESSION_ID=sC python3 "$DAEDALUS_HOME/core/context.py" reach pkg/a.py
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "${lines[0]}" in "reach pkg/a.py — window 02, repo thing; "*) : ;; *) echo "${lines[0]}"; return 1 ;; esac
+  printf 'def fa():\n    return 2\n' > "$W2/pkg/a.py"
+  printf 'Run {{APP}}/pkg/b.py and {{APP}}/pkg/a.py\n' > "$W2/templates/e.md.tmpl"
+  git -C "$W2" commit -q -am "a, and the template that runs it"
+  fail_run 'FAILED tests/test_g.py::test_g - flaky'
+  run as_prime bash "$PROMOTE" 02
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$(record_of | tail -1)" in "Code context: 1 changed file and 1 failed test no query named — templates/e.md.tmpl (template path), tests/test_g.py ("*"); the log is state/code-context/misses.jsonl.") : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import json,sys; rows=[json.loads(l) for l in open(sys.argv[1])]; m=[r for r in rows if r.get("file") == "templates/e.md.tmpl"]; assert m and m[0]["kind"] == "template path" and m[0]["queries"] == 1, rows' "$MISSES"
+  shown_then_said "Yes, push it."
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+}
