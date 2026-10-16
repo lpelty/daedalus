@@ -508,7 +508,7 @@ text = re.sub(r"`[^`]*`", "X", sys.argv[1])
 long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.5 section:"; echo "$output"; return 1; }
-  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 2p)" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
+  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.4 — every session can close and commit, and the update keeps a deployment's own vault" ]
 }
 
 # v0.7.4 (a session holding no window can still close): written for the operator, the house parts in order, what a
@@ -535,7 +535,7 @@ text = re.sub(r"`[^`]*`", "X", sys.argv[1])
 long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) > 30]
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.4 section:"; echo "$output"; return 1; }
-  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 3p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
+  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 4p)" = "## v0.7.3 — one command updates Daedalus, and the upgrade no longer outgrows its safety copy" ]
 }
 
 @test "CLAUDE.md says how a session holding no window closes: its log number at start and from lease.sh log, the pen when no live session holds it, lease: none in the frontmatter, and the close order" {
@@ -598,7 +598,7 @@ long = [s.strip() for s in re.split(r"(?<=[.!?:;])\s+", text) if len(s.split()) 
 print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   [ "$status" -eq 0 ] || { echo "sentences over 30 words in the v0.7.3 section:"; echo "$output"; return 1; }
   # v0.7.2 sits right below it
-  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 4p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
+  [ "$(grep '^## v[0-9.]* — ' "$DAEDALUS_HOME/CHANGELOG.md" | sed -n 5p)" = "## v0.7.2 — the vault index rebuilds itself; deleting a window's work and keeping the journal are the agent's again" ]
 }
 
 @test "CHANGELOG: v0.7.2, below v0.7.3, keeps its trunk parts under In detail; v0.7.1 below it — a one-line headline for the tag, then, in short plain sentences, what went wrong, what changed, what you will see, how to take it, and how to tell; the v0.7.0 section below it keeps its shape: what changes, what the first session after the pull shows, what the windows are, how a change reaches trunk, the one paste, what to do if the upgrade stops, and how to tell; In detail below; nothing left unreleased" {
