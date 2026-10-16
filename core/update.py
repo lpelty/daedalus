@@ -6,7 +6,7 @@
 
 The `daedalus` command on PATH is a shim that runs this file with `--home <this home>`. Every path comes from
 --home: this script reads nothing from its own directory (a later release runs it from a temporary copy, and the
-first update runs it from a pipe), never reads stdin, and closes stdin for every program it runs. Standard library
+first update runs it from a temporary file the README's one line saves it to), never reads stdin, and closes stdin for every program it runs. Standard library
 only; the home's own core/upgrade.py is imported for one thing, its liveness check.
 
 `daedalus update`, in order, non-interactive; it either finishes or leaves the home as it was:
@@ -19,7 +19,7 @@ only; the home's own core/upgrade.py is imported for one thing, its liveness che
   4. fetches that trunk and the release tags, then hands off: unless this run is the home's own core/update.py and
      that file equals the release's, the release's copy is written to a fresh temporary directory outside the home
      and runs in this one's place (--handed-off, holding this run's lock through --lock-fd), so the rules that move
-     a home are always the release's; a script read from a pipe cannot be compared, so it always hands off;
+     a home are always the release's; a script run from a temporary file or a pipe always hands off;
   5. with the home already at the remote trunk: says it is up to date (and finishes a stopped upgrade first);
   6. classifies every path where the working tree or HEAD differs from the release, judged against every copy
      of that path on the release's history: a local change outside CLAUDE.md and .claude/settings.json, an
@@ -1410,8 +1410,8 @@ def git_blob_of(home: Path, data: bytes) -> str:
 
 def running_release_copy(home: Path, ref: str) -> bool:
     """True when this run is the home's own core/update.py, a real file, whose blob equals <ref>:core/update.py.
-    A script read from a pipe (python3 /dev/stdin, python3 <(...)) cannot re-read its own text, so it is never
-    taken for the release's."""
+    A script run from anywhere else — a temporary file (the README's first-update line), a pipe (python3
+    /dev/stdin) — is never taken for the release's: it always hands off to the release's own copy."""
     me = os.path.realpath(globals().get("__file__") or "")
     mine = home / SELF
     if not me or me != os.path.realpath(str(mine)) or not mine.is_file():

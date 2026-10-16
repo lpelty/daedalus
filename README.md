@@ -149,11 +149,13 @@ Close every Daedalus window and type this one line in a terminal, with your
 home's path in place of `~/daedalus`:
 
 ```
-python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus
+(f="$(mktemp)" && { git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py >"$f"; } 2>/dev/null || { echo "Not updated: could not fetch the update from github.com/lpelty/daedalus. Nothing in this home was changed." >&2; rm -f "$f"; exit 1; }; python3 "$f" update --home ~/daedalus; s=$?; rm -f "$f"; exit $s)
 ```
 
-It names no remote: it fetches the release's own address and runs that
-release's update, which then picks the home's remote by address. Or say to an
+It names no remote: it fetches the release's own address, saves that
+release's update to a temporary file and runs it; the update then picks the
+home's remote by address. If the fetch fails, it says so in one line and
+changes nothing. Or say to an
 agent on that machine: "Close every Daedalus window, then run the first-update
 line from the Daedalus README's Upgrading section on GitHub,
 github.com/lpelty/daedalus." From then on, `daedalus update` is the whole

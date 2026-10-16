@@ -346,12 +346,17 @@ Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
   [ "$(printf '%s\n' "$output" | tail -n 1)" = "Daedalus updated $N -> $N1; doctor OK." ] || { echo "$output"; return 1; }
 }
 
+# the first-update line: no process substitution (auto mode refused it); the fetched update.py goes to a temp file
+FIRST_LINE='(f="$(mktemp)" && { git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py >"$f"; } 2>/dev/null || { echo "Not updated: could not fetch the update from github.com/lpelty/daedalus. Nothing in this home was changed." >&2; rm -f "$f"; exit 1; }; python3 "$f" update --home ~/daedalus; s=$?; rm -f "$f"; exit $s)'
+
 @test "bootstrap: the README's first-update line, run literally under bash and under zsh on a home with no core/update.py, updates it" {
-  LINE='python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus'
-  # the README and the v0.7.3 CHANGELOG section carry exactly this line, on a line of its own
+  LINE="$FIRST_LINE"
+  # the README and the v0.7.3 and v0.7.4 CHANGELOG sections carry exactly this line, on a line of its own; no <( anywhere
   for f in README.md CHANGELOG.md; do
     grep -qxF "$LINE" "$REPO/$f" || { echo "$f's first-update line is not the one tested"; return 1; }
+    ! grep -qF '<(' "$REPO/$f" || { echo "$f still has a process substitution"; return 1; }
   done
+  [ "$(grep -cxF "$LINE" "$REPO/CHANGELOG.md")" = 2 ]
   R3="$B/old.git"; SEED_OLD=1 seed_release "$R3" main
   local url='https://github.com/lpelty/daedalus.git'
   local here="${LINE//"$url"/$R3}" sh i=0
@@ -366,6 +371,26 @@ Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
     [ "$(git -C "$HOME/daedalus" rev-parse HEAD)" = "$(trunk_sha "$R3")" ]
     [ -f "$HOME/daedalus/core/update.py" ]
   done
+}
+
+@test "bootstrap: when the fetch fails the line exits 1 with one Daedalus sentence and leaves no temp file; the update's own exit passes through; the terminal it runs in survives" {
+  export TMPDIR="$B/tmp"; mkdir -p "$TMPDIR"
+  local url='https://github.com/lpelty/daedalus.git'
+  local here="${FIRST_LINE//"$url"/$B/no-such-release.git}"
+  here="${here//\~\/daedalus/$H}"
+  run --separate-stderr bash -c "$here" </dev/null
+  [ "$status" -eq 1 ] || { echo "status $status: $output $stderr"; return 1; }
+  [ "$stderr" = "Not updated: could not fetch the update from github.com/lpelty/daedalus. Nothing in this home was changed." ] || { echo "$stderr"; return 1; }
+  [ -z "$(ls -A "$TMPDIR")" ] || { ls -A "$TMPDIR"; return 1; }
+  run bash -c "$here; echo after" </dev/null
+  [ "${lines[${#lines[@]}-1]}" = after ] || { echo "$output"; return 1; }
+  # a reachable release: the update runs, its exit passes through, and the temp file is gone
+  local ok="${FIRST_LINE//"$url"/$R}"; ok="${ok//\~\/daedalus/$H}"
+  printf '# local\n' >> "$H/core/lease.sh"
+  run bash -c "$ok" </dev/null
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updated: core/lease.sh carries local changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -z "$(ls -A "$TMPDIR")" ] || { ls -A "$TMPDIR"; return 1; }
 }
 
 # --- the local-layer migration (Decisions 4, 15, 16, 21; §4.3, §5.6 tests 20-22, 33-36, 39, 40) ---------------------

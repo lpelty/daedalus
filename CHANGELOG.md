@@ -79,7 +79,16 @@ vault, and a pen left by a session that has ended moves on by itself.
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
 in a terminal. It prints `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.` There
-is no migration: the upgrade only writes the new stamp.
+is no migration: the upgrade only writes the new stamp. A home older than
+v0.7.3 has no `daedalus` command yet; type this one line instead, with your
+home's path in place of `~/daedalus`:
+
+```
+(f="$(mktemp)" && { git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py >"$f"; } 2>/dev/null || { echo "Not updated: could not fetch the update from github.com/lpelty/daedalus. Nothing in this home was changed." >&2; rm -f "$f"; exit 1; }; python3 "$f" update --home ~/daedalus; s=$?; rm -f "$f"; exit $s)
+```
+
+It replaces the earlier first-update line, which auto mode refused. It saves
+the fetched update to a temporary file, runs it, and removes the file.
 
 **How to tell you have it.** `cat VERSION` prints `0.7.4`. `daedalus version`
 prints `Daedalus 0.7.4`, with the home, the remote and the tag. `core/doctor.sh`
@@ -173,7 +182,7 @@ This one time takes a longer line. Close every Daedalus window, then type it
 in a terminal, with your home's path in place of `~/daedalus`:
 
 ```
-python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus
+(f="$(mktemp)" && { git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py >"$f"; } 2>/dev/null || { echo "Not updated: could not fetch the update from github.com/lpelty/daedalus. Nothing in this home was changed." >&2; rm -f "$f"; exit 1; }; python3 "$f" update --home ~/daedalus; s=$?; rm -f "$f"; exit $s)
 ```
 
 It names no remote, so it works whatever your remotes are called. Or say to

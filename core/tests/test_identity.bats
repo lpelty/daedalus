@@ -559,7 +559,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
            'Upgrade to 0.7.3: complete.' '`cat VERSION` prints `0.7.3`' 'mods/lease-board/tsconfig.json'; do
     case "$rel" in *"$s"*) : ;; *) echo "the v0.7.3 section lacks: $s"; return 1 ;; esac
   done
-  printf '%s\n' "$sec" | grep -qxF 'python3 <(git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py) update --home ~/daedalus' \
+  printf '%s\n' "$sec" | grep -qxF '(f="$(mktemp)" && { git -C ~/daedalus fetch -q https://github.com/lpelty/daedalus.git main && git -C ~/daedalus show FETCH_HEAD:core/update.py >"$f"; } 2>/dev/null || { echo "Not updated: could not fetch the update from github.com/lpelty/daedalus. Nothing in this home was changed." >&2; rm -f "$f"; exit 1; }; python3 "$f" update --home ~/daedalus; s=$?; rm -f "$f"; exit $s)' \
     || { echo "the v0.7.3 section lacks the first-update line on a line of its own"; return 1; }
   ! printf '%s\n' "$sec" | grep -qiE 'smartsheet|employer' || { echo "the v0.7.3 section names an employer"; return 1; }
   ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara' || { echo "the v0.7.3 section names an agent"; return 1; }
