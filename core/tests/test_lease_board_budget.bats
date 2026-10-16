@@ -19,7 +19,7 @@ under() {  # under <t0> <t1> <secs> <what>
 }
 # timed_board <sid> — one prompt through PATH (as set by the caller); $output, $status, and the wall time checked < 4.5 s
 timed_board() {
-  local t0 t1; t0="$(now)"; run board "$1"; t1="$(now)"
+  local t0 t1; t0="$(now)"; run --separate-stderr board "$1"; t1="$(now)"
   [ "$status" -eq 0 ] || { echo "exit $status: $output"; return 1; }
   under "$t0" "$t1" 4.5 "prompt" || { ctx; return 1; }
 }
@@ -85,7 +85,7 @@ UNCHECKED_LINE() { printf -- "- %s — swept; not checked for unpromoted work th
 fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(8)' "$DAEDALUS_HOME/state/leases/.lock" 3>&- </dev/null >/dev/null 2>&1 &
   holder=$!; printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
   sleep 0.5
-  t0="$(now)"; run board sA; t1="$(now)"; kill "$holder" 2>/dev/null || true
+  t0="$(now)"; run --separate-stderr board sA; t1="$(now)"; kill "$holder" 2>/dev/null || true
   [ "$status" -eq 0 ]; under "$t0" "$t1" 3.3 "busy prompt"
   [ "$(ctx)" = "the lease lock stayed busy (a window is being made or swept); the board draws at your next prompt, or run \`core/lease.sh list\` to wait for it" ] || { ctx; return 1; }
 }
@@ -128,8 +128,8 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
 
 @test "cache (a): the second prompt on an unchanged fixture runs no check at all — one tip listing per repo, no log, no merge-base, no --merged" {
   four_repos 02 03 04; export PATH="$(count_git):$PATH"
-  run board sA; [ "$status" -eq 0 ]
-  : > "$GIT_LOG"; run board sA; [ "$status" -eq 0 ]
+  run --separate-stderr board sA; [ "$status" -eq 0 ]
+  : > "$GIT_LOG"; run --separate-stderr board sA; [ "$status" -eq 0 ]
   [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
   [ "$(listings)" -eq 4 ] || { cat "$GIT_LOG"; return 1; }
   for r in thing thing/sub thing/sub2 thing/sub3; do [ "$(grep -c "/target/$r"$'\tfor-each-ref --format' "$GIT_LOG")" -eq 1 ]; done
@@ -138,17 +138,17 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
 
 @test "cache (b)(c): a new commit on lease/03 in one repo recomputes that pair only; the trunk advanced in one repo is one --merged there, and the promoted work leaves the line" {
   four_repos 02 03 04; export PATH="$(count_git):$PATH"
-  run board sA; run board sA
+  run --separate-stderr board sA; run --separate-stderr board sA
   W="$DAEDALUS_HOME/worktrees/03/thing/sub2"; printf 'more\n' >> "$W/w.txt"
   git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "more 03 in sub2"
-  : > "$GIT_LOG"; run board sA
+  : > "$GIT_LOG"; run --separate-stderr board sA
   [ "$(checks)" -eq 1 ] && grep -q $'/target/thing/sub2\tlog --format=%H' "$GIT_LOG" || { cat "$GIT_LOG"; return 1; }
   case "$(ctx)" in *"- 03 — swept, 5 unpromoted commits waiting ("*"more 03 in sub2"*) : ;; *) ctx; return 1 ;; esac
   # 02's work in sub lands on sub's trunk (from another clone, the way it happens), and target/thing/sub fetches it
   E="$BATS_TEST_TMPDIR/promoter"; git clone -q "$BATS_TEST_TMPDIR/sub-origin.git" "$E"
   git -C "$E" fetch -q "$DAEDALUS_HOME/target/thing/sub" lease/02; git -C "$E" push -q origin FETCH_HEAD:main
   git -C "$DAEDALUS_HOME/target/thing/sub" fetch -q origin
-  : > "$GIT_LOG"; run board sA
+  : > "$GIT_LOG"; run --separate-stderr board sA
   [ "$(grep -c $'\tfor-each-ref --merged' "$GIT_LOG")" -eq 1 ] && grep -q $'/target/thing/sub\tfor-each-ref --merged' "$GIT_LOG" || { cat "$GIT_LOG"; return 1; }
   ! grep -qE $'/target/thing(/sub2|/sub3)?\tlog --format=%H' "$GIT_LOG" || { cat "$GIT_LOG"; return 1; }
   c="$(ctx)"
@@ -176,15 +176,15 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
 
 @test "cache (e): pruning — a claimed window's entries go, a deleted branch's entries go, a repo whose listing fails keeps its entries" {
   four_repos 02 03 04
-  run board sA; cache_check 'len(d["entries"]) == 12'
+  run --separate-stderr board sA; cache_check 'len(d["entries"]) == 12'
   bind_live 02 sB
-  run board sA; cache_check 'not any(k.startswith("02 ") for k in d["entries"]) and len(d["entries"]) == 8'
+  run --separate-stderr board sA; cache_check 'not any(k.startswith("02 ") for k in d["entries"]) and len(d["entries"]) == 8'
   for r in thing thing/sub thing/sub2 thing/sub3; do git -C "$DAEDALUS_HOME/target/$r" update-ref -d refs/heads/lease/03; done
-  run board sA; cache_check 'sorted(d["entries"]) == ["04 thing", "04 thing/sub", "04 thing/sub2", "04 thing/sub3"]'
+  run --separate-stderr board sA; cache_check 'sorted(d["entries"]) == ["04 thing", "04 thing/sub", "04 thing/sub2", "04 thing/sub3"]'
   export PATH="$(count_git):$PATH" FAKE_GIT_FAIL_ON="for-each-ref" FAKE_GIT_FAIL_IN="/thing/sub2"
   rm -f "$DAEDALUS_HOME/worktrees/04/thing/sub2/.git" 2>/dev/null; git -C "$DAEDALUS_HOME/target/thing/sub2" update-ref -d refs/heads/lease/04
   W="$DAEDALUS_HOME/worktrees/04/thing"; printf 'x\n' >> "$W/w.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "04 again"
-  run board sA
+  run --separate-stderr board sA
   case "$(ctx)" in *"- target/thing/sub2's lease branches were not listed this time (git for-each-ref failed: fatal: Unable to create"*"run \`core/lease.sh list\` to check them"*) : ;; *) ctx; return 1 ;; esac
   cache_check '"04 thing/sub2" in d["entries"]'      # unlisted: kept, although its branch is gone
 }
@@ -196,25 +196,25 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
     board sA >/dev/null 2>&1 & a=$!; board sA >/dev/null 2>&1 & b=$!; wait "$a" "$b"
     cache_check 'd["v"] == 1' || { echo "round $i"; return 1; }
   done
-  run board sA; export PATH="$(count_git):$PATH"; : > "$GIT_LOG"; run board sA
+  run --separate-stderr board sA; export PATH="$(count_git):$PATH"; : > "$GIT_LOG"; run --separate-stderr board sA
   [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
 }
 
 @test "cache (g): the history view — a replace ref, info/grafts, or shallow in one repo misses that repo's pairs only; with the replace ref the board agrees with waiting-work; no --no-replace-objects on the check path" {
   four_repos 02 03; export PATH="$(count_git):$PATH"
-  run board sA
+  run --separate-stderr board sA
   T="$DAEDALUS_HOME/target/thing"
   git -C "$T" replace --graft "$(git -C "$T" rev-parse refs/remotes/origin/main)" "$(git -C "$T" rev-parse refs/heads/lease/03)"   # the trunk now descends from 03
-  : > "$GIT_LOG"; run board sA
+  : > "$GIT_LOG"; run --separate-stderr board sA
   ! grep -qE $'/target/thing/sub[23]?\t(log --format=%H|for-each-ref --merged)' "$GIT_LOG" || { cat "$GIT_LOG"; return 1; }
   grep -qE $'/target/thing\t(log --format=%H|for-each-ref --merged)' "$GIT_LOG" || { cat "$GIT_LOG"; return 1; }
   [ -z "$(LL waiting-work 03)" ]       # through the replace ref, the trunk contains 03's outer commit
   case "$(ctx)" in *"- 03 — swept, 3 unpromoted commits waiting (\"work 03 in sub\", "*) : ;; *) ctx; return 1 ;; esac
   ! grep -q -- '--no-replace-objects' "$GIT_LOG"
   for f in info/grafts shallow; do
-    run board sA
+    run --separate-stderr board sA
     mkdir -p "$DAEDALUS_HOME/target/thing/sub2/.git/info"; : > "$DAEDALUS_HOME/target/thing/sub2/.git/$f"
-    : > "$GIT_LOG"; run board sA
+    : > "$GIT_LOG"; run --separate-stderr board sA
     grep -qE $'/target/thing/sub2\t(log --format=%H|for-each-ref --merged)' "$GIT_LOG" || { echo "$f"; cat "$GIT_LOG"; return 1; }
     ! grep -qE $'/target/thing(/sub|/sub3)?\t(log --format=%H|for-each-ref --merged)' "$GIT_LOG" || { echo "$f"; cat "$GIT_LOG"; return 1; }
     rm -f "$DAEDALUS_HOME/target/thing/sub2/.git/$f"
@@ -223,7 +223,7 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
 
 @test "cache (h): written only on change — an all-hits prompt leaves the mtime; a home with no swept window never gets the file; doctor-lines with misses leaves state/leases/ byte-identical" {
   LS create >/dev/null; bind_live 01 sA
-  run board sA; run board sA; [ ! -e "$(CACHE)" ]
+  run --separate-stderr board sA; run --separate-stderr board sA; [ ! -e "$(CACHE)" ]
   LS create >/dev/null; swept_with_work 02
   L="$DAEDALUS_HOME/state/leases"
   before="$(cd "$L" && shasum -a 256 * | sort)"; mt="$(cd "$L" && stat -f '%N %Fm' * | sort)"
@@ -231,16 +231,16 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
   case "$output" in *"NOTE     leases: 02 swept with 2 unpromoted commits waiting"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(cd "$L" && shasum -a 256 * | sort)" = "$before" ]; [ "$(cd "$L" && stat -f '%N %Fm' * | sort)" = "$mt" ]
   [ ! -e "$(CACHE)" ]
-  run board sA; [ -f "$(CACHE)" ]
+  run --separate-stderr board sA; [ -f "$(CACHE)" ]
   touch -t 202001010000 "$(CACHE)"; m="$(stat -f %Fm "$(CACHE)")"
-  run board sA; [ "$(stat -f %Fm "$(CACHE)")" = "$m" ]
+  run --separate-stderr board sA; [ "$(stat -f %Fm "$(CACHE)")" = "$m" ]
 }
 
 @test "cache (i): a .unpromoted-*.tmp older than 60 s is removed by the next write; a younger one is left" {
   LS create >/dev/null; bind_live 01 sA; LS create >/dev/null; swept_with_work 02
   L="$DAEDALUS_HOME/state/leases"
   : > "$L/.unpromoted-old111.tmp"; touch -t 202001010000 "$L/.unpromoted-old111.tmp"; : > "$L/.unpromoted-new222.tmp"
-  run board sA; [ -f "$(CACHE)" ]
+  run --separate-stderr board sA; [ -f "$(CACHE)" ]
   [ ! -e "$L/.unpromoted-old111.tmp" ]; [ -e "$L/.unpromoted-new222.tmp" ]
   [ "$(ls "$L" | grep -c '\.json$')" -eq 1 ]      # the cache and its temps are never *.json
 }
@@ -253,7 +253,7 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
   git -C "$W" -c user.email=t@x -c user.name=t commit -q -a --allow-empty-message -m ""
   rm -f "$DAEDALUS_HOME/state/leases/03.json" "$DAEDALUS_HOME/state/leases/03.seen" "$DAEDALUS_HOME/state/leases/03.changed"
   run LL waiting-work 03; [ "$output" = "(no subject)" ] || { echo "$output"; return 1; }
-  run board sA; case "$(ctx)" in *"- 03 — swept, 1 unpromoted commit waiting (\"(no subject)\")"*) : ;; *) ctx; return 1 ;; esac
+  run --separate-stderr board sA; case "$(ctx)" in *"- 03 — swept, 1 unpromoted commit waiting (\"(no subject)\")"*) : ;; *) ctx; return 1 ;; esac
   run LS create; [ -f "$DAEDALUS_HOME/state/leases/04.json" ]; [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]
   # reclaim: window 02 stale (dead recorded pid), clean, its only unpromoted commit message-less
   W="$DAEDALUS_HOME/worktrees/02/thing"; printf 'e\n' >> "$W/a.txt"
@@ -271,11 +271,11 @@ d=json.load(sys.stdin); assert d["trunk"]=="main" and len(d["trunk_sha"])==40 an
   run LS create; case "$output" in *"Reclaimed window 02"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]; [ -f "$DAEDALUS_HOME/state/leases/03.json" ]
   cache_check 'sorted(d["entries"]) == ["02 thing", "02 thing/sub"] and all(e["subjects"] == [] for e in d["entries"].values())'
-  export PATH="$(count_git):$PATH"; : > "$GIT_LOG"; run board sA
+  export PATH="$(count_git):$PATH"; : > "$GIT_LOG"; run --separate-stderr board sA
   [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
   case "$(ctx)" in *"- 02 "*) ctx; return 1 ;; esac
   W="$DAEDALUS_HOME/worktrees/02/thing"; printf 'later\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "later work"
-  run board sA; case "$(ctx)" in *"- 02 — swept, 1 unpromoted commit waiting (\"later work\")"*) : ;; *) ctx; return 1 ;; esac
+  run --separate-stderr board sA; case "$(ctx)" in *"- 02 — swept, 1 unpromoted commit waiting (\"later work\")"*) : ;; *) ctx; return 1 ;; esac
 }
 
 # --- Task 6: the partial board ----------------------------------------------------------------------------------------
@@ -288,7 +288,7 @@ complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted comm
 @test "partial board: 6 swept x 4 repos, empty cache, every check log sleeping 0.4 s — prompt 1 draws what it finished and the exact 'not checked' line for the rest within 3.3 s; later prompts finish monotonically; the end agrees with lease.sh list" {
   four_repos 02 03 04 05 06 07
   export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:--format=%H" FAKE_GIT_SLEEP=0.4
-  t0="$(now)"; run board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 3.3 "prompt 1"
+  t0="$(now)"; run --separate-stderr board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 3.3 "prompt 1"
   c="$(ctx)"; printf '# prompt 1:\n%s\n' "$(swept_lines | sed 's/^/#   /')" >&3
   case "$c" in *"$(UNCHECKED_LINE 07)"*) : ;; *) echo "$c"; return 1 ;; esac
   for nn in 02 03 04 05 06 07; do
@@ -299,7 +299,7 @@ complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted comm
   prev="$(complete_count)"; p=1; pairs="$(cache_count)"
   while ctx | grep -qE 'not checked|at least'; do
     p=$((p + 1)); [ "$p" -le 10 ] || { echo "never finished"; ctx; return 1; }
-    t0="$(now)"; run board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 4.5 "prompt $p"
+    t0="$(now)"; run --separate-stderr board sA; t1="$(now)"; [ "$status" -eq 0 ]; under "$t0" "$t1" 4.5 "prompt $p"
     n="$(complete_count)"; m="$(cache_count)"
     [ "$m" -gt "$pairs" ] || { echo "no answer added at prompt $p ($pairs pairs)"; ctx; return 1; }
     [ "$n" -ge "$prev" ] || { echo "went back at prompt $p"; return 1; }; prev="$n"; pairs="$m"
@@ -314,7 +314,7 @@ complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted comm
   four_repos 02 03
   git -C "$DAEDALUS_HOME/target/thing/sub2" update-ref -d refs/heads/lease/02
   export PATH="$(count_git):$PATH" FAKE_GIT_FAIL_ON="log:--format=%H" FAKE_GIT_FAIL_IN="/thing/sub2"
-  run board sA; [ "$status" -eq 0 ]; c="$(ctx)"
+  run --separate-stderr board sA; [ "$status" -eq 0 ]; c="$(ctx)"
   case "$c" in *"- 03 — swept; cannot tell whether lease/03 has unpromoted work in thing/sub2 (git log origin/main..lease/03 failed: fatal: Unable to create '"*"index.lock': File exists.); run \`git -C target/thing/sub2 log -1 refs/heads/lease/03\` to see the error"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"- 02 — swept, 3 unpromoted commits waiting ("*) : ;; *) echo "$c"; return 1 ;; esac
   run LL doctor-lines
@@ -411,8 +411,8 @@ start_hook() { hook_json SessionStart "$1" | python3 "$DAEDALUS_HOME/core/sessio
 @test "no numbered lease and 2 swept windows: one tip listing per repo per prompt (the empty-board test and the render share one result)" {
   LS create >/dev/null; LS create >/dev/null; swept_with_work 01 02
   export PATH="$(count_git):$PATH"
-  : > "$GIT_LOG"; run board sX; [ "$(listings)" -eq 2 ] || { cat "$GIT_LOG"; return 1; }
-  : > "$GIT_LOG"; run board sX; [ "$(listings)" -eq 2 ] && [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
+  : > "$GIT_LOG"; run --separate-stderr board sX; [ "$(listings)" -eq 2 ] || { cat "$GIT_LOG"; return 1; }
+  : > "$GIT_LOG"; run --separate-stderr board sX; [ "$(listings)" -eq 2 ] && [ "$(checks)" -eq 0 ] || { cat "$GIT_LOG"; return 1; }
   case "$(ctx)" in *"- 01 — swept, 2 unpromoted commits waiting"*"- 02 — swept, 2 unpromoted commits waiting"*) : ;; *) ctx; return 1 ;; esac
 }
 
@@ -442,7 +442,7 @@ start_hook() { hook_json SessionStart "$1" | python3 "$DAEDALUS_HOME/core/sessio
 fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(8)' "$DAEDALUS_HOME/state/leases/.lock" 3>&- </dev/null >/dev/null 2>&1 &
   holder=$!; printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
   sleep 0.5
-  run board sA; kill "$holder" 2>/dev/null || true
+  run --separate-stderr board sA; kill "$holder" 2>/dev/null || true
   [ "$status" -eq 0 ]; c="$(ctx)"
   case "$c" in *"the lease lock stayed busy"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"9.9.9"*) : ;; *) echo "no pending line: $c"; return 1 ;; esac
