@@ -1791,3 +1791,19 @@ PY
     [ "$output" = None ] || { echo "$output"; return 1; }
   fi
 }
+
+@test "code-review-graph run directly is refused through every wrapper the guard unwraps; core/context.py is its only caller; naming it as data is allowed (code-context design departure 7)" {
+  why="core/context.py is code-review-graph's only caller; run python3 core/context.py <verb>"
+  for c in 'code-review-graph install' '/opt/crg/.venv/bin/code-review-graph init' 'env HOME=/tmp code-review-graph build' \
+           'sudo code-review-graph register' 'timeout 30 code-review-graph daemon' 'nohup code-review-graph serve' \
+           'bash -c "code-review-graph mcp"' 'cd target/thing && code-review-graph watch' 'python3 -m code_review_graph install' \
+           '/opt/crg/.venv/bin/python -m code_review_graph.cli build' 'uvx code-review-graph init' 'uvx code-review-graph==2.3.9 install' \
+           'uv run code-review-graph build' 'pipx run code-review-graph init' 'x=1 code-review-graph -v'; do
+    run guard "$c"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"$why"*) : ;; *) echo "reason for $c: $output"; return 1 ;; esac
+  done
+  for c in 'ls /opt/crg/.venv/bin/code-review-graph' 'grep -n code-review-graph README.md' 'echo code-review-graph' \
+           'python3 core/context.py reach a.py' 'cat README.md | grep code_review_graph'; do
+    run guard "$c"; allowed || { echo "denied: $c -> $output"; return 1; }
+  done
+}

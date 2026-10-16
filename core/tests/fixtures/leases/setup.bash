@@ -9,7 +9,7 @@ lease_fixture() {
            "$DAEDALUS_HOME/vault/sessions" "$BATS_TEST_TMPDIR/sessions"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
   for f in lease.sh lease-board.py session-start.py boundary-hook.py guard-bash.py verify-hook.py \
-           fingerprint.sh gates.sh manifest-append.py vault-commit.sh pitfall-inject.py code-context.py \
+           fingerprint.sh gates.sh manifest-append.py vault-commit.sh pitfall-inject.py context.py context-rules.json \
            transcriptlib.py capture.py prepush.py distcheck.py upgrade.py update.py capture-tick.sh \
            amilib.py frame-jack.py ami-daemon.py ami-hook.py; do
     [ -f "$SRC/$f" ] && cp "$SRC/$f" "$DAEDALUS_HOME/core/"

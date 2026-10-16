@@ -2683,6 +2683,37 @@ def switch_verb_denied(seg: List[str], g: G) -> Optional[str]:
 CD_FLAGS = "LPe@"      # bash's cd options (zsh's -q and -s too): none moves the directory elsewhere
 
 
+# Code-context design departure 7 (v0.9.0): core/context.py is code-review-graph's only caller. Run directly, the
+# tool's install/init/register/daemon/serve/mcp/watch commands write MCP entries, hooks, skills and rule files into
+# the coding tools' configuration or a registry under the home; core/context.py runs only build, update, query and
+# impact, with HOME, CRG_HOME and CRG_DATA_DIR under state/code-context/. Refused as the executable (behind every
+# runner exec_index looks through), as `python -m code_review_graph`, and as a package runner's argument
+# (`uvx code-review-graph==2.3.9 …`). Naming it as data (`ls`, `grep`, `echo`) is not running it.
+CRG_DENY = "core/context.py is code-review-graph's only caller; run python3 core/context.py <verb>"
+CRG_NAME = "code-review-graph"
+CRG_MODULE = re.compile(r"code_review_graph(\..*)?$")
+PKG_RUNNERS = {"uvx", "uv", "pipx"}
+
+
+def runs_code_review_graph(seg: List[str]) -> bool:
+    head = os.path.basename(seg[0])
+    if head in DATA_HEADS:
+        return False
+    run = seg[exec_index(seg, RUN_HEADS | {CRG_NAME}):]
+    rhead = os.path.basename(run[0])
+    if rhead == CRG_NAME:
+        return True
+    if rhead in INTERPRETERS or re.fullmatch(r"python[0-9.]*", rhead):
+        for i, t in enumerate(run[1:], 1):
+            if t == "-m" and i + 1 < len(run) and CRG_MODULE.match(run[i + 1]):
+                return True
+            if t.startswith("-m") and CRG_MODULE.match(t[2:]):
+                return True
+    if head in PKG_RUNNERS:
+        return any(re.split(r"[=@<>~!\[]", os.path.basename(t), 1)[0] == CRG_NAME for t in seg[1:])
+    return False
+
+
 def cd_target(seg: List[str], here: Path, cmd: str) -> Path:
     """Where `cd` / `pushd` / `popd` leave the shell (critic-fix review, finding 2): options are read as the shell
     reads them — -L, -P, -e, -@ (a flag run of them, `-LP`) and `--` before the directory, which is the first operand
@@ -2878,6 +2909,8 @@ def check_segment(raw: List[str], piped: List[str], bodies: List[str], cmd: str,
     reason = switch_verb_denied(seg, g)
     if reason:
         return reason, [], here, branch_created
+    if runs_code_review_graph(seg):
+        return CRG_DENY, [], here, branch_created
     k = exec_index(seg, RUN_HEADS)
     run = seg[k:]
     rhead = os.path.basename(run[0])

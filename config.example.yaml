@@ -173,9 +173,6 @@ recall:
   # Store location: a relative path resolved under the Daedalus home.
   # Absolute paths and ".." are rejected.
   store: state/chroma
-  # Code context engine (optional). Pin the version: an unpinned uvx ruff
-  # floats to latest and un-certifies the JSON shape the hook parses.
-  ruff: 'uvx ruff@0.16.5'
 
 leases:
   # How long a window may go without a prompt before the board calls it

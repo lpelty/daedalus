@@ -230,7 +230,7 @@ PY
   [ -z "$uncovered" ] || { echo "permission surface unprotected:$uncovered"; return 1; }
 }
 
-@test "settings.json parses with unique keys and every wired hook event survives" {
+@test "settings.json parses with unique keys, every wired hook event survives, and no hook runs the code-context layer" {
   cd "$DAEDALUS_HOME"
   # The verify-stage merge produced two top-level "hooks" keys; JSON parsers
   # keep the last, so SessionStart, guard-bash, boundary, and the verify Stop
@@ -259,20 +259,19 @@ if missing:
 
 cmds = json.dumps(cfg["hooks"])
 for script in ("session-start.py", "guard-bash.py", "pitfall-inject.py",
-               "boundary-hook.py", "verify-hook.py", "code-context.py"):
+               "boundary-hook.py", "verify-hook.py"):
     if script not in cmds:
         sys.exit("hook script not wired in effective config: %s" % script)
 
-pre = cfg["hooks"].get("PreToolUse", [])
-placed = any(
-    e.get("matcher") == "Edit|Write"
-    and any("code-context.py" in h.get("command", "") for h in e.get("hooks", []))
-    for e in pre)
-if not placed:
-    sys.exit("code-context.py must be a PreToolUse entry with matcher Edit|Write")
-compact = json.dumps(cfg["hooks"].get("PreCompact", []))
-if "code-context.py" not in compact:
-    sys.exit("code-context.py must also be wired on PreCompact (seen-state reset)")
+# v0.9.0 (code-context design §4, Decision 2): the code-context layer runs only
+# when invoked, so no hook command anywhere names core/code-context.py (the
+# retired edit-time hook) or core/context.py (the command that replaced it).
+for event, entries in cfg["hooks"].items():
+    for e in entries:
+        for h in e.get("hooks", []):
+            c = h.get("command", "")
+            if "code-context.py" in c or "context.py" in c:
+                sys.exit("a hook runs the code-context layer (%s: %s); it must run only when invoked" % (event, c))
 PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

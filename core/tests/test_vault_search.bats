@@ -316,8 +316,6 @@ EOF
   [ "$v" = '<command that (re)indexes the vault into the store>' ]
   v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.store')"
   [ "$v" = 'state/chroma' ]
-  v="$(cd "$DAEDALUS_HOME" && bash -c 'source core/lib.sh; cfg recall.ruff')"
-  [ "$v" = 'uvx ruff@0.16.5' ]
 }
 
 @test "index refuses from a non-prime session, runs for the prime under a non-blocking lock, and says 'already running' when held; --check for a clone names the prime" {

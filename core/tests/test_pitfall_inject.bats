@@ -535,7 +535,7 @@ EOF
 }
 
 @test "no private target_root wrapper: neither hook shells to target_path on its own; a path pitfall fires under worktrees/02 for a bound session and for an unbound one (the banner carries the §4.4 sentence); --check under Refused prints the sentence" {
-  run grep -c "source \"\$1\"; target_path" "$SRC/pitfall-inject.py" "$SRC/code-context.py"; [ "$(printf '%s\n' "$output" | awk -F: '{s+=$2} END {print s}')" -eq 0 ]
+  run grep -cH "source \"\$1\"; target_path" "$SRC/pitfall-inject.py"; [ "$(printf '%s\n' "$output" | awk -F: '{s+=$2} END {print s}')" -eq 0 ]
   cp "$SRC/verifylib.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
   use_fixture bb-bats-brackets
   mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/worktrees/02/thing" "$DAEDALUS_HOME/worktrees/03/thing"
