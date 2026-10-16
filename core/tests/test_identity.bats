@@ -402,8 +402,8 @@ _run_scan_in_fixture() {
   run grep -qF 'incremental capture (plan 2)' "$DAEDALUS_HOME/CHANGELOG.md"; [ "$status" -ne 0 ]
 }
 
-@test "VERSION is one line, 0.7.4; the wide scan reads VERSION and docs/, which publish (spec §14)" {
-  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.4" ]
+@test "VERSION is one line, 0.7.5; the wide scan reads VERSION and docs/, which publish (spec §14)" {
+  [ "$(cat "$DAEDALUS_HOME/VERSION")" = "0.7.5" ]
   [ "$(wc -l < "$DAEDALUS_HOME/VERSION" | tr -d ' ')" = 1 ]
   _make_fixture_repo
   mkdir -p "$fixture/docs"
