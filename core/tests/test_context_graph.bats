@@ -205,3 +205,53 @@ PY
   [ ! -s "$CRG_LOG" ] || { echo "the graph was called:"; cat "$CRG_LOG"; return 1; }
   [ ! -e "$DAEDALUS_HOME/state/code-context" ]
 }
+
+@test "a rebuild cut short by what is left of graph_budget is skipped, not build-failed: the next query builds; a rebuild that fails on its own is named a rebuild" {
+  use_fake_graph 4 3.5
+  run as_window python3 "$CX" importers pkg/core.py
+  [ "$status" -eq 0 ]; case "${lines[0]}" in *"; graph built ("*) : ;; *) echo "${lines[0]}"; return 1 ;; esac
+  crg_knob SLEEP_UPDATE=2; crg_knob FAIL_UPDATE=1; crg_knob SLEEP_BUILD=3
+  run as_window python3 "$CX" importers pkg/core.py --json
+  [ "$status" -eq 0 ]
+  python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["graph"]["state"] == "skipped", d["graph"]' "$output"
+  ! python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m.get("state") == "build-failed", m' "$DAEDALUS_HOME/state/code-context/02/thing/meta.json" 2>/dev/null
+  sleep 0.2; [ -z "$(pgrep -f "$CRG_DIR")" ]
+  : > "$CRG_DIR/fake-crg.env"
+  run as_window python3 "$CX" importers pkg/core.py
+  [ "$status" -eq 0 ]; case "${lines[0]}" in *"; graph built ("*) : ;; *) echo "${lines[0]}"; return 1 ;; esac
+  crg_knob FAIL_UPDATE=1; crg_knob FAIL_BUILD=1
+  run as_window python3 "$CX" importers pkg/core.py
+  case "${lines[0]}" in *"graph: the index rebuild after a failed update failed at "[0-9][0-9]:[0-9][0-9]" (exited 1: "*"); python3 core/context.py rebuild --timeout 600 tries again (give that Bash call a 600 s timeout)") : ;; *) echo "${lines[0]}"; return 1 ;; esac
+}
+
+@test "killing the query's process group stops code-review-graph with it: nothing is left running" {
+  use_fake_graph; crg_knob SLEEP_BUILD=20
+  python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' env CLAUDE_CODE_SESSION_ID=sC python3 "$CX" importers pkg/core.py </dev/null >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do grep -q '^argv build' "$CRG_LOG" && break; sleep 0.1; done
+  grep -q '^argv build' "$CRG_LOG"
+  kill -KILL -- "-$pid"
+  sleep 0.5
+  [ -z "$(pgrep -f "$CRG_DIR")" ] || { ps -o pid,pgid,command -p $(pgrep -f "$CRG_DIR" | tr '\n' ' '); return 1; }
+}
+
+@test "a SIGTERM to the query process alone stops code-review-graph too" {
+  use_fake_graph; crg_knob SLEEP_BUILD=20
+  env CLAUDE_CODE_SESSION_ID=sC python3 "$CX" importers pkg/core.py </dev/null >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do grep -q '^argv build' "$CRG_LOG" && break; sleep 0.1; done
+  kill -TERM "$pid"
+  wait "$pid" || true
+  sleep 0.3
+  [ -z "$(pgrep -f "$CRG_DIR")" ]
+}
+
+@test "the -v cache is keyed on the installed package too: an upgrade in place that leaves the wrapper untouched is seen" {
+  use_fake_graph
+  SP="$BATS_TEST_TMPDIR/crg/lib/python3.12/site-packages"; mkdir -p "$SP/code_review_graph-2.3.9.dist-info"
+  run as_window python3 "$CX" importers pkg/core.py
+  [ "$status" -eq 0 ]; case "${lines[0]}" in *"; graph built ("*) : ;; *) echo "${lines[0]}"; return 1 ;; esac
+  rm -rf "$SP/code_review_graph-2.3.9.dist-info"; mkdir -p "$SP/code_review_graph-2.4.0.dist-info"; crg_knob VERSION=2.4.0
+  run as_window python3 "$CX" importers pkg/core.py
+  case "${lines[0]}" in *"is code-review-graph 2.4.0, not the pinned 2.3.9"*) : ;; *) echo "${lines[0]}"; return 1 ;; esac
+}

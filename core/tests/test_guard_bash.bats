@@ -1798,12 +1798,16 @@ PY
            'sudo code-review-graph register' 'timeout 30 code-review-graph daemon' 'nohup code-review-graph serve' \
            'bash -c "code-review-graph mcp"' 'cd target/thing && code-review-graph watch' 'python3 -m code_review_graph install' \
            '/opt/crg/.venv/bin/python -m code_review_graph.cli build' 'uvx code-review-graph init' 'uvx code-review-graph==2.3.9 install' \
-           'uv run code-review-graph build' 'pipx run code-review-graph init' 'x=1 code-review-graph -v'; do
+           'uv run code-review-graph build' 'pipx run code-review-graph init' 'x=1 code-review-graph -v' \
+           'uv tool run code-review-graph build' 'uv --quiet run --with code-review-graph code-review-graph build' \
+           'pipx code-review-graph' 'uv code-review-graph'; do
     run guard "$c"; denied || { echo "not denied: $c"; return 1; }
     case "$output" in *"$why"*) : ;; *) echo "reason for $c: $output"; return 1 ;; esac
   done
   for c in 'ls /opt/crg/.venv/bin/code-review-graph' 'grep -n code-review-graph README.md' 'echo code-review-graph' \
-           'python3 core/context.py reach a.py' 'cat README.md | grep code_review_graph'; do
+           'python3 core/context.py reach a.py' 'cat README.md | grep code_review_graph' \
+           "uv pip install --python .venv/bin/python 'code-review-graph==2.3.9'" 'uv pip show code-review-graph' \
+           'uv tool install code-review-graph==2.3.9' 'pipx install code-review-graph==2.3.9'; do
     run guard "$c"; allowed || { echo "denied: $c -> $output"; return 1; }
   done
 }

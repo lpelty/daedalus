@@ -124,3 +124,14 @@ PY
   [ -f "$DAEDALUS_HOME/state/code-context/07/queries.jsonl" ]
   git -C "$T" worktree remove --force "$DAEDALUS_HOME/state/promote/p1/thing"
 }
+
+@test "importers of a one-segment module (e.py at the tree root) is not a substring search: only its importers and the files naming its basename are hits" {
+  cd "$DAEDALUS_HOME"
+  printf 'def f():\n    return 2\n' > "$T/e.py"
+  printf 'import e\n\ne.f()\n' > "$T/pkg/uses_e.py"
+  printf 'from e import f\n' > "$T/pkg/from_e.py"
+  printf 'Run python3 e.py once; see also make-e.py and line.py.\n' > "$T/notes.md"
+  run python3 "$CX" importers e.py
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  expect_files notes.md pkg/from_e.py pkg/uses_e.py
+}

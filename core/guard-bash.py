@@ -2693,12 +2693,29 @@ CRG_DENY = "core/context.py is code-review-graph's only caller; run python3 core
 CRG_NAME = "code-review-graph"
 CRG_MODULE = re.compile(r"code_review_graph(\..*)?$")
 PKG_RUNNERS = {"uvx", "uv", "pipx"}
+# Package-manager subcommands that install or inspect a package and run none of it: `uv pip install …
+# code-review-graph==2.3.9` (README's own install line) is not running it. Any other subcommand naming it is.
+PKG_SAFE = {"uv": {"pip", "venv", "add", "remove", "lock", "sync", "tree", "cache", "python", "help"},
+            "pipx": {"install", "uninstall", "list", "upgrade", "inject", "help"}}
+UV_TOOL_SAFE = {"install", "uninstall", "list", "upgrade", "dir", "help"}
+
+
+def pkg_subcommand(args: List[str]) -> List[str]:
+    """The non-option words of a package runner's arguments (a global flag before the subcommand is skipped)."""
+    return [t for t in args if not t.startswith("-")]
 
 
 def runs_code_review_graph(seg: List[str]) -> bool:
     head = os.path.basename(seg[0])
     if head in DATA_HEADS:
         return False
+    if head in PKG_RUNNERS:
+        if not any(re.split(r"[=@<>~!\[]", os.path.basename(t), maxsplit=1)[0] == CRG_NAME for t in seg[1:]):
+            return False
+        words = pkg_subcommand(seg[1:])
+        if head == "uv" and words[:1] == ["tool"]:
+            return words[1:2] == [] or words[1] not in UV_TOOL_SAFE
+        return not (head in PKG_SAFE and words and words[0] in PKG_SAFE[head])
     run = seg[exec_index(seg, RUN_HEADS | {CRG_NAME}):]
     rhead = os.path.basename(run[0])
     if rhead == CRG_NAME:
@@ -2709,8 +2726,6 @@ def runs_code_review_graph(seg: List[str]) -> bool:
                 return True
             if t.startswith("-m") and CRG_MODULE.match(t[2:]):
                 return True
-    if head in PKG_RUNNERS:
-        return any(re.split(r"[=@<>~!\[]", os.path.basename(t), 1)[0] == CRG_NAME for t in seg[1:])
     return False
 
 

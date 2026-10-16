@@ -41,8 +41,10 @@ release sets its heading and VERSION, which stays 0.8.0 until then.
   update and query after a 4-file edit 0.9 s, and a median `reach` 0.8 s. An
   index is about 40 MB.
 - On the trial's own questions, the merged answer's recall was at least the
-  graph's on every one. Shell, template and `-m` edges went from 0 of 15 to 15
-  of 15.
+  graph's on every one the graph answers. Shell, template and `-m` edges went
+  from 0 of 15 to 15 of 15. The two text questions run on grep alone: one
+  found all 11 files, the other 2 of 10, because most of its answer lies
+  outside the target.
 - Precision fell where grep adds noise, which is why every file carries its
   label.
 

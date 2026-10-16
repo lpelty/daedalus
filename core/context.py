@@ -429,15 +429,17 @@ def callers_patterns(sym: str) -> List[Pattern]:
 def importers_patterns(rel: str, roots: List[str]) -> List[Pattern]:
     base, stem = posixpath.basename(rel), stem_of(rel)
     pats: List[Pattern] = []
-    if base not in ("__init__.py", "__main__.py"):
-        pats.append(Pattern(base, base))
+    if base not in ("__init__.py", "__main__.py"):     # bounded on the left: e.py is not a hit in make-e.py or core.py
+        pats.append(Pattern(base, base, regex=r"(?<![\w-])%s" % re.escape(base)))
     for d in module_names(rel, roots):
-        pats.append(Pattern(d, d))
+        if "." in d:            # a one-segment name (cli, e) would be a substring search; the import patterns cover it
+            pats.append(Pattern(d, d))
     if stem.isidentifier():
         s = re.escape(stem)
         pats.append(Pattern(stem, "import %s" % stem, regex=r"\bimport\s+%s\b" % s))
         pats.append(Pattern(stem, "from … import %s" % stem,
                             regex=r"\bfrom\s+[A-Za-z0-9_.]+\s+import\s.*\b%s\b" % s))
+        pats.append(Pattern(stem, "from %s import" % stem, regex=r"\bfrom\s+\.*%s\s+import\b" % s))
     return pats
 
 
@@ -527,29 +529,70 @@ def crg_env(root: Path, exe: str, data_dir: Optional[Path]) -> dict:
     return env
 
 
+LIVE: List[subprocess.Popen] = []      # children running now: a SIGTERM/SIGINT/SIGHUP to this process stops them
+
+
+def descendants(pid: int) -> List[int]:
+    """Every process below pid (ps once; a child may run its own children, as a build or a fake's sleep does)."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid="], stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids: Dict[int, List[int]] = {}
+    for ln in out.splitlines():
+        f = ln.split()
+        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+            kids.setdefault(int(f[1]), []).append(int(f[0]))
+    found: List[int] = []
+    todo = [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            if k not in found:
+                found.append(k)
+                todo.append(k)
+    return found
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """SIGKILL proc and everything below it. The children stay in this process's group (no new session), so a
+    kill of the caller's group reaches them too; this is for the timeout and the signal handler."""
+    for pid in [proc.pid] + descendants(proc.pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _stop_children(signum: int, _frame: object) -> None:
+    for p in list(LIVE):
+        kill_tree(p)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
 def crg_run(exe: str, args: List[str], env: dict, cwd: Path, timeout: float) -> Tuple[int, str, str, bool]:
-    """(exit, stdout, stderr, timed out). Only the allowlisted subcommands; the whole process group is
-    killed at the timeout, so nothing is left running."""
+    """(exit, stdout, stderr, timed out). Only the allowlisted subcommands; the child and everything below it
+    are killed at the timeout, so nothing is left running."""
     if not args or args[0] not in ALLOWED:
         raise GraphFail("code-review-graph %s is not a call core/context.py makes" % (args[:1] or ["?"])[0])
     if timeout <= 0:
         return 1, "", "", True
     try:
         proc = subprocess.Popen([exe] + args, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
-                                start_new_session=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
     except OSError as e:
         raise GraphFail("it could not be started (%s)" % (e.strerror or e))
+    LIVE.append(proc)
     try:
         out, err = proc.communicate(timeout=timeout)
         return proc.returncode, out, err, False
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        kill_tree(proc)
         out, err = proc.communicate()
         return proc.returncode if proc.returncode is not None else -9, out or "", err or "", True
+    finally:
+        LIVE.remove(proc)
 
 
 def read_json_file(p: Path) -> Optional[dict]:
@@ -567,13 +610,25 @@ def write_json_file(p: Path, data: dict) -> None:
     os.replace(str(tmp), str(p))
 
 
+def dist_info(exe: str) -> List[List[object]]:
+    """[name, mtime] of each code_review_graph-*.dist-info in the venv that holds exe (<venv>/bin/<exe>)."""
+    out: List[List[object]] = []
+    for d in sorted(Path(exe).parent.parent.glob("lib/python*/site-packages/code_review_graph-*.dist-info")):
+        try:
+            out.append([d.name, d.stat().st_mtime])
+        except OSError:
+            continue
+    return out
+
+
 def graph_version(root: Path, exe: str) -> Tuple[Optional[str], Optional[str]]:
     """(version, problem). `-v` once per executable: cached in state/code-context/home/version.json,
-    keyed on the executable's path, size and mtime."""
+    keyed on the executable's path, size and mtime, and on the venv's code_review_graph dist-info directories
+    (an upgrade in place can leave the console-script wrapper byte-identical)."""
     cache = cc_dir(root) / "home" / "version.json"
     try:
         st = os.stat(exe)
-        key = {"path": exe, "size": st.st_size, "mtime": st.st_mtime}
+        key = {"path": exe, "size": st.st_size, "mtime": st.st_mtime, "dist": dist_info(exe)}
     except OSError as e:
         return None, "context.graph is %s, which cannot be read (%s)" % (exe, e.strerror)
     c = read_json_file(cache) or {}
@@ -627,9 +682,14 @@ class Lock:
                 self.fd = None
 
 
+BUILD_FAILED = {"build": "the first index build failed", "rebuild": "the index rebuild after a failed update failed"}
+BUDGET_SLACK = 1.0      # a build given less than build_timeout minus this was cut short by the time budget
+
+
 def build_failed_sentence(meta: dict) -> str:
-    return ("the first index build failed at %s (%s); python3 core/context.py rebuild --timeout 600 tries again "
-            "(give that Bash call a 600 s timeout)" % (meta.get("failed_at") or "?",
+    return ("%s at %s (%s); python3 core/context.py rebuild --timeout 600 tries again "
+            "(give that Bash call a 600 s timeout)" % (BUILD_FAILED.get(str(meta.get("kind")), BUILD_FAILED["build"]),
+                                                       meta.get("failed_at") or "?",
                                                        meta.get("failed_reason") or "no reason recorded"))
 
 
@@ -653,16 +713,24 @@ class Index:
     def current(self, m: Optional[dict]) -> bool:
         return m is not None and all(m.get(k) == self.want[k] for k in self.want)
 
-    def build(self, timeout: float) -> Tuple[bool, str, float]:
-        """Delete the index and build it. (ok, output, seconds); a failure is recorded in meta.json."""
+    def build(self, timeout: float, kind: str = "build", cut: bool = False) -> Tuple[bool, str, float]:
+        """Delete the index and build it. (ok, output, seconds); a failure is recorded in meta.json, except a
+        timeout when `cut` (the time budget, not build_timeout, set the timeout): then meta.json is removed, so
+        the next query builds again instead of skipping the graph until a manual rebuild."""
         shutil.rmtree(str(self.dir), ignore_errors=True)
         self.dir.mkdir(parents=True, exist_ok=True)
         meta = dict(self.want, built_at=None, build_seconds=None, state="building", pid=os.getpid(),
-                    failed_reason=None)
+                    failed_reason=None, kind=kind)
         write_json_file(self.meta_path, meta)
         t0 = time.monotonic()
         rc, out, err, to = crg_run(self.exe, ["build", "--repo", str(self.repo_dir)], self.env, self.repo_dir, timeout)
         secs = time.monotonic() - t0
+        if to and cut:
+            try:
+                self.meta_path.unlink()
+            except OSError:
+                pass
+            return False, out + err, secs
         if to or rc != 0:
             meta.update(state="build-failed", failed_at=time.strftime("%H:%M"),
                         failed_reason=("timed out after %d s" % round(timeout) if to else
@@ -685,6 +753,19 @@ class Index:
         write_json_file(self.meta_path, m)
         return m
 
+    def build_within(self, cfg: Cfg, deadline: float, kind: str) -> None:
+        """build() inside what is left of the budget; raises Budget when the budget cut it short (§7)."""
+        left = remaining(deadline)
+        if left <= 0:
+            raise Budget()
+        cut = left < cfg.build_timeout - BUDGET_SLACK
+        ok, _, _ = self.build(min(cfg.build_timeout, left), kind, cut)
+        if not ok:
+            m = self.meta()
+            if m is None:
+                raise Budget()
+            raise GraphFail(build_failed_sentence(m))
+
     def ready(self, cfg: Cfg, deadline: float) -> str:
         """Bring the index up to date (§7 steps 3-4): 'built' | 'updated'; raises GraphFail / Budget."""
         m = self.meta()
@@ -693,17 +774,11 @@ class Index:
         if self.current(m) and m.get("state") == "build-failed":
             raise GraphFail(build_failed_sentence(m))
         if not self.current(m) or m.get("state") != "ok":
-            ok, _, _ = self.build(min(cfg.build_timeout, remaining(deadline)))
-            if not ok:
-                raise GraphFail(build_failed_sentence(self.meta() or {}))
+            self.build_within(cfg, deadline, "build")
             return "built"
         if self.update(remaining(deadline)):
             return "updated"
-        if remaining(deadline) <= 0:
-            raise Budget()
-        ok, _, _ = self.build(min(cfg.build_timeout, remaining(deadline)))     # an update that fails: rebuild once
-        if not ok:
-            raise GraphFail(build_failed_sentence(self.meta() or {}))
+        self.build_within(cfg, deadline, "rebuild")     # an update that fails: rebuild once
         return "rebuilt"
 
     def ask(self, args: List[str], deadline: float) -> dict:
@@ -1177,19 +1252,19 @@ def rules_part(root: Path, cfg: Cfg, tree: Tree, subj: Subject,
     try:
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--rules-worker"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                text=True, start_new_session=True, env=dict(os.environ, DAEDALUS_HOME=str(root)))
+                                text=True, env=dict(os.environ, DAEDALUS_HOME=str(root)))
     except OSError as e:
         return {}, ["rules could not run (%s), so this answer has no rule hits" % (e.strerror or e)], "failed"
+    LIVE.append(proc)
     try:
         out, _ = proc.communicate(json.dumps(job), timeout=limit)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        kill_tree(proc)
         proc.communicate()
+        LIVE.remove(proc)
         return {}, ["rules timed out after %s s, so this answer has no rule hits; %s lists them"
                     % (("%g" % limit), CHECK_HINT)], "timed-out"
+    LIVE.remove(proc)
     try:
         res = json.loads(out)
     except ValueError:
@@ -1257,7 +1332,7 @@ def graph_phrase(g: GraphInfo) -> str:
         return "graph %s (%.1f s)" % (g.action or "updated", g.seconds or 0.0)
     if g.state == "absent":
         return "graph: %s, so these answers come from git grep and rules" % g.note
-    if g.note and g.note.startswith("the first index build failed"):
+    if g.note and g.note.startswith(tuple(BUILD_FAILED.values())):
         return "graph: %s" % g.note
     return "graph: %s, so these answers come from git grep and rules" % (g.note or g.state)
 
@@ -1441,7 +1516,10 @@ def predicted_of(rows: List[dict]) -> Tuple[Set[str], Set[str], int]:
 
 
 def excluded(rel: str, patterns: List[str]) -> bool:
-    return any(rel == x or rel.startswith(x + "/") for x in patterns if x)
+    """As git reads fingerprint.sh's :(exclude) pathspecs: the path, a directory above it, or a wildcard (whose *
+    crosses /, as git's default pathspec does)."""
+    return any(rel == x or rel.startswith(x + "/") or (any(c in x for c in "*?[") and fnmatch.fnmatchcase(rel, x))
+               for x in patterns if x)
 
 
 def changed_files(tree: Tree, repo_pre: str, base: str, head: str,
@@ -1810,6 +1888,8 @@ def query(root: Path, verb: str, arg: str, want_json: bool) -> int:
 
 
 def main(argv: List[str]) -> int:
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _stop_children)
     root = daedalus_root()
     args = argv[1:]
     want_json = "--json" in args

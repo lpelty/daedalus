@@ -279,3 +279,16 @@ PY
   [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
+
+@test "target.fingerprint_exclude is read as git reads its :(exclude) pathspecs: a path, a directory, or a wildcard" {
+  python3 - "$DAEDALUS_HOME" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/core")
+import context as cc
+x = ["CHANGELOG.md", "docs/gen", "*.lock", "notes/*.md"]
+for p in ("CHANGELOG.md", "docs/gen/a.py", "uv.lock", "sub/poetry.lock", "notes/a.md", "notes/deep/b.md"):
+    assert cc.excluded(p, x), p
+for p in ("CHANGELOG.md.bak", "docs/general.py", "lock.py", "notes.md", "src/notes/a.md"):
+    assert not cc.excluded(p, x), p
+PY
+}
