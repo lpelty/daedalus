@@ -21,19 +21,31 @@ only; the home's own core/upgrade.py is imported for one thing, its liveness che
      and runs in this one's place (--handed-off, holding this run's lock through --lock-fd), so the rules that move
      a home are always the release's; a script read from a pipe cannot be compared, so it always hands off;
   5. with the home already at the remote trunk: says it is up to date (and finishes a stopped upgrade first);
-  6. otherwise fast-forwards to the remote trunk (a journal in SOUL.md, modified in the working tree, is kept);
-     a local edit in another tracked file, or history the release does not have, is refused in this build;
-  7. runs core/upgrade.py --caller update --progress now, not at the next session start;
-  8. runs core/doctor.sh quietly, and
-  9. says one line: "Daedalus updated 0.7.2 -> 0.7.3; doctor OK." (or what needs attention, one sentence each).
-Exit 0: updated or up to date; 1: refused, nothing changed; 2: updated, but the upgrade or doctor names something.
+  6. classifies every path where the working tree or HEAD differs from the release, judged against every copy
+     of that path on the release's history: a local change outside CLAUDE.md and .claude/settings.json, an
+     untracked file where the release adds one, or a merge or rebase half done is refused, naming it; an older
+     release's copy checked out on purpose is reported and replaced;
+  7. a clean home whose HEAD the release contains fast-forwards; any other runs the local-layer migration —
+     backup branch local/before-update-<stamp> and copies under state/update-backups/<stamp>/ first; rules and
+     hook groups no release ever had go to .claude/settings.local.json (state/settings-before-merge.json's
+     additions too), a removed Edit(/CLAUDE.md) deny becomes boundary.edit_brief: true in config.yaml, brief
+     lines no release ever had go to CLAUDE.local.md, and what it does not move is reported — then resets to
+     the release, SOUL.md's journal written back (it is the deployment's, dirty or committed). A failure from
+     the backup on restores the original HEAD, working tree and local-layer files, never the backup commit;
+  8. runs core/upgrade.py --caller update --progress now, not at the next session start;
+  9. runs core/doctor.sh quietly, and
+ 10. says one line: "Daedalus updated 0.7.2 -> 0.7.3; doctor OK." (or what needs attention, one sentence each).
+Exit 0: updated or up to date; 1: refused (nothing changed) or restored; 2: updated, but the upgrade or doctor names
+something.
 
 Tests replace the upgrade and doctor with DAEDALUS_UPDATE_UPGRADE / DAEDALUS_UPDATE_DOCTOR (a command, split as a
 shell would, given the same arguments).
 """
 from __future__ import annotations
 
+import difflib
 import fcntl
+import json
 import os
 import re
 import shlex
@@ -44,7 +56,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # The release's address (Decision 20): a remote is the release's when its recorded URL normalises to this. A fork's
 # maintainer changes this one constant; a home that deliberately follows a mirror sets update.address instead.
@@ -71,10 +83,12 @@ def _env() -> Dict[str, str]:
     return env
 
 
-def git(home: Path, *args: str, timeout: int = 120) -> Tuple[int, str, str]:
+def git(home: Path, *args: str, timeout: int = 120, env: Optional[Dict[str, str]] = None) -> Tuple[int, str, str]:
+    e = _env()
+    e.update(env or {})
     try:
         r = subprocess.run(["git", "-C", str(home)] + list(args), stdin=subprocess.DEVNULL, capture_output=True,
-                           text=True, timeout=timeout, env=_env())
+                           text=True, timeout=timeout, env=e)
     except subprocess.TimeoutExpired:
         return 124, "", "timed out after %d s" % timeout
     except OSError as e:
@@ -273,33 +287,6 @@ def refuse_if_live(home: Path, tail: str = NOTHING) -> None:
 
 # --- the move ------------------------------------------------------------------------------------------------------
 
-def local_edits(home: Path, trunk_ref: str) -> List[str]:
-    """Tracked paths the working tree changes, but a journal in SOUL.md the release does not touch."""
-    code, out, err = git(home, "status", "--porcelain=v1", "-z", "--untracked-files=no")
-    if code != 0:
-        raise Refuse("Not updating: git status failed in this home (%s). %s" % (_last(err), NOTHING))
-    paths: List[str] = []
-    parts = out.split("\0")
-    i = 0
-    while i < len(parts):
-        ent = parts[i]
-        i += 1
-        if len(ent) < 4:
-            continue
-        if ent[0] in "RC":
-            i += 1      # the rename's source follows
-        paths.append(ent[3:])
-    out_paths = []
-    for p in paths:
-        if p == JOURNAL:
-            a = git(home, "rev-parse", "-q", "--verify", "HEAD:" + p)[1].strip()
-            b = git(home, "rev-parse", "-q", "--verify", trunk_ref + ":" + p)[1].strip()
-            if a and a == b:
-                continue
-        out_paths.append(p)
-    return out_paths
-
-
 def set_tracking(home: Path, branch: str, remote: str, trunk: str) -> None:
     """The branch follows <remote>/<trunk> afterwards, so the release pull and the next update read the release."""
     if _cfg_lines(home, "--local", "--get", "branch.%s.remote" % branch) != [remote]:
@@ -318,6 +305,693 @@ def fast_forward(home: Path, ref: str) -> Tuple[int, str]:
         for s, h in old.items():
             signal.signal(s, h)
     return code, err or out
+
+
+# --- the local layer: classify, migrate, back up, reset, restore (Decisions 4, 15, 16, 21; §4.3) --------------------
+
+BRIEF = "CLAUDE.md"
+SETTINGS = ".claude/settings.json"
+LOCAL_BRIEF = "CLAUDE.local.md"
+LOCAL_SETTINGS = ".claude/settings.local.json"
+CONFIG = "config.yaml"
+MIGRATABLE = (BRIEF, SETTINGS)      # the tracked files whose local lines the migration knows how to move
+BEFORE_MERGE = Path("state") / "settings-before-merge.json"
+BACKUPS = Path("state") / "update-backups"
+# what the backup copies, and under which name: a file that is not there is recorded as <name>.absent
+COPIES = ((BRIEF, "CLAUDE.md"), (LOCAL_BRIEF, "CLAUDE.local.md"), (SETTINGS, "settings.json"),
+          (LOCAL_SETTINGS, "settings.local.json"), (CONFIG, "config.yaml"), (JOURNAL, "SOUL.md"))
+LOCAL_LAYER = (LOCAL_BRIEF, LOCAL_SETTINGS, CONFIG)     # the untracked files a migration writes, and a restore puts back
+PATH_TOOLS = ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit")
+RULE_KINDS = ("allow", "deny", "ask")
+BRIEF_DENY = "Edit(CLAUDE.md)"      # Edit(/CLAUDE.md) in any anchor, normalised
+ZERO = "0" * 40                     # git's name for "no blob": the path is absent
+AUTO_MODE_LINE = "Editing CLAUDE.md in the Daedalus home"   # the v0.7.2 README's auto-mode line
+IN_PROGRESS = (("MERGE_HEAD", "a merge", "git merge --abort"), ("rebase-merge", "a rebase", "git rebase --abort"),
+               ("rebase-apply", "a rebase", "git rebase --abort"),
+               ("CHERRY_PICK_HEAD", "a cherry-pick", "git cherry-pick --abort"),
+               ("REVERT_HEAD", "a revert", "git revert --abort"), ("BISECT_LOG", "a bisect", "git bisect reset"))
+_MISSING = object()
+
+
+class Unmovable(Exception):
+    """A clause: why the migration cannot read what it must move. Raised before anything is written."""
+
+
+class MoveFailed(Exception):
+    """A step of the move failed after the backup began: the home is restored."""
+
+
+def home_relative_glob(root: Path, pattern: str) -> Optional[str]:
+    """verifylib.home_relative_glob, carried here because this script never imports the old home's code
+    (Decision 12); a test pins the two together. `//path` is absolute, `~/path` names no file of the home, `/path`
+    and `./path` and a bare `path` are read at the home, and a trailing slash names the directory and all in it."""
+    g = pattern
+    if g.startswith("//"):
+        try:
+            g = Path(g[1:]).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None
+        if pattern.endswith("/"):
+            g += "/"
+    elif g.startswith("~"):
+        return None
+    elif g.startswith("./"):
+        g = g[2:]
+    elif g.startswith("/"):
+        g = g[1:]
+    if g.endswith("/"):
+        g = g.rstrip("/") + "/**"
+    if g in ("", ".", "/**", "./**"):
+        return None
+    return g
+
+
+def normalise_rule(home: Path, rule: str) -> str:
+    """A permission rule in one form for comparing: a file tool's anchored path read relative to the home, so
+    Edit(./SOUL.md), Edit(/SOUL.md) and Edit(//<home>/SOUL.md) are one rule. Any other rule is itself."""
+    r = rule.strip()
+    m = re.match(r"^([A-Za-z]+)\((.*)\)$", r)
+    if not m or m.group(1) not in PATH_TOOLS:
+        return r
+    g = home_relative_glob(home, m.group(2))
+    return r if g is None else "%s(%s)" % (m.group(1), g)
+
+
+def _out(res: Tuple[int, str, str], what: str) -> str:
+    code, out, err = res
+    if code != 0:
+        raise MoveFailed("%s failed (%s)" % (what, _last(err or out)))
+    return out
+
+
+def tree(home: Path, rev: str) -> Dict[str, str]:
+    """path → blob of every file of `rev` ({} for no rev)."""
+    if not rev:
+        return {}
+    code, out, err = git(home, "ls-tree", "-r", "-z", "--full-tree", rev, timeout=120)
+    if code != 0:
+        raise Unmovable("git could not list %s (%s)" % (rev[:12], _last(err)))
+    d = {}
+    for ent in out.split("\0"):
+        meta, _, path = ent.partition("\t")
+        parts = meta.split()
+        if path and len(parts) == 3:
+            d[path] = parts[2]
+    return d
+
+
+def history(home: Path, ref: str) -> Dict[str, Set[str]]:
+    """path → every blob that path has held on `ref`'s history (ZERO among them when it was ever absent): what came
+    from a release at some time, so is never a local edit."""
+    code, out, err = git(home, "log", "-m", "--root", "--raw", "-z", "--no-abbrev", "--no-renames", "--format=", ref,
+                         timeout=600)
+    if code != 0:
+        raise Unmovable("git could not read the release's history (%s)" % _last(err))
+    hist: Dict[str, Set[str]] = {}
+    toks = out.split("\0")
+    i = 0
+    while i < len(toks):
+        t = toks[i].lstrip("\n")
+        if t.startswith(":") and i + 1 < len(toks):
+            parts = t.split()
+            if len(parts) >= 4:
+                hist.setdefault(toks[i + 1], set()).update((parts[2], parts[3]))
+            i += 2
+            continue
+        i += 1
+    return hist
+
+
+def blob_text(home: Path, blob: str) -> Optional[str]:
+    if not blob or blob == ZERO:
+        return None
+    code, out, _ = git(home, "cat-file", "blob", blob)
+    return out if code == 0 else None
+
+
+def worktree_blobs(home: Path, paths: List[str]) -> Dict[str, str]:
+    """path → the blob the working-tree file would be (ZERO when it is not there)."""
+    blobs = {p: ZERO for p in paths}
+    present = [p for p in paths if (home / p).is_file()]
+    if present:
+        try:
+            r = subprocess.run(["git", "-C", str(home), "hash-object", "--stdin-paths"], input="\n".join(present) + "\n",
+                               capture_output=True, text=True, timeout=300, env=_env())
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise Unmovable("git could not read the working tree (%s)" % e)
+        if r.returncode != 0:
+            raise Unmovable("git could not read the working tree (%s)" % _last(r.stderr))
+        for p, b in zip(present, r.stdout.split()):
+            blobs[p] = b
+    return blobs
+
+
+def _names(res: Tuple[int, str, str]) -> List[str]:
+    code, out, err = res
+    if code != 0:
+        raise Unmovable("git diff failed (%s)" % _last(err))
+    return [p for p in out.split("\0") if p]
+
+
+def in_progress(home: Path) -> Optional[str]:
+    """The clause naming an operation git has half done in this home, and the command that clears it."""
+    for name, what, cmd in IN_PROGRESS:
+        gp = git(home, "rev-parse", "--git-path", name)[1].strip()
+        if gp and (Path(gp) if os.path.isabs(gp) else home / gp).exists():
+            return "%s is in progress in this home; finish it or run %s" % (what, cmd)
+    gp = git(home, "rev-parse", "--git-path", "index.lock")[1].strip()
+    if gp and (Path(gp) if os.path.isabs(gp) else home / gp).exists():
+        return ("git's index lock (%s) is held; once no git command is running in this home, remove that file" % gp)
+    return None
+
+
+def classify(home: Path, head: str, target: str, base: str, hist: Dict[str, Set[str]]) -> Dict[str, Any]:
+    """Every path where the working tree or HEAD differs from the release (Decision 16). A path is local when its
+    working-tree blob or its HEAD blob matches no version of it on the release's history; pinned when both are release copies but one is neither the merge base's
+    nor the release's (an older release's copy, checked out on purpose). SOUL.md is the deployment's, never
+    classified (Decision 15). An absent file is a release's state when the merge base or the release lacks it too
+    (a path a later release added, or one the release deleted); a deletion of a file both have is local. Also:
+    untracked files at paths the release has."""
+    th, tt, tb = tree(home, head), tree(home, target), tree(home, base)
+    changed = sorted(set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", target)))
+                     | set(_names(git(home, "diff", "--name-only", "-z", "--no-renames", head, target))))
+    wt = worktree_blobs(home, changed + ([JOURNAL] if JOURNAL not in changed else []))
+    local, pinned = [], []
+    for p in changed:
+        if p == JOURNAL:
+            continue
+        seen = hist.get(p, set())
+
+        def known(b: str) -> bool:
+            return (p not in tt or p not in tb) if b == ZERO else b in seen
+        hb, wb = th.get(p, ZERO), wt[p]
+        if not (known(hb) and known(wb)):
+            local.append(p)
+        elif {hb, wb} - {tb.get(p, ZERO), tt.get(p, ZERO)}:
+            pinned.append(p)
+    code, out, err = git(home, "ls-files", "--others", "--exclude-standard", "-z")
+    if code != 0:
+        raise Unmovable("git could not list untracked files (%s)" % _last(err))
+    untracked = sorted(p for p in out.split("\0") if p and p in tt)
+    dirty = [p for p in changed if wt.get(p, ZERO) != th.get(p, ZERO)]
+    return {"head": th, "target": tt, "base": tb, "changed": changed, "wt": wt, "local": local, "pinned": pinned,
+            "untracked": untracked, "dirty": dirty}
+
+
+# --- settings (§4.3 "Settings") --------------------------------------------------------------------------------------
+
+def _json(text: Optional[str], what: str) -> Dict[str, Any]:
+    if text is None or not text.strip():
+        return {}
+    try:
+        d = json.loads(text)
+    except ValueError as e:
+        raise Unmovable("%s is not valid JSON (%s); fix it or move it aside" % (what, e))
+    return d if isinstance(d, dict) else {}
+
+
+def _rules(home: Path, d: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    perms = d.get("permissions") if isinstance(d.get("permissions"), dict) else {}
+    out = []
+    for k in RULE_KINDS:
+        for r in perms.get(k) or []:
+            if isinstance(r, str):
+                out.append((k, r, normalise_rule(home, r)))
+    return out
+
+
+def _groups(d: Dict[str, Any]) -> List[Tuple[str, str, Any]]:
+    hooks = d.get("hooks") if isinstance(d.get("hooks"), dict) else {}
+    out = []
+    for ev, gs in hooks.items():
+        if isinstance(gs, list):
+            for g in gs:
+                out.append((ev, json.dumps(g, sort_keys=True), g))
+    return out
+
+
+def _matcher(g: Any) -> Optional[str]:
+    return g.get("matcher") if isinstance(g, dict) else None
+
+
+def _hook_name(ev: str, g: Any) -> str:
+    m = _matcher(g)
+    return "the %s hook%s" % (ev, " for %s" % m if m else "")
+
+
+def analyse_settings(home: Path, wt: Dict[str, Any], base: Dict[str, Any], target: Dict[str, Any],
+                     versions: List[Dict[str, Any]], before: Optional[Dict[str, Any]], bdir: str) -> Dict[str, Any]:
+    """What of the working tree's settings is the deployment's own, judged three ways: against the merge base (what
+    changed here), the release (what the release has now) and every version on the release's history (what came
+    from a release at some time, so is never moved). Also the additions of state/settings-before-merge.json, read
+    by the history test alone (its own base is not known)."""
+    h_rules = {(k, n) for v in versions for k, _, n in _rules(home, v)}
+    h_hooks = {(ev, key) for v in versions for ev, key, _ in _groups(v)}
+    base_r = {(k, n) for k, _, n in _rules(home, base)}
+    wt_r = {(k, n) for k, _, n in _rules(home, wt)}
+    target_r = {(k, n) for k, _, n in _rules(home, target)}
+    rules: List[Tuple[str, str, str]] = []
+    hooks: List[Tuple[str, str, Any]] = []
+    reports: List[str] = []
+    edit_brief = False
+
+    def add_rule(k: str, raw: str, n: str) -> None:
+        if (k, n) not in {(a, c) for a, _, c in rules}:
+            rules.append((k, raw, n))
+
+    def add_hook(ev: str, key: str, g: Any) -> None:
+        if (ev, key) not in {(a, b) for a, b, _ in hooks}:
+            hooks.append((ev, key, g))
+
+    for k, raw, n in _rules(home, wt):
+        if (k, n) not in base_r and (k, n) not in h_rules:
+            add_rule(k, raw, n)
+    for k, raw, n in _rules(home, base):
+        if (k, n) in wt_r:
+            continue
+        if k == "deny" and n == BRIEF_DENY:
+            edit_brief = True
+        elif (k, n) in target_r:
+            reports.append("the deployment had removed the %s rule %s; the release's settings have it again" % (k, raw))
+    base_g, wt_g = _groups(base), _groups(wt)
+    base_keys, wt_keys = {(e, k) for e, k, _ in base_g}, {(e, k) for e, k, _ in wt_g}
+    target_keys = {(e, k) for e, k, _ in _groups(target)}
+    gone = [x for x in base_g if (x[0], x[1]) not in wt_keys]
+    for ev, key, g in wt_g:
+        if (ev, key) in base_keys or (ev, key) in h_hooks:
+            continue
+        twin = next((x for x in gone if x[0] == ev and _matcher(x[2]) == _matcher(g)), None)
+        if twin is not None:
+            # a release group the deployment changed: moving it would run beside the release's, so it is not moved
+            gone.remove(twin)
+            reports.append("the deployment had changed %s; the release's runs; the old one is in %s/settings.json"
+                           % (_hook_name(ev, g), bdir))
+        else:
+            add_hook(ev, key, g)
+    for ev, key, g in gone:
+        if (ev, key) in target_keys:
+            reports.append("the deployment had removed %s; the release's settings have it again" % _hook_name(ev, g))
+    extra: List[Tuple[Tuple[str, ...], Any]] = []
+    for k, v in wt.items():
+        if k in ("permissions", "hooks"):
+            continue
+        bv = base.get(k, _MISSING)
+        if bv == v:
+            continue
+        if isinstance(v, dict) and isinstance(bv, dict):
+            extra += [((k, sk), sv) for sk, sv in v.items() if bv.get(sk, _MISSING) != sv]
+        else:
+            extra.append(((k,), v))
+    wp = wt.get("permissions") if isinstance(wt.get("permissions"), dict) else {}
+    bp = base.get("permissions") if isinstance(base.get("permissions"), dict) else {}
+    extra += [(("permissions", sk), sv) for sk, sv in wp.items()
+              if sk not in RULE_KINDS and bp.get(sk, _MISSING) != sv]
+    if before:
+        for k, raw, n in _rules(home, before):
+            if (k, n) not in h_rules:
+                add_rule(k, raw, n)
+        for ev, key, g in _groups(before):
+            if (ev, key) not in h_hooks:
+                add_hook(ev, key, g)
+    return {"rules": rules, "hooks": hooks, "extra": extra, "edit_brief": edit_brief, "reports": reports}
+
+
+def merged_local_settings(home: Path, local: Dict[str, Any], plan: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]],
+                                                                                              List[str]]:
+    """settings.local.json with the plan's rules, hooks and keys added (de-duplicated by normalised form), or None
+    when nothing new; and the sentences for keys it already sets otherwise (never overwritten)."""
+    d = json.loads(json.dumps(local))
+    changed = False
+    reports = []
+    for k, raw, n in plan["rules"]:
+        perms = d.setdefault("permissions", {})
+        if not isinstance(perms, dict) or not isinstance(perms.setdefault(k, []), list):
+            reports.append("the rule %s could not join .claude/settings.local.json, whose permissions are not a list; "
+                           "it is in the backup" % raw)
+            continue
+        if n not in {normalise_rule(home, x) for x in perms[k] if isinstance(x, str)}:
+            perms[k].append(raw)
+            changed = True
+    for ev, key, g in plan["hooks"]:
+        hk = d.setdefault("hooks", {})
+        if not isinstance(hk, dict) or not isinstance(hk.setdefault(ev, []), list):
+            reports.append("%s could not join .claude/settings.local.json; it is in the backup" % _hook_name(ev, g))
+            continue
+        if key not in {json.dumps(x, sort_keys=True) for x in hk[ev]}:
+            hk[ev].append(g)
+            changed = True
+    for path, v in plan["extra"]:
+        node: Any = d
+        for part in path[:-1]:
+            node = node.setdefault(part, {}) if isinstance(node, dict) else None
+        name = ".".join(path)
+        if not isinstance(node, dict):
+            reports.append("the deployment had set %s, which could not join .claude/settings.local.json; it is in the "
+                           "backup" % name)
+        elif path[-1] not in node:
+            node[path[-1]] = v
+            changed = True
+        elif node[path[-1]] != v:
+            reports.append("the deployment had set %s in .claude/settings.json, and .claude/settings.local.json already "
+                           "sets it otherwise; that value stays, and the other is in the backup" % name)
+    return (d if changed else None), reports
+
+
+# --- the brief (§4.3 "Brief") ----------------------------------------------------------------------------------------
+
+def _heading(lines: List[str], i: int) -> str:
+    for k in range(min(i, len(lines)) - 1, -1, -1):
+        if lines[k].startswith("#"):
+            return lines[k].lstrip("#").strip()
+    return "the top of CLAUDE.md"
+
+
+def _local_runs(lines: List[str], known: Set[str]) -> List[List[str]]:
+    """The contiguous runs of lines no release ever had (blank lines join a run; a release's line ends it)."""
+    runs: List[List[str]] = []
+    cur: List[str] = []
+
+    def flush() -> None:
+        while cur and not cur[-1].strip():
+            cur.pop()
+        while cur and not cur[0].strip():
+            cur.pop(0)
+        if cur:
+            runs.append(list(cur))
+        cur.clear()
+    for ln in lines:
+        if ln.strip() and ln.rstrip() in known:
+            flush()
+        else:
+            cur.append(ln)
+    flush()
+    return runs
+
+
+def analyse_brief(base: str, wt: str, target: str, versions: List[str], bdir: str) -> Dict[str, Any]:
+    """Three-way, from the merge base's CLAUDE.md to the working tree's, each line judged against every version of
+    CLAUDE.md on the release's history: inserted lines no release had move; reworded release passages are reported
+    and not moved (CLAUDE.md goes back to the release's wording, and both would load); release lines the
+    deployment removed are reported."""
+    known = {ln.rstrip() for t in versions for ln in t.splitlines()}
+    tl = {ln.rstrip() for ln in target.splitlines()}
+    b, w = base.splitlines(), wt.splitlines()
+    blocks: List[Tuple[str, List[str]]] = []
+    reworded: List[str] = []
+    removed = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, b, w, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        runs = _local_runs(w[j1:j2], known)
+        heading = _heading(b, i1)
+        if tag == "replace" and runs:
+            reworded.append(heading)
+            continue
+        blocks += [(heading, r) for r in runs]
+        if tag in ("delete", "replace"):
+            removed += sum(1 for ln in b[i1:i2] if ln.strip() and ln.rstrip() in tl)
+    reports = []
+    if reworded:
+        where = " and ".join("'%s'" % h for h in dict.fromkeys(reworded))
+        reports.append("CLAUDE.md: the deployment had reworded %d passage%s of the release's brief, under %s; the "
+                       "release's wording is back; the reworded text is in %s/CLAUDE.md — move what still applies "
+                       "into CLAUDE.local.md" % (len(reworded), "" if len(reworded) == 1 else "s", where, bdir))
+    if removed:
+        reports.append("CLAUDE.md: the deployment had removed %d line%s of the release's brief; they are back; the "
+                       "old text is in %s/CLAUDE.md" % (removed, "" if removed == 1 else "s", bdir))
+    return {"blocks": blocks, "reports": reports}
+
+
+def local_brief_text(existing: str, blocks: List[Tuple[str, List[str]]], stamp: str, branch: str) -> Optional[str]:
+    """CLAUDE.local.md with the moved blocks appended under one header, or None when every block is there already."""
+    new = []
+    for heading, run in blocks:
+        body = "\n".join(run)
+        if body not in existing:
+            new.append("<!-- was under: %s -->\n%s" % (heading, body))
+    if not new:
+        return None
+    day = "%s-%s-%s" % (stamp[0:4], stamp[4:6], stamp[6:8])
+    out = existing
+    if out and not out.endswith("\n"):
+        out += "\n"
+    if out:
+        out += "\n"
+    return (out + "## Local brief — moved from CLAUDE.md by daedalus update, %s (backup: %s)\n\n" % (day, branch)
+            + "\n\n".join(new) + "\n")
+
+
+def with_edit_brief(text: str) -> str:
+    """config.yaml with boundary.edit_brief: true, the rest of the file as it was."""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if re.match(r"^boundary:", ln):
+            j = i + 1
+            while j < len(lines) and not re.match(r"^[^\s#]", lines[j]):
+                words = lines[j].split()
+                if words and words[0] == "edit_brief:":
+                    lines[j] = (re.match(r"^\s*", lines[j]).group(0) or "  ") + "edit_brief: true"
+                    return "\n".join(lines) + "\n"
+                j += 1
+            lines.insert(i + 1, "  edit_brief: true")
+            return "\n".join(lines) + "\n"
+    body = text if not text or text.endswith("\n") else text + "\n"
+    return body + ("\n" if body else "") + "boundary:\n  edit_brief: true\n"
+
+
+def auto_mode_note(home: Path) -> Optional[str]:
+    """The operator's Claude Code settings, read only: an auto-mode line that lets this home's CLAUDE.md be edited
+    (the v0.7.2 README's wording) now names the wrong file."""
+    user = os.path.expanduser("~")
+    files = []
+    for d in (os.environ.get("CLAUDE_CONFIG_DIR"), os.path.join(user, ".claude")):
+        if d and os.path.join(d, "settings.json") not in files:
+            files.append(os.path.join(d, "settings.json"))
+    forms = {str(home)}
+    if str(home).startswith(user + os.sep):
+        forms.add("~" + str(home)[len(user):])
+    for f in files:
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        am = d.get("autoMode") if isinstance(d, dict) else None
+        allow = am.get("allow") if isinstance(am, dict) else None
+        for e in allow if isinstance(allow, list) else []:
+            if isinstance(e, str) and AUTO_MODE_LINE in e and any(x in e for x in forms):
+                return ("~/.claude/settings.json allows auto mode to edit CLAUDE.md here; reword that line to name "
+                        "CLAUDE.local.md (README, 'Letting Daedalus edit its own brief')")
+    return None
+
+
+# --- back up, move, restore ------------------------------------------------------------------------------------------
+
+def _read(path: Path) -> Optional[str]:
+    try:
+        return path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _ident(home: Path) -> Dict[str, str]:
+    """An author for the backup commit when git has none configured here (a fresh machine)."""
+    if git(home, "var", "GIT_COMMITTER_IDENT")[0] == 0 and git(home, "var", "GIT_AUTHOR_IDENT")[0] == 0:
+        return {}
+    who = {"NAME": "daedalus update", "EMAIL": "daedalus-update@localhost"}
+    return {"GIT_%s_%s" % (r, k): v for r in ("AUTHOR", "COMMITTER") for k, v in who.items()}
+
+
+def make_backup(home: Path, head: str, branch: str, bdir: Path, stamp: str) -> None:
+    """Copies of the six files under state/update-backups/<stamp>/, then the branch: a commit of the working tree's
+    tracked files on top of HEAD, made in a temporary index so neither HEAD nor the real index moves."""
+    bdir.mkdir(parents=True)
+    for rel, name in COPIES:
+        src = home / rel
+        if src.is_file():
+            shutil.copy2(str(src), str(bdir / name))
+        else:
+            (bdir / (name + ".absent")).write_text("")
+    gp = git(home, "rev-parse", "--git-path", "index.daedalus-update")[1].strip()
+    idx = gp if os.path.isabs(gp) else str(home / gp)
+    env = {"GIT_INDEX_FILE": idx}
+    try:
+        _out(git(home, "read-tree", head, env=env), "making the backup branch")
+        _out(git(home, "add", "-u", "--", ".", env=env, timeout=600), "making the backup branch")
+        t = _out(git(home, "write-tree", env=env), "making the backup branch").strip()
+        env.update(_ident(home))
+        c = _out(git(home, "commit-tree", t, "-p", head, "-m",
+                     "daedalus update %s: this home's tracked files as they were before the update" % stamp, env=env),
+                 "making the backup branch").strip()
+        _out(git(home, "branch", branch, c), "making the backup branch")
+    finally:
+        try:
+            os.unlink(idx)
+        except OSError:
+            pass
+
+
+def restore(home: Path, orig_head: str, branch: str, bdir: Path, moved_before_merge: bool) -> List[str]:
+    """Back to the original HEAD and working tree — never the backup commit, which would join the branch's history
+    — and every local-layer file as the copies hold it (Decision 21). What could not be put back, in words."""
+    problems = []
+
+    def step(res: Tuple[int, str, str], what: str) -> bool:
+        if res[0] != 0:
+            problems.append("%s (%s)" % (what, _last(res[2] or res[1])))
+            return False
+        return True
+    step(git(home, "reset", "--quiet", "--hard", orig_head, timeout=600), "git reset to the original HEAD")
+    if git(home, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0:
+        if step(git(home, "checkout", branch, "--", ".", timeout=600), "the original files from the backup branch"):
+            for p in _names(git(home, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", orig_head,
+                                branch)):
+                try:
+                    (home / p).unlink()
+                except OSError:
+                    pass
+        step(git(home, "reset", "--quiet"), "unstaging the original changes")
+    for rel, name in COPIES:
+        if rel not in LOCAL_LAYER:
+            continue
+        try:
+            if (bdir / name).is_file():
+                (home / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(bdir / name), str(home / rel))
+            elif (bdir / (name + ".absent")).exists() and (home / rel).exists():
+                (home / rel).unlink()
+        except OSError as e:
+            problems.append("%s (%s)" % (rel, e))
+    if moved_before_merge:
+        try:
+            shutil.move(str(bdir / BEFORE_MERGE.name), str(home / BEFORE_MERGE))
+        except OSError as e:
+            problems.append("%s (%s)" % (BEFORE_MERGE, e))
+    return problems
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".daedalus-update")
+    tmp.write_text(text)
+    os.replace(str(tmp), str(path))
+
+
+def migrate_and_reset(home: Path, c: Dict[str, Any], hist: Dict[str, Set[str]], head: str, target: str,
+                      branch_name: str, remote: str, trunk: str) -> Tuple[str, List[str]]:
+    """The local-layer migration, then the reset to the release, SOUL.md's journal written back; a failure from
+    the backup to the end restores the home. Returns the clause for the one line, and the report sentences."""
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    n = 1
+    while (home / BACKUPS / stamp).exists() or \
+            git(home, "rev-parse", "-q", "--verify", "refs/heads/local/before-update-" + stamp)[0] == 0:
+        n += 1
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-%d" % n
+    branch = "local/before-update-" + stamp
+    bdir_rel = (BACKUPS / stamp).as_posix()
+    bdir = home / BACKUPS / stamp
+    th, tt, tb = c["head"], c["target"], c["base"]
+
+    def at(path: str, which: Dict[str, str]) -> Optional[str]:
+        return blob_text(home, which.get(path, ZERO))
+
+    def versions(path: str) -> List[str]:
+        return [t for t in (blob_text(home, b) for b in sorted(hist.get(path, set()))) if t is not None]
+
+    # what moves: read and judged before anything is written (Unmovable ends it with nothing changed)
+    reports: List[str] = []
+    local_settings = None
+    before_path = home / BEFORE_MERGE
+    before = _json(_read(before_path), str(BEFORE_MERGE)) if before_path.is_file() else None
+    edit_brief = False
+    if SETTINGS in c["local"] or before:
+        wt_text = _read(home / SETTINGS) if (home / SETTINGS).is_file() else at(SETTINGS, th)
+        plan = analyse_settings(home, _json(wt_text, SETTINGS) if SETTINGS in c["local"] else {},
+                                _json(at(SETTINGS, tb), SETTINGS), _json(at(SETTINGS, tt), SETTINGS),
+                                [_json(t, SETTINGS) for t in versions(SETTINGS)], before, bdir_rel)
+        if SETTINGS not in c["local"]:
+            plan["edit_brief"], plan["reports"] = False, []
+        edit_brief = plan["edit_brief"]
+        reports += plan["reports"]
+        existing = _json(_read(home / LOCAL_SETTINGS), LOCAL_SETTINGS) if (home / LOCAL_SETTINGS).is_file() else {}
+        local_settings, more = merged_local_settings(home, existing, plan)
+        reports += more
+    brief_text = None
+    if BRIEF in c["local"]:
+        wt_brief = _read(home / BRIEF)
+        bp = analyse_brief(at(BRIEF, tb) or "", wt_brief if wt_brief is not None else (at(BRIEF, th) or ""),
+                           at(BRIEF, tt) or "", versions(BRIEF), bdir_rel)
+        reports += bp["reports"]
+        brief_text = local_brief_text(_read(home / LOCAL_BRIEF) or "", bp["blocks"], stamp, branch)
+    config_text = None
+    if edit_brief and config_value(home, "boundary.edit_brief") != "true":
+        config_text = with_edit_brief(_read(home / CONFIG) or "")
+    soul = None
+    try:
+        soul = (home / JOURNAL).read_bytes()
+    except OSError:
+        pass
+    keep_soul = soul is not None and git_blob_of(home, soul) != tt.get(JOURNAL, ZERO)
+    soul_release = keep_soul and tt.get(JOURNAL, ZERO) != tb.get(JOURNAL, ZERO) and JOURNAL in tt
+    if c["pinned"]:
+        if len(c["pinned"]) == 1:
+            reports.append("%s held an older release's copy; the release's copy replaces it" % c["pinned"][0])
+        else:
+            reports.append("%s held older releases' copies; the release's copies replace them" % _join(c["pinned"]))
+    staged = git(home, "diff", "--cached", "--quiet")[0] != 0
+
+    moved_before_merge = False
+    old = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        try:
+            make_backup(home, head, branch, bdir, stamp)
+            if soul_release:
+                _write(bdir / "SOUL.release.md", at(JOURNAL, tt) or "")
+            if local_settings is not None:
+                _write(home / LOCAL_SETTINGS, json.dumps(local_settings, indent=2) + "\n")
+            if brief_text is not None:
+                _write(home / LOCAL_BRIEF, brief_text)
+            if config_text is not None:
+                _write(home / CONFIG, config_text)
+            if before_path.is_file():
+                shutil.move(str(before_path), str(bdir / BEFORE_MERGE.name))
+                moved_before_merge = True
+            _out(git(home, "reset", "--quiet", "--hard", target, timeout=600),
+                 "git reset to %s/%s" % (remote, trunk))
+            if keep_soul:
+                (home / JOURNAL).write_bytes(soul)
+            set_tracking(home, branch_name, remote, trunk)
+        except (MoveFailed, OSError, Unmovable) as e:
+            problems = restore(home, head, branch, bdir, moved_before_merge)
+            back = ("this home is back as it was (HEAD %s, its files and its local-layer files restored%s)"
+                    % (head[:7], "; changes that were staged come back unstaged" if staged else ""))
+            if problems:
+                back = "restoring this home also failed for %s — put those back from the backup" % "; ".join(problems)
+            raise Refuse("Not updating: %s; %s; the backup is at %s and %s/." % (e, back, branch, bdir_rel))
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    moved = [p for p, w in ((LOCAL_SETTINGS, local_settings), (LOCAL_BRIEF, brief_text)) if w is not None]
+    where = "backup at %s and %s/" % (branch, bdir_rel)
+    clause = ("local edits moved to %s, %s" % (" and ".join(moved), where)) if moved else where
+    notes = []
+    if config_text is not None:
+        notes.append("This home had removed the CLAUDE.md deny, so boundary.edit_brief is now true in config.yaml: "
+                     "Daedalus edits CLAUDE.local.md, and since config.yaml changed, each window re-runs core/gates.sh "
+                     "before its next claim")
+    if soul_release:
+        notes.append("the release changed SOUL.md; this home's journal is kept, and the release's copy is in "
+                     "%s/SOUL.release.md" % bdir_rel)
+    return clause, notes + reports
+
+
+def git_blob_of(home: Path, data: bytes) -> str:
+    try:
+        r = subprocess.run(["git", "-C", str(home), "hash-object", "--stdin"], input=data, capture_output=True,
+                           timeout=60, env=_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.decode().strip() if r.returncode == 0 else ""
 
 
 # --- the hand-off (Decision 13) -------------------------------------------------------------------------------------
@@ -422,17 +1096,22 @@ def _sentence(s: str) -> str:
     return s if s.endswith((".", "!", "?")) else s + "."
 
 
-def finish(home: Path, head: str, done: str = "") -> Tuple[str, int]:
+def finish(home: Path, head: str, done: str = "", notes: Optional[List[str]] = None) -> Tuple[str, int]:
     """The upgrade, then doctor, as the tail of the one line, and the exit code. `done` is said after head when
-    the upgrade finished."""
+    the upgrade finished; `notes` (what the move reports) follow, one sentence each."""
     stop = run_upgrade(home)
     if stop:
-        return "%s; the upgrade stopped: %s" % (head, stop), 2
-    head += done
-    missing = run_doctor(home)
-    if missing:
-        return "%s; doctor names what needs attention: %s" % (head, " ".join(_sentence(m) for m in missing)), 2
-    return head + "; doctor OK.", 0
+        line, code = "%s; the upgrade stopped: %s" % (head, stop), 2
+    else:
+        head += done
+        missing = run_doctor(home)
+        if missing:
+            line, code = "%s; doctor names what needs attention: %s" % (head, " ".join(_sentence(m) for m in missing)), 2
+        else:
+            line, code = head + "; doctor OK.", 0
+    if notes:
+        line = _sentence(line) + " " + " ".join(_sentence(n[:1].upper() + n[1:]) for n in notes)
+    return line, code
 
 
 # --- the verbs -----------------------------------------------------------------------------------------------------
@@ -478,29 +1157,60 @@ def _update(home: Path, fd: int, handed_off: bool) -> Tuple[Optional[str], int]:
     head = git(home, "rev-parse", "--verify", "HEAD")[1].strip()
     if not target or not head:
         raise Refuse("Not updating: %s/%s or HEAD does not name a commit; %s" % (remote, trunk, fetched))
-    local = local_edits(home, ref)
-    if head == target and not local:
-        ver = home_version(home) or "unknown"
+    stuck = in_progress(home)
+    if stuck:
+        raise Refuse("Not updating: %s, then run daedalus update again; %s" % (stuck, fetched))
+    try:
+        hist = history(home, target)
+        base = git(home, "merge-base", head, target)[1].strip()
+        c = classify(home, head, target, base, hist)
+    except Unmovable as e:
+        raise Refuse("Not updating: %s; %s" % (e, fetched))
+    if c["untracked"]:
+        one = len(c["untracked"]) == 1
+        raise Refuse("Not updating: %s %s untracked here and the release adds %s; move %s aside, then run daedalus "
+                     "update again; %s" % (_join(c["untracked"]), "is" if one else "are", "it" if one else "them",
+                                           "it" if one else "them", fetched))
+    outside = [p for p in c["local"] if p not in MIGRATABLE]
+    if outside:
+        raise Refuse("Not updating: %s carr%s local changes daedalus update cannot move (it moves only CLAUDE.md and "
+                     ".claude/settings.json, and keeps SOUL.md); keep a copy elsewhere and undo them with git, then "
+                     "run daedalus update again; %s" % (_join(outside), "ies" if len(outside) == 1 else "y", fetched))
+    others = [p for p in c["changed"] if p != JOURNAL]
+    ver = home_version(home) or "unknown"
+    if head == target and not others:
         if _stamp(home) == ver:
             return "Daedalus is up to date (%s)." % ver, 0
         # up to date, but an earlier upgrade stopped: run it now, so a second run finishes it
         return finish(home, "Daedalus is up to date (%s)" % ver, done="; the upgrade finished")
     ancestor = git(home, "merge-base", "--is-ancestor", head, target)[0] == 0
-    if local or not ancestor:
-        why = ("local edits in tracked files (%s)" % ", ".join(local)) if local else \
-              "commits of its own that the release does not have"
-        raise Refuse("Not updating: this home has %s, which this daedalus update cannot move into the local layer "
-                     "yet; %s" % (why, fetched))
+    soul_dirty = c["wt"].get(JOURNAL, ZERO) != c["head"].get(JOURNAL, ZERO)
+    soul_moves = c["head"].get(JOURNAL, ZERO) != c["target"].get(JOURNAL, ZERO)
     refuse_if_live(home, tail=fetched[0].upper() + fetched[1:])
-    old = home_version(home) or head[:7]
-    code, msg = fast_forward(home, target)
-    if code != 0:
-        raise Refuse("Not updating: git could not fast-forward to %s/%s (%s); %s" % (remote, trunk, _last(msg), fetched))
-    set_tracking(home, branch, remote, trunk)
+    old = ver if ver != "unknown" else head[:7]
+    notes: List[str] = []
+    if ancestor and not [p for p in c["dirty"] if p != JOURNAL] and not (soul_dirty and soul_moves):
+        code, msg = fast_forward(home, target)
+        if code != 0:
+            raise Refuse("Not updating: git could not fast-forward to %s/%s (%s); %s"
+                         % (remote, trunk, _last(msg), fetched))
+        set_tracking(home, branch, remote, trunk)
+        clause = ""
+    else:
+        try:
+            clause, notes = migrate_and_reset(home, c, hist, head, target, branch, remote, trunk)
+        except Unmovable as e:
+            raise Refuse("Not updating: %s; %s" % (e, fetched))
+        clause = "; " + clause
+    auto = auto_mode_note(home)
+    if auto:
+        notes.append(auto)
     new = home_version(home) or target[:7]
-    if new == old:
-        new = "%s (%s)" % (new, target[:7])
-    return finish(home, "Daedalus updated %s -> %s" % (old, new))
+    if head == target:
+        line = "Daedalus is up to date (%s)" % new
+    else:
+        line = "Daedalus updated %s -> %s" % (old, new if new != old else "%s (%s)" % (new, target[:7]))
+    return finish(home, line + clause, notes=notes)
 
 
 def _stamp(home: Path) -> str:

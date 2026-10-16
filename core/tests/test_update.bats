@@ -7,6 +7,7 @@
 # are stubbed (DAEDALUS_UPDATE_UPGRADE, DAEDALUS_UPDATE_DOCTOR) in every test here: none is about them.
 bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
+load fixtures/update/replay.bash
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -40,6 +41,15 @@ for rel in sys.stdin.read().split("\0"):
     os.makedirs(os.path.dirname(os.path.join(dst, rel)) or dst, exist_ok=True)
     shutil.copy2(os.path.join(src, rel), os.path.join(dst, rel))' "$REPO" "$w"
   git init -q -b "$br" "$w"
+  if [ -n "${SEED_OLD_SETTINGS:-}" ]; then   # an older release before N: v0.7.0's ./-anchored settings, one more
+    # brief line and one more README line than N has (the history the migration judges "local" against)
+    cp "$w/.claude/settings.json" "$B/settings.aside"; cp "$w/CLAUDE.md" "$B/claude.aside"; cp "$w/README.md" "$B/readme.aside"
+    cp "$REPO/core/tests/fixtures/update/settings-v0.7.0.json" "$w/.claude/settings.json"
+    printf '\nAn older release'"'"'s brief line.\n' >> "$w/CLAUDE.md"
+    printf '\nAn older release'"'"'s README line.\n' >> "$w/README.md"
+    git -C "$w" add -A; git -C "$w" commit -q -m "older"; git -C "$w" tag older
+    cp "$B/settings.aside" "$w/.claude/settings.json"; cp "$B/claude.aside" "$w/CLAUDE.md"; cp "$B/readme.aside" "$w/README.md"
+  fi
   if [ -n "${SEED_OLD:-}" ]; then   # a commit before release N with no core/update.py (a home the bootstrap reaches)
     mv "$w/core/update.py" "$B/update.py.aside"; git -C "$w" add -A; git -C "$w" commit -q -m "before update.py"
     git -C "$w" tag before-update; mv "$B/update.py.aside" "$w/core/update.py"
@@ -54,6 +64,7 @@ d = json.load(open(p))
 d.setdefault("permissions", {}).setdefault("allow", []).append("Bash(echo next-release)")
 open(p, "w").write(json.dumps(d, indent=2) + "\n")
 PY
+  printf 'A file release %s adds.\n' "$N1" > "$w/NEXT-RELEASE.md"; git -C "$w" add NEXT-RELEASE.md
   git -C "$w" commit -q -am "v$N1"; git -C "$w" tag -a "v$N1" -m "v$N1"
   git init -q --bare -b "$br" "$bare"
   git -C "$w" push -q "$bare" "$br" --tags
@@ -207,15 +218,6 @@ PY
   [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
 }
 
-@test "update: a local edit to a tracked file is refused for now (the migration is not in this build), and nothing is changed" {
-  printf 'local\n' >> "$H/README.md"
-  before="$(listing)"
-  run upd update
-  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "Not updating: this home has local edits in tracked files (README.md)"*"in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
-  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
-}
-
 @test "update: a journal in SOUL.md (modified in the working tree) is kept across the fast-forward" {
   printf '\n## A journal entry\n' >> "$H/SOUL.md"
   run upd update
@@ -352,4 +354,222 @@ Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
     [ "$(git -C "$HOME/daedalus" rev-parse HEAD)" = "$(trunk_sha "$R3")" ]
     [ -f "$HOME/daedalus/core/update.py" ]
   done
+}
+
+# --- the local-layer migration (Decisions 4, 15, 16, 21; §4.3, §5.6 tests 20-22, 33-36, 39, 40) ---------------------
+
+# older_release — $R reseeded with an older release before N (tag "older"), and the home deployed again at N
+older_release() {
+  rm -rf "$R" "$H" "$B/rel-release"; SEED_OLD_SETTINGS=1 seed_release "$R" main; deploy origin "$R"
+}
+# six — the sha256 of the six files a migration reads or writes, and the home's status, ignored files included
+six() {
+  (cd "$H" && git status --porcelain --ignored -- . ':!state' && for f in CLAUDE.md CLAUDE.local.md .claude/settings.json \
+     .claude/settings.local.json config.yaml SOUL.md; do printf '%s  %s\n' "$( [ -e "$f" ] && shasum -a 256 < "$f" | cut -c1-64 || echo absent)" "$f"; done)
+}
+jq_py() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(eval(sys.argv[2]), sort_keys=True))" "$@"; }
+
+@test "migration replay of the second machine: a home that merged release N over local commits moves its rules, hook and brief lines into the local layer, keeps the committed journal, backs up, and a second run is byte-identical" {
+  older_release
+  replay_home
+  orig="$(git -C "$H" rev-parse HEAD)"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ] || { echo "$output"; return 1; }
+  stamp="$(git -C "$H" for-each-ref --format='%(refname:short)' refs/heads/local/ | sed -n 's#^local/before-update-##p')"
+  [ -n "$stamp" ] || { git -C "$H" branch -a; return 1; }
+  case "$output" in "Daedalus updated $N -> $N1; local edits moved to .claude/settings.local.json and CLAUDE.local.md, backup at local/before-update-$stamp and state/update-backups/$stamp/; doctor OK. "*"boundary.edit_brief is now true in config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
+  [ "$(git -C "$H" status --porcelain)" = " M SOUL.md" ] || { git -C "$H" status --porcelain; return 1; }
+  grep -q '^## Journal: a committed entry$' "$H/SOUL.md"
+  [ "$(jq_py "$H/.claude/settings.local.json" 'd["permissions"]')" = '{"allow": ["Bash(echo replay-allow)"], "ask": ["Bash(echo replay-ask)"]}' ] || { cat "$H/.claude/settings.local.json"; return 1; }
+  [ "$(jq_py "$H/.claude/settings.local.json" 'sorted(d["hooks"])')" = '["PreToolUse"]' ]
+  [ "$(jq_py "$H/.claude/settings.local.json" '[h["command"] for g in d["hooks"]["PreToolUse"] for h in g["hooks"]]')" = '["echo replay-hook"]' ]
+  ! grep -q 'deny\|\./' "$H/.claude/settings.local.json"
+  grep -q '^  edit_brief: true$' "$H/config.yaml"
+  grep -q "^## Local brief — moved from CLAUDE.md by daedalus update, .* (backup: local/before-update-$stamp)$" "$H/CLAUDE.local.md"
+  [ "$(grep -c '^Replay local line ' "$H/CLAUDE.local.md")" = 4 ]
+  ! grep -q "An older release" "$H/CLAUDE.local.md"
+  # the backup: the old tree on the branch (on top of the original HEAD), and the six copies
+  [ "$(git -C "$H" rev-parse "local/before-update-$stamp^")" = "$orig" ]
+  git -C "$H" show "local/before-update-$stamp:CLAUDE.md" | grep -q '^Replay local line four.$'
+  for f in CLAUDE.md CLAUDE.local.md.absent settings.json settings.local.json.absent config.yaml SOUL.md settings-before-merge.json; do
+    [ -e "$H/state/update-backups/$stamp/$f" ] || { ls -A "$H/state/update-backups/$stamp"; return 1; }
+  done
+  [ ! -e "$H/state/settings-before-merge.json" ]
+  before="$(six)"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  [ "$output" = "Daedalus is up to date ($N1)." ] || { echo "$output"; return 1; }
+  [ "$(six)" = "$before" ] || { diff <(printf '%s\n' "$before") <(six); return 1; }
+}
+
+@test "migration refused: an uncommitted or a committed local edit to core/lease.sh is refused, naming it, and nothing is changed; an older release's copy checked out on purpose is reported as pinned and replaced" {
+  printf '# local\n' >> "$H/core/lease.sh"
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updating: core/lease.sh carries local changes daedalus update cannot move"*"fetched origin/main, and nothing else in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+  git -C "$H" commit -q -am "a local core edit"
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updating: core/lease.sh carries local changes"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+  # pinned: README.md as an older release had it
+  older_release
+  git -C "$H" show older:README.md > "$H/README.md"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"README.md held an older release's copy; the release's copy replaces it."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
+  [ -z "$(git -C "$H" status --porcelain)" ]
+}
+
+@test "migration refused: an untracked file at a path the release adds is refused, naming it, and nothing is changed; so is a merge in progress" {
+  printf 'mine\n' > "$H/NEXT-RELEASE.md"
+  before="$(listing)"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updating: NEXT-RELEASE.md is untracked here and the release adds it"*"nothing else in this home was changed.") : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(listing); return 1; }
+  rm "$H/NEXT-RELEASE.md"
+  git -C "$H" rev-parse HEAD > "$H/.git/MERGE_HEAD"
+  run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in "Not updating: a merge is in progress in this home; finish it or run git merge --abort"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "migration settings, future release: a release that drops an allow rule and changes a hook's timeout moves only the deployment's own rule, and reports no deployment removal" {
+  git clone -q "$R" "$B/next"
+  python3 - "$B/next/.claude/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["permissions"]["allow"].remove("Bash(core/lease.sh release:*)")
+d["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = 45
+open(p, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+  git -C "$B/next" commit -q -am "drop a rule, change a timeout"; git -C "$B/next" push -q origin main
+  python3 - "$H/.claude/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["permissions"]["allow"].append("Bash(echo mine)")
+open(p, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"removed"*|*"changed the"*) echo "$output"; return 1 ;; esac
+  [ "$(jq_py "$H/.claude/settings.local.json" 'd')" = '{"permissions": {"allow": ["Bash(echo mine)"]}}' ] || { cat "$H/.claude/settings.local.json"; return 1; }
+  [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
+  [ -z "$(git -C "$H" status --porcelain)" ]
+}
+
+@test "migration settings, modified hook: a deployment's changed timeout on a release hook is not moved, it is reported, and the release's hook runs alone" {
+  python3 - "$H/.claude/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = 99
+open(p, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"The deployment had changed the SessionStart hook; the release's runs; the old one is in state/update-backups/"*"/settings.json."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$H/.claude/settings.local.json" ]
+  [ "$(jq_py "$H/.claude/settings.json" 'len(d["hooks"]["SessionStart"])')" = 1 ]
+  [ -z "$(git -C "$H" status --porcelain)" ]
+}
+
+@test "migration brief: an appended line moves to CLAUDE.local.md, a reworded release line is reported and not moved, and a line merged in from an older release is not moved" {
+  older_release
+  python3 - "$H/CLAUDE.md" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p).read().split("\n")
+i = next(k for k, l in enumerate(lines) if l.startswith("## Windows and the pen"))
+j = next(k for k in range(i + 1, len(lines)) if lines[k].strip() and not lines[k].startswith("#"))
+lines[j] = "Reworded by this home: " + lines[j]
+lines.insert(j + 2, "An older release's brief line.")
+open(p, "w").write("\n".join(lines).rstrip("\n") + "\n\nA line this home appended.\n")
+PY
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"CLAUDE.md: the deployment had reworded 1 passage of the release's brief, under 'Windows and the pen'; the release's wording is back"*) : ;; *) echo "$output"; return 1 ;; esac
+  grep -qx 'A line this home appended.' "$H/CLAUDE.local.md"
+  ! grep -q 'Reworded by this home' "$H/CLAUDE.local.md"
+  ! grep -q "An older release's brief line" "$H/CLAUDE.local.md"
+  [ "$(git -C "$H" rev-parse HEAD)" = "$(trunk_sha "$R")" ]
+  [ -z "$(git -C "$H" status --porcelain)" ]
+  cmp -s "$H/CLAUDE.md" <(git -C "$R" show main:CLAUDE.md)
+}
+
+@test "migration restore: a reset that fails puts back the original HEAD (not the backup commit), the original working-tree changes unstaged, and every local-layer file as it was" {
+  printf '\nA line this home appended.\n' >> "$H/CLAUDE.md"
+  python3 - "$H/.claude/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["permissions"]["deny"].remove("Edit(/CLAUDE.md)")
+d["permissions"]["allow"].append("Bash(echo mine)")
+open(p, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+  printf '{"permissions": {"deny": ["Edit(//elsewhere/x)"]}}\n' > "$H/.claude/settings.local.json"
+  git -C "$H" commit -q -m "a local commit" -- .claude/settings.json
+  orig="$(git -C "$H" rev-parse HEAD)"
+  diff_before="$(git -C "$H" diff HEAD)"; cached_before="$(git -C "$H" diff --cached)"
+  sl="$(shasum < "$H/.claude/settings.local.json")"; cy="$(shasum < "$H/config.yaml")"
+  real="$(command -v git)"; target="$(trunk_sha "$R")"; mkdir -p "$B/bin"
+  printf '#!/bin/bash\ncase " $* " in *" reset "*"--hard"*"%s"*) echo "fatal: injected reset failure" >&2; exit 1 ;; esac\nexec "%s" "$@"\n' \
+    "$target" "$real" > "$B/bin/git"
+  chmod +x "$B/bin/git"
+  PATH="$B/bin:$PATH" run upd update
+  [ "$status" -eq 1 ] || { echo "status $status: $output"; return 1; }
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 1 ]
+  case "$output" in "Not updating: "*"injected reset failure"*"this home is back as it was"*"local/before-update-"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$H" rev-parse HEAD)" = "$orig" ]
+  [ "$(git -C "$H" rev-parse HEAD)" != "$(git -C "$H" for-each-ref --format='%(objectname)' refs/heads/local/)" ]
+  ! git -C "$H" log --format=%s | grep -q "daedalus update"
+  [ "$(git -C "$H" diff HEAD)" = "$diff_before" ]
+  [ "$(git -C "$H" diff --cached)" = "$cached_before" ]
+  [ ! -e "$H/CLAUDE.local.md" ]
+  [ "$(shasum < "$H/.claude/settings.local.json")" = "$sl" ]
+  [ "$(shasum < "$H/config.yaml")" = "$cy" ]
+}
+
+@test "migration auto mode: a ~/.claude/settings.json whose auto-mode line lets this home's CLAUDE.md be edited is reported once, and the file is never written" {
+  mkdir -p "$HOME/.claude"
+  python3 - "$HOME/.claude/settings.json" "$H" <<'PY'
+import json, sys
+json.dump({"autoMode": {"allow": ["$defaults", "Editing CLAUDE.md in the Daedalus home at %s when the operator asked for that change in this session: the deployment chose to let Daedalus maintain its own brief." % sys.argv[2]]}}, open(sys.argv[1], "w"), indent=2)
+PY
+  sum="$(shasum < "$HOME/.claude/settings.json")"
+  run upd update
+  [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
+  case "$output" in *"~/.claude/settings.json allows auto mode to edit CLAUDE.md here; reword that line to name CLAUDE.local.md (README, 'Letting Daedalus edit its own brief')."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(printf '%s\n' "$output" | grep -o 'allows auto mode' | wc -l | tr -d ' ')" = 1 ]
+  [ "$(shasum < "$HOME/.claude/settings.json")" = "$sum" ]
+}
+
+@test "migration normalising: update.normalise_rule agrees with verifylib.home_relative_glob on every anchor form" {
+  run python3 - "$REPO/core" "$H" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+sys.dont_write_bytecode = True
+import update as u, verifylib as v
+home = Path(sys.argv[2])
+forms = ["/CLAUDE.md", "./CLAUDE.md", "//%s/CLAUDE.md" % home, "CLAUDE.md", "core/", "/core/**", "//elsewhere/x", "~/x"]
+for p in forms:
+    g = v.home_relative_glob(home, p)
+    want = "Edit(%s)" % g if g is not None else "Edit(%s)" % p
+    got = u.normalise_rule(home, "Edit(%s)" % p)
+    assert got == want, (p, got, want)
+assert u.normalise_rule(home, "Edit(./SOUL.md)") == u.normalise_rule(home, "Edit(/SOUL.md)") == u.normalise_rule(home, "Edit(//%s/SOUL.md)" % home)
+assert u.normalise_rule(home, "Bash(core/lease.sh release:*)") == "Bash(core/lease.sh release:*)"
+print("ok")
+PY
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
