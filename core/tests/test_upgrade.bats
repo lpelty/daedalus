@@ -479,20 +479,20 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
   [ "$status" -eq 0 ]; [ "$output" = "Already upgraded to $CUR; nothing to do." ] || { echo "$output"; return 1; }
 }
 
-# v0.7.4 adds no step and no migration: a home stamped 0.7.3 takes it with the completion line alone, so `daedalus
+# v0.7.5 adds no step and no migration (the board's cache is made by the first board that needs it): a home stamped 0.7.4 takes it with the completion line alone, so `daedalus
 # update` (which runs this upgrade) handles it.
-@test "0.7.3 to 0.7.4 is a no-op beyond the stamp: a home stamped 0.7.3 says only the completion line and nothing else changes" {
+@test "0.7.4 to 0.7.5 is a no-op beyond the stamp: a home stamped 0.7.4 says only the completion line and nothing else changes" {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
-  [ "$(sed -n 1p "$REPO/VERSION")" = 0.7.4 ]
-  printf '0.7.3\n' > "$DAEDALUS_HOME/VERSION"
-  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.3 ]
+  [ "$(sed -n 1p "$REPO/VERSION")" = 0.7.5 ]
   printf '0.7.4\n' > "$DAEDALUS_HOME/VERSION"
+  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.4 ]
+  printf '0.7.5\n' > "$DAEDALUS_HOME/VERSION"
   before="$(snapshot | grep -v 'state/upgraded-to')"
   run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$output" = "Upgrade to 0.7.4: complete. What changed is in CHANGELOG.md under v0.7.4; what the target's agent may ask of you is in docs/handoff-reverse-caller.md." ] || { echo "$output"; return 1; }
-  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.4 ]
-  [ "$(snapshot | grep -v 'state/upgraded-to')" = "$before" ] || { echo "the 0.7.4 upgrade changed something"; return 1; }
+  [ "$output" = "Upgrade to 0.7.5: complete. What changed is in CHANGELOG.md under v0.7.5; what the target's agent may ask of you is in docs/handoff-reverse-caller.md." ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.5 ]
+  [ "$(snapshot | grep -v 'state/upgraded-to')" = "$before" ] || { echo "the 0.7.5 upgrade changed something"; return 1; }
 }
 
 # --- step 7: the daedalus command (update-command design §4.7, Decision 18) -----------------------------------------
