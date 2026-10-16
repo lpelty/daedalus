@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The only sanctioned way to commit the vault from a session (spec §4.7).
 #   core/vault-commit.sh [-m "<message>"] [--push]
-# 1. the prime window or an operator shell only; 2. vault index.lock is
+# 1. the pen's holder or an operator shell only — a pen whose holder has ended
+# moves to a terminal session here; behind a live holder, exit 3 and one line
+# (not committed here: the pen's holder commits); 2. vault index.lock is
 # retried three times, a second apart; 3–4. every claim-shaped changed or
 # untracked document is judged, whatever lease: it carries — a live other
 # window's claim is left out of the commit and named, a dead window's
@@ -54,12 +56,17 @@ else
   die "the vault at $V is neither its own git repository nor tracked by the Daedalus home repository ($DAEDALUS_HOME)"
 fi
 
-# 1. Only the prime window commits (§4.7); a shell with no session identity is the operator.
+# 1. The pen's holder commits (§4.7); a shell with no session identity is the operator. A pen whose
+# holder has ended moves to this session when it is a terminal session (leaselib pen-for-commit, one
+# locked judge-and-write). Exit 3: not committed here — the pen's holder commits; its one line says why.
+# rc=0 … || rc=$?: lib.sh sets -e, so a bare `said=$(…); rc=$?` would end the script silently at exit 3.
 if python3 "$LL" my-session >/dev/null 2>&1; then
-  if ! python3 "$LL" is-prime; then
-    sentence="$(python3 "$LL" not-prime-sentence 2>&1)" || die "$sentence"
-    die "$sentence"
-  fi
+  rc=0; said="$(python3 "$LL" pen-for-commit 2>&1)" || rc=$?
+  case $rc in
+    0) [ -z "$said" ] || log "$said" ;;
+    3) printf 'daedalus: %s\n' "$said" >&2; exit 3 ;;
+    *) die "${said#daedalus: }" ;;
+  esac
 fi
 
 # 2. retry_git <args...> — three tries, a second apart, while another session holds index.lock (§3.3).

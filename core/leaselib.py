@@ -4985,12 +4985,11 @@ def main(argv: list) -> int:
         if line:
             print(line)
         return rc
-    if cmd in ("is-prime", "not-prime-sentence", "numbers"):
-        # vault-commit.sh (§4.7): is-prime exits 0 when prime.json names the caller's
-        # session, or when the deployment has no lease files at all (nothing to hold);
-        # not-prime-sentence prints the refusal with window NUMBERS, never peer names
-        # (§4.1); numbers prints one unswept window number per line for the default
-        # commit message. One LOCK_SH read; an unreadable lease file fails closed.
+    if cmd in ("is-prime", "numbers"):
+        # is-prime exits 0 when prime.json names the caller's session, or when the deployment has no lease
+        # files at all (nothing to hold); vault-commit.sh judges the pen with pen-for-commit instead. numbers
+        # prints one unswept window number per line for the default commit message. One LOCK_SH read; an
+        # unreadable lease file fails closed.
         sid = session_id_from_env()
         leases: Dict[str, dict] = {}
         if leases_dir(root).is_dir():
@@ -5004,36 +5003,10 @@ def main(argv: list) -> int:
             for nn in numbered:
                 print(nn)
             return 0
-        prime = leases.get("prime") or {}
-        holder = prime.get("session_id")
-        if cmd == "is-prime":
-            if sid is None or (not numbered and not holder):
-                return 0
-            return 0 if holder and holder == sid else 1
-        mine, _ = lease_of_session(leases, sid or "")
-        prime_nn, prime_lease = lease_of_session(leases, str(holder)) if holder else (None, None)
-        me = "You are %s" % window_label(mine, leases.get(mine)) if mine else "This session holds no window"
-        if mine is None and sid:
-            # a session holding no window takes the pen only when no live session holds it (prime_take_windowless)
-            take = ("take it with `core/lease.sh prime take` (no window needed when no live session holds it), then "
-                    "run `core/vault-commit.sh` again.")
-            what = window_label(prime_nn, prime_lease) if prime_nn else "a session holding no window"
-            if not holder:
-                pen = "nobody holds the pen — " + take
-            elif (prime_nn is None and not registry_present()) or prime_holder_live(root, leases, str(holder))[0]:
-                pen = ("the pen is held by %s — a session holding no window cannot take it from a live session: ask "
-                       "it to commit, or the operator commits the vault from their own shell: `cd %s && "
-                       "core/vault-commit.sh`." % (what, root))
-            else:
-                pen = "the pen is held by %s, which is gone — %s" % (what, take)
-        elif prime_nn:
-            pen = "the pen is held by %s — ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so." % window_label(prime_nn, prime_lease)
-        elif holder:
-            pen = "the pen is held by a session that holds no window now — take it with `core/lease.sh prime take` if the operator says so."
-        else:
-            pen = "nobody holds the pen — take it with `core/lease.sh prime take` if the operator says so."
-        print("Only the prime window commits the vault. %s; %s" % (me, pen))
-        return 0
+        holder = (leases.get("prime") or {}).get("session_id")
+        if sid is None or (not numbered and not holder):
+            return 0
+        return 0 if holder and holder == sid else 1
     if cmd == "changed":
         if not args:
             sys.stderr.write("usage: leaselib.py changed <NN>\n"); return 2

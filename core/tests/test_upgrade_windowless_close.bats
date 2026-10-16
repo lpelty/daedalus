@@ -153,7 +153,10 @@ CLOSE="At its close, \`core/lease.sh log\` prints this session's log path; when 
   run --separate-stderr stop s1; [ "$status" -eq 2 ] || { echo "status $status: $stderr"; return 1; }
   printf '%s\n' "$stderr" >> "$M"
   case "$stderr" in *"$CLOSE"*) : ;; *) echo "the Stop does not name the close: $stderr"; return 1 ;; esac
-  env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh" >> "$M" 2>&1 || true      # nobody holds the pen yet
+  # nobody holds the pen yet: s1's vault commit takes it (a terminal session); hand it back, so s2 can take it below
+  env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh" >> "$M" 2>&1
+  grep -qF "Nobody held the pen; this session holds it now and commits the vault; promote waits until the upgrade finishes." "$M"
+  rm "$DAEDALUS_HOME/state/leases/prime.json"
   run python3 - "$DAEDALUS_HOME/core" <<'PY'
 import sys; sys.path.insert(0, sys.argv[1]); import leaselib as ll
 for p in (("0.7.0", "restart", ll.UPGRADE_NOT_RUN % "0.7.0"), ("0.7.0", "running", "x"),
@@ -168,8 +171,8 @@ PY
   env DAEDALUS_SESSION_ID=s2 bash "$DAEDALUS_HOME/core/lease.sh" prime take >> "$M" 2>&1
   run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/lease.sh" prime take; [ "$status" -ne 0 ]
   printf '%s\n' "$output" >> "$M"; case "$output" in *"held by a live session"*) : ;; *) echo "$output"; return 1 ;; esac
-  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -ne 0 ]
-  printf '%s\n' "$output" >> "$M"; case "$output" in *"cannot take it from a live session"*) : ;; *) echo "$output"; return 1 ;; esac
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 3 ]
+  printf '%s\n' "$output" >> "$M"; case "$output" in *"which is live: its next vault commit carries every window's files"*) : ;; *) echo "$output"; return 1 ;; esac
   board_as s1 >> "$M"
   # every backticked command in what s1 was shown
   run python3 - "$M" "$DAEDALUS_HOME" "$DAEDALUS_HOME/core" <<'PY'
@@ -211,21 +214,23 @@ PY
   case "$output" in *"$CLOSE"*) : ;; *) echo "the note is missing: $output"; return 1 ;; esac
 }
 
-@test "vault-commit.sh's refusal to a session holding no window names what works: the pen is free — prime take, no window needed; the holder is live — ask it, or the operator commits from their own shell" {
+@test "vault-commit.sh for a session holding no window: behind a live holder it is told in one line that the holder's commit carries its files (exit 3); once the holder has ended, or when nobody holds the pen, it takes the pen and commits" {
   mkdir -p "$DAEDALUS_HOME/state/leases"
   P="$(live_pid)"; registry_entry "$P" s1
   pa="$(live_pid)"; registry_entry "$pa" sA interactive cli holder-a
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 01 "{\"lease\":\"01\",\"session_id\":\"sA\",\"worktree\":\"worktrees/01\",\"pid\":$pa,\"proc_started\":$(ps_ms "$pa")}"
   touch "$DAEDALUS_HOME/state/leases/01.seen"
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
-  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -ne 0 ]
-  case "$output" in *"This session holds no window; the pen is held by window 01 — a session holding no window cannot take it from a live session: ask it to commit, or the operator commits the vault from their own shell: \`cd $DAEDALUS_HOME && core/vault-commit.sh\`."*) : ;; *) echo "$output"; return 1 ;; esac
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 3 ]
+  [ "$output" = "daedalus: The vault is left for the pen's holder, window 01, which is live: its next vault commit carries every window's files, this session's included, and once it ends the next close takes the pen and commits them." ] || { echo "$output"; return 1; }
   kill "$pa"; wait "$pa" 2>/dev/null || true
-  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -ne 0 ]
-  case "$output" in *"This session holds no window; the pen is held by window 01, which is gone — take it with \`core/lease.sh prime take\` (no window needed when no live session holds it), then run \`core/vault-commit.sh\` again."*) : ;; *) echo "$output"; return 1 ;; esac
-  rm "$DAEDALUS_HOME/state/leases/prime.json"
-  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -ne 0 ]
-  case "$output" in *"nobody holds the pen — take it with \`core/lease.sh prime take\` (no window needed when no live session holds it)"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'h\n' > "$DAEDALUS_HOME/vault/hot.md"
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in "daedalus: The pen's holder, window 01, has ended; this session holds the pen now and commits the vault; promote waits until the upgrade finishes."*"committed: "*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("taken_without_window"))' "$DAEDALUS_HOME/state/leases/prime.json")" = s1 ]
+  rm "$DAEDALUS_HOME/state/leases/prime.json"; printf 'h2\n' > "$DAEDALUS_HOME/vault/hot.md"
+  run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in "daedalus: Nobody held the pen; this session holds it now and commits the vault"*"committed: "*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "the board: with no window open, the lead names the close for a session holding no window once; a window sees why the pen is not its — 'held by a session holding no window'; lease.sh log and prime take with no state/leases/ yet name what works" {

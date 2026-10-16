@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# Pins core/vault-commit.sh: prime-only, index.lock retry, per-file claim staging (spec §4.7).
+# Pins core/vault-commit.sh: the pen's holder (or an operator shell) commits, a dead holder's pen moves on, index.lock retry, per-file claim staging (spec §4.7).
+bats_require_minimum_version 1.5.0
 load fixtures/leases/setup.bash
 setup() {
   lease_fixture; VC="$DAEDALUS_HOME/core/vault-commit.sh"
@@ -16,12 +17,32 @@ doc() { # doc <relpath> <status> <lease> [evidence-run]
   { printf -- '---\ntype: proposal\nstatus: %s\nupdated-by: daedalus\ncreated: 2026-02-01\nlease: %s\n' "$2" "$3"; [ -n "${4:-}" ] && printf 'evidence-run: %s\n' "$4"; printf -- '---\n# x\n'; } > "$DAEDALUS_HOME/vault/$1"
 }
 
-@test "non-prime is refused naming the prime's window number, never a peer name; an operator shell may commit" {
+@test "a session behind a live pen holder is told in one line that the holder's commit carries its files (exit 3), never a peer name, nothing staged; an operator shell may commit; a visitor is told its caller commits" {
   doc proposals/PROP-1.md PROPOSED 02
-  run env DAEDALUS_SESSION_ID=sB bash "$VC"; [ "$status" -ne 0 ]
-  case "$output" in *"Only the prime window commits the vault"*"window 01"*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *daedalus-0*) echo "$output"; return 1 ;; *) : ;; esac
+  run --separate-stderr env DAEDALUS_SESSION_ID=sB bash "$VC"; [ "$status" -eq 3 ] || { echo "$status $output $stderr"; return 1; }
+  [ -z "$output" ] || { echo "stdout: $output"; return 1; }
+  [ "$stderr" = "daedalus: The vault is left for the pen's holder, window 01, which is live: its next vault commit carries every window's files, this session's included, and once it ends the next close takes the pen and commits them." ] || { echo "$stderr"; return 1; }
+  case "$stderr" in *daedalus-0*) echo "$stderr"; return 1 ;; *) : ;; esac
+  [ -z "$(git -C "$DAEDALUS_HOME/vault" diff --cached --name-only)" ]
+  [ "$(git -C "$DAEDALUS_HOME/vault" log --format=%s | wc -l | tr -d ' ')" = 2 ]
+  run --separate-stderr env DIRECT_CALL_ID=x DAEDALUS_SESSION_ID=sV bash "$VC"; [ "$status" -eq 3 ]
+  [ "$stderr" = "daedalus: This is a direct-call session; it does not commit the vault — its caller's session does." ] || { echo "$stderr"; return 1; }
   run bash -c "env -u DAEDALUS_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID bash '$VC'"; [ "$status" -eq 0 ]
+  git -C "$DAEDALUS_HOME/vault" log -1 --format=%s | grep -q 'vault: prime commit'
+}
+
+@test "the pen's holder has ended: the next terminal session's vault-commit.sh takes the pen, says so in one line, and commits (one commit)" {
+  cat "$DAEDALUS_HOME/state/leases/01.json" > /dev/null
+  rm -f "$BATS_TEST_TMPDIR"/sessions/*.json                  # nobody is in the registry: both windows have ended ...
+  pb="$(live_pid)"; registry_entry "$pb" sB                  # ... but window 02's session is back, in a terminal
+  printf '{"lease":"02","session_id":"sB","worktree":"worktrees/02","pid":%s,"proc_started":%s}' "$pb" "$(ps_ms "$pb")" > "$DAEDALUS_HOME/state/leases/02.json"
+  printf 'log\n' > "$DAEDALUS_HOME/vault/sessions/2026-10-16-001.md"
+  n0="$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)"
+  run env DAEDALUS_SESSION_ID=sB bash "$VC"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in "daedalus: The pen's holder, window 01, has ended; this session holds the pen now and commits the vault."*"daedalus: committed: "*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)" = $((n0 + 1)) ]
+  git -C "$DAEDALUS_HOME/vault" show --name-only --format= HEAD | grep -q 'sessions/2026-10-16-001.md'
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["session_id"]=="sB" and d["history"][-1]["auto"]=="commit", d' "$DAEDALUS_HOME/state/leases/prime.json"
 }
 
 @test "a live other lease's IMPLEMENTED claim is left unstaged and named; the rest commits; a dead lease's unverified claim stops the commit naming the dead window; two files with one number stop it" {
