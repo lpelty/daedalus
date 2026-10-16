@@ -37,6 +37,14 @@ release sets its heading and VERSION, which stays 0.8.0 until then.
   the hook left in a local settings file cannot block edits.
 - `recall.ruff` is no longer read. The Bash guard refuses `code-review-graph`
   run directly: `core/context.py` is its only caller.
+- Measured on a 283-file target: the first index build took 1.6 s, an
+  update and query after a 4-file edit 0.9 s, and a median `reach` 0.8 s. An
+  index is about 40 MB.
+- On the trial's own questions, the merged answer's recall was at least the
+  graph's on every one. Shell, template and `-m` edges went from 0 of 15 to 15
+  of 15.
+- Precision fell where grep adds noise, which is why every file carries its
+  label.
 
 **What you will see.**
 - Doctor has a new line: `NOTE code context: no code graph configured`. The
