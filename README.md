@@ -103,9 +103,10 @@ Close every Daedalus window, then type one command in a terminal:
 daedalus update
 ```
 
-It prints one line, `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.`, or what
-needs attention, one sentence each. Run again, it says `Daedalus is up to
-date (0.7.4).` If `daedalus` is not found, type `~/.local/bin/daedalus
+The first line is the result: `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.`,
+`Daedalus is up to date (0.7.4).`, or `Not updated:` and the reason. What
+else it has to say follows on later lines, one sentence each: what it moved
+and where the backup is, what the upgrade or doctor needs. If `daedalus` is not found, type `~/.local/bin/daedalus
 update`; `core/setup.sh` and the upgrade install the command there and print
 the one line that adds it to your shell's PATH. It never overwrites a file
 there it did not write. `daedalus version` prints the release, the home, the
@@ -116,9 +117,11 @@ home, naming each, and while another update runs. It picks the remote whose
 address is the release's, github.com/lpelty/daedalus, whatever it is called;
 a home that follows a mirror sets `update.address` in `config.yaml`. It
 refuses when git's settings would fetch from anywhere but that address. It
-fetches, runs the release's own copy of the update, and refuses, naming them,
-on local changes it cannot move: an edit to `core/`, `mods/` or the README,
-or an untracked file where the release adds one. When `CLAUDE.md` or
+fetches, runs the release's own copy of the update, and refuses in one line
+on local changes it cannot carry: an edit to `core/`, `mods/` or the README,
+or an untracked file where the release adds one. The line names at most three
+paths; past three, the full list is in `state/update-refused.txt`. A refusal
+never tells you to undo, reset or delete anything. When `CLAUDE.md` or
 `.claude/settings.json` carries a local edit, or the home's history has
 diverged from the release (a merge with local commits), it moves those edits
 into the local layer (see "The local layer"):
@@ -137,12 +140,28 @@ into the local layer (see "The local layer"):
 
 First it keeps a backup: the branch `local/before-update-<stamp>` and copies
 under `state/update-backups/<stamp>/`. Then it resets the tracked files to the
-release. SOUL.md, the journal, keeps the deployment's copy. If the backup
+release. SOUL.md, the journal, keeps the deployment's copy. Backup branches
+stay local and pile up; the update never pushes or prunes them, but a remote
+set up with `mirror = true` would push them.
+
+**A home that keeps its vault in its own repository.** Some homes commit
+`vault/` in the home repository (doctor accepts that layout) and push it to a
+remote of their own. There the update never resets: after the local-layer
+move, one local commit sets the release's files, then it merges the release
+into its branch and keeps the home's history, every vault file, and the
+branch's tracking — the branch keeps following its own remote, so the next
+push is an ordinary one. `.gitignore` becomes the release's copy followed by
+a marked block of this home's own lines (with `!/vault/` when the release
+would ignore it), so later releases never conflict there. SOUL.md stays the
+home's. A failure puts back only what the update wrote; a vault edit made
+meanwhile is kept. In a home that tracks its vault in its own repository,
+`daedalus update` is the way a release arrives; `git pull` pulls that home's
+own remote. If the backup
 itself fails, it stops before changing anything. A failure after the backup
 puts the home back from it. Then it runs the upgrade at once, then
-doctor, and prints the one line, naming the backup when it made one. Network
-failure, or anything unsafe, ends with one sentence that says nothing in the
-home was changed.
+doctor, and prints the result first, naming the backup on a later line when
+it made one. Network failure, or anything unsafe, ends with one line that
+says nothing in the home was changed.
 
 **The first update.** A home older than v0.7.3 has no `daedalus` command yet.
 Close every Daedalus window and type this one line in a terminal, with your
@@ -303,7 +322,7 @@ move the other aside, or `git -C target/<repo> config --unset core.hooksPath`
 — then `core/setup.sh`; until then promote refuses and the doctor says
 MISSING.
 `python3 core/upgrade.py --dry-run` says what it would do and changes nothing.
-`cat VERSION` prints the release, and `git describe --tags --abbrev=0` its tag.
+`cat VERSION` prints the release, and `git describe --tags --abbrev=0 --match 'v[0-9]*'` its tag.
 `core/doctor.sh` reports the version, the stamp, and anything in `target/`
 still off its trunk. A stash in a target checkout is saved work no window
 shows, so it is never the remedy: the upgrade stops on it, and `core/doctor.sh`

@@ -11,7 +11,9 @@ window, by design. It can now close like any other session. It gets its
 session-log number, takes the pen when no live session holds it, writes
 `hot.md` and commits the vault. Thanks to a Daedalus deployment on a second
 machine, which reported the stall this came from. Every close now commits the
-vault, and a pen left by a session that has ended moves on by itself.
+vault, and a pen left by a session that has ended moves on by itself. And a
+home that keeps its vault in its own repository now takes releases by
+merging.
 
 **What went wrong.**
 - No window opens while the upgrade is pending, so that its safety copy reads
@@ -76,6 +78,26 @@ vault, and a pen left by a session that has ended moves on by itself.
   its line names, then run `core/vault-commit.sh`; do not close again.
 - If your deployment keeps its own close skill: `core/close.sh` commits the
   vault now; `--commit` is no longer needed.
+
+**A home that keeps its vault in its own repository.**
+- Some homes commit `vault/` in the home repository and push it to a remote
+  of their own. `daedalus update` refused such a home.
+- The refusal listed every vault file, hundreds of paths in one sentence. It
+  also advised undoing them with git, which would have destroyed the vault.
+- Now such a home takes the release by merging. Its history, its vault and
+  its own remote are kept; nothing is reset.
+- One local commit first sets the release's files, after the usual move of
+  local edits into the local layer. Then the release merges into the branch.
+- `.gitignore` becomes the release's copy plus a marked block of the home's
+  own lines. Later releases never conflict there.
+- If anything fails, the update puts back only what it wrote. A vault edit
+  made meanwhile is kept.
+- `core/upgrade.py --rollback` refuses such a home in one line: its last step
+  would take the vault out of the working tree.
+- Every result now leads the output on its own first line. A refusal is one
+  line starting `Not updated:`, naming at most three paths.
+- Past three paths, the full list is in `state/update-refused.txt`. No
+  refusal tells you to undo, reset, abort or delete anything.
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
 in a terminal. It prints `Daedalus updated 0.7.3 -> 0.7.4; doctor OK.` There

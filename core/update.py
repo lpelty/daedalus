@@ -25,7 +25,11 @@ only; the home's own core/upgrade.py is imported for one thing, its liveness che
      of that path on the release's history: a local change outside CLAUDE.md and .claude/settings.json, an
      untracked file where the release adds one, or a merge or rebase half done is refused, naming it; an older
      release's copy checked out on purpose is reported and replaced;
-  7. a clean home whose HEAD the release contains fast-forwards; any other runs the local-layer migration —
+  7. a home that tracks paths no release ever had (its vault; is_deployment_path) is in merge mode: after the
+     local-layer migration below, one local commit sets every release path to the release's copy and carries
+     .gitignore's own lines, then the release merges into the home's branch (migrate_and_merge) — its history, its
+     vault and its branch's own remote kept, a failure restoring only what the move wrote. Otherwise:
+     a clean home whose HEAD the release contains fast-forwards; any other runs the local-layer migration —
      backup branch local/before-update-<stamp> and copies under state/update-backups/<stamp>/ first; rules and
      hook groups no release ever had go to .claude/settings.local.json (state/settings-before-merge.json's
      additions too), a removed Edit(/CLAUDE.md) deny becomes boundary.edit_brief: true in config.yaml, brief
@@ -34,7 +38,10 @@ only; the home's own core/upgrade.py is imported for one thing, its liveness che
      the backup on restores the original HEAD, working tree and local-layer files, never the backup commit;
   8. runs core/upgrade.py --caller update --progress now, not at the next session start;
   9. runs core/doctor.sh quietly, and
- 10. says one line: "Daedalus updated 0.7.2 -> 0.7.3; doctor OK." (or what needs attention, one sentence each).
+ 10. leads with the result on the first line — "Daedalus updated 0.7.2 -> 0.7.3; doctor OK.", "Daedalus is up to date
+     (X).", or "Not updated: <reason>." — and says the rest on later lines, one sentence each: the move, the upgrade's
+     stop, each doctor finding, the notes. A refusal is one line, naming at most three paths (the full list in
+     state/update-refused.txt), and never advises undoing, resetting or deleting anything.
 Exit 0: updated or up to date; 1: refused (nothing changed) or restored; 2: updated, but the upgrade or doctor names
 something.
 

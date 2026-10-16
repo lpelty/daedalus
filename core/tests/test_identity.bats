@@ -701,3 +701,21 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$part"
   run git -C "$DAEDALUS_HOME" ls-files -- vault state target worktrees
   [ "$status" -eq 0 ]; [ -z "$output" ] || { echo "tracked under a deployment's paths: $output"; return 1; }
 }
+
+@test "a home that keeps its vault in its own repository: README's Upgrading section says the update merges, carries .gitignore's own lines and keeps the branch's own remote, and how a release arrives there; the v0.7.4 part says it in plain words; the first line is the result" {
+  UP="$(awk '/^## Upgrading/{f=1; next} /^## /{if (f) exit} f' "$DAEDALUS_HOME/README.md" | tr '\n' ' ' | tr -s ' ')"
+  for s in 'A home that keeps its vault in its own repository' 'merges the release into its branch' "keeps the home's history" \
+           "this home's own lines" '.gitignore' 'keeps following its own remote' \
+           "In a home that tracks its vault in its own repository, \`daedalus update\` is the way a release arrives; \`git pull\` pulls that home's own remote." \
+           'The first line is the result' 'state/update-refused.txt' 'local/before-update-' 'mirror'; do
+    case "$UP" in *"$s"*) : ;; *) echo "README Upgrading lacks: $s"; return 1 ;; esac
+  done
+  grep -qF "git describe --tags --abbrev=0 --match 'v[0-9]*'" "$DAEDALUS_HOME/README.md"
+  sec="$(awk '/^## v0.7.4 /{f=1; next} /^### In detail/{if (f) exit} /^## /{if (f) exit} f' "$DAEDALUS_HOME/CHANGELOG.md")"
+  rel="$(printf '%s\n' "$sec" | tr '\n' ' ' | tr -s ' ')"
+  for s in '**A home that keeps its vault in its own repository.**' 'merges' 'Not updated:' 'state/update-refused.txt' '.gitignore'; do
+    case "$rel" in *"$s"*) : ;; *) echo "the v0.7.4 section lacks: $s"; return 1 ;; esac
+  done
+  ! printf '%s\n' "$sec" | grep -qwiE 'wren|bill|clara|smartsheet' || { echo "names an agent or employer"; return 1; }
+  ! printf '%s\n' "$sec" | grep -qE 'PROP-[0-9]|EX-[0-9]|\bB[0-9]\b|\bA[0-9]\b' || { echo "names a proposal number or step code"; return 1; }
+}
