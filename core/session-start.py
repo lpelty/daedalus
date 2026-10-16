@@ -22,6 +22,7 @@ orientation line (§8.2), so a caller can grep for it.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -69,6 +70,28 @@ def unverified(root: Path, marker: dict) -> list:
         elif rec.get("result") != "PASS":
             out.append("%s: evidence-run %s is %s" % (p, rid, rec.get("result")))
     return out
+
+
+UPDATE_LOCK = Path("state") / ".update.lock"   # core/update.py holds it from its liveness check to its last line
+UPDATE_RUNNING = ("daedalus update is running in this home; close this session and start again once it prints "
+                  "its result.")
+
+
+def update_running(root: Path) -> bool:
+    """Whether `daedalus update` holds the home's update lock (update design Decision 19): its tree may be half way
+    through a move, and its upgrade runs beside this start's. Taken shared and let go at once, so two starts never
+    hold each other up; a missing lock file is no update."""
+    try:
+        fd = os.open(str(root / UPDATE_LOCK), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
 
 
 def resolve_budget(started_at: float) -> int:
@@ -183,6 +206,11 @@ def main() -> int:
     # out instead of leaving a checkout writing (plan 2 Decision 20).
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     started_at = time.time()
+    # First of all: while `daedalus update` runs, this start does nothing but say so — no upgrade, no bind, no
+    # marker (update design Decision 19).
+    if update_running(v.ROOT):
+        v.emit({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": UPDATE_RUNNING}})
+        return 0
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):

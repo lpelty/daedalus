@@ -9,7 +9,7 @@ setup() {
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/target" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/state"
   cp "$SRC/lib.sh" "$SRC/verifylib.py" "$SRC/guard-bash.py" "$DAEDALUS_HOME/core/"
   # the guard imports boundary-hook.py for the cross-lease helpers and leaselib for the leases (Task 11)
-  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$SRC/distcheck.py" "$DAEDALUS_HOME/core/"
+  cp "$SRC/leaselib.py" "$SRC/lease.sh" "$SRC/boundary-hook.py" "$SRC/transcriptlib.py" "$SRC/distcheck.py" "$SRC/update.py" "$DAEDALUS_HOME/core/"
   printf '{"permissions":{"deny":["Edit(/core/**)","Edit(/CLAUDE.md)"]}}' > "$DAEDALUS_HOME/.claude/settings.json"
   printf 'x\n' > "$DAEDALUS_HOME/CLAUDE.md"
   cat > "$DAEDALUS_HOME/config.yaml" <<'EOF'

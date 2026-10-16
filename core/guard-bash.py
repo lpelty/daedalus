@@ -905,18 +905,14 @@ def release_origin_problem(repo: Path) -> Optional[str]:
     r = remote[0]
     if get("--get-all", "branch.%s.remote" % b) != remote or get("--get-all", "branch.%s.merge" % b) != merge:
         return RELEASE_REFUSED % ("git settings outside this checkout change which remote or branch %s pulls from" % b)
-    urls, every = get("--local", "--get-all", "remote.%s.url" % r), get("--get-all", "remote.%s.url" % r)
-    if len(urls) != 1 or every != urls:
-        return RELEASE_REFUSED % ("git settings outside this checkout give the remote %s another address (%s)"
-                                  % (r, ", ".join(u for u in every if u not in urls) or "none recorded here"))
-    code, out, _ = v.run(["git", "-C", str(repo), "ls-remote", "--get-url", r])
-    got = out.strip()
-    if code != 0 or got != urls[0]:
-        return RELEASE_REFUSED % ("an address rewrite (insteadOf) turns %s into %s" % (urls[0], got or "nothing"))
-    for k in ("uploadpack", "vcs"):
-        if get("--get-all", "remote.%s.%s" % (r, k)):
-            return RELEASE_REFUSED % ("remote.%s.%s is set, which fetches through another program" % (r, k))
-    return None
+    # the address half is one rule with `daedalus update` (update design Decision 14): core/update.py holds it
+    try:
+        upd = importlib.import_module("update")
+        problem = upd.remote_problem(repo, r)
+    except Exception as e:   # fail closed: without the rule nothing says the address is the recorded one
+        return RELEASE_REFUSED % ("core/update.py, which checks the remote's address, could not be read (%s: %s)"
+                                  % (type(e).__name__, e))
+    return RELEASE_REFUSED % problem if problem else None
 
 
 PRODUCT_WRITE = ("`git %s` changes Daedalus's own checkout, which changes only by the release pull (`git pull "

@@ -102,6 +102,12 @@ boundary:
   # CLAUDE.md), so a release never conflicts with it.
   edit_brief: false
 
+# `daedalus update` (optional): it takes the release from the remote whose
+# address is the release's, github.com/lpelty/daedalus, whatever that remote is
+# called. A home that deliberately follows a mirror names the mirror here.
+# update:
+#   address: https://git.example.com/mirror/daedalus.git
+
 # Direct calls (optional) — core/call-agent.sh. Uncomment to use.
 # The target's own agent — the one Daedalus may summon for context or a
 # review — is named HERE and nowhere else: core has no default and takes no
