@@ -563,6 +563,17 @@ scratch_and_worktree() {
   run guard_as sA "git -C $T worktree prune"; allowed
 }
 
+@test "a prime that took the pen at a vault commit while the upgrade is pending does not remove or prune promote's worktrees until the upgrade finishes" {
+  scratch_and_worktree
+  printf '9.9.9\n' > "$DAEDALUS_HOME/VERSION"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[],"taken_while_pending":"9.9.9"}'
+  run guard_as sA "git -C $T worktree prune"; denied
+  case "$output" in *"waits until the upgrade to 9.9.9 finishes"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "git -C $T worktree remove $S"; denied
+  printf '9.9.9\n' > "$DAEDALUS_HOME/state/upgraded-to"
+  run guard_as sA "git -C $T worktree prune"; allowed
+}
+
 @test "abbreviated options are the options they abbreviate; update-ref and branch -f on a trunk; every other way to set the hooks path (Decision 33)" {
   scratch_and_worktree
   for c in 'git push --no-veri origin lease/02' 'git push --mirr origin' 'git push --prun origin' 'git push origin --delet fix/x' \

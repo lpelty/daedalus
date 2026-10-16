@@ -258,6 +258,9 @@ DENIED_LONG = ("--no-verify", "--mirror", "--all", "--branches", "--prune", "--d
                "--force-if-includes")
 WORKTREE_PROMOTE = ("Removing or pruning worktrees under state/promote/ is the prime's (it is promote's scratch); "
                     "window %s is not the prime.")
+WORKTREE_PROMOTE_WAITS = ("Removing or pruning worktrees under state/promote/ waits until the upgrade to %s finishes: "
+                          "this session took the pen at a vault commit while it was pending, and the upgrade's safety "
+                          "copy protects target/.")
 TOO_DEEP = "This command nests shells too deeply for the guard to check; run the inner command directly."
 HOME_TREES = ("target", "worktrees", "state/promote")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
@@ -1040,17 +1043,27 @@ def check_worktree_promote(rest: List[str], repo: Path, root: Path, ctx: dict) -
     """§7.3: `git worktree remove <state/promote/…>` and `git worktree prune` in a repo
     under the home are the prime's; a non-prime window is denied, and so is a prime
     that can be given no tree (it holds no window while the upgrade is pending, or took
-    the pen without one: `refused` is set for it) — target/'s repositories are not its."""
-    if not ctx["leases"] or (ctx["prime"] and not ctx.get("refused")) or not rest or home_tree(root, repo) is None:
+    the pen without one: `refused` is set for it) — target/'s repositories are not its —
+    and a prime that took the pen at a vault commit while the upgrade is pending
+    (prime.json's taken_while_pending), until the upgrade finishes, as promote waits."""
+    if not ctx["leases"] or not rest or home_tree(root, repo) is None:
         return None
-    who = ctx["mine"] or "none"
     if rest[0] == "prune":
-        return WORKTREE_PROMOTE % who
-    if rest[0] == "remove":
+        hit = True
+    elif rest[0] == "remove":
         scratch = (root / "state" / "promote").resolve()
-        if any(not a.startswith("-") and under(resolve(repo, a), scratch) for a in rest[1:]):
-            return WORKTREE_PROMOTE % who
-    return None
+        hit = any(not a.startswith("-") and under(resolve(repo, a), scratch) for a in rest[1:])
+    else:
+        hit = False
+    if not hit:
+        return None
+    if ctx["prime"] and not ctx.get("refused"):
+        mark = (ctx["leases"].get("prime") or {}).get("taken_while_pending")
+        if not mark:
+            return None
+        import leaselib as ll        # only for a prime that took the pen at a commit while the upgrade was pending
+        return WORKTREE_PROMOTE_WAITS % mark if ll.pending_version(root) == mark else None
+    return WORKTREE_PROMOTE % (ctx["mine"] or "none")
 
 
 def hooks_path(p: Path) -> bool:
