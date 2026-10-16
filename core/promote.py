@@ -572,8 +572,19 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
         % (p["merge_sha"][:7], p["trunk_sha_at_prepare"][:7], p["trunk"], p["fetched_at"]),
         "evidence run %s; %s" % (p["run_id"], review_part),
         "fingerprint of what will be pushed %s…%s; promotion id %s." % (fp[:4], fp[-4:], p["promote_id"]),
-    ])
+    ] + ([p["context_line"]] if p.get("context_line") else []))     # rendered as stored, never recomputed (§9)
     return decision, record
+
+
+def code_context(root: Path, p: dict, pdir: Path) -> Tuple[str, dict]:
+    """Code-context design §9: the files the window changed and the tests that failed in its gate runs, set
+    against what its queries named. core/context.py, imported by path like leaselib; never a Stop."""
+    try:
+        import context as cc
+        return cc.misses(root, p, pdir)
+    except Exception as e:
+        return ("Code context: misses not computed (%s); promote is unaffected." % (one_line(e) or type(e).__name__),
+                {"count": None, "kinds": {}})
 
 
 def refuted_sentence(p: dict) -> str:
@@ -768,6 +779,9 @@ def prepare(root: Path, a: dict) -> int:
     if len(set(seen)) != 1:
         raise Stop("The tree changed while promote was running (fingerprint before %s, after %s). Run promote again."
                    % (fp[:12], (fp_after if fp_after != fp else next(s for s in seen if s != fp) or "null")[:12]))
+    ctx_line, ctx_misses = code_context(root, {"promote_id": pid, "lease": nn, "lease_created": lease.get("created"),
+                                               "repo": repo, "trunk_sha_at_prepare": trunk_sha, "merge_sha": merge},
+                                        pdir)
     at, ts = tl.iso_utc(time.time()), time.time()
     dist = dc.committed_dist(root)
     secs = sum(int(g.get("duration_s") or 0) for g in run_rec.get("gates") or [])
@@ -784,7 +798,8 @@ def prepare(root: Path, a: dict) -> int:
          "core_tree": dist.get("core_tree"), "charter_sha": dist.get("charter_sha"), "commits": commits,
          "gates": {"count": len(run_rec.get("gates") or []), "seconds": secs}, "fetched_at": fetched_at,
          "prepared_at": at, "prepared_ts": ts,
-         "prepared_by": {"session_id": me["session_id"], "lease": me["lease"], "pid": me["pid"], "user": me["user"]}}
+         "prepared_by": {"session_id": me["session_id"], "lease": me["lease"], "pid": me["pid"], "user": me["user"]},
+         "context_line": ctx_line, "context_misses": ctx_misses}
     write_json(pdir / "prepared.json", p)
 
     def record(rec: dict) -> None:

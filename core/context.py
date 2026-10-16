@@ -1385,6 +1385,327 @@ def prune(root: Path) -> None:
             shutil.rmtree(str(d), ignore_errors=True)
 
 
+# --- misses at promote (§9) ------------------------------------------------------------------------------
+
+LOG_NAME = "state/code-context/misses.jsonl"
+FAILURE_LINE = re.compile(r"FAILED|ERROR|not ok|in test file")
+LOCATION_LINE = re.compile(r"^([\w./-]+):\d+: ")
+PATH_TOKEN = re.compile(r"[\w./-]+")
+CONFIG_EXTS = (".yaml", ".yml", ".toml", ".json", ".ini", ".cfg")
+NOT_COUNTED = ("summary", "no-queries", "unasked")
+CLASSIFY_MAX = 50
+CLASSIFY_SECS = 20.0
+TOO_MANY_FAILING = 10
+
+
+def parse_local(stamp: object) -> Optional[float]:
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def window_rows(root: Path, nn: str, created: object) -> List[dict]:
+    return [r for r in read_rows(cc_dir(root) / nn / "queries.jsonl")
+            if r.get("lease") == nn and r.get("lease_created") == created]
+
+
+def predicted_of(rows: List[dict]) -> Tuple[Set[str], Set[str], int]:
+    """(predicted files, those only rules named, broad queries): every subject file and every hit, except the hits
+    of a broad grep (§8)."""
+    pred: Set[str] = set()
+    labels: Dict[str, Set[str]] = {}
+    broad = 0
+    for r in rows:
+        for f in r.get("subject_files") or []:
+            if isinstance(f, str):
+                pred.add(f)
+                labels.setdefault(f, set()).add("subject")
+        if r.get("broad"):
+            broad += 1
+            continue
+        for h in r.get("hits") or []:
+            if isinstance(h, list) and h and isinstance(h[0], str):
+                pred.add(h[0])
+                labels.setdefault(h[0], set()).add(str(h[1]) if len(h) > 1 else "")
+    rule_only = {f for f, ls in labels.items() if ls and all(x.startswith("rule:") for x in ls)}
+    return pred, rule_only, broad
+
+
+def excluded(rel: str, patterns: List[str]) -> bool:
+    return any(rel == x or rel.startswith(x + "/") for x in patterns if x)
+
+
+def changed_files(tree: Tree, repo_pre: str, base: str, head: str,
+                  fx: List[str]) -> Tuple[Dict[str, str], Set[str]]:
+    """({tree-relative path: status} the merge changed, the paths it added). Added files are dropped from the
+    first (a file that did not exist could not have been predicted), as is target.fingerprint_exclude."""
+    code, out = _git(tree.repo_dir(repo_pre), ["diff", "--name-status", "--no-renames", "-z", base, head])
+    if code != 0:
+        raise RuntimeError("git diff %s..%s failed" % (base[:7], head[:7]))
+    parts = [x for x in out.split("\0")]
+    changed: Dict[str, str] = {}
+    added: Set[str] = set()
+    i = 0
+    while i + 1 < len(parts):
+        st, path = parts[i], parts[i + 1]
+        i += 2
+        if not st:
+            continue
+        rel = "%s/%s" % (repo_pre, path) if repo_pre else path
+        if st.startswith("A"):
+            added.add(rel)
+            continue
+        if excluded(rel, fx):
+            continue
+        changed[rel] = st[0]
+    return changed, added
+
+
+def failed_tests(root: Path, nn: str, created: object, tracked: Set[str],
+                 added: Set[str]) -> Tuple[Set[str], int]:
+    """(test files named on a failure line of the window's FAIL gate runs, runs dropped as too broad)."""
+    since = parse_local(created)
+    out: Set[str] = set()
+    too_broad = 0
+    ev = root / "state" / "evidence"
+    for rj in sorted(ev.glob("*/run.json")) if ev.is_dir() else []:
+        rec = read_json_file(rj) or {}
+        started = parse_local(rec.get("started"))
+        if rec.get("lease") != nn or rec.get("result") != "FAIL" or rec.get("promote_id"):
+            continue
+        if since is not None and (started is None or started < since):
+            continue
+        named: Set[str] = set()
+        for g in rec.get("gates") or []:
+            if not isinstance(g, dict) or g.get("exit") in (0, 126, 127) or not g.get("log"):
+                continue
+            try:
+                text = Path(str(g["log"])).read_text(errors="replace")
+            except OSError:
+                continue
+            for ln in text.splitlines():
+                if not (FAILURE_LINE.search(ln) or LOCATION_LINE.match(ln)):
+                    continue
+                for tok in PATH_TOKEN.findall(ln):
+                    tok = tok.lstrip("./") if tok.startswith("./") else tok
+                    if "." not in posixpath.basename(tok) or not is_test_path(tok):
+                        continue
+                    named.update(f for f in tracked if f == tok or f.endswith("/" + tok))
+        named -= added                        # a new test that failed is the red step, not a missed link
+        if len(named) > TOO_MANY_FAILING:
+            too_broad += 1
+            continue
+        out |= named
+    return out, too_broad
+
+
+def names_for(rel: str, roots: List[str]) -> List[Tuple[str, Optional["re.Pattern"]]]:
+    """What another file would say to name rel: its basename (a substring), and each dotted module name with at
+    least one dot (word-bounded)."""
+    out: List[Tuple[str, Optional[re.Pattern]]] = [(posixpath.basename(rel), None)]
+    for d in module_names(rel, roots):
+        if "." in d:
+            out.append((d, re.compile(r"(?<![\w.])%s(?![\w])" % re.escape(d))))
+    return out
+
+
+def mentions(text: str, names: List[Tuple[str, Optional["re.Pattern"]]]) -> bool:
+    for lit, rx in names:
+        if lit in text and (rx is None or rx.search(text)):
+            return True
+    return False
+
+
+def dotted_above(rel: str) -> List[str]:
+    """M's module name relative to every directory above it, longest first (x/a/b/c.py: x.a.b.c, a.b.c, b.c, c)."""
+    if not rel.endswith(".py"):
+        return []
+    parts = rel[:-3].split("/")
+    if parts[-1] in ("__init__", "__main__"):
+        parts = parts[:-1]
+    out = []
+    for i in range(len(parts)):
+        sub = parts[i:]
+        if sub and all(p.isidentifier() for p in sub):
+            out.append(".".join(sub))
+    return out
+
+
+def _pick(hits: Dict[str, List[Tuple[int, str]]], m: str, predicted: Set[str],
+          accept=None) -> Optional[str]:
+    """The evidence file:line, preferring a line in M or in a predicted file."""
+    cands: List[Tuple[int, str, int]] = []
+    for f, rows in sorted(hits.items()):
+        if accept is not None and not accept(f):
+            continue
+        for n, _ in rows:
+            cands.append((0 if f == m or f in predicted else 1, f, n))
+    if not cands:
+        return None
+    cands.sort()
+    return "%s:%d" % (cands[0][1], cands[0][2])
+
+
+def shell_file(tree: Tree, rel: str) -> bool:
+    if rel.endswith((".sh", ".bash")):
+        return True
+    if "." in posixpath.basename(rel):
+        return False
+    try:
+        with open(str(tree.root / rel), errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return bool(re.match(r"#!.*\b(bash|sh)\b", first))
+
+
+def kind_of(tree: Tree, m: str, predicted: Set[str], roots: List[str]) -> Tuple[str, str]:
+    """(kind, evidence) of one linked miss: the §9 table, first match wins."""
+    base = posixpath.basename(m)
+    if m.endswith(".tmpl"):
+        return "template path", m
+    rx = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}[^\s\"'`]*" + re.escape(base) + r"(?![\w.])")
+    ev = _pick(git_grep(tree, base, regex=rx), m, predicted, accept=lambda f: f.endswith(".tmpl"))
+    if ev:
+        return "template path", ev
+    for d in dotted_above(m):
+        rx = re.compile(r"-m\s+%s(?![\w.])" % re.escape(d))
+        ev = _pick(git_grep(tree, d, regex=rx), m, predicted)
+        if ev:
+            return "uv run -m", ev
+    if m.endswith(CONFIG_EXTS):
+        return "manifest/config key", m
+    ev = _pick(git_grep(tree, base), m, predicted, accept=lambda f: f.endswith(CONFIG_EXTS))
+    if ev:
+        return "manifest/config key", ev
+    parent = posixpath.basename(posixpath.dirname(m))
+    if parent:
+        rx = re.compile(r"[\"']%s[\"']\s*/\s*[\"']%s[\"']" % (re.escape(parent), re.escape(base)))
+        ev = _pick(git_grep(tree, base, regex=rx), m, predicted, accept=lambda f: f.endswith(".py"))
+        if ev:
+            return "python path join", ev
+    ev = _pick(git_grep(tree, base, regex=re.compile(r"python")), m, predicted, accept=lambda f: shell_file(tree, f))
+    if ev:
+        return "shell python invocation", ev
+    return "other", ""
+
+
+def earlier_windows(rows: List[dict], kind: str, nn: str, created: object) -> int:
+    return len({(r.get("lease"), r.get("lease_created")) for r in rows
+                if r.get("kind") == kind and kind not in NOT_COUNTED
+                and (r.get("lease"), r.get("lease_created")) != (nn, created)})
+
+
+def count_phrase(n_changed: int, n_failed: int) -> str:
+    parts = []
+    if n_changed:
+        parts.append("%d changed file%s" % (n_changed, "" if n_changed == 1 else "s"))
+    if n_failed:
+        parts.append("%d failed test%s" % (n_failed, "" if n_failed == 1 else "s"))
+    return " and ".join(parts)
+
+
+def misses(root: Path, p: dict, pdir: Path) -> Tuple[str, dict]:
+    """§9: (the record paragraph's line, {"count", "kinds"}), the rows appended to misses.jsonl. Needs neither
+    the graph nor grep over the window: promote never depends on the optional tool."""
+    if os.environ.get("DAEDALUS_CONTEXT_TEST_DIE") == "misses":
+        raise RuntimeError("test knob")
+    cfg = read_config(root)
+    nn, created, repo, pid = str(p["lease"]), p.get("lease_created"), str(p["repo"]), p.get("promote_id")
+    outer = cfg.name or repo.split("/")[0]
+    pre = repo[len(outer) + 1:] if repo != outer and repo.startswith(outer + "/") else ""
+    tree = Tree(pdir / outer, outer, cfg.nested)
+    log = cc_dir(root) / "misses.jsonl"
+    earlier = read_rows(log)
+    rows = window_rows(root, nn, created)
+    predicted, rule_only, broad = predicted_of(rows)
+    changed, added = changed_files(tree, pre, str(p["trunk_sha_at_prepare"]), str(p["merge_sha"]),
+                                   cfg.fingerprint_exclude)
+    tracked = ls_files(tree, untracked=False)
+    failed, too_broad = failed_tests(root, nn, created, tracked, added)
+    base = {"lease": nn, "lease_created": created, "promote_id": pid}
+    summary = dict(base, at=now_iso(), kind="summary", queries=len(rows), predicted=len(predicted),
+                   predicted_rule_only=len(rule_only & predicted), broad_queries=broad, changed=len(changed),
+                   failed_tests=len(failed), misses=0, runs_too_broad=too_broad)
+    if not rows:
+        append_row(log, dict(base, at=now_iso(), repo=repo, kind="no-queries", queries=0))
+        append_row(log, summary)
+        return ("Code context: window %s ran no code-context queries, so there is nothing to compare." % nn,
+                {"count": None, "kinds": {}})
+    found = [(f, "changed") for f in sorted(changed) if f not in predicted]
+    found += [(f, "failed-test") for f in sorted(failed) if f not in predicted and f not in changed]
+    roots = module_roots(tree, cfg, tracked)
+    pred_names = {f: names_for(f, roots) for f in predicted}
+    pred_text: Dict[str, str] = {}
+    for f in predicted:
+        try:
+            pred_text[f] = (tree.root / f).read_text(errors="replace")
+        except OSError:
+            pred_text[f] = ""
+
+    def text_of(m: str) -> str:
+        try:
+            return (tree.root / m).read_text(errors="replace")
+        except OSError:
+            r_name, r_pre = tree.repo_of(m)
+            code, out = _git(tree.repo_dir(r_pre), ["show", "%s:%s" % (p["trunk_sha_at_prepare"],
+                                                                         m[len(r_pre) + 1:] if r_pre else m)])
+            return out if code == 0 else ""
+
+    started = time.monotonic()
+    limit = int(os.environ.get("DAEDALUS_CONTEXT_TEST_CLASSIFY_MAX") or CLASSIFY_MAX)
+    classified = 0
+    result: List[dict] = []
+    for m, source in found:
+        mt = text_of(m)
+        linked = any(mentions(t, names_for(m, roots)) for t in pred_text.values()) or \
+            any(mentions(mt, pred_names[f]) for f in predicted)
+        if not linked:
+            kind, ev = "unasked", ""
+        elif classified >= limit or time.monotonic() - started > CLASSIFY_SECS:
+            kind, ev = "other", "not classified (budget)"
+        else:
+            kind, ev = kind_of(tree, m, predicted, roots)
+            classified += 1
+        result.append({"file": m, "source": source, "kind": kind, "evidence": ev})
+    for r in result:
+        append_row(log, dict(base, at=now_iso(), repo=repo, file=r["file"], source=r["source"], kind=r["kind"],
+                             evidence=r["evidence"], queries=len(rows)))
+    summary["misses"] = len(result)
+    append_row(log, summary)
+    kinds: Dict[str, int] = {}
+    for r in result:
+        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+    note = ""
+    if predicted and len(rule_only & predicted) * 2 > len(predicted):
+        note = " (%d of %d predicted files came from rules alone)" % (len(rule_only & predicted), len(predicted))
+    if not result:
+        line = "Code context: every changed file and failed test was named by window %s's %d quer%s%s." % (
+            nn, len(rows), "y" if len(rows) == 1 else "ies", note)
+        return line, {"count": 0, "kinds": {}}
+    ordered = [r for r in result if r["kind"] != "unasked"] + [r for r in result if r["kind"] == "unasked"]
+    n_changed = sum(1 for r in result if r["source"] == "changed")
+    n_failed = len(result) - n_changed
+    if all(r["kind"] == "unasked" for r in result):
+        named = ", ".join(r["file"] for r in ordered[:3])
+        head = "%s no query was near (unasked)" % count_phrase(n_changed, n_failed)
+    else:
+        items = []
+        for r in ordered[:3]:
+            k = r["kind"]
+            e = earlier_windows(earlier, k, nn, created) if k not in NOT_COUNTED else 0
+            items.append("%s (%s%s)" % (r["file"], k, ", also missed in %d earlier window%s" % (e, "" if e == 1 else "s")
+                                        if e else ""))
+        named = ", ".join(items)
+        head = "%s no query named" % count_phrase(n_changed, n_failed)
+    more = " and %d more" % (len(ordered) - 3) if len(ordered) > 3 else ""
+    line = "Code context: %s — %s%s%s; the log is %s." % (head, named, more, note, LOG_NAME)
+    return line, {"count": len(result), "kinds": kinds}
+
+
 # --- the query verbs -------------------------------------------------------------------------------------
 
 def query(root: Path, verb: str, arg: str, want_json: bool) -> int:
