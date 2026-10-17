@@ -15,7 +15,11 @@ CALLEE_LAUNCHER_EXIT (default 0): 3 is "orientation not verified"; anything
 else non-zero is a failure.
 CALLEE_LAUNCHER_ANSWER (default "callee launcher answer"): set it empty for a
 launcher that prints no answer, as the real one does when claude reports an
-error but exits 0 (it then exits 3)."""
+error but exits 0 (it then exits 3).
+CALLEE_LAUNCHER_SHAPE=other: a launcher with a receipt of another shape (SPEC-011
+§1's launcher_call_id / launcher_oriented): "<Name> call <id>; status and answer
+files in <dir>" and "<Name> recall: $CALLEE_LAUNCHER_RECALL (default available);
+capture: partial", with no orientation: field and a call id that is not a uuid."""
 import argparse, os, sys
 
 d = os.environ["FAKE_CLAUDE_DIR"]
@@ -33,9 +37,16 @@ with open(os.path.join(d, "launcher-env.txt"), "w") as f:
                     if kv[0].startswith(("DIRECT_CALL_", "CAPTURE_DEFER"))))
 code = int(os.environ.get("CALLEE_LAUNCHER_EXIT", "0"))
 answer = os.environ.get("CALLEE_LAUNCHER_ANSWER", "callee launcher answer")
-sys.stderr.write("Alpha call 0f0f0f0f-1111-2222-3333-444444444444; receipt /somewhere/state/direct-calls/x\n")
+other = os.environ.get("CALLEE_LAUNCHER_SHAPE") == "other"
+if other:
+    sys.stderr.write("Gamma call g-20261017-0001; status and answer files in /somewhere/calls/g-20261017-0001\n")
+else:
+    sys.stderr.write("Alpha call 0f0f0f0f-1111-2222-3333-444444444444; receipt /somewhere/state/direct-calls/x\n")
 if answer:
     sys.stdout.write(answer + "\n")
-sys.stderr.write("Alpha orientation: %s; recall: skipped; capture: confirmed; exit: %s\n"
-                 % ("yes" if code == 0 else "no", code))
+if other:
+    sys.stderr.write("Gamma recall: %s; capture: partial\n" % os.environ.get("CALLEE_LAUNCHER_RECALL", "available"))
+else:
+    sys.stderr.write("Alpha orientation: %s; recall: skipped; capture: confirmed; exit: %s\n"
+                     % ("yes" if code == 0 else "no", code))
 sys.exit(code)

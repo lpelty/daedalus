@@ -162,6 +162,35 @@ def kick_reindex(root: Path, started_at: float) -> Optional[str]:
     return None
 
 
+CONSULT_MIN_LEFT_SECS = 2
+
+
+def consult_note(root: Path, started_at: float) -> Optional[str]:
+    """SPEC-011 §3: the agents this Daedalus may consult, one line, from the
+    launcher's own reader (`core/call_agent.py --consult-line`), so the line
+    and a call never disagree about who is configured. Nothing when config.yaml
+    names no callee (read here first, so a home without one pays no
+    subprocess), when the reader prints nothing, or when the budget is spent."""
+    script = root / "core" / "call_agent.py"
+    try:
+        text = (root / "config.yaml").read_text(errors="replace")
+    except OSError:
+        return None
+    if not script.is_file() or not any(ln.startswith("callee_") or ln.strip().startswith("callee_home:")
+                                       for ln in text.splitlines()):
+        return None
+    left = HOOK_BUDGET_SECS - MARKER_TAIL_SECS - (time.time() - started_at)
+    if left < CONSULT_MIN_LEFT_SECS:
+        return None
+    try:
+        r = subprocess.run([sys.executable, str(script), "--consult-line"], cwd=str(root),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=min(5, left - 1))
+    except Exception:
+        return None
+    line = next((ln for ln in (r.stdout or "").splitlines() if ln.startswith("Agents you may consult")), None)
+    return line if r.returncode == 0 else None
+
+
 def _hook_commands(path: Path) -> list:
     """Every hook command in a settings file, walked as JSON (hooks -> event
     -> groups -> hooks -> command) — the walk doctor.sh's local_capture_wiring
@@ -484,6 +513,14 @@ def main() -> int:
             and str(payload.get("source", "")).lower() in ("startup", "resume"):
         try:
             line = kick_reindex(root, started_at)
+        except Exception:
+            line = None
+        if line:
+            notes.append(line)
+    # Whom this Daedalus may ask (SPEC-011 §3): a visitor's tools cannot run a call, so it is not told.
+    if not visitor:
+        try:
+            line = consult_note(root, started_at)
         except Exception:
             line = None
         if line:

@@ -885,6 +885,261 @@ PY
   [ "$status" -eq 2 ]; case "$output" in *"--verdict-file is refused on resume"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+# --- named callees (SPEC-011): one callee_<key>: block each, --to <key> --------------------------
+
+# callee_block <key> <lines...> — append a top-level callee_<key>: block to the fixture config.
+callee_block() {
+  local key="$1"; shift
+  { printf 'callee_%s:\n' "$key"; for l in "$@"; do printf '  %s\n' "$l"; done; } >> "$DAEDALUS_HOME/config.yaml"
+}
+
+# two_callees — alpha behind its own launcher (with launcher_args), gamma a bare claude -p with its marker.
+two_callees() {
+  A="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/home-alpha"; G="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/home-gamma"
+  mkdir -p "$A" "$G"
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$A/launcher"
+  callee_block alpha "name: Alpha" "home: $A" "launcher: $A/launcher" "launcher_args: --callee alpha" \
+    "consult_for: fleet history and why a thing was built"
+  callee_block gamma "name: Gamma" "home: $G" "marker: 'Gamma orientation:'" \
+    "consult_for: an independent design pass on a brief"
+}
+
+@test "SPEC-011 criterion 1: one legacy direct_call callee and no callee_* blocks — a call without --to reaches it as today, --to its lowercased name reaches it, and the receipt records the key" {
+  direct_call "callee_home: $CALLEE" "callee_name: Alpha" "orientation_marker: 'Session orientation'"
+  FAKE_MARKER="Session orientation: ready" run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "$(cat "$FAKE_CLAUDE_DIR/1.cwd")" = "$CALLEE" ]
+  case "${stderr_lines[0]}" in "Alpha call "*) : ;; *) echo "$stderr"; return 1 ;; esac
+  FAKE_MARKER="Session orientation: ready" run --separate-stderr bash "$CALL" --callee agent --to alpha "hello"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "$(cat "$FAKE_CLAUDE_DIR/2.cwd")" = "$CALLEE" ]
+  for r in "$DAEDALUS_HOME"/state/direct-calls/*/launch.json; do
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["callee_key"] == "alpha" and r["callee"] == "Alpha", r' "$r"
+  done
+  run bash "$CALL" --callee agent --to beta "hello"
+  [ "$status" -eq 2 ]
+  case "$output" in *'no callee "beta" is configured (--to names one of: alpha)'*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 2 ]
+  # a receipt written before v0.10.0 has no callee_key: it resumes the legacy callee by its name
+  id="$(basename "$(dirname "$(ls "$DAEDALUS_HOME"/state/direct-calls/*/launch.json | head -1)")")"
+  python3 - "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1])); r.pop("callee_key"); json.dump(r, open(sys.argv[1], "w"))
+PY
+  FAKE_MARKER="Session orientation: ready" run --separate-stderr bash "$CALL" --resume "$id" "and then?"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+}
+
+@test "SPEC-011 criterion 2: two callee blocks — --to alpha and --to gamma each reach their own home, launcher, launcher_args and marker; no --to is exit 2 listing both keys with their consult_for" {
+  two_callees
+  run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 2 ]
+  [ "$stderr" = "daedalus: 2 callees are configured; name one with --to <key>: alpha — fleet history and why a thing was built; gamma — an independent design pass on a brief" ] \
+    || { echo "$stderr"; return 1; }
+  [ "$(calls)" -eq 0 ]; [ ! -e "$FAKE_CLAUDE_DIR/launcher-argv.txt" ]
+  run --separate-stderr bash "$CALL" --callee agent --to alpha "for alpha"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "$output" = "callee launcher answer" ]
+  [ "$(calls)" -eq 0 ]
+  [ "$(sed -n 1,4p "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tr '\n' ' ')" = "--callee alpha --caller Daedalus " ]
+  [ "${stderr_lines[1]}" = "Alpha orientation: yes; capture: deferred; exit: 0" ]
+  # gamma's marker, not alpha's (alpha has none): its absence is exit 3, its presence exit 0, in gamma's home
+  FAKE_MARKER="Alpha orientation: ready" run --separate-stderr bash "$CALL" --callee agent --to gamma "for gamma"
+  [ "$status" -eq 3 ] || { echo "$status / $stderr"; return 1; }
+  [ "${stderr_lines[1]}" = "Gamma orientation: no; capture: skipped; exit: 3" ]
+  FAKE_MARKER="Gamma orientation: ready" run --separate-stderr bash "$CALL" --callee agent --to gamma "for gamma"
+  [ "$status" -eq 0 ] || { echo "$status / $stderr"; return 1; }
+  [ "$(cat "$FAKE_CLAUDE_DIR/2.cwd")" = "$G" ]
+  grep -q "You are Gamma, being called directly by Daedalus" "$FAKE_CLAUDE_DIR/2.argv"
+  ! grep -qx -- '--callee' "$FAKE_CLAUDE_DIR/2.argv"
+  run bash "$CALL" --callee self --caller Peer --to gamma "x"
+  [ "$status" -eq 2 ]; case "$output" in *"--to names a callee for --callee agent; --callee self takes none"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "SPEC-011 criterion 3: --resume of a call to gamma resumes gamma with no --to; a --to naming another key is refused; after callee_gamma.home changes the resume is refused" {
+  two_callees
+  FAKE_MARKER="Gamma orientation: ready" run --separate-stderr bash "$CALL" --callee agent --to gamma "first"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Gamma call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  FAKE_MARKER="Gamma orientation: ready" run --separate-stderr bash "$CALL" --resume "$id" "and then?"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "${stderr_lines[0]}" = "Gamma call $id (resumed from an operator shell); receipt state/direct-calls/$id" ]
+  [ "$(cat "$FAKE_CLAUDE_DIR/2.cwd")" = "$G" ]
+  python3 - "$FAKE_CLAUDE_DIR/2.argv" "$id" <<'PY'
+import sys
+argv = open(sys.argv[1]).read().split("\n")
+assert ("--resume", sys.argv[2]) in list(zip(argv, argv[1:])), argv
+PY
+  FAKE_MARKER="Gamma orientation: ready" run --separate-stderr bash "$CALL" --resume "$id" --to gamma "same key"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  run bash "$CALL" --resume "$id" --to alpha "another key"
+  [ "$status" -eq 2 ]
+  case "$output" in *"call $id went to callee gamma; a resume keeps its callee (--to alpha refused) — start a new call"*) : ;; *) echo "$output"; return 1 ;; esac
+  G2="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/home-gamma-2"; mkdir -p "$G2"
+  sed -i.bak "s|home: $G\$|home: $G2|" "$DAEDALUS_HOME/config.yaml"
+  grep -q "home: $G2" "$DAEDALUS_HOME/config.yaml"
+  run bash "$CALL" --resume "$id" "after the move"
+  [ "$status" -eq 2 ]
+  case "$output" in *"the configured callee changed since call $id; start a new call"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" -eq 3 ]
+}
+
+@test "SPEC-011 criterion 4: a reserved or malformed key, a duplicate (legacy + same key), and every per-field rule is one MISSING line in doctor and the same sentence as the launcher's refusal" {
+  cp "$DAEDALUS_HOME/config.yaml" "$BATS_TEST_TMPDIR/base.yaml"
+  H="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/home-x"; mkdir -p "$H"
+  printf 'not executable\n' > "$H/plain"
+  printf '#!/bin/sh\nexit 0\n' > "$H/launcher"; chmod +x "$H/launcher"
+  ok="name: X|home: $H"
+  # case: the --to a call names | the block's lines, |-separated (the first line is the block's own)
+  cases=(
+    "x|callee_X:|$ok"
+    "x|callee_self:|$ok"
+    "x|callee_9x:|$ok"
+    "x|callee_x: value|$ok"
+    "x|LEGACY|callee_x:|$ok"
+    "x|callee_x:|name: X"
+    "x|callee_x:|home: $H"
+    "x|callee_x:|consult_for: something"
+    "x|callee_x:|name: X|home: relative/path"
+    "x|callee_x:|name: X|home: $H/nowhere"
+    "x|callee_x:|$ok|launcher: $H/plain"
+    "x|callee_x:|$ok|launcher_args: --callee x"
+    "x|callee_x:|$ok|launcher: $H/launcher|launcher_args: --x 'unclosed"
+    "x|callee_x:|$ok|launcher: $H/launcher|launcher_args: --caller Someone"
+    "x|callee_x:|$ok|launcher_call_id: 'call (\\S+)'"
+    "x|callee_x:|$ok|launcher_oriented: 'recall: available'"
+    "x|callee_x:|$ok|launcher: $H/launcher|launcher_call_id: 'call ([a-z'"
+    "x|callee_x:|$ok|launcher: $H/launcher|launcher_call_id: 'call \\S+'"
+    "x|callee_x:|$ok|launcher: $H/launcher|launcher_oriented: '(unclosed'"
+    "x|callee_x:|$ok|tools: Read,Bash"
+    "x|callee_x:|$ok|max_turns: 0"
+    "x|callee_x:|$ok|capture_wait: 301"
+    "x|callee_x:|$ok|timeout: ten"
+    "x|callee_x:|$ok|capture: maybe"
+  )
+  for c in "${cases[@]}"; do
+    cp "$BATS_TEST_TMPDIR/base.yaml" "$DAEDALUS_HOME/config.yaml"
+    IFS='|' read -r -a parts <<< "$c"
+    to="${parts[0]}"; rest=("${parts[@]:1}")
+    if [ "${rest[0]}" = "LEGACY" ]; then
+      direct_call "callee_home: $H" "callee_name: X"; rest=("${rest[@]:1}")
+    fi
+    { printf '%s\n' "${rest[0]}"; for l in "${rest[@]:1}"; do printf '  %s\n' "$l"; done; } >> "$DAEDALUS_HOME/config.yaml"
+    run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+    [ "$status" -eq 0 ]
+    missing="$(printf '%s\n' "$output" | grep '^MISSING  direct call: ' || true)"
+    [ "$(printf '%s\n' "$missing" | grep -c .)" -eq 1 ] || { echo "case [$c]: want one MISSING line: $output"; return 1; }
+    run --separate-stderr bash "$CALL" --callee agent --to "$to" "hello"
+    [ "$status" -eq 2 ] || { echo "case [$c]: exit $status: $stderr"; return 1; }
+    [ "$stderr" = "daedalus: ${missing#MISSING  direct call: }" ] || { echo "case [$c]: doctor [$missing] launcher [$stderr]"; return 1; }
+  done
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "SPEC-011 criterion 5: session start lists the configured callees in one line, with consult_for or its absence; none configured, nothing" {
+  start_context() {
+    python3 - "$DAEDALUS_HOME" "$1" <<'PY'
+import json, os, subprocess, sys
+payload = json.dumps({"hook_event_name": "SessionStart", "session_id": sys.argv[2], "source": "startup",
+                      "transcript_path": "/dev/null"})
+p = subprocess.run(["python3", sys.argv[1] + "/core/session-start.py"], input=payload, capture_output=True, text=True)
+print(json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"])
+PY
+  }
+  run start_context s-none
+  [ "$status" -eq 0 ]
+  case "$output" in *"Agents you may consult"*) echo "a line with no callee: $output"; return 1 ;; esac
+  two_callees
+  callee_block delta "name: Delta" "home: $CALLEE"
+  run start_context s-three
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^Agents you may consult')" -eq 1 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -qxF "Agents you may consult (core/call-agent.sh --callee agent --to <key>): alpha — fleet history and why a thing was built; gamma — an independent design pass on a brief; delta — (no consult_for set)" \
+    || { echo "$output"; return 1; }
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  case "$output" in *"NOTE     direct call: callee delta has no consult_for — it is callable but Daedalus has no reason on file to choose it"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "SPEC-011 criterion 6: a callee's own knob beats direct_call's — callee_gamma.timeout: 1200 over direct_call.timeout, and a callee's short timeout kills its call while the shared one is long" {
+  two_callees
+  direct_call "timeout: 600"
+  sed -i.bak "s|^  marker: 'Gamma orientation:'|  marker: 'Gamma orientation:'\n  timeout: 1200|" "$DAEDALUS_HOME/config.yaml"
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$DAEDALUS_HOME" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/core")
+import call_agent as ca
+from pathlib import Path
+t = ca.callee_table(ca.read_config(Path(sys.argv[1])))
+by = {e["key"]: e["settings"] for e in t["callees"]}
+assert by["gamma"]["timeout"] == 1200 and by["alpha"]["timeout"] == 600, by
+assert t["shared"]["timeout"] == 600, t["shared"]
+PY
+  sed -i.bak 's|^  timeout: 1200|  timeout: 1|' "$DAEDALUS_HOME/config.yaml"
+  t0="$(date +%s)"
+  FAKE_SLEEP=3 run --separate-stderr bash "$CALL" --callee agent --to gamma "hello"
+  [ "$status" -eq 124 ] || { echo "$status / $stderr"; return 1; }
+  case "${stderr_lines[1]}" in *"; exit: 124 — timed out after 1s; killed with its process group"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$(( $(date +%s) - t0 ))" -lt 20 ]
+}
+
+@test "doctor, one line per callee: OK with its home, launcher and consult_for; the allowlist where core can read it (admits, refuses, none), or enforced by the callee's own launcher" {
+  two_callees
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  [ "$status" -eq 0 ]
+  for want in \
+    "OK       direct call: callee alpha (Alpha) at $A through its own launcher (with --callee alpha); consult for: fleet history and why a thing was built" \
+    "OK       direct call: callee gamma (Gamma) at $G; consult for: an independent design pass on a brief" \
+    "OK       direct call: callee alpha allowlist: enforced by its own launcher, not checked without a call" \
+    "NOTE     direct call: callee gamma allowlist: none found (no direct_calls in agent.yaml, no .direct-callers); a call proceeds and its receipt says so"; do
+    printf '%s\n' "$output" | grep -qxF -- "$want" || { echo "lacks [$want]: $output"; return 1; }
+  done
+  printf 'name: gamma\ndirect_calls:\n  callers: [Daedalus]\n' > "$G/agent.yaml"
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  printf '%s\n' "$output" | grep -qxF "OK       direct call: callee gamma allowlist: agent.yaml direct_calls.callers admits Daedalus" || { echo "$output"; return 1; }
+  printf 'name: gamma\ndirect_calls:\n  callers: [Peer]\n' > "$G/agent.yaml"
+  run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
+  printf '%s\n' "$output" | grep -qxF "MISSING  direct call: callee gamma allowlist: agent.yaml direct_calls.callers does not admit Daedalus — a call to it is refused until it does" || { echo "$output"; return 1; }
+  run bash "$CALL" --callee agent --to gamma "hello"
+  [ "$status" -eq 2 ]; case "$output" in *"Daedalus is not on Gamma's callers list (agent.yaml direct_calls.callers)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a callee launcher's receipt: unset patterns keep today's contract; launcher_call_id and launcher_oriented read a receipt of another shape — the call id it resumes by, orientation yes on the configured line, unverified (exit 3) without it" {
+  H="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/home-gamma"; mkdir -p "$H"
+  cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$H/launcher"
+  # unset: today's "<Name> call <uuid>" and "orientation: yes"; the other shape has neither
+  callee_block gamma "name: Gamma" "home: $H" "launcher: $H/launcher" "launcher_args: --callee gamma" "consult_for: review"
+  run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "${stderr_lines[1]}" = "Gamma orientation: yes; capture: deferred; exit: 0" ]
+  grep -q '"callee_receipt": "0f0f0f0f-1111-2222-3333-444444444444"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  rm -rf "$DAEDALUS_HOME"/state/direct-calls/*
+  CALLEE_LAUNCHER_SHAPE=other run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 3 ] || { echo "$status / $stderr"; return 1; }
+  [ "${stderr_lines[1]}" = "Gamma orientation: unverified; capture: deferred; exit: 3" ]
+  ! grep -q '"callee_receipt"' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
+  rm -rf "$DAEDALUS_HOME"/state/direct-calls/*
+  # configured for the other shape
+  printf "  launcher_call_id: '^Gamma call (\\\\S+); status and answer files in '\n  launcher_oriented: 'Gamma recall: available;'\n" >> "$DAEDALUS_HOME/config.yaml"
+  CALLEE_LAUNCHER_SHAPE=other run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 0 ] || { echo "$status / $stderr"; cat "$DAEDALUS_HOME/config.yaml"; return 1; }
+  [ "$output" = "callee launcher answer" ]
+  [ "${stderr_lines[1]}" = "Gamma orientation: yes; capture: deferred; exit: 0" ]
+  id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Gamma call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
+  grep -q '"callee_receipt": "g-20261017-0001"' "$DAEDALUS_HOME/state/direct-calls/$id/launch.json"
+  CALLEE_LAUNCHER_SHAPE=other run --separate-stderr bash "$CALL" --resume "$id" "and then?"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  [ "$(grep -A1 -x -- '--resume' "$FAKE_CLAUDE_DIR/launcher-argv.txt" | tail -1)" = "g-20261017-0001" ]
+  # its orientation line absent or another value: unverified, the answer still printed, exit 3
+  CALLEE_LAUNCHER_SHAPE=other CALLEE_LAUNCHER_RECALL=unavailable run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 3 ] || { echo "$status / $stderr"; return 1; }
+  [ "$output" = "callee launcher answer" ]
+  [ "${stderr_lines[1]}" = "Gamma orientation: unverified; capture: deferred; exit: 3" ]
+  # a launcher's exit 3 with no answer is still a failure, whatever its receipt says
+  CALLEE_LAUNCHER_SHAPE=other CALLEE_LAUNCHER_EXIT=3 CALLEE_LAUNCHER_ANSWER= run --separate-stderr bash "$CALL" --callee agent "hello"
+  [ "$status" -eq 1 ] || { echo "$status / $stderr"; return 1; }
+  [ "$(calls)" -eq 0 ]
+}
+
 # --- the distribution docs (Task 10) ------------------------------------------------
 
 @test "README, CLAUDE.md and CHANGELOG describe the launcher, the callee-from-config rule, the receipt and --resume-review — in plain language" {
