@@ -4,13 +4,12 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
-## v0.9.0 (draft) — code context at implementation time
+## v0.9.0 — code context at build time: a code graph and grep together, and a log of what they missed
 
 **In short.** A new command, `core/context.py`, answers "what else does this
 change touch?" before the agent changes code. It merges an optional code
 graph, `git grep` and a few rules. It runs only when invoked, never while you
-brainstorm, plan or write a spec unless you ask. This section is a draft: the
-release sets its heading and VERSION, which stays 0.8.0 until then.
+brainstorm, plan or write a spec unless you ask.
 
 **What changed.**
 - `core/context.py` has five questions: `callers`, `importers`, `tests`,
@@ -57,12 +56,13 @@ release sets its heading and VERSION, which stays 0.8.0 until then.
   line: `Added code-context rule <name>: <why>; its test passes.`
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
-in a terminal. The update installs nothing for the graph. Only if you want
-it, install Code Review Graph 2.3.9 once per machine, in its own virtual
-environment. Then paste the `context:` block into `config.yaml`. README "Code
+in a terminal. It prints `Daedalus updated 0.8.0 -> 0.9.0; doctor OK.` The
+update installs nothing for the graph. Only if you want it, install Code
+Review Graph 2.3.9 once per machine, in its own virtual environment. Then paste the `context:` block into `config.yaml`. README "Code
 context" has every step, and the commands of the tool never to run.
 
-**How to tell you have it.** `python3 core/context.py rules --check` ends
+**How to tell you have it.** `cat VERSION` prints `0.9.0`.
+`python3 core/context.py rules --check` ends
 `4 rules, 0 fail`. `core/doctor.sh` prints a `code context` line.
 
 ## v0.8.0 — frame-jack, a switch for the AMI
