@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Removed in 0.9.0; deleted in 0.10.0.
+"""Removed in 0.9.0; kept as a no-op through 0.10.0.
 
 This was the edit-time code-context hook (PreToolUse Edit|Write and
 PreCompact). v0.9.0 replaced it with core/context.py, which runs only when
@@ -10,6 +10,13 @@ nothing and exits 0, because a hook entry left behind in a home's
 which exits 2, and exit 2 from a PreToolUse hook blocks the tool call:
 every edit in that home. Doctor notes such an entry so the operator can
 remove it.
+
+0.10.0 meant to delete it and did not: no upgrade has ever edited the hooks
+in .claude/settings.local.json (the operator's file, which the Stop check
+guards), and a session whose start runs the upgrade keeps the hooks it read
+at startup, so removing the entry there would not save that session's edits.
+The file goes once the upgrade can remove such an entry before any session
+reads it.
 """
 import sys
 

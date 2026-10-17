@@ -233,7 +233,10 @@ line when it does:
    cut off is finished by the next start, or by picking it up again;
 7. installs the daedalus command at `~/.local/bin/daedalus`, never over a file
    it did not write, and says how to reach it from your shell;
-8. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
+8. says, once, that a callee named the 0.9.0 way (`direct_call.callee_name`)
+   now has a key, its name in lower case, and that nothing needs changing; it
+   never writes `config.yaml`;
+9. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
    worktree (the board and doctor name such a window).
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
@@ -926,16 +929,30 @@ begun reads as tampering and blocks.
 
 One launcher, three callees, one receipt format:
 
-- `--callee agent` asks the target's own agent — the one whose home and name
-  `config.yaml` sets in `direct_call.callee_home` and `direct_call.callee_name`
-  — a read-only question ("what is this hook for, before I change it?"). The
-  call runs in that agent's home with its hooks, so its own identity loads.
-  Nothing else can name the callee: there is no default and no command-line
-  flag for it, and the call is refused while the two keys are unset. If the
-  agent publishes a callers list (`direct_calls.callers` in its `agent.yaml`,
-  or a `.direct-callers` file), Daedalus must be on it; with
-  `direct_call.callee_launcher` the agent's own launcher runs instead and
-  applies its own list, receipt and capture.
+- `--callee agent --to <key>` asks one of the agents this deployment may
+  consult a read-only question ("what is this hook for, before I change it?").
+  Each is one `callee_<key>:` block in `config.yaml`: its `name`, its `home`,
+  and a `consult_for` line that says what to ask it. Session start lists the
+  keys with their `consult_for`, and the agent chooses whom to ask, saying in
+  one line whom and why. With exactly one callee, `--to` may be left out;
+  with several and no `--to` the call is refused, and the refusal lists them.
+  The call runs in that agent's home with its hooks, so its own identity
+  loads. Nothing else can name a callee: there is no default and no
+  command-line flag for a home. If the agent publishes a callers list
+  (`direct_calls.callers` in its `agent.yaml`, or a `.direct-callers` file),
+  Daedalus must be on it; with `launcher:` the agent's own launcher runs
+  instead and applies its own list, receipt and capture. A launcher whose
+  stderr reads differently from Daedalus's own (`<Name> call <id>; ...` and
+  `orientation: yes`) is described by `launcher_call_id` and
+  `launcher_oriented`, two regular expressions in its block. A block's own
+  `timeout`, `tools`, `max_turns`, `capture` and `capture_wait` beat
+  `direct_call`'s. `config.example.yaml` shows a block with every field.
+- A deployment from before 0.10.0 that names its one callee in
+  `direct_call.callee_home` and `direct_call.callee_name` keeps working
+  unchanged: that callee's key is its name in lower case. The upgrade says so
+  in one line and does not touch `config.yaml`. Doctor prints one line per
+  callee, and whether its callers list admits Daedalus where Daedalus can
+  read it; it never makes a call.
 - `--callee self --caller <name>` is how another agent asks this Daedalus;
   the name must be in `direct_call.callers`. The called session is a
   visitor: it never takes a window number or the pen.
@@ -950,12 +967,13 @@ Daedalus orientation: yes; capture: confirmed; exit: 0
 
 On a failure the second line says why, after the exit code. Exit codes: `0`
 answered and the callee's identity verified; `2` refused before anything ran
-(unlisted caller, no callee configured, a config other than this
+(unlisted caller, no callee configured, several callees and no `--to`, a config other than this
 deployment's `config.yaml`, bad arguments, modified distribution code); `3`
 answered but the identity marker was not found; `124` timed out and killed;
 anything else is `claude`'s own failure.
 Check the exit code and that the answer is not empty — never the receipt
-line alone. `--resume <call-id>` continues a call. Every call is read-only:
+line alone. `--resume <call-id>` continues a call, with the callee it went
+to: the key comes from the receipt, never the command line. Every call is read-only:
 `Read`, `Grep` and `Glob`, no MCP servers, and a frame prompt that says it
 is a discussion, not a work order. With a `memory:` block, the launcher
 captures the call afterwards with the caller and the callee as the speakers;

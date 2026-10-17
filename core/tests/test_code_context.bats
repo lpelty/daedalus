@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # core/code-context.py was the edit-time hook; 0.9.0 removed it (code-context
-# design §4) and keeps the file one release as a no-op, so a hook entry left in
+# design §4) and keeps the file as a no-op (through 0.10.0), so a hook entry left in
 # a home's .claude/settings.local.json cannot block edits (exit 2 from a
 # PreToolUse hook blocks the tool call). Assertions use [ ] only.
 

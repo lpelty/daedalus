@@ -606,12 +606,21 @@ nothing more is needed for it.
 
 ## Direct calls
 
-`core/call-agent.sh --callee agent` asks the target's own agent — the one
-`config.yaml` names in `direct_call` — a read-only question, for context
-before you change something it owns. Give it the question and, if it needs
-to read something, `--artifact-dir <dir>`. Check the exit code and that the
-answer is not empty; the receipt line alone proves nothing. Exit 2 means it
-never ran (no callee configured, or you are not on its callers list); say so
-rather than guessing the answer. A call is a discussion, not a work order: it
+`core/call-agent.sh --callee agent --to <key>` asks one of the agents
+`config.yaml` names, one `callee_<key>:` block each, a read-only question:
+for context before you change something it owns, or for a review. Session
+start lists them in one line, each with its `consult_for`. You choose whom to
+ask on your own judgment, matching the question to a callee's `consult_for`;
+nobody tells you which. Before the call, say in one line whom you are asking
+and why ("Asking <key> for an independent pass on the brief: its consult_for
+is design review"), and put the same line in your session log. With exactly
+one callee configured, `--to` may be left out.
+
+Give it the question and, if it needs to read something,
+`--artifact-dir <dir>`. Check the exit code and that the answer is not empty;
+the receipt line alone proves nothing. Exit 2 means it never ran (no callee
+configured, no `--to` among several, or you are not on its callers list); say
+so rather than guessing the answer. `--resume <call-id>` continues a call
+with the callee it went to. A call is a discussion, not a work order: it
 never changes anything on either side. When you are the one called (a
 session that started as a visitor), answer the question and change nothing.
