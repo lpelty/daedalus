@@ -1110,7 +1110,7 @@ shown_then_yes() {
   tx "$TX" operator "$1" "$(plus "$P" 3)" >/dev/null
 }
 
-@test "delete gate: core/lease.sh release 02 --remove is denied without the report, without --operator-said, with words not beginning with yes, with a reply of two lines or carrying a \$ (the one-word-yes sentence), and when only a tool result or the report's first sentence carried the line; nothing else about lease.sh is gated" {
+@test "delete gate: core/lease.sh release 02 --remove is denied without the report, without --operator-said, with words that are not an acknowledgement, with a reply of two lines or carrying a \$ (the one-line-reply sentence), and when only a tool result or the report's first sentence carried the line; nothing else about lease.sh is gated" {
   delete_guard
   run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA 'core/lease.sh release 02 --remove --operator-said yes'; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac   # without --force too
@@ -1119,10 +1119,10 @@ shown_then_yes() {
   run guard_as sA 'core/lease.sh list'; allowed
   R="$(asked_by_sA)"
   run guard_as sA "$DEL"; denied; case "$output" in *"Record what the operator said: add --operator-said"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sA "$DEL --operator-said ok"; denied; case "$output" in *"do not begin with yes"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sA "$DEL --operator-said \"yes \$HOME\""; denied; case "$output" in *"Ask the operator for a one-word yes and record that"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said 'not yet'"; denied; case "$output" in *"are not an acknowledgement"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said \"yes \$HOME\""; denied; case "$output" in *"Ask the operator for a one-line reply and record that"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA "$DEL --operator-said \"yes
-please\""; denied; case "$output" in *"Ask the operator for a one-word yes and record that"*) : ;; *) echo "$output"; return 1 ;; esac
+please\""; denied; case "$output" in *"Ask the operator for a one-line reply and record that"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA "$DEL --operator-said 'yes \`date\`'"; denied
   # the line only in a tool result (never said to the operator), then only the first sentence in a reply
   P="$(now)"

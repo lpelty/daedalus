@@ -11,7 +11,8 @@ may ask a question. Each gets its own `callee_<key>:` block in
 `config.yaml`, with a `consult_for` line saying what to ask it. A call names
 the key: `core/call-agent.sh --callee agent --to <key>`. Daedalus chooses
 whom to ask, and says in one line whom and why. A deployment with one callee
-changes nothing.
+changes nothing. A confirmation is now any acknowledgement in the operator's
+own words, not only one that begins with yes.
 
 **What changed.**
 - A callee is a top-level block, `callee_<key>:`, with `name`, `home` and
@@ -38,6 +39,13 @@ changes nothing.
   With none configured it says nothing.
 - `direct_call:` still holds who may call this Daedalus. That list is
   unchanged.
+- A confirmation no longer has to begin with the word yes. Any
+  acknowledgement in the operator's own words passes: "Okay, yes, proceed.",
+  "ok", "go ahead", "sounds good, push it".
+- A reply with no, not, wait, hold, stop or later in it is refused, and so is
+  a question. This holds for promote, typed or recorded, and for deleting a
+  window's work. The reply must still be the operator's whole message after
+  the block.
 - `core/code-context.py` stays a no-op in this release. 0.9.0 said it would
   go now. Removing a leftover hook entry for it needs the upgrade to edit a
   local settings file, which no upgrade has done before.
@@ -50,6 +58,8 @@ changes nothing.
   `direct_call's callee AgentName is now callee "agentname"; nothing to change.`
   The upgrade does not touch `config.yaml`.
 - At session start, a line beginning `Agents you may consult`.
+- A confirmation that is not an acknowledgement is refused with
+  `The operator's words are not an acknowledgement`.
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
 in a terminal. It prints `Daedalus updated 0.9.0 -> 0.10.0; doctor OK.` To

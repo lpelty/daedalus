@@ -435,7 +435,7 @@ _run_scan_in_fixture() {
            'run `core/lease.sh unpromoted 02` first' 'the unpromoted commits and any uncommitted files' \
            'it ends with the line `Say yes to delete window 02'"'"'s work.`' 'Never run `release` with `--remove`' \
            'run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` exactly so' \
-           'ask for a one-word yes and carry that' 'never write a yes the operator did not give'; do
+           'ask for a one-line reply and carry that' 'never write a yes the operator did not give'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
   # 2026-10-15: the agent runs the delete after the yes; the "give the operator the line to run" fallback is gone

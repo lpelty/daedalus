@@ -920,7 +920,7 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
     (§7.2 step 2): the operator's WHOLE turn (Decision 30), typed after `after`,
     after an assistant turn that showed `what` — carrying `shown_text` when it is
     given, or ending with `shown_end` when that is given (the operator asked first;
-    the prime answered and asked again). With must_be_yes the words must begin with yes. Every failure is a
+    the prime answered and asked again). With must_be_yes the words must be an acknowledgement (is_assent). Every failure is a
     refusal; an unreadable transcript, or one outside the denied directories
     (Decision 36), is never a pass (A12)."""
     if me["kind"] != "prime-session":
@@ -928,9 +928,9 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
                    "`promote.confirm: tty` and run the confirm there.")
     if not (said or "").strip():
         raise Stop("Record what the operator said. The yes is evidence; an empty one is not a yes.")
-    if must_be_yes and not tl.is_yes(said):
-        raise Stop("The operator's words do not begin with yes (got: \"%s\"). Record the operator's whole reply; a "
-                   "yes begins with yes." % said.strip())
+    if must_be_yes and not tl.is_assent(said):
+        raise Stop("The operator's words are not an acknowledgement (got: \"%s\"). Record the operator's whole reply; "
+                   "a reply in their own words that agrees, with no no, wait or question in it, is one." % said.strip())
     try:
         path = tl.transcript_for(root, me["session_id"])
         found = tl.find_operator_words(path, said, after, require_shown=True, shown_text=shown_text,
@@ -1001,7 +1001,7 @@ def cutoff(root: Path, p: dict, pdir: Path) -> float:
 
 def tty_yes(root: Path, p: dict) -> dict:
     """§7.2 step 2, tty: the decision paragraph again, then one line read from
-    /dev/tty that must begin with yes (§7.4) — from a process that descends from
+    /dev/tty that must be an acknowledgement (§7.4; is_assent) — from a process that descends from
     a terminal login and from no agent (Decision 32)."""
     decision, _ = decision_block(root, p)
     paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --confirm`" % (root, p["lease"])
@@ -1012,8 +1012,8 @@ def tty_yes(root: Path, p: dict) -> dict:
         raise Stop("The confirm must be typed by a person in their own terminal: %s. %s" % (e, paste))
     except tl.NoTerminal:
         raise Stop("The confirm must be typed by a person in a terminal. This session has none. " + paste)
-    if not tl.is_yes(text):
-        raise Stop("The operator did not say yes (typed: \"%s\")." % text.strip())
+    if not tl.is_assent(text):
+        raise Stop("The operator's words are not an acknowledgement (typed: \"%s\")." % text.strip())
     return {"typed": {"text": text.strip(), "tty": name, "pid": os.getpid()}}
 
 

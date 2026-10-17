@@ -1796,7 +1796,7 @@ asked() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 
 delete_as_sA() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" release 02 --remove --force "$@"; }
 LINE02="Say yes to delete window 02's work."
 
-@test "release --remove from a session (2026-10-15): refused without the report (nothing deleted); with no --operator-said, a reply not beginning with yes, a reply of several lines or with a \$; refused when the work changed since the report; in tty mode with the paste line — and an operator shell is not gated" {
+@test "release --remove from a session (2026-10-15): refused without the report (nothing deleted); with no --operator-said, a reply that is not an acknowledgement, a reply of several lines or with a \$; refused when the work changed since the report; in tty mode with the paste line — and an operator shell is not gated" {
   delete_fixture
   run delete_as_sA --operator-said yes
   [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, repeat its report to the operator word for word, and ask; the delete runs only after their yes."*) : ;; *) echo "$output"; return 1 ;; esac
@@ -1805,11 +1805,11 @@ LINE02="Say yes to delete window 02's work."
   [ "${R##*$'\n'}" = "$LINE02" ]
   run delete_as_sA
   [ "$status" -ne 0 ]; case "$output" in *'Record what the operator said: add --operator-said "<their whole reply>". The yes is evidence; an empty one is not a yes.'*) : ;; *) echo "$output"; return 1 ;; esac
-  run delete_as_sA --operator-said "ok"
-  [ "$status" -ne 0 ]; case "$output" in *'The operator'"'"'s words do not begin with yes (got: "ok"). Record the operator'"'"'s whole reply; a yes begins with yes.'*) : ;; *) echo "$output"; return 1 ;; esac
+  run delete_as_sA --operator-said "not yet"
+  [ "$status" -ne 0 ]; case "$output" in *'The operator'"'"'s words are not an acknowledgement (got: "not yet"). Record the operator'"'"'s whole reply; a reply in their own words that agrees, with no no, wait or question in it, is one.'*) : ;; *) echo "$output"; return 1 ;; esac
   for bad in $'yes\nplease' 'yes $HOME' 'yes `date`'; do
     run delete_as_sA --operator-said "$bad"
-    [ "$status" -ne 0 ]; case "$output" in *"Ask the operator for a one-word yes and record that; a reply with several lines or shell characters cannot be carried on the command."*) : ;; *) echo "$output"; return 1 ;; esac
+    [ "$status" -ne 0 ]; case "$output" in *"Ask the operator for a one-line reply and record that; a reply with several lines or shell characters cannot be carried on the command."*) : ;; *) echo "$output"; return 1 ;; esac
   done
   [ -d "$W" ]
   # the yes is in the transcript, but the work changed since the report: a commit the operator did not see named
@@ -1831,6 +1831,18 @@ LINE02="Say yes to delete window 02's work."
   run LS release 02 --remove --force; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ ! -d "$W" ]; [ ! -e "$M" ]
   case "$output" in *"after the operator said"*) echo "an operator shell has no recorded yes: $output"; return 1 ;; *) : ;; esac
+}
+
+@test "release --remove from a session takes an acknowledgement in the operator's own words (Decision 30, v0.10.0): \"Okay, yes, proceed.\" after the report deletes the window" {
+  delete_fixture
+  R="$(asked)"; P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "$R" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" operator "Okay, yes, proceed." "$(plus "$P" 3)" >/dev/null
+  run --separate-stderr delete_as_sA --operator-said "Okay, yes, proceed."
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"Window 02 released; its worktree and branch are deleted (after the operator said: \"Okay, yes, proceed.\")."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$W" ]
 }
 
 @test "release --remove from a session after the yes: the report shown and the operator's first reply a yes deletes the window and records what authorised it under state/evidence/deletions/; a reply carrying only the first sentence, a yes before the line, and a later question that cleared the line are refused naming the line; the operator may ask first" {

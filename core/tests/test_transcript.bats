@@ -175,7 +175,7 @@ PY
   [ "${lines[0]}" = "$(cd "$BATS_TEST_TMPDIR/tdir" && pwd -P)" ]; [ "${lines[1]}" = "$(cd "$BATS_TEST_TMPDIR/tdir" && pwd -P)/sY.jsonl" ]
 }
 
-@test "the yes is the operator's whole turn (Decision 30): a fragment of a longer turn is not found, whatever it is; the shown turn must carry the block's opening words when they are named; is_yes wants the word yes first" {
+@test "the yes is the operator's whole turn (Decision 30): a fragment of a longer turn is not found, whatever it is; the shown turn must carry the block's opening words when they are named; is_assent wants an acknowledgement in the operator's own words" {
   tx "$F" assistant "Ready to promote window 02's work onto main." "$(plus "$T0" 1)" >/dev/null
   tx "$F" operator "No, wait — what did the reviewer say about F2?" "$(plus "$T0" 2)" >/dev/null
   for q in "wait" "e" "no" "No, wait"; do
@@ -190,8 +190,11 @@ PY
   tx "$F" assistant "Something else entirely." "$(plus "$T0" 1)" >/dev/null; tx "$F" operator "yes" "$(plus "$T0" 2)" >/dev/null
   run yes_check "$F" "yes" "$T0" 1 "Ready to promote window 02's work onto main"; [ "$output" = "NOTSHOWN" ] || { echo "$output"; return 1; }
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl
-assert tl.is_yes("Yes, push it.") and tl.is_yes("  YES") and tl.is_yes("yes")
-assert not tl.is_yes("no, wait") and not tl.is_yes("yesterday was fine") and not tl.is_yes("ok") and not tl.is_yes("")
+ok = ["Okay, yes, proceed.", "ok", "Go ahead", "Sounds good, push it", "Yes, push it.", "  YES", "yes", "LGTM", "approved", "\U0001f44d"]
+bad = ["no, wait", "yesterday was fine", "okay but why?", "hold on", "not yet", "", "   ", "Don\u2019t push it", "yes, but wait", "good"]
+wrong = [t for t in ok if not tl.is_assent(t)] + [t for t in bad if tl.is_assent(t)]
+assert not wrong, wrong
+assert tl.is_yes is tl.is_assent
 print("ok")' "$SRC"
   [ "$output" = "ok" ] || { echo "$output"; return 1; }
 }

@@ -498,8 +498,9 @@ until it is released.
 
 - `confirm: transcribed` (the default) — the prime types the operator's reply
   with `--operator-said "…"`, and promote requires it in the prime's own
-  session transcript as a whole message the operator typed, which begins with
-  yes, as their first message after a reply of the prime's that showed the
+  session transcript as a whole message the operator typed that is an
+  acknowledgement in their own words — "Okay, yes, proceed." and "go ahead"
+  are; "okay but why?", "no, wait" and "not yet" are not — as their first message after a reply of the prime's that showed the
   block or, once the block has been shown, ended with the last line of the
   block's first paragraph (`Say yes to push window 02's work to main.` — the operator may ask
   questions first; each answer ends with that line and nothing after it), in
@@ -512,7 +513,7 @@ until it is released.
   each one beside the transcript), with the transcript before it unchanged
   since — a yes rewritten into the file is refused.
 - `confirm: tty` — the operator pastes one line into their own shell and
-  types `yes` at the terminal; that shell pushes and finishes the rest, and
+  types `yes` (or any acknowledgement) at the terminal; that shell pushes and finishes the rest, and
   the prime's next prompt says it happened. The confirm refuses a process
   started by a Claude Code session or by no terminal login, and the guard
   refuses programs that make terminals — a stronger check than the

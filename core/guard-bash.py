@@ -297,7 +297,7 @@ DELETE_FROM_STDIN = ("A delete takes its arguments on the command line, never fr
                      "core/lease.sh release NN --remove … directly.")
 DELETE_NO_SESSION = "The delete runs from a window: this command carries no session."
 DELETE_NUMBER = "Name the window by its number (core/lease.sh release 02 --remove …), not an alias or a variable."
-DELETE_ONE_WORD = ("Ask the operator for a one-word yes and record that; a reply with several lines or shell "
+DELETE_ONE_WORD = ("Ask the operator for a one-line reply and record that; a reply with several lines or shell "
                    "characters cannot be carried on the command.")
 # git options that take their value as the next word (git.c handle_options).
 GIT_VALUE_OPTS = {"-C", "-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}

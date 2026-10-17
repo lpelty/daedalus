@@ -221,10 +221,31 @@ def normalize(text: str) -> str:
     return " ".join(text.translate(_CURLY).split()).casefold().strip(EDGES)
 
 
-def is_yes(text: str) -> bool:
-    """The reply begins with the word yes — tty's rule, applied to the transcribed
-    yes too (Decision 30): 'Yes, push it.' is; 'yesterday…', 'ok', 'no, wait' are not."""
-    return re.match(r"yes\b", normalize(text or "")) is not None
+# Decision 30, as revised 2026-10-17 (v0.10.0): the operator's own words are an acknowledgement when
+# they carry an affirmative word or phrase and no negation or hold word, each at word boundaries, and
+# do not end in a question mark. One rule for the transcribed reply, the tty line and release --remove.
+_WORD = r"(?<![\w'])(?:%s)(?![\w'])"
+ASSENT_RE = re.compile(_WORD % "|".join((
+    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go ahead", "go", "proceed", "approved?", "confirm(?:ed)?",
+    "do it", "ship it", "push it", "sounds good", "lgtm")) + "|\U0001f44d")
+DISSENT_RE = re.compile(_WORD % "|".join((
+    "no", "nope", "nah", "not", "cannot", "can't", "don't", "dont", "never", "wait", "stop", "hold", "cancel",
+    "abort", "later")))
+
+
+def is_assent(text: str) -> bool:
+    """The operator's reply is an acknowledgement (Decision 30, revised in v0.10.0): an affirmative word
+    or phrase (yes, ok, okay, go ahead, proceed, sounds good, ship it, ...) and none of the negation or
+    hold words (no, not, don't, wait, stop, hold, later, ...), at word boundaries, and not a question.
+    'Okay, yes, proceed.' is; 'yesterday was fine', 'okay but why?', 'no, wait', '' are not."""
+    raw = " ".join((text or "").translate(_CURLY).split()).casefold()
+    if raw.rstrip(" \"')]}»\u2019\u201d").endswith("?"):
+        return False
+    t = normalize(text or "")
+    return bool(t) and DISSENT_RE.search(t) is None and ASSENT_RE.search(t) is not None
+
+
+is_yes = is_assent      # the name every caller used before v0.10.0
 
 
 def classify(e: dict) -> str:

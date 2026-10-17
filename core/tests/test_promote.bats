@@ -315,6 +315,20 @@ PY
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
 
+@test "an acknowledgement in the operator's own words confirms (Decision 30, v0.10.0): \"Okay, yes, proceed.\" after the block pushes; \"okay but why?\" before it is refused and pushes nothing" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"; P="$(pj prepared_ts)"
+  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" operator "okay but why?" "$(plus "$P" 2)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "okay but why?"
+  refused "The operator's words are not an acknowledgement (got: \"okay but why?\")."
+  [ "$(origin_main)" = "$before" ]
+  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" 3)" >/dev/null
+  tx "$TXP" operator "Okay, yes, proceed." "$(plus "$P" 4)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "Okay, yes, proceed."; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+}
+
 @test "a yes rewritten into the session transcript is refused and nothing is pushed — the whole-file rewrite that keeps the chain: a yes and a reply inserted after the block, the next entry re-parented, the harness writing on after it; the genuine yes after it is accepted (critic-fix review, finding 3)" {
   work_on_02
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"; P="$(pj prepared_ts)"
@@ -377,7 +391,7 @@ PY
   c ""; refused "Record what the operator said. The yes is evidence; an empty one is not a yes."
   tx "$TXP" assistant "$B" "$(plus "$P" 1)" >/dev/null
   tx "$TXP" operator "No, wait — what did the reviewer say about F2?" "$(plus "$P" 2)" >/dev/null
-  c "No, wait"; refused "The operator's words do not begin with yes (got: \"No, wait\")."
+  c "No, wait"; refused "The operator's words are not an acknowledgement (got: \"No, wait\")."
   c "yes ship it"; refused "I could not find those words as something the operator typed after the promote block was shown."
   tx "$TXP" operator "yes, but first tell me about F2" "$(plus "$P" 3)" >/dev/null
   c "yes"; refused "I could not find those words as something the operator typed after the promote block was shown."
@@ -698,11 +712,11 @@ PY
   [ -f "$DAEDALUS_HOME/state/promote/$pid/announced" ]; [ ! -f "$S" ]
 }
 
-@test "tty mode: anything but yes at the terminal pushes nothing; a transcribed confirm's stamp is never announced as pushed from a shell" {
+@test "tty mode: anything but an acknowledgement at the terminal pushes nothing; a transcribed confirm's stamp is never announced as pushed from a shell" {
   work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"
   run type_into "not yet" "Type yes to push" bash "$PROMOTE" 02 --confirm
-  [ "$status" -eq 2 ]; case "$output" in *"The operator did not say yes (typed: \"not yet\"). Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -eq 2 ]; case "$output" in *"The operator's words are not an acknowledgement (typed: \"not yet\"). Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(origin_main)" = "$before" ]
   sed -i '' 's/^  confirm: tty$/  confirm: transcribed/' "$DAEDALUS_HOME/config.yaml"
   shown_then_said "yes"

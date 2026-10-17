@@ -2140,8 +2140,8 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
       1. the witness: `unpromoted nn` ran in THIS session (state/release-asked/<nn>.json names sid and nn), and
          not before this window existed (lease_epochs) — a witness, not a trust root;
       2. tty mode: the deployment confirms at a terminal, so the delete is pasted there;
-      3. the words: --operator-said carries one plain line beginning with yes (a reply of several lines, or with
-         a $ or a backtick, cannot ride on the command — ask for a one-word yes);
+      3. the words: --operator-said carries one plain line that is an acknowledgement (transcriptlib.is_assent;
+         a reply of several lines, or with a $ or a backtick, cannot ride on the command — ask for a one-line reply);
       4. the work is what the report named (work_fingerprint unchanged since the ask);
       5. the yes is in this session's transcript as the operator's first reply to an assistant turn carrying the
          constant DELETE_INVITATION line, after a cut-off that is the latest of the ask and the lease's own times
@@ -2168,11 +2168,11 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
         raise Refused("Record what the operator said: add --operator-said \"<their whole reply>\". The yes is "
                       "evidence; an empty one is not a yes.")
     said = str(said)
-    if not tl.is_yes(said):
-        raise Refused("The operator's words do not begin with yes (got: \"%s\"). Record the operator's whole reply; "
-                      "a yes begins with yes." % said.strip())
+    if not tl.is_assent(said):
+        raise Refused("The operator's words are not an acknowledgement (got: \"%s\"). Record the operator's whole reply; "
+                      "a reply in their own words that agrees, with no no, wait or question in it, is one." % said.strip())
     if "\n" in said or "$" in said or "`" in said:
-        raise Refused("Ask the operator for a one-word yes and record that; a reply with several lines or shell "
+        raise Refused("Ask the operator for a one-line reply and record that; a reply with several lines or shell "
                       "characters cannot be carried on the command.")
     if work_fingerprint(root, nn, lease) != marker.get("fingerprint"):
         raise Refused("Window %s's work changed since the report (a commit, an amended commit, or a changed or added "
