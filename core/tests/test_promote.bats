@@ -918,7 +918,7 @@ PY
   # both files wrap their lines: read each with its line breaks folded to spaces
   flat() { tr '\n' ' ' < "$1" | tr -s ' '; }
   RM="$(flat "$R/README.md")"; CM="$(flat "$R/CLAUDE.md")"
-  for s in 'core/promote.sh 02' '--operator-said' 'promote.confirm: tty' 'pre-push hook' 'core/lease.sh rebase 02' 'core/lease.sh split 02 --repo' '--skip-review --reason' 'Nothing was pushed.' 'begins with yes' 'not a proof' 'server-side branch protection'; do
+  for s in 'core/promote.sh 02' '--operator-said' 'promote.confirm: tty' 'pre-push hook' 'core/lease.sh rebase 02' 'core/lease.sh split 02 --repo' '--skip-review --reason' 'Nothing was pushed.' 'an acknowledgement in their own words' 'not a proof' 'server-side branch protection'; do
     case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
   done
   for s in '## Promote' 'core/promote.sh 02 --confirm --operator-said' 'in a later turn' 'their whole reply' 'Promote window 02'"'"'s work without the review?' 'core/lease.sh rebase 02' "the operator's own write"; do
