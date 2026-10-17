@@ -28,8 +28,10 @@ step is idempotent — the second run changes nothing — and says one line the 
      stop too, naming what to do; a checkout or reset `lease.sh adopt` began and was cut off is finished.
   7. the daedalus command: ~/.local/bin/daedalus for this home (core/update.py --install-shim's rules — never over
      a file it did not write, nor over one serving another home still there), and how to reach it from the login
-     shell; it never stops the upgrade (update-command design §4.7). FULL = len(STEPS) is the whole run
-  8. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
+     shell; it never stops the upgrade (update-command design §4.7)
+  8. a config.yaml naming its one callee in the legacy direct_call keys is told, once, its callee key (SPEC-011 §4);
+     config.yaml is read, never written. FULL = len(STEPS) is the whole run
+  9. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
 Before step 2, the first that can touch target/, every run takes a safety copy of everything in target/ into
 state/upgrade-snapshot/<stamp>/ and checks it, or stops before changing anything (see "the safety copy" below):
@@ -3740,13 +3742,32 @@ def step_command(root: Path, head: str, dry: bool, deadline: Optional[float]) ->
     return ["%s: %s" % (head, ln) for ln in said]
 
 
+NAMED_CALLEES = (0, 10, 0)
+LEGACY_CALLEE = ("direct_call's callee %s is now callee \"%s\"; nothing to change. A second callee goes in its own "
+                 "callee_<key>: block (config.example.yaml shows one).")
+
+
+def step_callee(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
+    """Step 8 (SPEC-011 §4): a home whose config.yaml names its one callee in the legacy direct_call keys is told,
+    once — at the upgrade from a release before named callees — that the callee now has a key and nothing needs
+    changing. Reads config.yaml and never writes it (the operator's file); never stops the upgrade."""
+    was = stamped(root) or ""
+    if VERSION_RE.fullmatch(was) and tuple(int(x) for x in was.split(".")) >= NAMED_CALLEES:
+        return []
+    name = _cfg(root, "direct_call.callee_name")
+    if not (name and _cfg(root, "direct_call.callee_home")):
+        return []
+    return ["%s: %s" % (head, LEGACY_CALLEE % (name, name.lower()))]
+
+
 STEPS = ((1, "creating the window directories", step_dirs),
          (2, "installing the pre-push hook", step_hooks),
          (3, "removing the old shared reminder files", step_dedup),
          (4, "renaming hot.md's session line", step_hot),
          (5, "moving capture's settings into config.yaml", step_memory),
          (6, "putting target/ back on its trunk", step_trunk),
-         (7, "installing the daedalus command", step_command))
+         (7, "installing the daedalus command", step_command),
+         (8, "naming the direct-call callee", step_callee))
 FULL = len(STEPS)       # "the whole run": every step, then the stamp (Decision 18); --setup runs steps 1-3
 
 
