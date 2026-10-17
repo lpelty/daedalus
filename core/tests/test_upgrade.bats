@@ -536,7 +536,7 @@ PY
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(printf '%s\n' "$output" | grep -c 'direct_call.s callee')" -eq 1 ] || { echo "$output"; return 1; }
-  printf '%s\n' "$output" | grep -qxF "Upgrade to 0.7.0: direct_call's callee Echo is now callee \"wren\"; nothing to change. A second callee goes in its own callee_<key>: block (config.example.yaml shows one)." \
+  printf '%s\n' "$output" | grep -qxF "Upgrade to 0.7.0: direct_call's callee Echo is now callee \"echo\"; nothing to change. A second callee goes in its own callee_<key>: block (config.example.yaml shows one)." \
     || { echo "$output"; return 1; }
   [ "$(shasum "$DAEDALUS_HOME/config.yaml")" = "$before" ]
   printf '0.10.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
