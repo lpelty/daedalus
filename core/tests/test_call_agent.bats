@@ -56,16 +56,24 @@ teardown() { teardown_live; }
   case "$output" in *"MISSING  direct call: direct_call.callee_home and direct_call.callee_name are set together or not at all (only callee_home is set)"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "config.example.yaml ships the direct_call block commented out, with placeholders; uncommented and pointed at a real home it is valid" {
+@test "config.example.yaml ships the direct_call block and a callee_<key>: block commented out, with placeholders and no legacy callee keys; uncommented and pointed at a real home they are valid" {
   ex="$BATS_TEST_DIRNAME/../../config.example.yaml"
   grep -q '^# direct_call:' "$ex"
-  run grep -E '^direct_call:' "$ex"; [ "$status" -ne 0 ]
+  grep -q '^# callee_agentname:' "$ex"
+  run grep -E '^(direct_call|callee_[a-z0-9-]+):' "$ex"; [ "$status" -ne 0 ]
   # comments on their own lines only: cfg does not strip an inline comment
   run grep -E '^#   [a-z_]+: .*[^ ] +#' "$ex"; [ "$status" -ne 0 ] || { echo "inline comment: $output"; return 1; }
-  sed -n '/^# direct_call:/,/^$/p' "$ex" | sed 's/^# \{0,1\}//' | grep -v '^ *#' | grep -v '^$' \
-    | sed "s|callee_home: .*|callee_home: $CALLEE|; s|callee_launcher: .*|callee_launcher: /usr/bin/true|" >> "$DAEDALUS_HOME/config.yaml"
+  # SPEC-011 §4: the legacy one-callee keys are still read, no longer shown
+  run grep -E '^#   (callee_home|callee_name|callee_launcher|callee_launcher_args|orientation_marker):' "$ex"
+  [ "$status" -ne 0 ] || { echo "legacy key in the example: $output"; return 1; }
+  sed -n '/^# direct_call:/,/^$/p' "$ex" | grep -E '^# [a-z_]+:$|^#   [a-z_]+: ' | sed 's/^# \{0,1\}//' \
+    | sed "s|^  home: .*|  home: $CALLEE|; s|^  launcher: .*|  launcher: /usr/bin/true|" >> "$DAEDALUS_HOME/config.yaml"
   run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
-  case "$output" in *"OK       direct call: callee AgentName at $CALLEE through its own launcher (with --callee agentname); callers of this Daedalus: AgentName"*) : ;; *) echo "$output"; cat "$DAEDALUS_HOME/config.yaml"; return 1 ;; esac
+  case "$output" in *MISSING*) echo "$output"; cat "$DAEDALUS_HOME/config.yaml"; return 1 ;; esac
+  for want in "OK       direct call: callers of this Daedalus: AgentName" \
+    "OK       direct call: callee agentname (AgentName) at $CALLEE through its own launcher (with --callee agentname); consult for: the history of this target and why it is built the way it is"; do
+    printf '%s\n' "$output" | grep -qxF -- "$want" || { echo "lacks [$want]: $output"; cat "$DAEDALUS_HOME/config.yaml"; return 1; }
+  done
 }
 
 # --- the engine through --callee self: receipts, the stdout/stderr contract, exit codes, the watchdog (Task 2) ---

@@ -109,43 +109,15 @@ boundary:
 #   address: https://git.example.com/mirror/daedalus.git
 
 # Direct calls (optional) — core/call-agent.sh. Uncomment to use.
-# The target's own agent — the one Daedalus may summon for context or a
-# review — is named HERE and nowhere else: core has no default and takes no
-# callee home on the command line, so the same core calls one agent on one
-# deployment and another agent on the next. --callee agent is refused while
-# callee_home and callee_name are unset. Comments on their own lines only:
-# cfg does not strip an inline comment.
+# Comments on their own lines only: cfg does not strip an inline comment.
 # direct_call:
-#   # The agent's Claude Code project root (absolute). The call runs there,
-#   # so its identity loads from its own CLAUDE.md and hooks.
-#   callee_home: /abs/path/to/agent-home
-#   # Its name in the frame prompt and the receipts.
-#   callee_name: AgentName
 #   # Who authorized the exchange ("<human> authorized this exchange").
 #   callee_human: OperatorName
 #   # Who may call THIS Daedalus (--callee self). Comma separated; absent or
 #   # empty means nobody. A name is a claim on one user account; the
 #   # receipt records the invoking process as evidence.
 #   callers: AgentName
-#   # A line the agent's SessionStart writes into its transcript; the
-#   # launcher looks for it to report "orientation: yes". Unset, a call to
-#   # the agent reports "unverified" (exit 3). --callee self knows
-#   # Daedalus's own line and ignores this key.
-#   orientation_marker: 'Session orientation'
-#   # Optional. The agent's own direct-call launcher (absolute path). When
-#   # set, --callee agent runs it instead of a bare claude -p, so the agent's
-#   # allowlist, receipt and capture apply. It is called as
-#   #   <launcher> <args> --caller Daedalus --request-file <file> --artifact-dir <dir>
-#   #   <launcher> <args> --caller Daedalus --resume <its call id> --request-file <file>
-#   # and must answer on stdout with "<Name> call <id>; receipt ..." and
-#   # "... orientation: yes|no ..." on stderr. Exit 3 means it answered but
-#   # could not verify orientation; exit 3 with no answer is a failure.
-#   callee_launcher: /abs/path/to/callee-launcher
-#   # Optional, with callee_launcher only: the <args> above, as shell words —
-#   # whatever that launcher itself requires, typically its own name for the
-#   # agent (a launcher serving several agents refuses a call without it).
-#   # It may not name --caller, --request-file, --artifact-dir or --resume.
-#   callee_launcher_args: --callee agentname
+#   # Shared by every callee below unless its own block sets the same key.
 #   # Read-only tools, passed as --tools. Only Read, Grep and Glob are accepted.
 #   tools: Read,Grep,Glob
 #   max_turns: 40
@@ -155,6 +127,54 @@ boundary:
 #   # afterwards, labelled with the caller and the callee.
 #   capture: true
 #   capture_wait: 90
+#
+# The agents Daedalus may ask for context or a review — one callee_<key>:
+# block each, named HERE and nowhere else: core has no default and takes no
+# callee home on the command line, so the same core calls one agent on one
+# deployment and other agents on the next. A call names the key:
+#   core/call-agent.sh --callee agent --to <key> "<question>"
+# and may leave --to out when exactly one callee is configured. <key> is a
+# lowercase letter, then up to 30 lowercase letters, digits or hyphens; not
+# agent, self or refuter. (The one-callee keys of 0.9.0 and before —
+# direct_call.callee_home, callee_name, callee_launcher, callee_launcher_args,
+# orientation_marker — are still read, as callee <callee_name lowercased>.)
+# callee_agentname:
+#   # Its name in the frame prompt and the receipts.
+#   name: AgentName
+#   # The agent's Claude Code project root (absolute). The call runs there,
+#   # so its identity loads from its own CLAUDE.md and hooks.
+#   home: /abs/path/to/agent-home
+#   # What to ask this agent for. Daedalus chooses whom to ask by this line,
+#   # and session start lists it beside the key.
+#   consult_for: the history of this target and why it is built the way it is
+#   # A line the agent's SessionStart writes into its transcript; the
+#   # launcher looks for it to report "orientation: yes". Unset, a call to
+#   # the agent reports "unverified" (exit 3). Single-quote it.
+#   marker: 'Session orientation'
+#   # Optional. The agent's own direct-call launcher (absolute path). When
+#   # set, the call runs it instead of a bare claude -p, so the agent's
+#   # allowlist, receipt and capture apply. It is called as
+#   #   <launcher> <args> --caller Daedalus --request-file <file> --artifact-dir <dir>
+#   #   <launcher> <args> --caller Daedalus --resume <its call id> --request-file <file>
+#   # and answers on stdout. Exit 3 means it answered but could not verify
+#   # orientation; exit 3 with no answer is a failure.
+#   launcher: /abs/path/to/callee-launcher
+#   # Optional, with launcher only: the <args> above, as shell words —
+#   # whatever that launcher itself requires, typically its own name for the
+#   # agent (a launcher serving several agents refuses a call without it).
+#   # It may not name --caller, --request-file, --artifact-dir or --resume.
+#   launcher_args: --callee agentname
+#   # Optional, with launcher only: how its stderr reads. Unset, it must print
+#   # "<Name> call <uuid>; ..." and "... orientation: yes|no ...".
+#   # launcher_call_id is a Python regular expression with one capturing
+#   # group, the call id a resume passes back; launcher_oriented one whose
+#   # presence on stderr means its orientation was verified (absent:
+#   # unverified, exit 3). Single-quote both.
+#   launcher_call_id: '^AgentName call (\S+);'
+#   launcher_oriented: 'orientation: yes'
+#   # Optional: this callee's own tools, max_turns, timeout, capture and
+#   # capture_wait, which beat direct_call's.
+#   timeout: 900
 
 recall:
   # Optional retrieval layer (spec: document-recall-and-code-context design).

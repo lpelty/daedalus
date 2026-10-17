@@ -530,18 +530,18 @@ PY
 
 # --- step 8: the legacy direct-call callee is told its key (SPEC-011 §4) ----------------------------------------------
 @test "SPEC-011 criterion 1: a legacy direct_call callee gets one upgrade line naming its key, config.yaml is not rewritten, and an upgrade from 0.10.0 or later, or a home without one, says nothing" {
-  mkdir -p "$BATS_TEST_TMPDIR/wrenhome"
-  printf 'direct_call:\n  callee_home: %s\n  callee_name: Wren\n' "$BATS_TEST_TMPDIR/wrenhome" >> "$DAEDALUS_HOME/config.yaml"
+  mkdir -p "$BATS_TEST_TMPDIR/echohome"
+  printf 'direct_call:\n  callee_home: %s\n  callee_name: Echo\n' "$BATS_TEST_TMPDIR/echohome" >> "$DAEDALUS_HOME/config.yaml"
   before="$(shasum "$DAEDALUS_HOME/config.yaml")"
   run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(printf '%s\n' "$output" | grep -c 'direct_call.s callee')" -eq 1 ] || { echo "$output"; return 1; }
-  printf '%s\n' "$output" | grep -qxF "Upgrade to 0.7.0: direct_call's callee Wren is now callee \"wren\"; nothing to change. A second callee goes in its own callee_<key>: block (config.example.yaml shows one)." \
+  printf '%s\n' "$output" | grep -qxF "Upgrade to 0.7.0: direct_call's callee Echo is now callee \"wren\"; nothing to change. A second callee goes in its own callee_<key>: block (config.example.yaml shows one)." \
     || { echo "$output"; return 1; }
   [ "$(shasum "$DAEDALUS_HOME/config.yaml")" = "$before" ]
   printf '0.10.0\n' > "$DAEDALUS_HOME/state/upgraded-to"
   run python3 "$UP"
-  case "$output" in *"callee Wren"*) echo "said again after 0.10.0: $output"; return 1 ;; esac
+  case "$output" in *"callee Echo"*) echo "said again after 0.10.0: $output"; return 1 ;; esac
   sed -i.bak '/^direct_call:/,$d' "$DAEDALUS_HOME/config.yaml"; rm "$DAEDALUS_HOME/state/upgraded-to"
   run python3 "$UP"
   case "$output" in *"direct_call's callee"*) echo "$output"; return 1 ;; esac
