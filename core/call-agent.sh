@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The direct-call launcher's entry point (spec §8): one core, three callees —
-# the target's own agent (--callee agent, named ONLY by config.yaml
-# direct_call.callee_home / callee_name), this Daedalus called by an allowlisted
+# an agent this deployment may ask (--callee agent [--to <key>], named ONLY by
+# config.yaml: a callee_<key>: block each, or the legacy direct_call.callee_home /
+# callee_name; --to may be left out when exactly one is configured), this Daedalus called by an allowlisted
 # agent (--callee self), and the fresh-context refuter Thing (--callee refuter,
 # used by core/refute.sh). Answer on stdout, a two-line receipt on stderr,
 # resume by call id; exit 0 / 2 refused / 3 answered, orientation unverified /

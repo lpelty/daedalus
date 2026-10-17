@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Direct-call launcher: one core, three callees (spec §8).
 
-    core/call-agent.sh --callee agent|self|refuter [--request-file F | "<request>" | stdin]
+    core/call-agent.sh --callee agent|self|refuter [--to <key>] [--request-file F | "<request>" | stdin]
                        [--tree <abs path>] [--tag <label>] [--artifact-dir <abs path>]
                        [--caller <name>] [--verdict-file <path>] [--mode branch|promote]
     core/call-agent.sh --resume <call-id> [--callee <mode>] [--request-file F | "<request>"]
     core/call-agent.sh --resume-review <NN> "<question>"
     python3 core/call_agent.py --doctor
+    python3 core/call_agent.py --consult-line
 
 Contract: the answer on stdout, a two-line receipt on stderr, resume by call
 id. Callers check the exit code AND a non-empty stdout, never the receipt line
@@ -17,11 +18,15 @@ launcher's), passed through — except a child's 3 with no answer, which is 1:
 3 here always means an answer exists.
 
 The callee is configuration, never an argument (spec §8.4): --callee agent
-reads direct_call.callee_home / callee_name (and optional callee_launcher,
-with callee_launcher_args for whatever that launcher itself requires, such as
-its own name for the tenant) from this deployment's config.yaml and is refused while they are unset. Core
-names no agent and has no default callee, so the same code calls one agent on
-one deployment and a different agent on the next.
+reads one callee_<key>: block per agent this deployment may ask (name, home,
+and optional launcher, launcher_args, marker, consult_for, launcher_call_id,
+launcher_oriented and per-callee knobs; SPEC-011), and the legacy one-callee
+keys direct_call.callee_home / callee_name / callee_launcher / ... as callee
+<callee_name lowercased>. --to <key> picks one; it may be left out when
+exactly one is configured, and the call is refused while none is. The key
+names a block in this deployment's config.yaml, never a home: core names no
+agent and has no default callee, so the same code calls one agent on one
+deployment and different agents on the next.
 
 Receipts: state/direct-calls/<call-id>/launch.json plus per-attempt sidecars.
 Session id == call id. Python 3.9, standard library only; verifylib and
@@ -81,9 +86,23 @@ BINDING_VARS = ("DAEDALUS_LEASE", "DAEDALUS_SESSION_ID", "DAEDALUS_HOOK_PID", "D
 CALL_VARS = ("CAPTURE_DEFER_TO_CALLER", "DIRECT_CALL_ID", "DIRECT_CALL_RECEIPT_DIR", "DIRECT_CALL_CALLER")
 CONFIG_KEYS = ("direct_call.callee_home", "direct_call.callee_name", "direct_call.callee_human",
                "direct_call.callers", "direct_call.orientation_marker", "direct_call.callee_launcher",
-               "direct_call.callee_launcher_args", "direct_call.tools", "direct_call.max_turns", "direct_call.timeout", "direct_call.capture",
+               "direct_call.callee_launcher_args", "direct_call.consult_for", "direct_call.callee_launcher_call_id",
+               "direct_call.callee_launcher_oriented", "direct_call.tools", "direct_call.max_turns", "direct_call.timeout", "direct_call.capture",
                "direct_call.capture_wait", "verify.refute_model", "verify.refute_timeout",
                "memory.transcript_dir")
+# Named callees (SPEC-011): one top-level callee_<key>: block each, two levels
+# deep so lib.sh cfg reads every field unchanged. A key is what --to names;
+# the three --callee modes are not keys.
+CALLEE_FIELDS = ("name", "home", "launcher", "launcher_args", "marker", "consult_for", "launcher_call_id",
+                 "launcher_oriented", "tools", "max_turns", "timeout", "capture", "capture_wait")
+CALLEE_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
+RESERVED_KEYS = ("agent", "self", "refuter")
+# Any top-level line that starts callee_ and has a colon is a block to judge
+# (a malformed one is a problem, never silently skipped).
+CALLEE_LINE_RE = re.compile(r"callee_([^:]*):(.*)")
+BLOCKS = "\0callee-blocks"      # read_config's scan of those lines, "<key>\t<rest>" per line
+# What a callee launcher's call id may be before it is passed back as --resume <id>.
+LAUNCHER_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 REQUEST_FILE = "\0request-file"
 WRITE_ONCE = "A review for this run already exists; a new verdict needs a new run."
 EXIT_REFUSED, EXIT_UNVERIFIED, EXIT_TIMEOUT = 2, 3, 124
@@ -91,6 +110,11 @@ EXIT_REFUSED, EXIT_UNVERIFIED, EXIT_TIMEOUT = 2, 3, 124
 # launch_agent); direct_call.callee_launcher_args may not name them.
 LAUNCHER_OWN_FLAGS = ("--caller", "--request-file", "--artifact-dir", "--resume")
 CALL_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# A callee launcher's stderr, when its block sets neither launcher_call_id nor
+# launcher_oriented: this launcher's own contract ("<Name> call <uuid>; ..." and
+# "<Name> orientation: yes|no|unverified; ...").
+DEFAULT_CALL_ID_RE = re.compile(r"call (" + CALL_ID_RE.pattern + r")")
+DEFAULT_ORIENTED_RE = re.compile(r"orientation: (yes|no|unverified)")
 # One parser for config.yaml: lib.sh cfg (lib.sh:19-69). Every key in one bash call.
 CFG_SNIPPET = r'''source "$DAEDALUS_HOME/core/lib.sh"; set +e
 for k in "$@"; do val="$(cfg "$k" 2>/dev/null)" && printf '%s\t%s\n' "$k" "$val"; done
@@ -181,11 +205,30 @@ def config_file(root: Path) -> Path:
     return here / "config.yaml"
 
 
+def callee_blocks(text: str) -> List[Tuple[str, str]]:
+    """(key, what follows its colon) for every top-level callee_* line, in file
+    order: the one scan SPEC-011 §1 adds. A trailing comment is not a value."""
+    out = []
+    for ln in text.splitlines():
+        m = CALLEE_LINE_RE.match(ln)
+        if m:
+            rest = m.group(2).strip()
+            out.append((m.group(1).strip().replace("\t", " "), "" if rest.startswith("#") else rest))
+    return out
+
+
 def read_config(root: Path) -> Dict[str, str]:
     cfg_file = config_file(root)
     if not cfg_file.is_file():
         raise Refusal("no config at %s (copy config.example.yaml)" % cfg_file)
-    p = subprocess.run(["bash", "-c", CFG_SNIPPET, "cfg"] + list(CONFIG_KEYS),
+    try:
+        blocks = callee_blocks(cfg_file.read_text(errors="replace"))
+    except OSError as e:
+        raise Refusal("cannot read %s (%s)" % (cfg_file, e.strerror))
+    keys = list(CONFIG_KEYS) + ["callee_%s.%s" % (k, f) for k, rest in blocks
+                                if not rest and CALLEE_KEY_RE.fullmatch(k) and k not in RESERVED_KEYS
+                                for f in CALLEE_FIELDS]
+    p = subprocess.run(["bash", "-c", CFG_SNIPPET, "cfg"] + keys,
                        capture_output=True, text=True, timeout=20, env=lib_env(root))
     if p.returncode != 0:
         raise Refusal("cannot read config.yaml through lib.sh cfg (%s)" % (p.stderr.strip() or p.returncode))
@@ -194,6 +237,7 @@ def read_config(root: Path) -> Dict[str, str]:
         key, _, val = line.partition("\t")
         if key:
             out[key] = val
+    out[BLOCKS] = "\n".join("%s\t%s" % kr for kr in blocks)
     return out
 
 
@@ -201,79 +245,222 @@ def _whole(raw: str, lo: int, hi: int) -> Optional[int]:
     return int(raw) if raw.isdigit() and len(raw) <= 7 and lo <= int(raw) <= hi else None
 
 
-def direct_call_settings(conf: Dict[str, str]) -> Tuple[dict, List[str]]:
-    """direct_call.* validated, with the spec §8.1 defaults. (settings,
-    problems): each problem is one plain sentence naming its key. The launcher
-    refuses on the first; doctor prints them all."""
-    g = conf.get
-    problems: List[str] = []
-    s = {"callee_home": None, "callee_name": None, "callee_launcher": None, "callee_launcher_args": [],
-         "callee_human": g("direct_call.callee_human") or "the operator",
-         "callers": [c.strip() for c in (g("direct_call.callers") or "").split(",") if c.strip()],
-         "marker": g("direct_call.orientation_marker"), "tools": list(READ_ONLY_TOOLS),
-         "max_turns": 40, "timeout": 600, "capture": True, "capture_wait": 90,
-         "transcript_dir": g("memory.transcript_dir")}
-    home, name = g("direct_call.callee_home"), g("direct_call.callee_name")
-    if bool(home) != bool(name):
-        problems.append("direct_call.callee_home and direct_call.callee_name are set together or not at all "
-                        "(only %s is set)" % ("callee_home" if home else "callee_name"))
-    elif home:
-        if not home.startswith("/"):
-            problems.append("direct_call.callee_home must be an absolute path (got: %s)" % home)
-        elif not Path(home).is_dir():
-            problems.append("direct_call.callee_home is not a directory: %s" % home)
-        else:
-            s["callee_home"], s["callee_name"] = home, name
-    launcher = g("direct_call.callee_launcher")
-    if launcher:
-        if not (launcher.startswith("/") and Path(launcher).is_file() and os.access(launcher, os.X_OK)):
-            problems.append("direct_call.callee_launcher must be the absolute path of an executable file (got: %s)"
-                            % launcher)
-        else:
-            s["callee_launcher"] = launcher
-    # Whatever the callee's own launcher requires before Daedalus's flags —
-    # its own name for the tenant, an interpreter's arguments — split as shell
-    # words (a trailing # comment dropped). Configuration, so core names no
-    # agent and assumes no launcher's argv beyond the four flags it supplies.
-    largs = g("direct_call.callee_launcher_args")
-    if largs:
-        try:
-            words = shlex.split(largs, comments=True)
-        except ValueError as e:
-            problems.append("direct_call.callee_launcher_args cannot be split into arguments (%s; got: %s)" % (e, largs))
-        else:
-            own = [w for w in words if w.split("=", 1)[0] in LAUNCHER_OWN_FLAGS]
-            if not launcher:
-                problems.append("direct_call.callee_launcher_args is set but direct_call.callee_launcher is not")
-            elif own:
-                problems.append("direct_call.callee_launcher_args may not name %s — Daedalus passes %s itself "
-                                "(got: %s)" % (", ".join(own), ", ".join(LAUNCHER_OWN_FLAGS), largs))
-            else:
-                s["callee_launcher_args"] = words
-    tools = g("direct_call.tools")
+def _knobs(get, spell, s: dict, problems: List[str]) -> None:
+    """The read-only knobs a call runs with (tools, max_turns, capture_wait,
+    timeout, capture), each validated into s when it is set; one problem per
+    bad value, naming it as config.yaml spells it."""
+    tools = get("tools")
     if tools is not None:
         names = [t.strip() for t in tools.split(",") if t.strip()]
         if not names or any(t not in READ_ONLY_TOOLS for t in names):
-            problems.append("direct_call.tools may name only Read, Grep and Glob — a direct call is read-only "
-                            "(got: %s)" % tools)
+            problems.append("%s may name only Read, Grep and Glob — a direct call is read-only "
+                            "(got: %s)" % (spell("tools"), tools))
         else:
             s["tools"] = names
     for key, lo, hi in (("max_turns", 1, 500), ("capture_wait", 0, 300), ("timeout", 1, 9999999)):
-        raw = g("direct_call." + key)
+        raw = get(key)
         if raw is None:
             continue
         n = _whole(raw, lo, hi)
         if n is None:
-            problems.append("direct_call.%s must be a whole number from %d to %d (got: %s)" % (key, lo, hi, raw))
+            problems.append("%s must be a whole number from %d to %d (got: %s)" % (spell(key), lo, hi, raw))
         else:
             s[key] = n
-    cap = g("direct_call.capture")
+    cap = get("capture")
     if cap is not None:
         if cap not in ("true", "false"):
-            problems.append("direct_call.capture must be true or false (got: %s)" % cap)
+            problems.append("%s must be true or false (got: %s)" % (spell("capture"), cap))
         else:
             s["capture"] = cap == "true"
+
+
+def shared_settings(conf: Dict[str, str]) -> Tuple[dict, List[str]]:
+    """direct_call.*'s shared part (spec §8.1 defaults): who may call this
+    Daedalus, who authorizes, and the knobs every callee falls back to."""
+    g = conf.get
+    problems: List[str] = []
+    s = {"callee_human": g("direct_call.callee_human") or "the operator",
+         "callers": [c.strip() for c in (g("direct_call.callers") or "").split(",") if c.strip()],
+         "tools": list(READ_ONLY_TOOLS), "max_turns": 40, "timeout": 600, "capture": True, "capture_wait": 90,
+         "transcript_dir": g("memory.transcript_dir")}
+    _knobs(lambda k: g("direct_call." + k), lambda k: "direct_call." + k, s, problems)
     return s, problems
+
+
+def _pattern(raw: str, what: str, groups: Optional[int]) -> Tuple[Optional["re.Pattern"], Optional[str]]:
+    try:
+        rx = re.compile(raw)
+    except re.error as e:
+        return None, "%s is not a regular expression Python can compile (%s; got: %s)" % (what, e, raw)
+    if groups is not None and rx.groups != groups:
+        return None, ("%s must have exactly one capturing group, the callee launcher's call id (got %d: %s)"
+                      % (what, rx.groups, raw))
+    return rx, None
+
+
+def _callee(get, spell, base: dict, block: bool) -> Tuple[dict, List[str]]:
+    """One callee's fields validated (SPEC-011 §1): today's direct_call rules,
+    each problem naming the field as config.yaml spells it — direct_call.callee_home
+    for the legacy callee, callee_<key>.home for a block. base is the shared
+    settings; a block's own tools/max_turns/timeout/capture/capture_wait beat them."""
+    problems: List[str] = []
+    c = dict(base)
+    c.update(name=None, home=None, launcher=None, launcher_args=[], marker=get("marker"),
+             consult_for=get("consult_for"), call_id_re=None, oriented_re=None)
+    short = lambda f: spell(f).split(".", 1)[1]      # noqa: E731
+    home, name = get("home"), get("name")
+    if bool(home) != bool(name):
+        problems.append("%s and %s are set together or not at all (only %s is set)"
+                        % (spell("home"), spell("name"), short("home") if home else short("name")))
+    elif block and not home:
+        problems.append("%s and %s are required in a callee block" % (spell("home"), spell("name")))
+    elif home:
+        if not home.startswith("/"):
+            problems.append("%s must be an absolute path (got: %s)" % (spell("home"), home))
+        elif not Path(home).is_dir():
+            problems.append("%s is not a directory: %s" % (spell("home"), home))
+        else:
+            c["home"], c["name"] = home, name
+    launcher = get("launcher")
+    if launcher:
+        if not (launcher.startswith("/") and Path(launcher).is_file() and os.access(launcher, os.X_OK)):
+            problems.append("%s must be the absolute path of an executable file (got: %s)" % (spell("launcher"), launcher))
+        else:
+            c["launcher"] = launcher
+    # Whatever the callee's own launcher requires before Daedalus's flags —
+    # its own name for the tenant, an interpreter's arguments — split as shell
+    # words (a trailing # comment dropped). Configuration, so core names no
+    # agent and assumes no launcher's argv beyond the four flags it supplies.
+    largs = get("launcher_args")
+    if largs:
+        try:
+            words = shlex.split(largs, comments=True)
+        except ValueError as e:
+            problems.append("%s cannot be split into arguments (%s; got: %s)" % (spell("launcher_args"), e, largs))
+        else:
+            own = [w for w in words if w.split("=", 1)[0] in LAUNCHER_OWN_FLAGS]
+            if not launcher:
+                problems.append("%s is set but %s is not" % (spell("launcher_args"), spell("launcher")))
+            elif own:
+                problems.append("%s may not name %s — Daedalus passes %s itself (got: %s)"
+                                % (spell("launcher_args"), ", ".join(own), ", ".join(LAUNCHER_OWN_FLAGS), largs))
+            else:
+                c["launcher_args"] = words
+    # How this callee's own launcher reports on stderr (SPEC-011 §1): the call
+    # id it can be resumed by, and the line that means its orientation was
+    # verified. Unset, this launcher's contract: "<Name> call <uuid>; ..." and
+    # "orientation: yes|no|unverified".
+    for field, key, groups in (("launcher_call_id", "call_id_re", 1), ("launcher_oriented", "oriented_re", None)):
+        raw = get(field)
+        if not raw:
+            continue
+        if not launcher:
+            problems.append("%s is set but %s is not" % (spell(field), spell("launcher")))
+            continue
+        rx, why = _pattern(raw, spell(field), groups)
+        if why:
+            problems.append(why)
+        else:
+            c[key] = rx
+    if block:
+        _knobs(lambda k: get(k), spell, c, problems)
+    return c, problems
+
+
+# The legacy one-callee keys (v0.9.0 and before), read as one callee whose key
+# is callee_name lowercased (SPEC-011 §4); field -> its spelling in config.yaml.
+LEGACY = {"name": "direct_call.callee_name", "home": "direct_call.callee_home",
+          "launcher": "direct_call.callee_launcher", "launcher_args": "direct_call.callee_launcher_args",
+          "marker": "direct_call.orientation_marker", "consult_for": "direct_call.consult_for",
+          "launcher_call_id": "direct_call.callee_launcher_call_id",
+          "launcher_oriented": "direct_call.callee_launcher_oriented"}
+NO_CALLEE = ("no callee is configured: set direct_call.callee_home and callee_name in config.yaml, or add a "
+             "callee_<key>: block (config.example.yaml shows one)")
+
+
+def direct_call_settings(conf: Dict[str, str]) -> Tuple[dict, List[str]]:
+    """direct_call.* validated, with the spec §8.1 defaults — the shared part
+    and the legacy callee, as v0.9.0 read them. (settings, problems): each
+    problem is one plain sentence naming its key. --callee self refuses on the
+    first; a callee_<key>: block is never read here (callee_table)."""
+    s, problems = shared_settings(conf)
+    c, more = _callee(lambda f: conf.get(LEGACY[f]), lambda f: LEGACY[f], s, block=False)
+    s.update(callee_home=c["home"], callee_name=c["name"], callee_launcher=c["launcher"],
+             callee_launcher_args=c["launcher_args"], marker=c["marker"])
+    return s, more + problems
+
+
+def callee_table(conf: Dict[str, str]) -> dict:
+    """Every callee config.yaml names (SPEC-011 §§1, 4): the legacy direct_call
+    callee first, then each callee_<key>: block in file order. Returns
+      callees  [{key, block, legacy, settings, problems}] — problems are that callee's own
+      blocks   problems of the block names themselves (malformed, reserved, twice, a duplicate key)
+      problems the shared knobs' problems, and the legacy keys' when they make no callee
+      shared   the shared settings."""
+    shared, shared_p = shared_settings(conf)
+    out: List[dict] = []
+    block_p: List[str] = []
+    legacy_c, legacy_p = _callee(lambda f: conf.get(LEGACY[f]), lambda f: LEGACY[f], shared, block=False)
+    if conf.get(LEGACY["home"]) and conf.get(LEGACY["name"]):
+        out.append({"key": conf[LEGACY["name"]].lower(), "block": "direct_call", "legacy": True,
+                    "settings": legacy_c, "problems": legacy_p})
+        orphan: List[str] = []
+    else:
+        orphan = legacy_p
+    seen: List[str] = []
+    for raw, rest in [ln.split("\t", 1) for ln in (conf.get(BLOCKS) or "").split("\n") if ln]:
+        if rest:
+            block_p.append("callee_%s: must be a block of fields on the lines under it, not a value (got: %s)"
+                           % (raw, rest))
+            continue
+        if not CALLEE_KEY_RE.fullmatch(raw):
+            block_p.append("callee_%s: is not a callee key — a key is a lowercase letter, then up to 30 lowercase "
+                           "letters, digits or hyphens" % raw)
+            continue
+        if raw in RESERVED_KEYS:
+            block_p.append("callee_%s: uses a reserved key (agent, self and refuter are --callee modes); rename the "
+                           "block" % raw)
+            continue
+        if raw in seen:
+            block_p.append("callee_%s: appears more than once in config.yaml; keep one block" % raw)
+            continue
+        seen.append(raw)
+        if any(e["legacy"] and e["key"] == raw for e in out):
+            block_p.append("direct_call's callee %s and the callee_%s: block are both callee \"%s\"; remove one — "
+                           "--callee agent is refused until then" % (conf[LEGACY["name"]], raw, raw))
+            continue
+        c, p = _callee(lambda f, k=raw: conf.get("callee_%s.%s" % (k, f)),
+                       lambda f, k=raw: "callee_%s.%s" % (k, f), shared, block=True)
+        out.append({"key": raw, "block": "callee_" + raw, "legacy": False, "settings": c, "problems": p})
+    return {"callees": out, "blocks": block_p, "problems": orphan + shared_p, "shared": shared}
+
+
+def _menu(callees: List[dict]) -> str:
+    return "; ".join("%s — %s" % (e["key"], e["settings"].get("consult_for") or "(no consult_for set)")
+                     for e in callees)
+
+
+def pick_callee(conf: Dict[str, str], to: Optional[str]) -> dict:
+    """The callee a --callee agent call goes to (SPEC-011 §2), or a Refusal:
+    the block-name problems first, then no callee at all (today's sentence),
+    the shared knobs, the choice, and the chosen callee's own fields."""
+    t = callee_table(conf)
+    first(t["blocks"])
+    if not t["callees"]:
+        raise Refusal(NO_CALLEE)
+    first(t["problems"])
+    if to is None:
+        if len(t["callees"]) > 1:
+            raise Refusal("%d callees are configured; name one with --to <key>: %s"
+                          % (len(t["callees"]), _menu(t["callees"])))
+        e = t["callees"][0]
+    else:
+        e = next((x for x in t["callees"] if x["key"] == to), None)
+        if e is None:
+            raise Refusal("no callee \"%s\" is configured (--to names one of: %s)"
+                          % (to, ", ".join(x["key"] for x in t["callees"])))
+    first(e["problems"])
+    return e
 
 
 def refuter_settings(conf: Dict[str, str]) -> Tuple[dict, List[str]]:
@@ -569,27 +756,38 @@ def callee_callers(home: Path, callee: str) -> Tuple[Optional[List[str]], str]:
 
 
 def prepare_agent(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dict) -> dict:
-    if not (conf.get("direct_call.callee_home") and conf.get("direct_call.callee_name")):
-        raise Refusal("no callee is configured: set direct_call.callee_home and callee_name in config.yaml")
-    s, problems = direct_call_settings(conf)
-    first(problems)
+    e = pick_callee(conf, args.to)
+    c = e["settings"]
     if args.caller:
         raise Refusal("--caller is for --callee self; a call to the configured agent is always from %s" % SELF_NAME)
-    fields = {"caller": SELF_NAME, "callee": s["callee_name"], "callee_home": s["callee_home"],
-              "callee_launcher": s["callee_launcher"], "callee_launcher_args": s["callee_launcher_args"]}
-    if s["callee_launcher"]:
+    fields = {"caller": SELF_NAME, "callee_key": e["key"], "callee": c["name"], "callee_home": c["home"],
+              "callee_launcher": c["launcher"], "callee_launcher_args": c["launcher_args"]}
+    if c["launcher"]:
         fields["callee_allowlist"] = "the callee's own launcher enforces it"
         return fields
-    names, source = callee_callers(Path(s["callee_home"]), s["callee_name"])
+    names, source = callee_callers(Path(c["home"]), c["name"])
     if names is not None and SELF_NAME not in names:
-        raise Refusal("%s is not on %s's callers list (%s)" % (SELF_NAME, s["callee_name"], source))
+        raise Refusal("%s is not on %s's callers list (%s)" % (SELF_NAME, c["name"], source))
     fields["callee_allowlist"] = source
     return fields
 
 
+def receipt_key(rec: dict) -> str:
+    """The callee a receipt names: its callee_key, or — a receipt from before
+    v0.10.0, always the legacy callee — its callee name lowercased."""
+    return str(rec.get("callee_key") or str(rec.get("callee") or "").lower())
+
+
+def callee_of(conf: Dict[str, str], key: str) -> dict:
+    e = next((x for x in callee_table(conf)["callees"] if x["key"] == key), None)
+    if e is None:
+        raise Refusal("no callee \"%s\" is configured" % key)
+    first(e["problems"])
+    return e["settings"]
+
+
 def launch_agent(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, request: bytes, resumed: bool) -> dict:
-    s, problems = direct_call_settings(conf)
-    first(problems)
+    s = callee_of(conf, receipt_key(rec))
     home = Path(rec["callee_home"]).resolve()
     env = child_env(rec["call_id"], call_dir, SELF_NAME)
     if rec.get("callee_launcher"):
@@ -603,7 +801,8 @@ def launch_agent(root: Path, conf: Dict[str, str], rec: dict, call_dir: Path, re
         else:
             cmd += ["--artifact-dir", rec.get("artifact_dir") or home_raw()]
         return {"cmd": cmd, "cwd": home, "timeout": s["timeout"], "env": env, "output": "launcher",
-                "stdin": b"", "marker": None, "transcript": None, "settings": s, "cleanup": []}
+                "stdin": b"", "marker": None, "transcript": None, "settings": s, "cleanup": [],
+                "call_id_re": s["call_id_re"], "oriented_re": s["oriented_re"]}
     frame = frame_prompt(rec["callee"], SELF_NAME, s["callee_human"], rec["call_id"], resumed)
     return {"cmd": agent_command(s, rec, frame, resumed), "cwd": home, "timeout": s["timeout"], "env": env,
             "output": "json", "stdin": wrap_request(SELF_NAME, rec["call_id"], resumed, request),
@@ -907,7 +1106,12 @@ def orientation_of(launch: dict, mode: str, launcher_err: str, offset: int = 0) 
     if mode == "refuter":
         return "yes"          # the charter is the identity; its sha is in the receipt
     if launch["output"] == "launcher":
-        m = re.search(r"orientation: (yes|no|unverified)", launcher_err)
+        # The callee's own report (Decision 9). A configured launcher_oriented
+        # pattern found on its stderr is "yes" and its absence "unverified";
+        # unset, this launcher's own "orientation: yes|no|unverified".
+        if launch.get("oriented_re") is not None:
+            return "yes" if launch["oriented_re"].search(launcher_err) else "unverified"
+        m = DEFAULT_ORIENTED_RE.search(launcher_err)
         return m.group(1) if m else "unverified"
     marker = launch["marker"]
     if not marker:
@@ -987,9 +1191,10 @@ def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
                 answer, is_error = raw_out, False
             ans_path.write_text(answer)
             if launch["output"] == "launcher":
-                m = re.search(r"call (" + CALL_ID_RE.pattern + r")", err_text)
-                if m and not rec.get("callee_receipt"):
-                    rec["callee_receipt"] = m.group(1)
+                m = (launch.get("call_id_re") or DEFAULT_CALL_ID_RE).search(err_text)
+                got = m.group(1) if m else None
+                if got and LAUNCHER_ID_RE.fullmatch(got) and not rec.get("callee_receipt"):
+                    rec["callee_receipt"] = got
             orientation = orientation_of(launch, mode, err_text, offset)
             # A callee launcher speaks this launcher's contract: its exit 3 with
             # an answer on stdout is an answer whose orientation it could not
@@ -1157,6 +1362,8 @@ def new_call(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: d
         raise Refusal("--verdict-file is for --callee refuter")
     if (args.tree or args.mode) and mode != "refuter":
         raise Refusal("--tree and --mode are for --callee refuter")
+    if args.to is not None and mode != "agent":
+        raise Refusal("--to names a callee for --callee agent; --callee %s takes none" % mode)
     if mode not in PREPARE:
         raise Refusal("--callee %s is not available in this build" % mode)
     if mode == "refuter":
@@ -1210,26 +1417,38 @@ def need_claude(rec: dict) -> None:
         raise Refusal("claude not found on PATH — cannot launch the call")
 
 
-def recheck_agent(conf: Dict[str, str], rec: dict) -> None:
+def recheck_agent(conf: Dict[str, str], rec: dict, to: Optional[str] = None) -> None:
     """A resume of --callee agent is still a call to the configured agent
-    (Decision 16): the receipt says who was called, config says who may be.
-    Refused when no callee is configured now, when the callee — its home, its
-    name, its launcher or the arguments that launcher is given — differs from
-    the receipt's, or, with no callee launcher, when its list no longer names
-    Daedalus. (--callee self re-checks its own list in launch_self.)"""
-    if not (conf.get("direct_call.callee_home") and conf.get("direct_call.callee_name")):
-        raise Refusal("no callee is configured: set direct_call.callee_home and callee_name in config.yaml")
-    s, problems = direct_call_settings(conf)
-    first(problems)
-    now_callee = (s["callee_home"], s["callee_name"], s["callee_launcher"], s["callee_launcher_args"])
+    (Decision 16): the receipt says who was called — its callee key, never the
+    command line (SPEC-011 §2) — and config says who may be. Refused when a
+    --to names another key, when no callee is configured now, when that key's
+    callee — its home, its name, its launcher or the arguments that launcher is
+    given — differs from the receipt's or is gone, or, with no callee launcher,
+    when its list no longer names Daedalus. (--callee self re-checks its own
+    list in launch_self.)"""
+    key = receipt_key(rec)
+    if to is not None and to != key:
+        raise Refusal("call %s went to callee %s; a resume keeps its callee (--to %s refused) — start a new call"
+                      % (rec["call_id"], key, to))
+    t = callee_table(conf)
+    first(t["blocks"])
+    if not t["callees"]:
+        raise Refusal(NO_CALLEE)
+    first(t["problems"])
+    e = next((x for x in t["callees"] if x["key"] == key), None)
+    if e is None:
+        raise Refusal("the configured callee changed since call %s; start a new call" % rec["call_id"])
+    first(e["problems"])
+    c = e["settings"]
+    now_callee = (c["home"], c["name"], c["launcher"], c["launcher_args"])
     was_callee = (rec.get("callee_home"), rec.get("callee"), rec.get("callee_launcher"),
                   rec.get("callee_launcher_args") or [])
     if now_callee != was_callee:
         raise Refusal("the configured callee changed since call %s; start a new call" % rec["call_id"])
-    if not s["callee_launcher"]:
-        names, source = callee_callers(Path(s["callee_home"]), s["callee_name"])
+    if not c["launcher"]:
+        names, source = callee_callers(Path(c["home"]), c["name"])
         if names is not None and SELF_NAME not in names:
-            raise Refusal("%s is no longer on %s's callers list (%s)" % (SELF_NAME, s["callee_name"], source))
+            raise Refusal("%s is no longer on %s's callers list (%s)" % (SELF_NAME, c["name"], source))
 
 
 def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dict) -> int:
@@ -1263,8 +1482,10 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
         raise Refusal("call %s was made by %s, not %s" % (call_id, rec.get("caller"), args.caller))
     if mode not in LAUNCH:
         raise Refusal("call %s is a --callee %s call, which this build cannot resume" % (call_id, mode))
+    if args.to is not None and mode != "agent":
+        raise Refusal("--to names a callee for --callee agent; call %s is a --callee %s call" % (call_id, mode))
     if mode == "agent":
-        recheck_agent(conf, rec)
+        recheck_agent(conf, rec, args.to)
     if mode == "refuter":
         render_path, _ = render_charter(root)       # the charter's own refusals come first
         os.unlink(render_path)
@@ -1310,30 +1531,93 @@ def latest_review(root: Path, token: str, view: dict) -> str:
 
 # --- doctor (spec §15) -------------------------------------------------------------------
 
+def _through(c: dict) -> str:
+    if not c["launcher"]:
+        return ""
+    return " through its own launcher%s" % (" (with %s)" % shlex.join(c["launcher_args"]) if c["launcher_args"] else "")
+
+
+def _allowlist_line(key: str, c: dict) -> str:
+    """Whether the callee admits Daedalus, statically (SPEC-011 §5): its own
+    list where core can read it — the reader prepare_agent refuses by — and,
+    behind its own launcher, only that the launcher enforces it. Never a call."""
+    if c["launcher"]:
+        return "OK       direct call: callee %s allowlist: enforced by its own launcher, not checked without a call" % key
+    try:
+        names, source = callee_callers(Path(c["home"]), c["name"])
+    except Refusal as e:
+        return "MISSING  direct call: callee %s allowlist: %s" % (key, e)
+    if names is None:
+        return ("NOTE     direct call: callee %s allowlist: none found (no direct_calls in agent.yaml, no "
+                ".direct-callers); a call proceeds and its receipt says so" % key)
+    if SELF_NAME in names:
+        return "OK       direct call: callee %s allowlist: %s admits %s" % (key, source, SELF_NAME)
+    return ("MISSING  direct call: callee %s allowlist: %s does not admit %s — a call to it is refused until it does"
+            % (key, source, SELF_NAME))
+
+
+def consult_line(root: Path) -> int:
+    """The session-start line (SPEC-011 §3): each callee a call could reach
+    now, with its consult_for — nothing when none is configured, or when a
+    problem doctor names would refuse every --callee agent call. Exit 0."""
+    try:
+        t = callee_table(read_config(root))
+    except Refusal:
+        return 0
+    ok = [e for e in t["callees"] if not e["problems"]]
+    if ok and not t["blocks"] and not t["problems"]:
+        print("Agents you may consult (core/call-agent.sh --callee agent --to <key>): %s" % _menu(ok))
+    return 0
+
+
 def doctor(root: Path) -> int:
-    """One line per state (spec §15, Decision 5). No direct_call: block prints
-    nothing; an unreadable config is one MISSING line, and the rows that do
-    not depend on config (Task 3's distribution code) still follow it."""
+    """One line per state (spec §15, Decision 5; SPEC-011 §5: one line per
+    callee, its allowlist where core can read it, and a NOTE for a callee with
+    no consult_for). No direct_call: or callee_<key>: block prints nothing; an
+    unreadable config is one MISSING line, and the rows that do not depend on
+    config (Task 3's distribution code) still follow it. Never launches a
+    callee: reachable here means statically reachable."""
     try:
         conf = read_config(root)
     except Refusal as e:
         print("MISSING  direct call: %s" % e)
         conf = {}
-    s, problems = direct_call_settings(conf)
+    s, _ = direct_call_settings(conf)
+    t = callee_table(conf)
     callers = ", ".join(s["callers"]) or "nobody"
-    for p in problems:
+    legacy = next((e for e in t["callees"] if e["legacy"]), None)
+    every = t["blocks"] + (legacy["problems"] if legacy else []) + t["problems"]
+    for p in every:
         print("MISSING  direct call: %s" % p)
-    if not problems and any(k.startswith("direct_call.") for k in conf):
-        if s["callee_home"]:
-            print("OK       direct call: callee %s at %s%s; callers of this Daedalus: %s"
-                  % (s["callee_name"], s["callee_home"],
-                     (" through its own launcher%s" % (" (with %s)" % shlex.join(s["callee_launcher_args"])
-                                                      if s["callee_launcher_args"] else ""))
-                     if s["callee_launcher"] else "", callers))
-        else:
+    has_block = any(k.startswith("direct_call.") for k in conf)
+    blocks = [e for e in t["callees"] if not e["legacy"]]
+    if not every and has_block:
+        if legacy:
+            c = legacy["settings"]
+            print("OK       direct call: callee %s at %s%s; callers of this Daedalus: %s%s"
+                  % (c["name"], c["home"], _through(c), callers,
+                     "; consult for: %s" % c["consult_for"] if c["consult_for"] else ""))
+        elif blocks:
+            print("OK       direct call: callers of this Daedalus: %s" % callers)
+        elif not conf.get(BLOCKS):
             print("NOTE     direct call: no callee configured (optional) — core/call-agent.sh --callee agent is "
                   "refused until direct_call.callee_home and callee_name are set in config.yaml; callers of this "
                   "Daedalus: %s" % callers)
+    for e in blocks:
+        for p in e["problems"]:
+            print("MISSING  direct call: %s" % p)
+        if not e["problems"]:
+            c = e["settings"]
+            print("OK       direct call: callee %s (%s) at %s%s%s" % (e["key"], c["name"], c["home"], _through(c),
+                  "; consult for: %s" % c["consult_for"] if c["consult_for"] else ""))
+    for e in t["callees"]:
+        if e["problems"] or (e["legacy"] and every):
+            continue
+        c = e["settings"]
+        print(_allowlist_line(e["key"], c))
+        if not c["consult_for"]:
+            print("NOTE     direct call: callee %s has no consult_for — it is callable but Daedalus has no reason on "
+                  "file to choose it" % e["key"])
     state, detail = distribution_state(root)
     if state == "clean":
         print("OK       distribution code: core/, CLAUDE.md, .claude/settings.json unmodified")
@@ -1368,6 +1652,7 @@ def doctor(root: Path) -> int:
 def parse(argv: List[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="core/call-agent.sh", description="Direct-call launcher (spec §8).")
     ap.add_argument("--callee", choices=MODES)
+    ap.add_argument("--to", metavar="KEY")
     ap.add_argument("--caller")
     ap.add_argument("--request-file")
     ap.add_argument("--resume", metavar="CALL_ID")
@@ -1378,6 +1663,7 @@ def parse(argv: List[str]) -> argparse.Namespace:
     ap.add_argument("--verdict-file")
     ap.add_argument("--mode", choices=("branch", "promote"))
     ap.add_argument("--doctor", action="store_true")
+    ap.add_argument("--consult-line", action="store_true")
     ap.add_argument("text", nargs="?")
     args = ap.parse_args(argv)
     if args.resume and args.resume_review:
@@ -1392,6 +1678,8 @@ def main(argv: List[str]) -> int:
     root = v.ROOT
     if args.doctor:
         return doctor(root)
+    if args.consult_line:
+        return consult_line(root)
     try:
         conf = read_config(root)
         view = lease_view(root)
