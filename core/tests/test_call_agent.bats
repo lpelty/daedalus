@@ -907,7 +907,7 @@ two_callees() {
   mkdir -p "$A" "$G"
   cp "$BATS_TEST_DIRNAME/fixtures/caller/callee-launcher" "$A/launcher"
   callee_block alpha "name: Alpha" "home: $A" "launcher: $A/launcher" "launcher_args: --callee alpha" \
-    "consult_for: fleet history and why a thing was built"
+    "consult_for: the history of the target and why a thing was built"
   callee_block gamma "name: Gamma" "home: $G" "marker: 'Gamma orientation:'" \
     "consult_for: an independent design pass on a brief"
 }
@@ -942,7 +942,7 @@ PY
   two_callees
   run --separate-stderr bash "$CALL" --callee agent "hello"
   [ "$status" -eq 2 ]
-  [ "$stderr" = "daedalus: 2 callees are configured; name one with --to <key>: alpha — fleet history and why a thing was built; gamma — an independent design pass on a brief" ] \
+  [ "$stderr" = "daedalus: 2 callees are configured; name one with --to <key>: alpha — the history of the target and why a thing was built; gamma — an independent design pass on a brief" ] \
     || { echo "$stderr"; return 1; }
   [ "$(calls)" -eq 0 ]; [ ! -e "$FAKE_CLAUDE_DIR/launcher-argv.txt" ]
   run --separate-stderr bash "$CALL" --callee agent --to alpha "for alpha"
@@ -1062,7 +1062,7 @@ PY
   run start_context s-three
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '^Agents you may consult')" -eq 1 ] || { echo "$output"; return 1; }
-  printf '%s\n' "$output" | grep -qxF "Agents you may consult (core/call-agent.sh --callee agent --to <key>): alpha — fleet history and why a thing was built; gamma — an independent design pass on a brief; delta — (no consult_for set)" \
+  printf '%s\n' "$output" | grep -qxF "Agents you may consult (core/call-agent.sh --callee agent --to <key>): alpha — the history of the target and why a thing was built; gamma — an independent design pass on a brief; delta — (no consult_for set)" \
     || { echo "$output"; return 1; }
   run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
   case "$output" in *"NOTE     direct call: callee delta has no consult_for — it is callable but Daedalus has no reason on file to choose it"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -1095,7 +1095,7 @@ PY
   run python3 "$DAEDALUS_HOME/core/call_agent.py" --doctor
   [ "$status" -eq 0 ]
   for want in \
-    "OK       direct call: callee alpha (Alpha) at $A through its own launcher (with --callee alpha); consult for: fleet history and why a thing was built" \
+    "OK       direct call: callee alpha (Alpha) at $A through its own launcher (with --callee alpha); consult for: the history of the target and why a thing was built" \
     "OK       direct call: callee gamma (Gamma) at $G; consult for: an independent design pass on a brief" \
     "OK       direct call: callee alpha allowlist: enforced by its own launcher, not checked without a call" \
     "NOTE     direct call: callee gamma allowlist: none found (no direct_calls in agent.yaml, no .direct-callers); a call proceeds and its receipt says so"; do

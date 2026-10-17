@@ -4,6 +4,61 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.10.0 — named callees: one Daedalus may ask several agents
+
+**In short.** A deployment can now name more than one agent that Daedalus
+may ask a question. Each gets its own `callee_<key>:` block in
+`config.yaml`, with a `consult_for` line saying what to ask it. A call names
+the key: `core/call-agent.sh --callee agent --to <key>`. Daedalus chooses
+whom to ask, and says in one line whom and why. A deployment with one callee
+changes nothing.
+
+**What changed.**
+- A callee is a top-level block, `callee_<key>:`, with `name`, `home` and
+  `consult_for`. The optional fields are `launcher`, `launcher_args` and
+  `marker`.
+- A block's own `timeout`, `tools`, `max_turns`, `capture` and
+  `capture_wait` beat the shared ones in `direct_call:`.
+- `--to <key>` picks the callee. With one callee it may be left out. With
+  several and no `--to`, the call is refused, and the refusal lists each key
+  with its `consult_for`.
+- The receipt records the key. `--resume <call-id>` takes the key from the
+  receipt, never from the command line. A changed callee still refuses the
+  resume.
+- A callee's own launcher may report on stderr in its own words. Two
+  optional regular expressions in its block, `launcher_call_id` and
+  `launcher_oriented`, say where its call id is and which line means its
+  orientation was verified. Unset, the launcher must speak Daedalus's own
+  receipt, as before.
+- The one-callee keys of 0.9.0 (`direct_call.callee_home`, `callee_name` and
+  the rest) are still read. That callee's key is its name in lower case.
+- A legacy callee and a block with the same key is a problem doctor names.
+  Calls are refused until one is removed.
+- Session start lists the callees in one line, each with its `consult_for`.
+  With none configured it says nothing.
+- `direct_call:` still holds who may call this Daedalus. That list is
+  unchanged.
+- `core/code-context.py` stays a no-op in this release. 0.9.0 said it would
+  go now. Removing a leftover hook entry for it needs the upgrade to edit a
+  local settings file, which no upgrade has done before.
+
+**What you will see.**
+- Doctor prints one line per callee, and whether its callers list admits
+  Daedalus where Daedalus can read it. Doctor never makes a call.
+- A callee with no `consult_for` is a NOTE. It is still callable.
+- A deployment with a legacy callee sees one line at the upgrade:
+  `direct_call's callee AgentName is now callee "agentname"; nothing to change.`
+  The upgrade does not touch `config.yaml`.
+- At session start, a line beginning `Agents you may consult`.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.9.0 -> 0.10.0; doctor OK.` To
+add a callee, paste a `callee_<key>:` block into `config.yaml`.
+`config.example.yaml` shows one with every field.
+
+**How to tell you have it.** `cat VERSION` prints `0.10.0`.
+`core/doctor.sh` prints a `direct call: callee <key>` line for each callee.
+
 ## v0.9.0 — code context at build time: a code graph and grep together, and a log of what they missed
 
 **In short.** A new command, `core/context.py`, answers "what else does this
