@@ -8,8 +8,9 @@ Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
 **In short.** A new command, `core/context.py`, answers "what else does this
 change touch?" before the agent changes code. It merges an optional code
-graph, `git grep` and a few rules. It runs only when invoked, never while you
-brainstorm, plan or write a spec unless you ask.
+graph, `git grep` and a few rules. It runs only when the agent calls it:
+before it changes code, or while you brainstorm or plan and the answer turns
+on what already exists. No hook runs it.
 
 **What changed.**
 - `core/context.py` has five questions: `callers`, `importers`, `tests`,

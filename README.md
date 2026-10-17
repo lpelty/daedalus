@@ -990,8 +990,9 @@ rule:python-path-join  tools/call.py:9  ROOT / "app" / "core.py"
 
 It runs only when someone invokes it. No hook calls it, nothing builds an
 index at session start, and nothing refreshes in the background. The agent
-runs it in its window when it is about to change code; while brainstorming,
-planning or writing a spec it runs only when you ask. Inside a window the
+runs it in its window when it is about to change code. While brainstorming,
+planning or writing a spec it runs when the talk turns on what already exists
+or when you ask, and the agent says in one line that it checked. Inside a window the
 first query builds the window's index and every later query updates it, all
 inside one time budget (`context.graph_budget`, 90 s). Outside a window (your
 own shell, a direct call) it answers from `git grep` and the rules over

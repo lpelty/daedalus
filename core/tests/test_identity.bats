@@ -820,9 +820,8 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$ch"
   for s in 'python3 core/context.py callers <file>::<function>' 'importers <file>' 'grep "<text>"' '--json' \
            'both, graph only, grep only, or rule:<name>' \
            'Run it in your window when you are about to change code' \
-           'That is the only time it runs on its own initiative.' \
            'No hook calls it, nothing runs it at session start, and nothing refreshes it in the background' \
-           'While brainstorming, planning or writing a spec, run it only when the operator asks you to.' \
+           'While brainstorming, planning or writing a spec, run it yourself when the talk turns on what already exists' 'Say in one line that you checked and what it found.' \
            'Never run `code-review-graph` yourself' 'candidates, not answers' 'state/code-context/misses.jsonl' \
            'unasked' 'vault/context-rules.json' 'with an origin (date, window, why) and a test' \
            'python3 core/context.py rules --check' 'A rule can only add candidates.' 'You need no approval' \
@@ -830,7 +829,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$ch"
     case "$csec" in *"$s"*) : ;; *) echo "CLAUDE.md's Code context section lacks: $s"; return 1 ;; esac
   done
   row="$(grep -F '| "What does this change touch?"' "$H/CLAUDE.md")"
-  for s in 'python3 core/context.py reach <X>' 'word for word' 'during planning, it is the operator asking'; do
+  for s in 'python3 core/context.py reach <X>' 'word for word' 'It runs during planning too.'; do
     case "$row" in *"$s"*) : ;; *) echo "the operator row lacks: $s"; return 1 ;; esac
   done
   dc="$(grep -n '^## Direct calls' "$H/README.md" | head -1 | cut -d: -f1)"

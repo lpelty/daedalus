@@ -110,7 +110,7 @@ it.
 | (a background clone finished) | — | The board says "04 (spawned) — FINISHED …"; when the operator next asks what is open, repeat it and wait for "promote 4" or "release 4". |
 | "Hand the pen to window 3" | window 03 | `core/lease.sh prime take --reason "<their whole message>"`. Said to the prime instead: "Say that to window 03 — the pen is taken, never given." |
 | "Message window 2 that …" | any window | Send it (below) and repeat the reply word for word when it comes. |
-| "What does this change touch?" / "use the code graph on X" | that window | `python3 core/context.py reach <X>`; repeat its lines word for word, then say which ones you will read. When this comes during planning, it is the operator asking, so it runs. |
+| "What does this change touch?" / "use the code graph on X" | that window | `python3 core/context.py reach <X>`; repeat its lines word for word, then say which ones you will read. It runs during planning too. |
 
 ## Messages between windows
 
@@ -513,10 +513,13 @@ rule:<name>.
 
 Run it in your window when you are about to change code: before the first
 edit of a task, and again when the change reaches a file you have not asked
-about. That is the only time it runs on its own initiative. No hook calls it,
+about. No hook calls it,
 nothing runs it at session start, and nothing refreshes it in the background;
 the index is brought up to date inside the query. While brainstorming,
-planning or writing a spec, run it only when the operator asks you to. Never
+planning or writing a spec, run it yourself when the talk turns on what already
+exists: what uses something, what a change or a replacement would touch, or
+whether something already does it. Say in one line that you checked and what
+it found. Never
 run `code-review-graph` yourself: `core/context.py` is its only caller, and
 the Bash guard refuses the direct form. If the header says the first build
 failed, run the `rebuild --timeout` line it names, with a Bash timeout at
