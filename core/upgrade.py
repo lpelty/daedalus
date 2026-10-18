@@ -33,8 +33,12 @@ step is idempotent — the second run changes nothing — and says one line the 
      config.yaml is read, never written
   9. the service-status mod, installed at local scope beside the lease board for a deployment that has the board
      there (`claude plugin install service-status@daedalus-mods --scope local`); never stops the upgrade (service-
-     status spec §4). FULL = len(STEPS) is the whole run
- 10. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
+     status spec §4)
+ 10. each Daedalus mod already installed at local scope for this home, enabled there, and older in Claude Code's
+     installed_plugins.json than mods/<name>/.claude-plugin/plugin.json, updated (`claude plugin update
+     <name>@daedalus-mods --scope local`): a window loads the plugin cache's copy, not mods/; never stops the upgrade.
+     FULL = len(STEPS) is the whole run
+ 11. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
 Before step 2, the first that can touch target/, every run takes a safety copy of everything in target/ into
 state/upgrade-snapshot/<stamp>/ and checks it, or stops before changing anything (see "the safety copy" below):
@@ -48,6 +52,7 @@ board names the copy until --forget-snapshot removes it; nothing else ever does.
     python3 core/upgrade.py --progress         (with a run) a line on stderr about every 10 s while the safety
                                                copy is written: "safety copy: N of M MB"
     python3 core/upgrade.py --doctor           doctor's upgrade lines (§15)
+    python3 core/upgrade.py --doctor-mods      doctor's line for each mod installed here older than mods/ ships
     python3 core/upgrade.py --restore-help     what a safety copy holds that target/ no longer has, and the
                                                commands that bring each back
     python3 core/upgrade.py --forget-snapshot  removes the safety copies, only when nothing in them is missing
@@ -3821,6 +3826,107 @@ def step_status_mod(root: Path, head: str, dry: bool, deadline: Optional[float])
     return ["%s: the service-status mod was not installed (%s); run `%s` in the Daedalus home" % (head, why, STATUS_INSTALL)]
 
 
+MODS_MARKET = "daedalus-mods"
+
+
+def _plugins_root() -> Path:
+    """Where Claude Code keeps its plugin records: ~/.claude/plugins, or CLAUDE_CODE_PLUGIN_CACHE_DIR (plugin loading
+    reference, "Find plugins on disk"). Whether CLAUDE_CONFIG_DIR moves it is not documented, so, as doctor's
+    marketplace check does, it is not read here."""
+    return Path(os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or os.path.expanduser("~/.claude/plugins"))
+
+
+def _vtuple(s: object) -> Optional[Tuple[int, ...]]:
+    return tuple(int(x) for x in s.split(".")) if isinstance(s, str) and re.fullmatch(r"\d+(\.\d+)*", s) else None
+
+
+def stale_mods(root: Path) -> List[Tuple[str, str, str]]:
+    """(name, installed, shipped) for each mod of this home's marketplace that is enabled in .claude/settings.local.json
+    and whose local-scope record for this home in installed_plugins.json names an older version than
+    mods/<name>/.claude-plugin/plugin.json. A window loads the recorded copy from the plugin cache, not mods/, so a
+    newer mod in a pulled release stays unseen until `claude plugin update` (found 2026-10-18: lease-board 0.1.1 drawn
+    while the home shipped 0.1.3). A version either side that is not plain numbers is not compared."""
+    try:
+        market = json.loads((root / "mods" / ".claude-plugin" / "marketplace.json").read_text())
+        recs = json.loads((_plugins_root() / "installed_plugins.json").read_text()).get("plugins") or {}
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not (isinstance(market, dict) and isinstance(recs, dict)):
+        return []
+    local = root / ".claude" / "settings.local.json"
+    here = os.path.realpath(str(root))
+    out: List[Tuple[str, str, str]] = []
+    for entry in market.get("plugins") or []:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        src = entry.get("source") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            continue
+        plugin = "%s@%s" % (name, MODS_MARKET)
+        if _enabled_in(local, plugin) is not True:
+            continue
+        rel = src[2:] if isinstance(src, str) and src.startswith("./") else name
+        try:
+            shipped = json.loads((root / "mods" / rel / ".claude-plugin" / "plugin.json").read_text()).get("version")
+        except (OSError, ValueError, AttributeError):
+            continue
+        rec = [r for r in (recs.get(plugin) or []) if isinstance(r, dict) and r.get("scope") == "local"
+               and isinstance(r.get("projectPath"), str) and os.path.realpath(r["projectPath"]) == here]
+        if len(rec) != 1:
+            continue
+        have, want = _vtuple(rec[0].get("version")), _vtuple(shipped)
+        if have is not None and want is not None and have < want:
+            out.append((name, rec[0]["version"], shipped))
+    return out
+
+
+def _mod_update(name: str) -> str:
+    return "claude plugin update %s@%s --scope local" % (name, MODS_MARKET)
+
+
+def stale_mods_doctor(root: Path) -> None:
+    """Doctor's line for each mod a window here would draw from an older copy than this home ships. NOTE, never
+    MISSING: the older mod still works, and the model-facing board is unchanged."""
+    for name, have, want in stale_mods(root):
+        print("NOTE     %s mod out of date: %s is installed for this home, mods/ ships %s — run `%s` in the Daedalus "
+              "home, then /reload-plugins in an open window" % (name, have, want, _mod_update(name)))
+
+
+def step_mod_updates(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
+    """Step 10: each Daedalus mod already installed at local scope for this home and enabled there, whose recorded
+    version is older than the one mods/ ships, updated (`claude plugin update <name>@daedalus-mods --scope local`, in
+    the home). After step 9, so a release that adds one mod and changes another does both in one upgrade. It never
+    stops the upgrade: what it cannot do is a line naming the command. The updates together are bounded by 20 s, less
+    near a start's deadline."""
+    stale = stale_mods(root)
+    if not stale:
+        return []
+    if dry:
+        return ["%s: would update the %s mod %s → %s (%s)" % (head, n, a, b, _mod_update(n)) for n, a, b in stale]
+    claude = shutil.which("claude")
+    end = time.time() + 20.0 if deadline is None else min(time.time() + 20.0, deadline - 0.5)
+    lines: List[str] = []
+    for n, a, b in stale:
+        timeout = end - time.time()
+        if not claude:
+            why = "claude is not on PATH"
+        elif timeout < 2.0:
+            why = "no time left in this session start"
+        else:
+            try:
+                r = subprocess.run([claude, "plugin", "update", "%s@%s" % (n, MODS_MARKET), "--scope", "local"],
+                                   cwd=str(root), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   timeout=timeout)
+                why = "" if r.returncode == 0 else "exit %d" % r.returncode
+            except (OSError, subprocess.TimeoutExpired) as e:
+                why = type(e).__name__
+        if not why:
+            lines.append("%s: %s mod updated %s → %s; run /reload-plugins in an open window" % (head, n, a, b))
+        else:
+            lines.append("%s: the %s mod was not updated from %s to %s (%s); run `%s` in the Daedalus home"
+                         % (head, n, a, b, why, _mod_update(n)))
+    return lines
+
+
 STEPS = ((1, "creating the window directories", step_dirs),
          (2, "installing the pre-push hook", step_hooks),
          (3, "removing the old shared reminder files", step_dedup),
@@ -3829,7 +3935,8 @@ STEPS = ((1, "creating the window directories", step_dirs),
          (6, "putting target/ back on its trunk", step_trunk),
          (7, "installing the daedalus command", step_command),
          (8, "naming the direct-call callee", step_callee),
-         (9, "installing the service-status mod", step_status_mod))
+         (9, "installing the service-status mod", step_status_mod),
+         (10, "updating the Daedalus mods", step_mod_updates))
 FULL = len(STEPS)       # "the whole run": every step, then the stamp (Decision 18); --setup runs steps 1-3
 
 
@@ -4895,6 +5002,9 @@ def main(argv: List[str]) -> int:
     args = argv[1:]
     if args == ["--doctor"]:
         return doctor(root)
+    if args == ["--doctor-mods"]:
+        stale_mods_doctor(root)
+        return 0
     if args == ["--restore-help"]:
         return restore_help(root)
     if args == ["--forget-snapshot"]:
@@ -4915,7 +5025,7 @@ def main(argv: List[str]) -> int:
         _CALLER["update"] = True
     if [a for a in args if a not in ("--dry-run", "--setup", "--progress")]:
         sys.stderr.write("usage: python3 core/upgrade.py [--dry-run] [--setup] [--progress] [--caller update] | --doctor | "
-                         "--restore-help | --forget-snapshot | --rollback [--dry-run] [--force]\n")
+                         "--doctor-mods | --restore-help | --forget-snapshot | --rollback [--dry-run] [--force]\n")
         return 2
     dry, upto = "--dry-run" in args, (3 if "--setup" in args else FULL)
     _PROGRESS["on"] = 1 if "--progress" in args else 0

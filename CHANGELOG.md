@@ -28,6 +28,18 @@ trial, kept easy to change or switch off.
 - `core/setup.sh` installs the mod beside the lease board. The upgrade to
   0.11.0 installs it for a deployment that already has the board at local
   scope. A failed install is one line and never stops the upgrade.
+- The upgrade now updates a Daedalus mod that is already installed. A window
+  loads a mod from Claude Code's plugin cache, not from `mods/`, so a newer
+  mod in a pulled release stayed unseen and doctor said nothing. For each mod
+  enabled for this home whose installed version is older than the one in
+  `mods/`, the upgrade runs `claude plugin update <name>@daedalus-mods --scope
+  local` in the home, after any new install. A failed update is one line
+  naming the command and never stops the upgrade.
+- Doctor prints a NOTE for a mod installed here that is older than `mods/`,
+  naming the same command.
+- The lease board 0.1.3: the board's first line keeps its full length, up to
+  60% of the band, beside the services' summary. On Claude Code 2.1.302 it
+  was cut at about half the band.
 
 **What you will see.**
 - At the right of the board's first line: `services ok` in green, or
@@ -45,6 +57,10 @@ trial, kept easy to change or switch off.
 - Doctor prints one more line, `service status on screen`.
 - The upgrade says, once:
   `Installed the service-status mod at local scope: the services' summary now sits at the right of the lease board.`
+- For a mod that was behind, the upgrade says, once:
+  `lease-board mod updated 0.1.1 → 0.1.3; run /reload-plugins in an open window`.
+- Doctor, while a mod is behind: `NOTE     lease-board mod out of date: 0.1.1 is installed for this home, mods/ ships 0.1.3`,
+  with the command that updates it.
 
 **How to take it.** Close every Daedalus window, then type `daedalus update`
 in a terminal. It prints `Daedalus updated 0.10.0 -> 0.11.0; doctor OK.` Open

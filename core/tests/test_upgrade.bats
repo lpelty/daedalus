@@ -519,10 +519,10 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
 import inspect, re, sys
 sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
 import upgrade as u
-assert u.FULL == len(u.STEPS) == 9, u.FULL
-assert [n for n, _, _ in u.STEPS] == list(range(1, 10))
+assert u.FULL == len(u.STEPS) == 10, u.FULL
+assert [n for n, _, _ in u.STEPS] == list(range(1, 11))
 assert u.STEPS[6][2] is u.step_command and u.STEPS[5][2] is u.step_trunk and u.STEPS[7][2] is u.step_callee
-assert u.STEPS[8][2] is u.step_status_mod
+assert u.STEPS[8][2] is u.step_status_mod and u.STEPS[9][2] is u.step_mod_updates
 src = inspect.getsource(u)
 assert not re.search(r"upto\s*(==|=)\s*6\b|else 6\)", src), re.findall(r".*upto.*6.*", src)
 print("ok")
@@ -567,6 +567,7 @@ status_mod_fixture() {
   FAKE="$BATS_TEST_TMPDIR/fakeclaude"; mkdir -p "$FAKE"; CALLS="$BATS_TEST_TMPDIR/claude-calls"
   printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$(pwd -P)" "$*" >> "%s"\nexit "${FAKE_CLAUDE_RC:-0}"\n' "$CALLS" > "$FAKE/claude"; chmod +x "$FAKE/claude"
   export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  export CLAUDE_CODE_PLUGIN_CACHE_DIR="$BATS_TEST_TMPDIR/plugins"; mkdir -p "$CLAUDE_CODE_PLUGIN_CACHE_DIR"
 }
 
 @test "step 9 installs the service-status mod at local scope, in the home, for a deployment with the lease board there; once; said before the completion line; a dry run only says it would" {
@@ -611,6 +612,69 @@ status_mod_fixture() {
   FAKE_CLAUDE_RC=1 PATH="$FAKE:$PATH" run python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   printf '%s\n' "$output" | grep -qxF 'Upgrade to 0.7.0: the service-status mod was not installed (exit 1); run `claude plugin install service-status@daedalus-mods --scope local` in the Daedalus home' \
+    || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
+
+# --- step 10: a Daedalus mod already installed here, older than mods/ ships, updated (found 2026-10-18) -------------
+# Claude Code's record of what a window loads: installed_plugins.json, one local-scope entry per project path.
+mod_record() {   # <plugin> <version> [projectPath]
+  python3 - "$CLAUDE_CODE_PLUGIN_CACHE_DIR/installed_plugins.json" "$1" "$2" "${3:-$DAEDALUS_HOME}" <<'PY'
+import json, os, sys
+path, plugin, ver, proj = sys.argv[1:5]
+d = json.load(open(path)) if os.path.exists(path) else {"version": 2, "plugins": {}}
+d["plugins"].setdefault(plugin, []).append({"scope": "local", "projectPath": proj, "version": ver,
+    "installPath": "/x/cache/daedalus-mods/%s/%s" % (plugin.split("@")[0], ver)})
+json.dump(d, open(path, "w"))
+PY
+}
+mod_version() {   # <name> <version>: what this home's mods/ ships
+  mkdir -p "$DAEDALUS_HOME/mods/$1/.claude-plugin"
+  printf '{"name":"%s","version":"%s"}\n' "$1" "$2" > "$DAEDALUS_HOME/mods/$1/.claude-plugin/plugin.json"
+}
+
+@test "step 10 updates an enabled mod installed here at an older version than mods/ ships, at local scope, in the home, after step 9's install in the same upgrade; one line each, before the completion line" {
+  status_mod_fixture
+  mod_version lease-board 0.1.3; mod_version service-status 0.1.0
+  mod_record lease-board@daedalus-mods 0.1.1
+  PATH="$FAKE:$PATH" run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  home="$(cd "$DAEDALUS_HOME" && pwd -P)"
+  [ "$(cat "$CALLS")" = "$(printf '%s|plugin install service-status@daedalus-mods --scope local\n%s|plugin update lease-board@daedalus-mods --scope local' "$home" "$home")" ] \
+    || { echo "calls: $(cat "$CALLS")"; return 1; }
+  said="Upgrade to 0.7.0: lease-board mod updated 0.1.1 → 0.1.3; run /reload-plugins in an open window"
+  [ "$(printf '%s\n' "$output" | grep -nxF "$said" | cut -d: -f1)" = \
+    "$(( $(printf '%s\n' "$output" | grep -n 'Upgrade to 0.7.0: complete' | cut -d: -f1) - 1 ))" ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
+
+@test "step 10 leaves alone a mod already at mods/' version or newer, one recorded only for another project, one not enabled here, and a version that is not plain numbers" {
+  status_mod_fixture
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true,"service-status@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  mod_version lease-board 0.1.3; mod_version service-status 0.1.0
+  mod_record lease-board@daedalus-mods 0.1.3; mod_record service-status@daedalus-mods 0.2.0
+  mod_record lease-board@daedalus-mods 0.1.0 "$BATS_TEST_TMPDIR/another-home"
+  PATH="$FAKE:$PATH" run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$CALLS" ] || { echo "calls: $(cat "$CALLS")"; return 1; }
+  case "$output" in *"mod updated"*|*"not updated"*) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/state/upgraded-to" "$CLAUDE_CODE_PLUGIN_CACHE_DIR/installed_plugins.json"
+  mod_record lease-board@daedalus-mods 0.1.1; mod_record service-status@daedalus-mods 0.0.1-dev
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":false,"service-status@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  PATH="$FAKE:$PATH" run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$CALLS" ] || { echo "calls: $(cat "$CALLS")"; return 1; }
+}
+
+@test "step 10 never stops the upgrade: a failing update is one line naming the command, and the stamp is written; a dry run only says it would" {
+  status_mod_fixture
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true,"service-status@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  mod_version lease-board 0.1.3; mod_record lease-board@daedalus-mods 0.1.1
+  PATH="$FAKE:$PATH" run python3 "$UP" --dry-run
+  printf '%s\n' "$output" | grep -qxF 'Upgrade to 0.7.0: would update the lease-board mod 0.1.1 → 0.1.3 (claude plugin update lease-board@daedalus-mods --scope local)' \
+    || { echo "$output"; return 1; }
+  [ ! -e "$CALLS" ]
+  FAKE_CLAUDE_RC=1 PATH="$FAKE:$PATH" run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -qxF 'Upgrade to 0.7.0: the lease-board mod was not updated from 0.1.1 to 0.1.3 (exit 1); run `claude plugin update lease-board@daedalus-mods --scope local` in the Daedalus home' \
     || { echo "$output"; return 1; }
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
 }

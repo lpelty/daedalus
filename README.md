@@ -236,7 +236,15 @@ line when it does:
 8. says, once, that a callee named the 0.9.0 way (`direct_call.callee_name`)
    now has a key, its name in lower case, and that nothing needs changing; it
    never writes `config.yaml`;
-9. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
+9. installs the service-status mod at local scope for a deployment that has
+   the lease board there, unless either settings file switches it off;
+10. updates each Daedalus mod already installed for this home whose installed
+   version is older than the one in `mods/` (`claude plugin update
+   <name>@daedalus-mods --scope local`): a window loads the copy in Claude
+   Code's plugin cache, not `mods/`. An open window needs `/reload-plugins`.
+   A failed install or update is one line naming the command; neither stops
+   the upgrade;
+11. writes `state/upgraded-to`, last — never while a window picked up from `target/` has no
    worktree (the board and doctor name such a window).
 
 Before it changes anything in `target/`, the upgrade keeps a checked safety
@@ -529,7 +537,9 @@ restarts or fixes a service.
 update` is still the one command. By hand, in the Daedalus home:
 `claude plugin install service-status@daedalus-mods --scope local`, then open a
 new terminal. Either mod can be switched off in `/plugin` without the other.
-`core/doctor.sh` reports the install (`service status on screen`).
+`core/doctor.sh` reports the install (`service status on screen`), and names
+`claude plugin update <name>@daedalus-mods --scope local` for a mod installed
+here that is older than `mods/` ships.
 
 ## Promote (`core/promote.sh`)
 

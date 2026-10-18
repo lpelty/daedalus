@@ -1354,6 +1354,26 @@ verify:
   case "$output" in *"OK       service status on screen: service-status@daedalus-mods is enabled in $CLAUDE_CONFIG_DIR/settings.json"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "doctor: a mod installed for this home older than mods/ ships is a NOTE naming the update command; current, or recorded only for another project, no line; doctor stays green (found 2026-10-18)" {
+  doctor_upgrade_fixture
+  export CLAUDE_CODE_PLUGIN_CACHE_DIR="$BATS_TEST_TMPDIR/plugins"
+  mkdir -p "$CLAUDE_CODE_PLUGIN_CACHE_DIR" "$DAEDALUS_HOME/.claude" "$DAEDALUS_HOME/mods/.claude-plugin" "$DAEDALUS_HOME/mods/lease-board/.claude-plugin"
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[{"name":"lease-board","source":"./lease-board"}]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  printf '{"name":"lease-board","version":"0.1.3"}\n' > "$DAEDALUS_HOME/mods/lease-board/.claude-plugin/plugin.json"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  rec() { printf '{"version":2,"plugins":{"lease-board@daedalus-mods":[{"scope":"local","projectPath":"%s","version":"%s"}]}}\n' "$1" "$2" > "$CLAUDE_CODE_PLUGIN_CACHE_DIR/installed_plugins.json"; }
+  note='NOTE     lease-board mod out of date: 0.1.1 is installed for this home, mods/ ships 0.1.3 — run `claude plugin update lease-board@daedalus-mods --scope local` in the Daedalus home, then /reload-plugins in an open window'
+  rec "$DAEDALUS_HOME" 0.1.1
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  rec "$DAEDALUS_HOME" 0.1.3
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"mod out of date"*) echo "$output"; return 1 ;; *) : ;; esac
+  rec "$BATS_TEST_TMPDIR/elsewhere" 0.1.1
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"mod out of date"*) echo "$output"; return 1 ;; *) : ;; esac
+}
+
 @test "doctor: lease board on screen — this machine's one daedalus-mods marketplace record pointing at another checkout's mods/ is a NOTE naming both paths; pointing here, no line (review 2026-10-11, findings 12, 18)" {
   doctor_upgrade_fixture
   export CLAUDE_CODE_PLUGIN_CACHE_DIR="$BATS_TEST_TMPDIR/plugins"; mkdir -p "$CLAUDE_CODE_PLUGIN_CACHE_DIR"

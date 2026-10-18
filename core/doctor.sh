@@ -242,6 +242,17 @@ PY
       *) log "NOTE     service status on screen: not installed for this deployment — run \`claude plugin install service-status@daedalus-mods --scope local\` in the Daedalus home, then open a new terminal" ;;
     esac
   fi
+  # A mod installed for this home older than mods/ ships (found 2026-10-18): a window draws the plugin cache's
+  # copy, not mods/, until `claude plugin update`. The upgrade's own reader, core/upgrade.py --doctor-mods
+  # (Claude Code's installed_plugins.json, this home's local-scope record), so doctor and the upgrade agree.
+  # NOTE, never MISSING: the older mod still works. Skipped when a fixture has no upgrade.py.
+  if [ -f "$DAEDALUS_HOME/core/upgrade.py" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] || log "$line"
+    done <<EOF
+$(python3 "$DAEDALUS_HOME/core/upgrade.py" --doctor-mods 2>/dev/null)
+EOF
+  fi
   # One machine holds one marketplace record per name ("There is one known_marketplaces.json per
   # user, so a marketplace you add in one project is available in every project", plugin loading
   # reference; a repeat `marketplace add` prints "already on disk" and exits 0, CLI reference), so a
