@@ -649,7 +649,7 @@ for (const [order, tier] of [['service-status first (outermost)', 'prepend'], ['
       expect(rows.length).toBe(5)
       expect(rows[0][0]).toMatch(/^window 03 · this window/)
       expect(rows[0].slice(1)).toEqual(['services ok', '[ details ]'])
-      // the first line has a floor: its full length, up to 60% of the band (Larry's look, 2026-10-18)
+      // the first line has a floor: its full length, up to 60% of the band (the operator's look, 2026-10-18)
       const floors = walk(tree).filter((x) => x.node.type === 'Box' && x.node.props && x.node.props.minWidth !== undefined)
       expect(floors.length).toBe(1)
       expect(floors[0].node.props.minWidth).toBe(Math.min(rows[0][0].length, Math.floor(BAND.props.bodyColumns * 0.6)))

@@ -368,7 +368,7 @@ export function register(on) {
     // mod's tree here, its summary lands at the right end of this first line whichever of the two runs first.
     // The first line grows and shrinks beside it (flexGrow/flexShrink, no width) and truncates at its end.
     // A floor under the first line: on 2.1.302 a growing, shrinking line beside the next mod's tree was cut at about
-    // half the band with the rest left empty (Larry's look, 2026-10-18). minWidth (the types, Box) holds it at its
+    // half the band with the rest left empty (the operator's look, 2026-10-18). minWidth (the types, Box) holds it at its
     // full length, up to FIRST_SHARE of the band; the summary beside it takes at most the other 40%
     // (service-status's SHARE), so the two fit and the line is cut only on a band too narrow for both.
     const first = Box(firstLineBox(lines[0], e.props.bodyColumns))
