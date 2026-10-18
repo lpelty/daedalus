@@ -690,7 +690,9 @@ sha() { shasum < "$1" | cut -c1-40; }
   [ "$output" = "Another daedalus ($B/early/daedalus) comes first on PATH; use ~/.local/bin/daedalus update." ] || { echo "$output"; return 1; }
   SHELL="$B/shells/broken" PATH="$HOME/.local/bin:$PATH" run shim
   [ -z "$output" ] || { echo "on this process's PATH: $output"; return 1; }
-  SHELL="$B/shells/broken" run shim
+  # this process's PATH, minus every directory but python3's and the system's: the real ~/.local/bin of
+  # whoever runs the suite may hold a daedalus of its own, which would be the shadow line instead
+  SHELL="$B/shells/broken" PATH="$(dirname "$(command -v python3)"):/usr/bin:/bin" run shim
   case "$output" in "Add ~/.local/bin to PATH"*"until then type ~/.local/bin/daedalus update.") : ;; *) echo "$output"; return 1 ;; esac
 }
 
