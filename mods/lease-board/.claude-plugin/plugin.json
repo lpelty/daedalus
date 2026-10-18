@@ -1,6 +1,6 @@
 {
   "name": "lease-board",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Draws the Daedalus lease board above the prompt: this window, the pen, every other window's state",
   "author": { "name": "Daedalus" }
 }

@@ -169,6 +169,17 @@ function amiLine(Text, a, nowMs) {
   return Text(Object.assign({ wrap: 'truncate-end' }, amiStyle(a), { children: [amiText(a, nowMs)] }))
 }
 
+const FIRST_SHARE = 0.6 // the least of the band's width the first line may be squeezed to beside the next mod's tree
+
+// Pure: the props of the Box that holds the band's first line, with its floor (see the band hook).
+function firstLineBox(line, columns) {
+  const props = { flexDirection: 'row', flexGrow: 1, flexShrink: 1, children: [line] }
+  const kids = line && line.props && Array.isArray(line.props.children) ? line.props.children : line && line.children
+  const text = Array.isArray(kids) ? kids.filter((k) => typeof k === 'string').join('') : ''
+  if (typeof columns === 'number' && columns > 0 && text.length > 0) props.minWidth = Math.min(text.length, Math.floor(columns * FIRST_SHARE))
+  return props
+}
+
 // Pure over board, failure and boardAt: the Text elements for the band, top to bottom.
 // "Text ... Takes color, bold, dimColor, italic, and wrap. ... A wrap is 'wrap', 'truncate',
 // 'truncate-start', 'truncate-middle', or 'truncate-end'." (interface page)
@@ -356,7 +367,11 @@ export function register(on) {
     // it lists under `dependencies`"). service-status draws `[ next(e) | summary ]` in one row; with the next
     // mod's tree here, its summary lands at the right end of this first line whichever of the two runs first.
     // The first line grows and shrinks beside it (flexGrow/flexShrink, no width) and truncates at its end.
-    const first = Box({ flexDirection: 'row', flexGrow: 1, flexShrink: 1, children: [lines[0]] })
+    // A floor under the first line: on 2.1.302 a growing, shrinking line beside the next mod's tree was cut at about
+    // half the band with the rest left empty (Larry's look, 2026-10-18). minWidth (the types, Box) holds it at its
+    // full length, up to FIRST_SHARE of the band; the summary beside it takes at most the other 40%
+    // (service-status's SHARE), so the two fit and the line is cut only on a band too narrow for both.
+    const first = Box(firstLineBox(lines[0], e.props.bodyColumns))
     const top = Box({ flexDirection: 'row', children: theirs && typeof theirs === 'object' ? [first, theirs] : [first] })
     const children = [top]
     if (lines.length > 1) {
