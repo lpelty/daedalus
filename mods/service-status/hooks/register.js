@@ -21,7 +21,7 @@ const GRACE_MS = 15000 // spec §3: MCP servers connect after the session starts
 const TIMEOUT_MS = 5000 // status.py's budget is 2 s (spec §3); this is the most a check may hold a read
 const STATUS_PY = 'core/status.py'
 const PANE = 'services' // the pane's id: "1-64 of letters, digits, `_` and `-`" (the types, PaneOpenArgs.id)
-const TOOLS_PREFIX = 'mcp__hindsight__' // "A tool's server is only in its name: `mcp__<server>__<tool>`" (Atlas's band)
+const TOOLS_PREFIX = 'mcp__hindsight__' // "A tool's server is only in its name: `mcp__<server>__<tool>`" (the reference status band)
 const BUTTON = '[ details ]' // the terminal draws a Button as `[ label ]` (reference: "A Button is `[ label ]` on the terminal")
 const SHARE = 0.4 // the most of the band's width the summary and its button may take beside the board's first line
 const TOOLS_HELP = "Memory tools aren't connected. Type /mcp and reconnect hindsight."
@@ -255,7 +255,7 @@ function paneLines(Text, Box) {
     }
     const server = snapshot.services.find((s) => s.stem === 'hindsight')
     if (tools === 'not-connected' && server && server.state === 'up') {
-      // indented by layout, so a wrapped line keeps the indent (Atlas's band)
+      // indented by layout, so a wrapped line keeps the indent (the reference status band)
       out.push(Box({ key: 'tools-help', paddingLeft: 2, children: [Text({ children: [TOOLS_HELP] })] }))
     }
   }

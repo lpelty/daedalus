@@ -4,6 +4,56 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.11.0 — the services at a glance, beside the lease board
+
+**In short.** Every window now shows whether this deployment's services are
+running. A one-word summary sits at the right end of the lease board's first
+line: `services ok`, or what is down. The details are in a pane. This is a
+trial, kept easy to change or switch off.
+
+**What changed.**
+- A second mod, `mods/service-status/`, ships beside the lease board. It reads
+  only, and never restarts or fixes a service.
+- `core/status.py` is the one reader behind it. It checks the memory server,
+  memory capture, vault search, the decider and the code graph in under 2
+  seconds. It runs no git, no model and no other program.
+- `python3 core/status.py --json` prints one row per service, each with its
+  stem, name, state and one detail. A state is `up`, `down` or `not-set-up`.
+- A service whose block is not in `config.yaml` is `not-set-up`. It never
+  counts as down. Frame-jack switched off is not down either.
+- The mod also checks the memory tools in the session, after a 15-second grace
+  while MCP servers connect.
+- The lease board now keeps what the next mod draws at the right end of its
+  first line. The two mods share the band in either order.
+- `core/setup.sh` installs the mod beside the lease board. The upgrade to
+  0.11.0 installs it for a deployment that already has the board at local
+  scope. A failed install is one line and never stops the upgrade.
+
+**What you will see.**
+- At the right of the board's first line: `services ok` in green, or
+  `hindsight down` in the warning colour, or `2 services down` when the names
+  do not fit. While the first check runs: `services: checking…`.
+- `details`, or `/services`, opens a `Services` pane with one row per service
+  and the time of the last check. Esc closes it.
+- A toast when a service goes down or comes back: `Hindsight went down`,
+  `Hindsight is back`. Nothing at startup.
+- While anything is down, one status line under the prompt:
+  `⚠ service-status: hindsight down — /services for details`. It goes when
+  everything is back.
+- When the memory tools are missing and the server is up, the pane says:
+  `Memory tools aren't connected. Type /mcp and reconnect hindsight.`
+- Doctor prints one more line, `service status on screen`.
+- The upgrade says, once:
+  `Installed the service-status mod at local scope: the services' summary now sits at the right of the lease board.`
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.10.0 -> 0.11.0; doctor OK.` Open
+a new terminal to see the summary.
+
+**How to tell you have it.** `cat VERSION` prints `0.11.0`.
+`python3 core/status.py` prints one line per service. `core/doctor.sh` prints
+`OK       service status on screen`.
+
 ## v0.10.0 — named callees: one Daedalus may ask several agents
 
 **In short.** A deployment can now name more than one agent that Daedalus

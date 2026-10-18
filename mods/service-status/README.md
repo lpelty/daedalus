@@ -33,8 +33,8 @@ window 02 · quiet since 21:40 · 0 changed
 Once at start (not awaited, so the first prompt is never held) and every 60
 seconds it runs `python3 core/status.py --json` in the Daedalus home: one fast
 reader, under 2 seconds, that never runs git, a model or any program. Its
-output has the shape of Atlas's `atlas status --json`, so a Lares or Ethos band
-could read it unchanged:
+output has the shape another harness's status band already reads, so such a
+band could read it unchanged:
 
 ```json
 {"services": [{"stem": "hindsight", "name": "memory server", "state": "up", "detail": "127.0.0.1:8888 answered"}], "checked_at": "2026-10-17T21:40:00+00:00"}
@@ -80,9 +80,11 @@ The mod ships inside the Daedalus repo, listed by the marketplace at
 `mods/.claude-plugin/marketplace.json`, and is installed at local scope beside
 lease-board. `core/setup.sh` installs it on a new deployment; the upgrade to
 0.11.0 installs it for a deployment that already has lease-board. By hand, in
-the Daedalus home:
+the Daedalus home (the first line is a no-op where lease-board's install
+already added the marketplace):
 
 ```bash
+claude plugin marketplace add ./mods --scope local
 claude plugin install service-status@daedalus-mods --scope local
 ```
 

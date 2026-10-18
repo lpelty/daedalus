@@ -9,7 +9,7 @@ config.yaml (the way lib.sh cfg reads it), a few files under state/, one HTTP GE
 any program, never writes a file, and never reaches the network beyond this machine: a memory server
 configured on another host is not checked.
 
---json prints one object with the shape of Atlas's `atlas status --json`, so a Lares or Ethos band reads it
+--json prints one object in the shape another harness's status band already reads, so such a band reads it
 unchanged:
 
     {"services": [{"stem", "name", "state", "detail"}], "checked_at": "<ISO 8601, UTC>"}

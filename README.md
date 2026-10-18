@@ -479,6 +479,58 @@ Bash allow rule in auto mode, so on such a deployment the classifier is back in
 front of the delete and may refuse it as it did before 2026-10-15;
 `core/doctor.sh` says so.
 
+## Service status (`core/status.py`)
+
+Whether this deployment's services are running, at a glance. A second mod,
+`mods/service-status/`, puts a one-word summary at the right end of the lease
+board's first line, with the details in a pane:
+
+```
+window 01 · this window · live · 3 changed              services ok  [ details ]
+window 02 · quiet since 21:40 · 0 changed
+```
+
+`services ok` is green. When something is down the summary names it in the
+warning colour (`hindsight down`), or counts (`2 services down`) when the names
+do not fit beside the board. `details`, or `/services`, opens a `Services` pane:
+one row per service with its plain name, its stem, its state and one detail,
+and the time of the last check; Esc closes it. A toast says when a service goes
+down or comes back, never at startup. While anything is down, a status line
+under the prompt reads
+`⚠ service-status: hindsight down — /services for details`;
+it goes when everything is back.
+
+The mod runs `python3 core/status.py --json` in the Daedalus home once at
+start and every 60 seconds. It takes under 2 seconds, never runs git, a model
+or any program, and reaches nothing beyond this machine. Run it yourself
+without `--json` for the same rows:
+
+```
+memory server   up          127.0.0.1:8888 answered
+memory capture  up          last capture 2 min ago
+vault search    up          store state/chroma
+decider         not-set-up  frame-jack is off
+code graph      not-set-up  no context: block in config.yaml
+checked at 2026-10-17T21:40:00+00:00
+```
+
+The rows are the memory server (`memory.api_url`'s `/health`), memory capture
+(the last capture against the sessions since), vault search (`recall.store`),
+the decider (frame-jack's daemon) and the code graph (`context.graph`). A
+service whose block is not in `config.yaml` is `not set up`: dim in the pane,
+never counted as down. Frame-jack switched off is not down either. The mod also
+checks the memory tools, the hindsight MCP server's tools in this session,
+after a 15-second grace; when they are missing and the server is up, the pane
+says to type `/mcp` and reconnect hindsight. It reads only: nothing here
+restarts or fixes a service.
+
+`core/setup.sh` installs the mod beside the lease board, and the upgrade to
+0.11.0 installs it for a deployment that already has the board, so `daedalus
+update` is still the one command. By hand, in the Daedalus home:
+`claude plugin install service-status@daedalus-mods --scope local`, then open a
+new terminal. Either mod can be switched off in `/plugin` without the other.
+`core/doctor.sh` reports the install (`service status on screen`).
+
 ## Promote (`core/promote.sh`)
 
 Trunk moves only through promote. The window holding the pen runs

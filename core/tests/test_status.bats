@@ -58,7 +58,7 @@ time.sleep(60)' "$port" >/dev/null 2>&1 &
 
 memory_block() { printf 'memory:\n  bank: test\n  api_url: %s\n  capture_interval: 120\n  transcript_dir: %s\n' "$1" "$TD" >> "$H/config.yaml"; }
 
-@test "the JSON has Atlas's shape: five rows of exactly stem, name, state and detail, in order, and checked_at; exit 0 in under 2 s" {
+@test "the JSON has the shared status shape: five rows of exactly stem, name, state and detail, in order, and checked_at; exit 0 in under 2 s" {
   start="$(python3 -c 'import time; print(time.time())')"
   run S
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
