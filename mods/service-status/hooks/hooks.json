@@ -1,0 +1,4 @@
+{
+  "description": "The service-status hooks module",
+  "modules": ["./register.js"]
+}

@@ -7,6 +7,11 @@
       "name": "lease-board",
       "source": "./lease-board",
       "description": "The lease board, drawn above the prompt in every window"
+    },
+    {
+      "name": "service-status",
+      "source": "./service-status",
+      "description": "Whether Daedalus's services are running: a summary in the band, the details in a pane"
     }
   ]
 }

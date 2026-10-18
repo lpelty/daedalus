@@ -21,6 +21,14 @@ fails, the last good board stays and one dim line says why
 (`board unavailable: …`); when one lease file cannot be read, every other
 window is still listed and one dim line names it (`one window is not shown: …`).
 
+## Sharing the band
+
+The band is one chain shared by every mod. The board keeps what the mods after
+it draw, at the right end of its first line, so the service-status mod's
+summary (`services ok  [ details ]`) sits there whichever of the two Claude
+Code runs first; every other row is the board's. See
+`mods/service-status/README.md`.
+
 ## The AMI line (frame-jack)
 
 When frame-jack has been switched on in this deployment, one more line follows

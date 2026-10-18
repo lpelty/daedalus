@@ -35,7 +35,7 @@ setup() {
   [ "$status" -eq 0 ] || { echo "--strict: $output"; return 1; }
 }
 
-@test "claude plugin validate: the marketplace under mods/ validates and lists ./lease-board" {
+@test "claude plugin validate: the marketplace under mods/ validates and lists ./lease-board, then ./service-status" {
   run claude plugin validate "$MODS"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Validation passed"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -43,7 +43,7 @@ setup() {
 import json, sys
 m, p, h = (json.load(open(f)) for f in sys.argv[1:4])
 assert m["name"] == "daedalus-mods", m
-assert [x["source"] for x in m["plugins"]] == ["./lease-board"], m
+assert [x["source"] for x in m["plugins"]] == ["./lease-board", "./service-status"], m
 assert m["plugins"][0]["name"] == "lease-board" == p["name"], (m, p)
 assert h["modules"] == ["./register.js"], h
 PY

@@ -1,0 +1,6 @@
+{
+  "name": "service-status",
+  "version": "0.1.0",
+  "description": "A one-word summary of the Daedalus services at the right of the band above the prompt, with the details in a pane",
+  "author": { "name": "Daedalus" }
+}

@@ -580,3 +580,82 @@ test('the AMI line says "1 time", not "1 times"', async ($, on) => {
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: AMI_ON.replace('7 times', '1 time') })).toBeDefined()
 })
+
+// --- sharing the band with service-status (service-status spec §4) -----------------------------------------------
+
+// The rows a tree lays out as, top to bottom, each the texts drawn left to right on it: a column Box stacks its
+// children's rows, a row Box lays its children's rows side by side (row i of each), a Text is one row, the engine's
+// node on an empty band draws nothing. A layout of the tree, not of the paint ("A drawing test checks the tree your
+// hook returns and whether it's valid for that app. It doesn't check how the app paints it", test page).
+function rowsOfTree(node: any): string[][] {
+  if (!node || typeof node !== 'object') return typeof node === 'string' && node.trim() ? [[node]] : []
+  if (node.type === 'engine') return []
+  if (node.type === 'Text') return [[(node.children || []).map((c: any) => (typeof c === 'string' ? c : '')).join('')]]
+  const kids = (node.children || []).map(rowsOfTree)
+  // a Box with no flexDirection is a row, as in the terminal's flex layout; both mods name theirs anyway
+  const dir = node.props && node.props.flexDirection
+  if (node.type === 'Box' && (dir === undefined || dir === 'row')) {
+    const n = Math.max(0, ...kids.map((k: string[][]) => k.length))
+    const out: string[][] = []
+    for (let i = 0; i < n; i += 1) out.push(kids.flatMap((k: string[][]) => k[i] || []))
+    return out
+  }
+  return kids.flat()
+}
+
+// A stand-in for service-status's band hook, the shape it draws (mods/service-status/hooks/register.js): one row,
+// the next mod's tree on the flexible left in a Box with no width, the summary on the right. Inline plugins are
+// "self-contained, as a module's is: it closes over nothing of the test file" (the types, Plugin), so the shape is
+// written out here; mods/service-status/tests/ holds the mirror of these tests with the real service-status and a
+// stand-in for this mod. `tier` places it in the chain: prepend runs before this mod (outermost), append after it.
+function statusStandIn(tier: 'prepend' | 'append') {
+  return {
+    name: 'status-stand-in',
+    tier,
+    register(on: any) {
+      on('ui.render', { component: 'AbovePrompt' }, async ($: any, e: any, next: any) => {
+        if (e.props.hasSurvey) return next(e)
+        const { Box, Text } = $.ui.resolve(e)
+        const theirs = await next(e)
+        return Box({
+          flexDirection: 'row',
+          children: [
+            Box({ flexDirection: 'row', flexGrow: 1, flexShrink: 1, children: theirs && typeof theirs === 'object' ? [theirs] : [] }),
+            Box({ key: 'summary', flexDirection: 'row', flexShrink: 0, children: [Text({ children: ['services ok'] }), ' ', Text({ children: ['[ details ]'] })] }),
+          ],
+        })
+      })
+    },
+  }
+}
+
+for (const [order, tier] of [['service-status first (outermost)', 'prepend'], ['lease-board first (outermost)', 'append']] as const) {
+  test(`both mods in the band, ${order}: one valid tree, every window line, the summary once at the right end of the first row`, { plugins: [statusStandIn(tier)] }, async ($, on) => {
+    stubs(on, () => ok(withAmi(undefined)), ENGINE)
+    await start($)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ ...BAND, surface })
+      let refusal = ''
+      let tree: any
+      try {
+        tree = await ui.drawn()
+      } catch (err: any) {
+        refusal = String(err && err.message ? err.message : err)
+      }
+      expect(refusal).toBe('')
+      // the order is the one asked for: the outermost mod's own Box is the root (a row for the stand-in)
+      expect(tree.props.flexDirection).toBe(tier === 'prepend' ? 'row' : 'column')
+      const rows = rowsOfTree(tree)
+      expect(rows.length).toBe(5)
+      expect(rows[0][0]).toMatch(/^window 03 · this window/)
+      expect(rows[0].slice(1)).toEqual(['services ok', '[ details ]'])
+      for (const r of rows.slice(1)) expect(r.length).toBe(1)
+      expect(rows.slice(1).map((r) => r[0].slice(0, 9))).toEqual(['window 01', 'window 02', 'window 04', 'window 05'])
+      // the engine's node once, under no Box with a width
+      const found = walk(tree).filter((x) => x.node.type === 'engine')
+      expect(found.length).toBe(1)
+      expect(found[0].above.filter((b) => b.type === 'Box' && b.props && b.props.width !== undefined).length).toBe(0)
+      await ui.unmount()
+    }
+  })
+}

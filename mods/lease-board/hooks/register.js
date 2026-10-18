@@ -337,24 +337,35 @@ export function register(on) {
       loggedTheirs = true
       $.ui.log('lease-board: next(e) resolved to ' + (theirs === null ? 'null' : typeof theirs) + ' on the band', { to: 'debug' })
     }
-    // This mod's lines, in a Box of their own sized to the band: "bodyColumns: Cells the band's tree is
-    // laid out in ... size a table to it rather than to viewport.columns." (the types)
-    const mine = { flexDirection: 'column', children: linesFor(Text, e.props) }
-    if (typeof e.props.bodyColumns === 'number' && e.props.bodyColumns > 0) mine.width = e.props.bodyColumns
+    const lines = linesFor(Text, e.props)
     // What next(e) resolves to on the band is the engine's own node: "At these sites, next(e) returns a
     // reference to Claude Code's drawing, { type: 'engine', ref }, unless a mod that runs after yours
     // returned a tree of its own" (interface page); "The component core draws itself, with the props held
-    // under `ref`. type: 'engine'; ref: number" (the types). It is kept, when it is an object, as a SIBLING
-    // of the sized Box above, inside an outer column Box that carries no width — never as a child of a Box
-    // with a width. On 2.1.300 that shape was refused on every render and the band stayed empty:
-    // "ui.render (AbovePrompt): a hook returned a tree that does not validate (engine node under a Box
-    // with prop "width"); drawing the engine's own" (claude --debug, 2026-10-15). The types write no such
-    // rule — their one composition rule is "a Box holds elements and strings (core wraps each string in a
-    // Text); a Text holds strings and inline elements, never an engine node" (StyledElement.children) — so
-    // the engine's refusal reason is the rule, and the page's own example is an unsized Box:
-    // "You can return the reference as it is, or place it in a Box beside elements of your own:
-    // return Box({ flexDirection: 'column', children: [theirs, Text({ children: ['under the spinner'] })] })"
-    const children = theirs && typeof theirs === 'object' ? [Box(mine), theirs] : [Box(mine)]
+    // under `ref`. type: 'engine'; ref: number" (the types). It is kept, when it is an object, at the RIGHT
+    // END OF THE FIRST ROW (service-status spec §4), beside this mod's first line in a row Box that carries
+    // no width — never as a child of a Box with a width. On 2.1.300 that shape was refused on every render
+    // and the band stayed empty: "ui.render (AbovePrompt): a hook returned a tree that does not validate
+    // (engine node under a Box with prop "width"); drawing the engine's own" (claude --debug, 2026-10-15).
+    // The types write no such rule — their one composition rule is "a Box holds elements and strings (core
+    // wraps each string in a Text); a Text holds strings and inline elements, never an engine node"
+    // (StyledElement.children) — so the engine's refusal reason is the rule, and the page's own example is an
+    // unsized Box: "You can return the reference as it is, or place it in a Box beside elements of your own".
+    // Why the first row: the band is one chain ("The first mod is outermost: it sees the event before the
+    // others and the result after them", events page, "The order mods run in"), and Claude Code orders two
+    // mods a person installs only by `dependencies` ("Among the mods you install, a mod runs before the mods
+    // it lists under `dependencies`"). service-status draws `[ next(e) | summary ]` in one row; with the next
+    // mod's tree here, its summary lands at the right end of this first line whichever of the two runs first.
+    // The first line grows and shrinks beside it (flexGrow/flexShrink, no width) and truncates at its end.
+    const first = Box({ flexDirection: 'row', flexGrow: 1, flexShrink: 1, children: [lines[0]] })
+    const top = Box({ flexDirection: 'row', children: theirs && typeof theirs === 'object' ? [first, theirs] : [first] })
+    const children = [top]
+    if (lines.length > 1) {
+      // The other lines, in a Box of their own sized to the band: "bodyColumns: Cells the band's tree is
+      // laid out in ... size a table to it rather than to viewport.columns." (the types)
+      const rest = { flexDirection: 'column', children: lines.slice(1) }
+      if (typeof e.props.bodyColumns === 'number' && e.props.bodyColumns > 0) rest.width = e.props.bodyColumns
+      children.push(Box(rest))
+    }
     return Box({ flexDirection: 'column', children })
   })
 }

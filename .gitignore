@@ -17,8 +17,9 @@ config.yaml
 # boundary.edit_brief in config.yaml decides whether Daedalus may write it.
 CLAUDE.local.md
 
-# Written by Claude Code when the lease-board mod loads with --plugin-dir.
+# Written by Claude Code when a mod loads with --plugin-dir.
 mods/lease-board/tsconfig.json
+mods/service-status/tsconfig.json
 
 .DS_Store
 

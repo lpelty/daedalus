@@ -389,8 +389,8 @@ EOF
   done
 }
 
-@test ".gitignore keeps the local layer out of the release: CLAUDE.local.md, .claude/settings.local.json and the lease board's tsconfig.json" {
-  for p in CLAUDE.local.md .claude/settings.local.json mods/lease-board/tsconfig.json; do
+@test ".gitignore keeps the local layer out of the release: CLAUDE.local.md, .claude/settings.local.json and the two mods' tsconfig.json" {
+  for p in CLAUDE.local.md .claude/settings.local.json mods/lease-board/tsconfig.json mods/service-status/tsconfig.json; do
     git -C "$DAEDALUS_HOME" check-ignore -q --no-index "$p" || { echo "not ignored: $p"; return 1; }
   done
   run git -C "$DAEDALUS_HOME" check-ignore -q --no-index CLAUDE.md; [ "$status" -ne 0 ]
