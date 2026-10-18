@@ -218,6 +218,30 @@ PY
     "disabled "*) log "NOTE     lease board on screen: lease-board@daedalus-mods is disabled in ${board_state#disabled } — \`claude plugin enable lease-board@daedalus-mods\` turns it back on" ;;
     *) log "NOTE     lease board on screen: not installed for this deployment — run \`claude plugin marketplace add ./mods --scope local\` then \`claude plugin install lease-board@daedalus-mods --scope local\` in the Daedalus home, then open a new terminal" ;;
   esac
+  # The service status on screen (service-status spec §4): the same marketplace's second mod, judged the same
+  # way, the same two files. Only where this home's marketplace lists it. NOTE, never MISSING.
+  if grep -q '"./service-status"' "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json" 2>/dev/null; then
+    status_state="$(python3 - "$DAEDALUS_HOME/.claude/settings.local.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" <<'PY' 2>/dev/null || true
+import json, sys
+for path, label in ((sys.argv[1], ".claude/settings.local.json"), (sys.argv[2], sys.argv[2])):
+    try:
+        d = json.load(open(path))
+    except (OSError, ValueError):
+        continue
+    v = (d.get("enabledPlugins") or {}).get("service-status@daedalus-mods") if isinstance(d, dict) else None
+    if v is True:
+        print("enabled " + label); break
+    if v is False:
+        print("disabled " + label); break
+PY
+)"
+    case "$status_state" in
+      "enabled "*) log "OK       service status on screen: service-status@daedalus-mods is enabled in ${status_state#enabled }" ;;
+      "disabled .claude/settings.local.json") log "NOTE     service status on screen: service-status@daedalus-mods is disabled in .claude/settings.local.json — \`claude plugin enable service-status@daedalus-mods --scope local\` turns it back on" ;;
+      "disabled "*) log "NOTE     service status on screen: service-status@daedalus-mods is disabled in ${status_state#disabled } — \`claude plugin enable service-status@daedalus-mods\` turns it back on" ;;
+      *) log "NOTE     service status on screen: not installed for this deployment — run \`claude plugin install service-status@daedalus-mods --scope local\` in the Daedalus home, then open a new terminal" ;;
+    esac
+  fi
   # One machine holds one marketplace record per name ("There is one known_marketplaces.json per
   # user, so a marketplace you add in one project is available in every project", plugin loading
   # reference; a repeat `marketplace add` prints "already on disk" and exits 0, CLI reference), so a

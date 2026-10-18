@@ -369,6 +369,46 @@ plugin install lease-board@daedalus-mods --scope local" ] || { echo "calls: $(ca
   [ ! -e "$CALLS" ] || { echo "claude was run: $(cat "$CALLS")"; return 1; }
 }
 
+# --- the service status install (service-status spec §4) ----------------------------------------------------------
+@test "setup: the service status — a marketplace listing it installs it at local scope after the lease board; a second run finds both named and runs nothing; one enabled at user scope is not declared again" {
+  setup_board_fixture
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin"
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[{"name":"lease-board","source":"./lease-board"},{"name":"service-status","source":"./service-status"}]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"service status: the summary beside the board"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$CALLS")" = "plugin marketplace add ./mods --scope local
+plugin install lease-board@daedalus-mods --scope local
+plugin marketplace add ./mods --scope local
+plugin install service-status@daedalus-mods --scope local" ] || { echo "calls: $(cat "$CALLS")"; return 1; }
+  mkdir -p "$DAEDALUS_HOME/.claude"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true,"service-status@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  rm -f "$CALLS"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"service status: already installed for this deployment (.claude/settings.local.json names service-status@daedalus-mods)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$CALLS" ] || { echo "claude was run: $(cat "$CALLS")"; return 1; }
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"enabledPlugins":{"service-status@daedalus-mods":true}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  case "$output" in *"service status: already installed for this deployment ($CLAUDE_CONFIG_DIR/settings.json names service-status@daedalus-mods)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$CALLS" ] || { echo "claude was run: $(cat "$CALLS")"; return 1; }
+}
+
+@test "setup: the service status — a failing claude is the did-not-finish line and setup still finishes; a marketplace that does not list it is the skipped line" {
+  setup_board_fixture
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin"
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[{"name":"service-status","source":"./service-status"}]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  FAKE_CLAUDE_RC=1 PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"service status: the install did not finish — run the install command in mods/service-status/README.md yourself"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  rm -f "$CALLS"
+  PATH="$FAKE:$PATH" run bash "$DAEDALUS_HOME/core/setup.sh"
+  case "$output" in *"service status: skipped (the marketplace in mods/ does not list it)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$(cat "$CALLS" 2>/dev/null)" in *service-status*) echo "calls: $(cat "$CALLS")"; return 1 ;; esac
+}
+
 # --- the daedalus command (update-command design Decision 1, §4.1, §4.7) -----------------------------------------
 @test "setup: the daedalus command — installed in ~/.local/bin (a scratch HOME) before doctor, with the marker naming this home; a second run leaves it and says nothing about it; a file there it did not write is left, with a line, and setup still finishes" {
   setup_board_fixture

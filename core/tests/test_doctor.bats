@@ -1330,6 +1330,30 @@ verify:
   case "$output" in *"NOTE     lease board on screen: lease-board@daedalus-mods is disabled in .claude/settings.local.json"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+# --- the service status on screen (service-status spec §4) -----------------------------------------------------
+@test "doctor: service status on screen — only where this home's marketplace lists it; NOTE naming the install command until enabled, OK naming the file that enables it, a disabled entry a NOTE naming the enable command; doctor stays green" {
+  doctor_upgrade_fixture
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"service status on screen"*) echo "a line with no marketplace listing it: $output"; return 1 ;; *) : ;; esac
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin"
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[{"name":"service-status","source":"./service-status"}]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  note='NOTE     service status on screen: not installed for this deployment — run `claude plugin install service-status@daedalus-mods --scope local` in the Daedalus home, then open a new terminal'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"$note"*) : ;; *) echo "$output"; return 1 ;; esac
+  mkdir -p "$DAEDALUS_HOME/.claude"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true,"service-status@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       service status on screen: service-status@daedalus-mods is enabled in .claude/settings.local.json"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     service status on screen"*) echo "a NOTE beside the OK: $output"; return 1 ;; *) : ;; esac
+  printf '{"enabledPlugins":{"service-status@daedalus-mods":false}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *'NOTE     service status on screen: service-status@daedalus-mods is disabled in .claude/settings.local.json — `claude plugin enable service-status@daedalus-mods --scope local` turns it back on'*) : ;; *) echo "$output"; return 1 ;; esac
+  rm "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"enabledPlugins":{"service-status@daedalus-mods":true}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       service status on screen: service-status@daedalus-mods is enabled in $CLAUDE_CONFIG_DIR/settings.json"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "doctor: lease board on screen — this machine's one daedalus-mods marketplace record pointing at another checkout's mods/ is a NOTE naming both paths; pointing here, no line (review 2026-10-11, findings 12, 18)" {
   doctor_upgrade_fixture
   export CLAUDE_CODE_PLUGIN_CACHE_DIR="$BATS_TEST_TMPDIR/plugins"; mkdir -p "$CLAUDE_CODE_PLUGIN_CACHE_DIR"

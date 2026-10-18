@@ -86,6 +86,32 @@ else
     || log "lease board: the install did not finish — run the two commands in README.md \"Windows (leases)\" yourself"
 fi
 
+# The service status on screen (service-status spec §4): the second mod of the same marketplace, installed the same
+# way, at local scope, beside the lease board. Only when the marketplace lists it (a fixture's may not); the same
+# two-file check, so a plugin enabled at user scope is never declared again here. `marketplace add` again is a
+# no-op when the lease board's step added it ("already on disk", exit 0) and covers one whose own step failed.
+log "service status: the summary beside the board"
+if [ ! -f "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json" ]; then
+  log "service status: skipped (mods/ absent)"
+elif ! grep -q '"./service-status"' "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"; then
+  log "service status: skipped (the marketplace in mods/ does not list it)"
+elif ! command -v claude >/dev/null 2>&1; then
+  log "service status: skipped (claude is not on PATH; run the install command in mods/service-status/README.md yourself)"
+elif status_file="$(python3 -c 'import json, sys
+for path, label in ((sys.argv[1], ".claude/settings.local.json"), (sys.argv[2], sys.argv[2])):
+    try:
+        d = json.load(open(path))
+    except (OSError, ValueError):
+        continue
+    if isinstance(d, dict) and "service-status@daedalus-mods" in (d.get("enabledPlugins") or {}):
+        print(label); sys.exit(0)
+sys.exit(1)' "$DAEDALUS_HOME/.claude/settings.local.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null)"; then
+  log "service status: already installed for this deployment ($status_file names service-status@daedalus-mods)"
+else
+  ( cd "$DAEDALUS_HOME" && claude plugin marketplace add ./mods --scope local && claude plugin install service-status@daedalus-mods --scope local ) \
+    || log "service status: the install did not finish — run the install command in mods/service-status/README.md yourself"
+fi
+
 # The daedalus command (update-command design Decision 1, §4.1): ~/.local/bin/daedalus, a shim running this
 # home's core/update.py, so `daedalus update` takes a release in one line from any terminal. update.py's own
 # install decides: never over a file it did not write, nor over one serving another home still there; each thing

@@ -30,8 +30,11 @@ step is idempotent — the second run changes nothing — and says one line the 
      a file it did not write, nor over one serving another home still there), and how to reach it from the login
      shell; it never stops the upgrade (update-command design §4.7)
   8. a config.yaml naming its one callee in the legacy direct_call keys is told, once, its callee key (SPEC-011 §4);
-     config.yaml is read, never written. FULL = len(STEPS) is the whole run
-  9. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
+     config.yaml is read, never written
+  9. the service-status mod, installed at local scope beside the lease board for a deployment that has the board
+     there (`claude plugin install service-status@daedalus-mods --scope local`); never stops the upgrade (service-
+     status spec §4). FULL = len(STEPS) is the whole run
+ 10. the stamp, state/upgraded-to, written last: a stopped upgrade runs again from the top next time
 
 Before step 2, the first that can touch target/, every run takes a safety copy of everything in target/ into
 state/upgrade-snapshot/<stamp>/ and checks it, or stops before changing anything (see "the safety copy" below):
@@ -3760,6 +3763,64 @@ def step_callee(root: Path, head: str, dry: bool, deadline: Optional[float]) -> 
     return ["%s: %s" % (head, LEGACY_CALLEE % (name, name.lower()))]
 
 
+STATUS_MOD = "service-status@daedalus-mods"
+BOARD_MOD = "lease-board@daedalus-mods"
+STATUS_INSTALL = "claude plugin install %s --scope local" % STATUS_MOD
+STATUS_SAID = ("Installed the service-status mod at local scope: the services' summary now sits at the right of the "
+               "lease board. Open a new terminal, or run /reload-plugins in one already open, to see it.")
+
+
+def _enabled_in(path: Path, plugin: str) -> Optional[bool]:
+    """enabledPlugins[plugin] in a settings file: True or False when it says, None when it does not (or is no JSON)."""
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    v = (d.get("enabledPlugins") or {}).get(plugin) if isinstance(d, dict) else None
+    return v if isinstance(v, bool) else None
+
+
+def step_status_mod(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
+    """Step 9 (service-status spec §4): the service-status mod for a deployment that already has the lease board at
+    local scope — the second mod of the same marketplace, installed beside the first, so `daedalus update` stays one
+    command. Acts only when this home's marketplace lists it, the lease board is enabled in .claude/settings.local.json,
+    and neither settings file names service-status (a person who switched it off keeps it off). A deployment without
+    the lease board is setup's and doctor's to tell. It never stops the upgrade: what it cannot do is a line naming
+    the command. The install is bounded by 20 s, less near a start's deadline."""
+    market = root / "mods" / ".claude-plugin" / "marketplace.json"
+    try:
+        if '"./service-status"' not in market.read_text():
+            return []
+    except OSError:
+        return []
+    local = root / ".claude" / "settings.local.json"
+    user = Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")) / "settings.json"
+    if _enabled_in(local, BOARD_MOD) is not True:
+        return []
+    if _enabled_in(local, STATUS_MOD) is not None or _enabled_in(user, STATUS_MOD) is not None:
+        return []
+    if dry:
+        return ["%s: would install the service-status mod at local scope (%s)" % (head, STATUS_INSTALL)]
+    claude = shutil.which("claude")
+    if not claude:
+        return ["%s: the service-status mod was not installed (claude is not on PATH); run `%s` in the Daedalus home"
+                % (head, STATUS_INSTALL)]
+    timeout = 20.0 if deadline is None else min(20.0, deadline - time.time() - 0.5)
+    if timeout < 2.0:
+        return ["%s: the service-status mod was not installed (no time left in this session start); run `%s` in the "
+                "Daedalus home" % (head, STATUS_INSTALL)]
+    try:
+        r = subprocess.run([claude, "plugin", "install", STATUS_MOD, "--scope", "local"], cwd=str(root),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+        ok = r.returncode == 0
+        why = "exit %d" % r.returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        ok, why = False, type(e).__name__
+    if ok:
+        return ["%s: %s" % (head, STATUS_SAID)]
+    return ["%s: the service-status mod was not installed (%s); run `%s` in the Daedalus home" % (head, why, STATUS_INSTALL)]
+
+
 STEPS = ((1, "creating the window directories", step_dirs),
          (2, "installing the pre-push hook", step_hooks),
          (3, "removing the old shared reminder files", step_dedup),
@@ -3767,7 +3828,8 @@ STEPS = ((1, "creating the window directories", step_dirs),
          (5, "moving capture's settings into config.yaml", step_memory),
          (6, "putting target/ back on its trunk", step_trunk),
          (7, "installing the daedalus command", step_command),
-         (8, "naming the direct-call callee", step_callee))
+         (8, "naming the direct-call callee", step_callee),
+         (9, "installing the service-status mod", step_status_mod))
 FULL = len(STEPS)       # "the whole run": every step, then the stamp (Decision 18); --setup runs steps 1-3
 
 

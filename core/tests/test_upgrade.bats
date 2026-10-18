@@ -518,9 +518,10 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
 import inspect, re, sys
 sys.path.insert(0, sys.argv[1]); sys.dont_write_bytecode = True
 import upgrade as u
-assert u.FULL == len(u.STEPS) == 8, u.FULL
-assert [n for n, _, _ in u.STEPS] == list(range(1, 9))
+assert u.FULL == len(u.STEPS) == 9, u.FULL
+assert [n for n, _, _ in u.STEPS] == list(range(1, 10))
 assert u.STEPS[6][2] is u.step_command and u.STEPS[5][2] is u.step_trunk and u.STEPS[7][2] is u.step_callee
+assert u.STEPS[8][2] is u.step_status_mod
 src = inspect.getsource(u)
 assert not re.search(r"upto\s*(==|=)\s*6\b|else 6\)", src), re.findall(r".*upto.*6.*", src)
 print("ok")
@@ -553,5 +554,62 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Upgrade to 0.7.0: ~/.local/bin/daedalus is not a shim daedalus wrote, so it was left as it is"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(cat "$S/.local/bin/daedalus")" = "$(printf '#!/bin/sh\necho mine')" ]
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
+
+# --- step 9: the service-status mod beside the lease board (service-status spec §4) ----------------------------------
+# A fake `claude` on PATH records every argv line; FAKE_CLAUDE_RC makes it fail.
+status_mod_fixture() {
+  mkdir -p "$DAEDALUS_HOME/mods/.claude-plugin" "$DAEDALUS_HOME/.claude"
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[{"name":"lease-board","source":"./lease-board"},{"name":"service-status","source":"./service-status"}]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  FAKE="$BATS_TEST_TMPDIR/fakeclaude"; mkdir -p "$FAKE"; CALLS="$BATS_TEST_TMPDIR/claude-calls"
+  printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$(pwd -P)" "$*" >> "%s"\nexit "${FAKE_CLAUDE_RC:-0}"\n' "$CALLS" > "$FAKE/claude"; chmod +x "$FAKE/claude"
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+}
+
+@test "step 9 installs the service-status mod at local scope, in the home, for a deployment with the lease board there; once; said before the completion line; a dry run only says it would" {
+  status_mod_fixture
+  PATH="$FAKE:$PATH" run python3 "$UP" --dry-run
+  case "$output" in *"Upgrade to 0.7.0: would install the service-status mod at local scope (claude plugin install service-status@daedalus-mods --scope local)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$CALLS" ]
+  PATH="$FAKE:$PATH" run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$CALLS")" = "$(cd "$DAEDALUS_HOME" && pwd -P)|plugin install service-status@daedalus-mods --scope local" ] || { echo "calls: $(cat "$CALLS")"; return 1; }
+  said="Upgrade to 0.7.0: Installed the service-status mod at local scope: the services' summary now sits at the right of the lease board. Open a new terminal, or run /reload-plugins in one already open, to see it."
+  [ "$(printf '%s\n' "$output" | grep -nxF "$said" | cut -d: -f1)" = \
+    "$(( $(printf '%s\n' "$output" | grep -n 'Upgrade to 0.7.0: complete' | cut -d: -f1) - 1 ))" ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+  # what the real CLI writes, then the next upgrade says nothing and runs nothing
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true,"service-status@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  rm "$DAEDALUS_HOME/state/upgraded-to" "$CALLS"
+  PATH="$FAKE:$PATH" run python3 "$UP"
+  [ ! -e "$CALLS" ]; case "$output" in *service-status*) echo "$output"; return 1 ;; esac
+}
+
+@test "step 9 leaves alone a deployment without the lease board at local scope, a service-status switched off at either scope, and a marketplace that does not list it" {
+  status_mod_fixture
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true,"service-status@daedalus-mods":false}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  PATH="$FAKE:$PATH" run python3 "$UP"; [ "$status" -eq 0 ]; [ ! -e "$CALLS" ]
+  rm "$DAEDALUS_HOME/state/upgraded-to"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"enabledPlugins":{"service-status@daedalus-mods":false}}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+  PATH="$FAKE:$PATH" run python3 "$UP"; [ "$status" -eq 0 ]; [ ! -e "$CALLS" ]
+  rm "$DAEDALUS_HOME/state/upgraded-to" "$CLAUDE_CONFIG_DIR/settings.json"
+  printf '{"enabledPlugins":{}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  PATH="$FAKE:$PATH" run python3 "$UP"; [ "$status" -eq 0 ]; [ ! -e "$CALLS" ]
+  rm "$DAEDALUS_HOME/state/upgraded-to"
+  printf '{"enabledPlugins":{"lease-board@daedalus-mods":true}}\n' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  printf '{"name":"daedalus-mods","owner":{"name":"x"},"plugins":[{"name":"lease-board","source":"./lease-board"}]}\n' > "$DAEDALUS_HOME/mods/.claude-plugin/marketplace.json"
+  PATH="$FAKE:$PATH" run python3 "$UP"; [ "$status" -eq 0 ]; [ ! -e "$CALLS" ]
+  case "$output" in *service-status*) echo "$output"; return 1 ;; esac
+}
+
+@test "step 9 never stops the upgrade: a failing install is one line naming the command, and the stamp is written" {
+  status_mod_fixture
+  FAKE_CLAUDE_RC=1 PATH="$FAKE:$PATH" run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -qxF 'Upgrade to 0.7.0: the service-status mod was not installed (exit 1); run `claude plugin install service-status@daedalus-mods --scope local` in the Daedalus home' \
+    || { echo "$output"; return 1; }
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
 }
