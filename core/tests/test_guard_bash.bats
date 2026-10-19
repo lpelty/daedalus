@@ -1239,6 +1239,38 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
+# --- v0.12.2: the guard lets a delete with nothing to lose through, and takes one yes for several windows ------
+@test "delete gate (v0.12.2): a window with nothing to lose is allowed with no report and no yes; one with work still needs them" {
+  delete_guard
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null       # 03: clean, nothing unpromoted
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 03 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/03.json")"
+  run guard_as sA 'core/lease.sh release 03 --remove'; allowed
+  run guard_as sA 'core/lease.sh release 03 --remove --force'; allowed
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
+  # a variable among several numbers is refused naming the number
+  run guard_as sA 'core/lease.sh release 02 $N --remove'; denied; case "$output" in *"Name the window by its number"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/03/thing" ]
+}
+
+@test "delete gate (v0.12.2): release 02 03 --remove is allowed after one yes to the one line naming both; denied when only one window's line was shown" {
+  delete_guard
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 03 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/03.json")"
+  W3="$DAEDALUS_HOME/worktrees/03/thing"
+  printf 'w\n' >> "$W3/a.txt"; git -C "$W3" -c user.email=t@x -c user.name=t commit -q -am "more work"
+  R="$(DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02 03)"; P="$(now)"
+  [ "${R##*$'\n'}" = "Say yes to delete the work of windows 02 and 03." ] || { echo "$R"; return 1; }
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "Window 02 has a commit. $LINE02" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" operator "yes" "$(plus "$P" 3)" >/dev/null
+  run guard_as sA 'core/lease.sh release 02 03 --remove --force --operator-said yes'; denied
+  case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
+  tx "$TX" assistant "$R" "$(plus "$P" 4)" >/dev/null
+  tx "$TX" operator "Yes, both." "$(plus "$P" 5)" >/dev/null
+  run guard_as sA "core/lease.sh release 02 03 --remove --force --operator-said 'Yes, both.'"; allowed
+  [ -d "$W" ]; [ -d "$W3" ]
+}
+
 # --- The local layer on the Bash leg (update design §4.4; Decisions 3, 22) ---
 
 brief_bash_checks() {   # brief_bash_checks <session-id> — the same sentences as the Edit leg

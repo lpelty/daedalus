@@ -2808,9 +2808,10 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
     """The early refusal for `lease.sh release NN --remove …` (design 2026-10-15, §4.3): the first word naming
     lease.sh, by basename, behind any wrapper (exec_index) — the home's, a worktree checkout's, a copy. Behind
     xargs or parallel it is refused outright (bare xargs is a wrapper Claude Code strips for the allow rule; the
-    guard reads no stdin). Then: a session must be present (fail closed), the number literal, the operator's
-    words readable, and leaselib.deletion_confirmed decides — the report shown, the yes after the line in this
-    session's transcript, the work unchanged. Plain `release NN` and every other verb are untouched."""
+    guard reads no stdin). Then: a session must be present (fail closed), every number literal, the operator's
+    words readable, and leaselib.deletion_confirmed decides — a window with nothing to lose needs nothing more
+    (v0.12.2); for the rest, the one report shown, the yes after its one line in this session's transcript, the
+    work unchanged. Plain `release NN` and every other verb are untouched."""
     j = exec_index(seg, LEASE_HEADS)
     if os.path.basename(seg[j]) != "lease.sh":
         return None
@@ -2821,8 +2822,12 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
         return None
     if g.sid is None:
         return DELETE_NO_SESSION
-    nn = args[1] if len(args) > 1 else ""
-    if unresolved(nn) or not re.fullmatch(r"[0-9]{2}", nn):
+    nns = []                                   # v0.12.2: several numbers, the words before the first flag
+    for w in args[1:]:
+        if w.startswith("--") and not unresolved(w):
+            break
+        nns.append(w)
+    if not nns or any(unresolved(nn) or not re.fullmatch(r"[0-9]{2}", nn) for nn in nns):
         return DELETE_NUMBER
     said = ""
     if "--operator-said" in args:
@@ -2831,7 +2836,7 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
         if unresolved(said):
             return DELETE_ONE_WORD                 # a $ or a backtick the guard cannot read
     import leaselib as ll
-    return ll.deletion_confirmed(g.root, g.sid, nn, said)
+    return ll.deletion_confirmed(g.root, g.sid, nns, said)
 
 
 def segments_of(cmd: str, cwd: Path, g: G, depth: int = 0) -> List[List[str]]:

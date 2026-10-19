@@ -541,7 +541,14 @@ Claude Code keeps under `~/.claude/sessions/` (liveness reads it).
 
 Deleting a window's work is report, yes, delete. `core/lease.sh unpromoted 02`
 reports what would be lost and ends with the line `Say yes to delete window
-02's work.`; the agent repeats the report and asks. The yes is found in the
+02's work.`; the agent repeats the report and asks. A window with nothing to
+lose — no unpromoted commit, no uncommitted file, its worktree on its own
+branch — needs no yes: the report says so and `release 02 --remove` deletes it
+at once. Several windows go in one report and one yes:
+`core/lease.sh unpromoted 02 03 04` ends with one line, `Say yes to delete the
+work of windows 02 and 03.`, naming every window with work, and
+`core/lease.sh release 02 03 04 --remove --force --operator-said "<your reply>"`
+deletes them all; a change in any one refuses the whole delete. The yes is found in the
 window's own transcript the way promote's is — your first reply to a turn
 carrying that line, and a reply of the agent's that ends with the line re-arms
 it, so you may ask first — and `core/lease.sh release 02 --remove --force

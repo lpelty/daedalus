@@ -1698,7 +1698,8 @@ print(sorted(p.name for p in (Path(sys.argv[2]) / "state" / "leases").iterdir() 
   W="$DAEDALUS_HOME/worktrees/01/thing"
   run LS unpromoted 01
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$output" = $'Window 01 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch.\nSay yes to delete window 01\'s work.' ] || { echo "$output"; return 1; }
+  # v0.12.2: nothing to lose asks no yes — the report says so and carries no line
+  [ "$output" = "Window 01 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch and needs no yes." ] || { echo "$output"; return 1; }
   printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
   printf 'd\n' >> "$W/a.txt"; printf 'u\n' > "$W/untracked.txt"
   run LS unpromoted 01
@@ -1733,18 +1734,22 @@ marker() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d.get(
 @test "unpromoted <NN> from a session is a witness: it writes state/release-asked/<NN>.json with the session id, the report, the problems and the work's fingerprint; a later ask overwrites it; a visitor's ask writes it; an operator shell's does not; release --remove and sweep remove it with the lease files" {
   LS create >/dev/null
   W="$DAEDALUS_HOME/worktrees/01/thing"; M="$DAEDALUS_HOME/state/release-asked/01.json"
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 01; [ "$status" -eq 0 ]
+  [ ! -e "$M" ] || { echo "a report with nothing to lose left a marker (v0.12.2: it asks no yes)"; return 1; }
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
   run LS unpromoted 01; [ "$status" -eq 0 ]
   [ ! -e "$M" ] || { echo "an operator shell's ask left a marker"; return 1; }
   DAEDALUS_SESSION_ID=sA run LS unpromoted 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ -f "$M" ]
-  [ "$(marker 01 session_id)" = "sA" ]; [ "$(marker 01 lease)" = "01" ]; [ "$(marker 01 problems)" = "[]" ]
-  [ "$(marker 01 report)" = "Window 01 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch." ]
+  [ "$(marker 01 session_id)" = "sA" ]; [ "$(marker 01 lease)" = "01" ]
+  [ "$(marker 01 problems)" = '["has 1 unpromoted commit: \"unmerged work\""]' ]
+  [ "$(marker 01 report)" = 'Window 01 has 1 unpromoted commit: "unmerged work".' ]
   f1="$(marker 01 fingerprint)"; [ "$f1" = "$(fp 01)" ]; [ "${#f1}" -eq 64 ]
   at1="$(marker 01 at)"; python3 -c 'import sys,time; a=float(sys.argv[1]); assert time.time()-60 < a <= time.time(), a' "$at1"
-  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
+  printf 'd\n' >> "$W/a.txt"
   DAEDALUS_SESSION_ID=sB run LS unpromoted 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(marker 01 session_id)" = "sB" ]
-  [ "$(marker 01 problems)" = '["has 1 unpromoted commit: \"unmerged work\""]' ]
+  [ "$(marker 01 problems)" = '["has 1 unpromoted commit: \"unmerged work\"", "has uncommitted changes in worktrees/01/thing (1 file: a.txt)"]' ]
   [ "$(marker 01 fingerprint)" != "$f1" ]; [ "$(marker 01 fingerprint)" = "$(fp 01)" ]
   DIRECT_CALL_ID=visit DAEDALUS_SESSION_ID=sV run LS unpromoted 01; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(marker 01 session_id)" = "sV" ]
@@ -1752,6 +1757,7 @@ marker() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d.get(
   [ ! -e "$M" ] || { echo "release --remove left the marker"; return 1; }
   LS create >/dev/null     # 01 again: a reused number never inherits an old ask
   [ ! -e "$M" ]
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unmerged work"
   DAEDALUS_SESSION_ID=sA LS unpromoted 01 >/dev/null; [ -f "$M" ]
   python3 "$LL" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
   run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1914,6 +1920,131 @@ PY
   DAEDALUS_SESSION_ID=sA run python3 "$LL" release 02 --remove --force --operator-said yes
   [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]
+}
+
+# --- v0.12.2: nothing to lose needs no yes; one report and one yes for several windows ---------------------
+# stale_window <NN> — window NN's lease held by a session that has ended (a dead recorded process)
+stale_window() {
+  python3 "$LL" _test-write "$1" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/$1.json")"
+}
+commit_in() { printf 'w\n' >> "$DAEDALUS_HOME/worktrees/$1/thing/a.txt"; git -C "$DAEDALUS_HOME/worktrees/$1/thing" -c user.email=t@x -c user.name=t commit -q -am "$2"; }
+
+@test "release --remove from a session with nothing to lose (v0.12.2): no report, no yes — the window is deleted at once and says no yes was needed; no evidence file; unpromoted says so and asks nothing" {
+  delete_fixture
+  LS create >/dev/null; stale_window 03         # 03: nothing unpromoted, a clean tree, on lease/03
+  W3="$DAEDALUS_HOME/worktrees/03/thing"
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 03
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Window 03 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch and needs no yes." ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/release-asked/03.json" ] || { echo "a report with nothing to lose left a witness"; return 1; }
+  DAEDALUS_SESSION_ID=sA run --separate-stderr LS release 03 --remove
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$output" = $'Window 03 had no unpromoted commits and no uncommitted changes, so no yes was needed.\nWindow 03 released; its worktree and branch are deleted.' ] || { echo "$output"; return 1; }
+  [ ! -d "$W3" ]; [ ! -f "$DAEDALUS_HOME/state/leases/03.json" ]
+  run git -C "$T" rev-parse --verify -q lease/03; [ "$status" -ne 0 ]
+  ! ls "$DAEDALUS_HOME"/state/evidence/deletions/03-*.json 2>/dev/null
+  # window 02 has a commit: still report, yes, delete
+  run delete_as_sA --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]
+}
+
+@test "nothing to lose is proved, never assumed (v0.12.2): a worktree on a detached HEAD or another branch, an uncommitted file, and a trunk ref git cannot read all keep the yes (or refuse) — nothing is deleted" {
+  delete_fixture
+  LS create >/dev/null; stale_window 03
+  W3="$DAEDALUS_HOME/worktrees/03/thing"
+  git -C "$W3" checkout -q --detach
+  DAEDALUS_SESSION_ID=sA run LS release 03 --remove
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 03 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 03
+  case "$output" in *"worktrees/03/thing on a detached HEAD, not lease/03"*"Say yes to delete window 03's work."*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W3" checkout -q -b other
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 03
+  case "$output" in *"worktrees/03/thing on branch other, not lease/03"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$W3" checkout -q lease/03
+  printf 'u\n' > "$W3/untracked.txt"
+  # the earlier report left a witness for 03, so the gate now asks for the operator's words — still no delete
+  DAEDALUS_SESSION_ID=sA run LS release 03 --remove
+  [ "$status" -ne 0 ]; case "$output" in *"Record what the operator said"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$W3/untracked.txt" ]
+  rm "$W3/untracked.txt"
+  git -C "$T" update-ref -d refs/remotes/origin/main
+  DAEDALUS_SESSION_ID=sA run LS release 03 --remove
+  [ "$status" -ne 0 ]; case "$output" in *"cannot tell"*|*"cannot list"*|*"origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W3" ]; [ -f "$DAEDALUS_HOME/state/leases/03.json" ]
+}
+
+# group_fixture — delete_fixture's 01 (sA) and 02 (stale, "unmerged work"), plus 03 (stale, "more work") and 04 (stale,
+# nothing to lose)
+group_fixture() {
+  delete_fixture
+  LS create >/dev/null; LS create >/dev/null
+  stale_window 03; stale_window 04
+  commit_in 03 "more work"
+  W3="$DAEDALUS_HOME/worktrees/03/thing"; W4="$DAEDALUS_HOME/worktrees/04/thing"
+  export W3 W4
+}
+LINE0203="Say yes to delete the work of windows 02 and 03."
+
+@test "unpromoted 02 03 04 (v0.12.2): one report for several windows — the windows with work named, the one with nothing said to need no yes — ending with ONE line naming every window with work; a witness for each of those carrying the group, none for the window with nothing" {
+  group_fixture
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 02 03 04
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = $'Window 02 has 1 unpromoted commit: "unmerged work".\nWindow 03 has 1 unpromoted commit: "more work".\nWindow 04 has no unpromoted commits and no uncommitted changes; deleting its work removes only its worktree and branch and needs no yes.\n'"$LINE0203" ] || { echo "$output"; return 1; }
+  [ "$(marker 02 group)" = '["02", "03"]' ]; [ "$(marker 03 group)" = '["02", "03"]' ]
+  [ "$(marker 02 at)" = "$(marker 03 at)" ]
+  [ "$(marker 03 fingerprint)" = "$(fp 03)" ]
+  [ ! -e "$DAEDALUS_HOME/state/release-asked/04.json" ]
+  # the single-window form is unchanged
+  DAEDALUS_SESSION_ID=sA run LS unpromoted 02
+  [ "$output" = $'Window 02 has 1 unpromoted commit: "unmerged work".\nSay yes to delete window 02\'s work.' ] || { echo "$output"; return 1; }
+  [ "$(marker 02 group)" = '["02"]' ]
+  run LS unpromoted 02 07
+  [ "$status" -ne 0 ]; case "$output" in *"There is no window 07."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "release 02 03 04 --remove after one yes to the one line (v0.12.2): all three deleted, an evidence file for each window that had work; a yes to one window's line alone, a different set of numbers, and a change in any window's work since the report refuse the whole delete by name, deleting nothing" {
+  group_fixture
+  R="$(DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02 03 04)"; P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "Window 02 has 1 unpromoted commit. $LINE02" "$(plus "$P" 2)" >/dev/null   # one window's line only
+  tx "$TX" operator "yes" "$(plus "$P" 3)" >/dev/null
+  DAEDALUS_SESSION_ID=sA run LS release 02 03 04 --remove --force --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"The delete line was not shown to the operator before that yes"*"$LINE0203"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ -d "$W3" ]; [ -d "$W4" ]
+  # a different set of windows than the report asked about
+  DAEDALUS_SESSION_ID=sA run LS release 02 04 --remove --force --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the line shown and a yes, but 03's work changed since the report
+  tx "$TX" assistant "$R" "$(plus "$P" 4)" >/dev/null
+  tx "$TX" operator "Yes, delete them." "$(plus "$P" 5)" >/dev/null
+  commit_in 03 "even more"
+  DAEDALUS_SESSION_ID=sA run LS release 02 03 04 --remove --force --operator-said "Yes, delete them."
+  [ "$status" -ne 0 ]; case "$output" in *"Window 03's work changed since the report"*"core/lease.sh unpromoted 02 03 again"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ -d "$W3" ]; [ -d "$W4" ]
+  git -C "$W3" -c user.email=t@x -c user.name=t reset -q --hard HEAD~1
+  # the work is as reported again: one yes deletes all three
+  settle_lease() { python3 -c 'import sys,time; time.sleep(max(0.0, float(sys.argv[1]) - time.time()))' "$(plus "$P" 7)"; }
+  settle_lease
+  R="$(DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02 03 04)"; P="$(now)"
+  tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" assistant "$R" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" operator "Yes, delete them." "$(plus "$P" 3)" >/dev/null
+  DAEDALUS_SESSION_ID=sA run --separate-stderr LS release 02 03 04 --remove --force --operator-said "Yes, delete them."
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"Window 02 released; its worktree and branch are deleted (after the operator said: \"Yes, delete them.\")."*"Window 03 released; its worktree and branch are deleted (after the operator said: \"Yes, delete them.\")."*"Window 04 had no unpromoted commits and no uncommitted changes, so no yes was needed."*"Window 04 released; its worktree and branch are deleted."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$W" ]; [ ! -d "$W3" ]; [ ! -d "$W4" ]
+  for n in 02 03 04; do [ ! -f "$DAEDALUS_HOME/state/leases/$n.json" ]; [ ! -e "$DAEDALUS_HOME/state/release-asked/$n.json" ]; done
+  ls "$DAEDALUS_HOME"/state/evidence/deletions/02-*.json >/dev/null; ls "$DAEDALUS_HOME"/state/evidence/deletions/03-*.json >/dev/null
+  ! ls "$DAEDALUS_HOME"/state/evidence/deletions/04-*.json 2>/dev/null
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+}
+
+@test "release with several numbers but no --remove is refused (one window releases itself; several numbers go with deleting their work)" {
+  group_fixture
+  DAEDALUS_SESSION_ID=sA run LS release 02 03
+  [ "$status" -ne 0 ]; case "$output" in *"--remove"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("released"))' "$DAEDALUS_HOME/state/leases/02.json")" = "None" ]
 }
 
 # --- The pen for a session holding no window ------------------------------------------------------------------

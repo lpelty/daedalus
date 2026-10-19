@@ -5,7 +5,7 @@
 #   core/lease.sh create [--note "..."] [--criteria <file>]
 #   core/lease.sh claim <NN> | alias <NN> <word> [--clear] | note <NN> "..." | update <NN> --criteria <file>
 #   core/lease.sh spawn "<task>" [--note "..."] | list [--stale] | status
-#   core/lease.sh release <NN> [--remove [--force]] | done <NN> --summary "..." | sweep [--force <NN>]
+#   core/lease.sh release <NN> [--remove [--force]] | release <NN> <NN> … --remove [--force] | done <NN> --summary "..." | sweep [--force <NN>]
 #   core/lease.sh prime take [--reason "..."] | rebase <NN> | split <NN> --repo <nested>
 #   core/lease.sh adopt <branch> [--repo <nested>] [--note "..."]
 #   core/lease.sh adopt --all-unfinished     ("pick it up": all the unfinished work the upgrade stopped on)

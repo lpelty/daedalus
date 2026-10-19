@@ -2113,47 +2113,99 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
             lease["released"] = now_stamp()
             write_lease(root, nn, lease)
             return "Window %s released; this window is done — close it." % nn
-        authorised = deletion_confirmed_locked(root, sid, nn, lease, said) if sid is not None else None
-        trunks = lease.get("trunks") or {}
+        # v0.12.2: from a session, the yes is asked only when there is something to lose (delete_risks)
+        authorised = None
+        if sid is not None and delete_risks(root, nn, lease):
+            authorised = deletion_confirmed_locked(root, sid, nn, lease, said)
         subjects, dirty, problems = unpromoted_work(root, nn, lease)
         if problems and not force:
             raise Refused("Window %s %s. Add --force to delete them." % (nn, ", and ".join(problems)))
-        if authorised is not None:
-            record_deletion(root, nn, str(sid), str(said), authorised)
-        out = []
-        if subjects:
-            out.append("Deleting window %s's unpromoted commits: %s" % (nn, _quoted(subjects)))
-        for repo, files in dirty:
-            out.append("Deleting window %s's uncommitted changes in worktrees/%s/%s: %s" % (nn, nn, repo, ", ".join(files)))
-        for repo in reversed(list(trunks)):          # nested repos first: they sit inside the outer worktree
-            src = root / "target" / repo
-            dest = root / "worktrees" / nn / repo
-            if dest.exists():
-                code, _, err = _git(src, "worktree", "remove", "--force", str(dest))
-                if code != 0:
-                    last = err.strip().splitlines()[-1:] or ["no output"]
-                    raise Refused("could not remove worktrees/%s/%s (git worktree remove: %s); nothing was deleted from the lease"
-                                  % (nn, repo, last[0]))
-            else:
-                prune_under(src, root / "worktrees")
-            if _git(src, "rev-parse", "--verify", "-q", "lease/%s" % nn)[0] == 0:
-                code, _, err = _git(src, "branch", "-D", "lease/%s" % nn)
-                if code != 0:
-                    last = err.strip().splitlines()[-1:] or ["no output"]
-                    raise Refused("could not delete branch lease/%s in target/%s (%s)" % (nn, repo, last[0]))
-            # split's kept tips (spec §7.1 step 2): kept until release --remove, then gone.
-            _, split_refs, _ = _git(src, "for-each-ref", "--format=%(refname)", "refs/daedalus/split/%s-*" % nn)
-            for ref in split_refs.split():
-                _git(src, "update-ref", "-d", ref)
-        _remove_lease_files(root, nn)
-        # the branch is gone, so is its work: drop its unpromoted-work answers, or the band (which reads the cache and
-        # never git) shows a swept number with work until some prompt's board rewrites it (review 2026-10-19, finding 4)
-        write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)
-        if authorised is not None:
-            out.append("Window %s released; its worktree and branch are deleted (after the operator said: \"%s\")."
-                       % (nn, authorised["text"]))
+        return "\n".join(_delete_window_locked(root, nn, lease, sid, said, authorised, subjects, dirty))
+
+
+def _delete_window_locked(root: Path, nn: str, lease: dict, sid: Optional[str], said: Optional[str],
+                          authorised: Optional[dict], subjects: list, dirty: list) -> list:
+    """release --remove's deletion of one window, once its gate has passed: the evidence first (when a yes
+    authorised it), then worktrees, branches, split tips, lease files and its unpromoted-cache entries. Caller holds
+    the lock. Returns the lines."""
+    trunks = lease.get("trunks") or {}
+    if authorised is not None:
+        record_deletion(root, nn, str(sid), str(said), authorised)
+    out = []
+    if sid is not None and authorised is None:
+        out.append("Window %s had no unpromoted commits and no uncommitted changes, so no yes was needed." % nn)
+    if subjects:
+        out.append("Deleting window %s's unpromoted commits: %s" % (nn, _quoted(subjects)))
+    for repo, files in dirty:
+        out.append("Deleting window %s's uncommitted changes in worktrees/%s/%s: %s" % (nn, nn, repo, ", ".join(files)))
+    for repo in reversed(list(trunks)):          # nested repos first: they sit inside the outer worktree
+        src = root / "target" / repo
+        dest = root / "worktrees" / nn / repo
+        if dest.exists():
+            code, _, err = _git(src, "worktree", "remove", "--force", str(dest))
+            if code != 0:
+                last = err.strip().splitlines()[-1:] or ["no output"]
+                raise Refused("could not remove worktrees/%s/%s (git worktree remove: %s); nothing was deleted from the lease"
+                              % (nn, repo, last[0]))
         else:
-            out.append("Window %s released; its worktree and branch are deleted." % nn)
+            prune_under(src, root / "worktrees")
+        if _git(src, "rev-parse", "--verify", "-q", "lease/%s" % nn)[0] == 0:
+            code, _, err = _git(src, "branch", "-D", "lease/%s" % nn)
+            if code != 0:
+                last = err.strip().splitlines()[-1:] or ["no output"]
+                raise Refused("could not delete branch lease/%s in target/%s (%s)" % (nn, repo, last[0]))
+        # split's kept tips (spec §7.1 step 2): kept until release --remove, then gone.
+        _, split_refs, _ = _git(src, "for-each-ref", "--format=%(refname)", "refs/daedalus/split/%s-*" % nn)
+        for ref in split_refs.split():
+            _git(src, "update-ref", "-d", ref)
+    _remove_lease_files(root, nn)
+    # the branch is gone, so is its work: drop its unpromoted-work answers, or the band (which reads the cache and
+    # never git) shows a swept number with work until some prompt's board rewrites it (review 2026-10-19, finding 4)
+    write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)
+    if authorised is not None:
+        out.append("Window %s released; its worktree and branch are deleted (after the operator said: \"%s\")."
+                   % (nn, authorised["text"]))
+    else:
+        out.append("Window %s released; its worktree and branch are deleted." % nn)
+    return out
+
+
+def release_many(root: Path, tokens: list, sid: Optional[str], force: bool = False, said: Optional[str] = None) -> str:
+    """`release 02 03 04 --remove [--force] [--operator-said "…"]` (v0.12.2): several windows' work deleted under
+    ONE gate. Every window is checked as `release NN --remove` checks one — it exists, no other live session holds
+    it — and, from a session, the windows with something to lose (delete_risks) need one yes to one ask that named
+    exactly them (group_confirmed_locked); a window with nothing to lose needs none. Any refusal — a held window,
+    a missing ask, a changed window, unpromoted work without --force — refuses the whole delete before anything is
+    deleted. Several numbers go only with --remove: a window releases itself (`release NN`)."""
+    with lock(root):
+        leases = read_all(root)
+        nns = sorted(set(number_of(leases, t, "release") for t in tokens))
+        for nn in nns:
+            lease = leases.get(nn)
+            if lease is None:
+                raise Refused("There is no window %s." % nn)
+            holder = lease.get("session_id")
+            if sid is not None and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+                raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
+        ok = None
+        if sid is not None:
+            need = [nn for nn in nns if delete_risks(root, nn, leases[nn])]
+            if need:
+                ok = group_confirmed_locked(root, sid, need, leases, said)
+        work = {}
+        for nn in nns:
+            subjects, dirty, problems = unpromoted_work(root, nn, leases[nn])
+            if problems and not force:
+                raise Refused("Window %s %s. Add --force to delete them; nothing was deleted." % (nn, ", and ".join(problems)))
+            work[nn] = (subjects, dirty)
+        out = []
+        for nn in nns:
+            m = (ok or {}).get("markers", {}).get(nn)
+            authorised = dict(ok, fingerprint=m.get("fingerprint"), problems=m.get("problems")) if m else None
+            try:
+                out += _delete_window_locked(root, nn, leases[nn], sid, said, authorised, *work[nn])
+            except Refused as e:
+                raise Refused("\n".join(out + [str(e)]))
         return "\n".join(out)
 
 
@@ -2184,6 +2236,20 @@ def unpromoted_work(root: Path, nn: str, lease: dict) -> Tuple[list, list, list]
 # the transcript check looks for (the operator may ask first; a reply that ends with it re-arms the yes, as
 # promote's invitation does): the gate computes it from the number, nothing read from disk supplies it.
 DELETE_INVITATION = "Say yes to delete window %s's work"
+# v0.12.2: one report for several windows ends with ONE line naming every window with work, so one yes answers it
+# (a reply can end with only one line: one line per window made the operator's single yes clear one window at most,
+# and the agent asked again, and again).
+DELETE_INVITATION_MANY = "Say yes to delete the work of windows %s"
+
+
+def and_list(nns: list) -> str:
+    """'02' · '02 and 03' · '02, 03 and 04'."""
+    return nns[0] if len(nns) == 1 else "%s and %s" % (", ".join(nns[:-1]), nns[-1])
+
+
+def delete_invitation(nns: list) -> str:
+    """The line the operator's yes answers: one window's line, unchanged, or the one line for several."""
+    return DELETE_INVITATION % nns[0] if len(nns) == 1 else DELETE_INVITATION_MANY % and_list(nns)
 
 
 def release_asked_path(root: Path, nn: str) -> Path:
@@ -2259,39 +2325,88 @@ def _read_json(p: Path) -> Optional[dict]:
 
 ASK_FIRST = ("Run core/lease.sh unpromoted %s first, repeat its report to the operator word for word, and ask; the "
              "delete runs only after their yes.")
+NOTHING_TO_LOSE = ("Window %s has no unpromoted commits and no uncommitted changes; deleting its work removes only its "
+                   "worktree and branch and needs no yes.")
+
+
+def delete_risks(root: Path, nn: str, lease: dict) -> list:
+    """What deleting window nn's work could lose, as the report's sentences — [] only when it is PROVED there is
+    nothing (v0.12.2: then the delete needs no yes): no commit on lease/<NN> that its trunk lacks, no uncommitted or
+    untracked file in any of its worktrees (unpromoted_work), and every worktree there checked out on lease/<NN> —
+    a detached HEAD or another branch may carry commits unpromoted_work never looks at. Refused when any of it
+    cannot be told: cannot tell is not "nothing"."""
+    _, _, risks = unpromoted_work(root, nn, lease)
+    risks = list(risks)
+    for repo in (lease.get("trunks") or {}):
+        wt = root / "worktrees" / nn / repo
+        if not wt.is_dir():
+            continue
+        code, out, err = _git(wt, "symbolic-ref", "-q", "HEAD")
+        if code == 0 and out.strip() == "refs/heads/lease/%s" % nn:
+            continue
+        if code == 0:
+            ref = out.strip()
+            risks.append("has worktrees/%s/%s on branch %s, not lease/%s"
+                         % (nn, repo, ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref, nn))
+        elif code == 1:
+            risks.append("has worktrees/%s/%s on a detached HEAD, not lease/%s" % (nn, repo, nn))
+        else:
+            last = err.strip().splitlines()[-1:] or ["no output"]
+            raise Refused("cannot tell which branch worktrees/%s/%s is on (git symbolic-ref: %s)" % (nn, repo, last[0]))
+    return risks
 
 
 def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: dict, said: Optional[str]) -> dict:
-    """Whether a session may delete window nn's work now (agent-runnable design 2026-10-15, §4.2). Caller holds
-    the lock, shared or exclusive; this never calls lock(). Returns what authorised it — transcript_ref,
-    shown_ref, cutoff, fingerprint, text — or raises Refused with one sentence:
-      1. the witness: `unpromoted nn` ran in THIS session (state/release-asked/<nn>.json names sid and nn), and
-         not before this window existed (lease_epochs) — a witness, not a trust root;
+    """One window's gate: group_confirmed_locked for [nn], answering as before — what authorised it (transcript_ref,
+    shown_ref, cutoff, fingerprint, text, problems) or Refused with one sentence."""
+    ok = group_confirmed_locked(root, sid, [nn], {nn: lease}, said)
+    m = ok["markers"][nn]
+    return dict(ok, fingerprint=m.get("fingerprint"), problems=m.get("problems"))
+
+
+def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Dict[str, dict],
+                           said: Optional[str]) -> dict:
+    """Whether a session may delete the work of windows nns now (agent-runnable design 2026-10-15, §4.2; several
+    windows under one yes since v0.12.2). Caller holds the lock, shared or exclusive; this never calls lock().
+    Returns what authorised it — transcript_ref, shown_ref, cutoff, text, and each window's witness under
+    "markers" — or raises Refused with one sentence:
+      1. the witness: ONE `unpromoted` ask in THIS session named exactly these windows (state/release-asked/<NN>.json
+         for each names sid, its number and the same group), and not before any of them existed (lease_epochs) —
+         a witness, not a trust root;
       2. tty mode: the deployment confirms at a terminal, so the delete is pasted there;
       3. the words: --operator-said carries one plain line that is an acknowledgement (transcriptlib.is_assent;
          a reply of several lines, or with a $ or a backtick, cannot ride on the command — ask for a one-line reply);
-      4. the work is what the report named (work_fingerprint unchanged since the ask);
+      4. the work is what the report named, in every window (work_fingerprint unchanged since the ask): one changed
+         window refuses the whole delete by name — nothing is deleted, and the ask is made again for all of them;
       5. the yes is in this session's transcript as the operator's first reply to an assistant turn carrying the
-         constant DELETE_INVITATION line, after a cut-off that is the latest of the ask and the lease's own times
-         — the recorded-yes machinery promote uses (transcriptlib.find_operator_words; the line re-arms)."""
+         ask's one line (delete_invitation — one window's line, or one line naming every window), after a cut-off
+         that is the latest of the ask and the leases' own times — the recorded-yes machinery promote uses
+         (transcriptlib.find_operator_words; the line re-arms)."""
     import transcriptlib as tl
-    marker = _read_json(release_asked_path(root, nn))
-    if marker is None or marker.get("session_id") != sid or marker.get("lease") != nn:
-        raise Refused(ASK_FIRST % nn)
-    try:
-        asked_at = float(marker.get("at"))      # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        raise Refused(ASK_FIRST % nn)
-    epochs = lease_epochs(lease)
-    if asked_at < epochs:
-        raise Refused(ASK_FIRST % nn)           # the report predates this window: stale, or not this window's
+    nns = sorted(set(nns))
+    nums = " ".join(nns)
+    markers, asked_at, epochs = {}, 0.0, 0.0
+    for nn in nns:
+        m = _read_json(release_asked_path(root, nn))
+        group = (m or {}).get("group") or [(m or {}).get("lease")]
+        if m is None or m.get("session_id") != sid or m.get("lease") != nn or sorted(group) != nns:
+            raise Refused(ASK_FIRST % nums)
+        try:
+            asked_at = max(asked_at, float(m.get("at")))      # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raise Refused(ASK_FIRST % nums)
+        e = lease_epochs(leases[nn])
+        if float(m.get("at")) < e:                          # type: ignore[arg-type]
+            raise Refused(ASK_FIRST % nums)                  # the report predates this window: stale, or not its own
+        epochs = max(epochs, e)
+        markers[nn] = m
     try:
         mode = tl.confirm_mode(root)
     except ValueError as e:
         raise Refused(str(e))
     if mode == "tty":
         raise Refused("This deployment confirms at the terminal (promote.confirm: tty). Paste this line in your "
-                      "own shell: cd %s && core/lease.sh release %s --remove --force" % (root, nn))
+                      "own shell: cd %s && core/lease.sh release %s --remove --force" % (root, nums))
     if not (said or "").strip():
         raise Refused("Record what the operator said: add --operator-said \"<their whole reply>\". The yes is "
                       "evidence; an empty one is not a yes.")
@@ -2302,11 +2417,13 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
     if "\n" in said or "$" in said or "`" in said:
         raise Refused("Ask the operator for a one-line reply and record that; a reply with several lines or shell "
                       "characters cannot be carried on the command.")
-    if work_fingerprint(root, nn, lease) != marker.get("fingerprint"):
-        raise Refused("Window %s's work changed since the report (a commit, an amended commit, or a changed or added "
-                      "file); run core/lease.sh unpromoted %s again and ask again." % (nn, nn))
+    changed = [nn for nn in nns if work_fingerprint(root, nn, leases[nn]) != markers[nn].get("fingerprint")]
+    if changed:
+        raise Refused("Window%s %s's work changed since the report (a commit, an amended commit, or a changed or added "
+                      "file); run core/lease.sh unpromoted %s again and ask again."
+                      % ("s" if len(changed) > 1 else "", and_list(changed), nums))
     cutoff = max(asked_at, epochs)
-    line = DELETE_INVITATION % nn
+    line = delete_invitation(nns)
     shell = "set `promote.confirm: tty` and run the delete in your own shell"
     try:
         found = tl.find_operator_words(tl.transcript_for(root, str(sid)), said, cutoff, require_shown=True,
@@ -2326,7 +2443,7 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
         raise Refused("The delete line was not shown to the operator before that yes: the report was not repeated, "
                       "the operator's reply to it came before that yes, or your last words before it were not the "
                       "line. Nothing was deleted. Show the report once (core/lease.sh unpromoted %s); after that, end "
-                      "every reply of yours with the line \"%s.\" and nothing after it, then ask again." % (nn, line))
+                      "every reply of yours with the line \"%s.\" and nothing after it, then ask again." % (nums, line))
     except tl.NotSubmitted as e:
         raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; show the report to "
                       "the operator and ask again." % str(e).replace("the words are", "they are", 1))
@@ -2338,19 +2455,24 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
         raise Refused("I could not find those words as something the operator typed after the delete line was "
                       "shown. Nothing was deleted.")
     return {"transcript_ref": found["transcript_ref"], "shown_ref": found["shown_ref"], "cutoff": cutoff,
-            "fingerprint": marker.get("fingerprint"), "text": found["text"], "problems": marker.get("problems")}
+            "text": found["text"], "markers": markers}
 
 
-def deletion_confirmed(root: Path, sid: str, nn: str, said: Optional[str]) -> Optional[str]:
-    """The guard's entry (core/guard-bash.py): the refusal sentence for `core/lease.sh release nn --remove …` from
-    session sid, or None when the delete may run. A shared lock, one read of the lease; transcriptlib is imported
-    only inside the check."""
+def deletion_confirmed(root: Path, sid: str, nns: "list | str", said: Optional[str]) -> Optional[str]:
+    """The guard's entry (core/guard-bash.py): the refusal sentence for `core/lease.sh release NN [NN …] --remove …`
+    from session sid, or None when the delete may run. A shared lock, one read of the leases; transcriptlib is
+    imported only inside the check. A window with nothing to lose (delete_risks) needs no yes (v0.12.2); the rest
+    need one yes to one ask that named exactly them."""
+    nns = [nns] if isinstance(nns, str) else list(nns)
     try:
         with lock(root, shared=True):
-            lease = read_lease(root, nn)
-            if lease is None:
-                return "There is no window %s." % nn
-            deletion_confirmed_locked(root, sid, nn, lease, said)
+            leases = read_all(root)
+            for nn in nns:
+                if leases.get(nn) is None:
+                    return "There is no window %s." % nn
+            need = [nn for nn in nns if delete_risks(root, nn, leases[nn])]
+            if need:
+                group_confirmed_locked(root, sid, need, leases, said)
     except Refused as e:
         return str(e)
     return None
@@ -2368,37 +2490,46 @@ def record_deletion(root: Path, nn: str, sid: str, said: str, ok: dict) -> Path:
     return p
 
 
-def unpromoted_report(root: Path, token: str, sid: Optional[str] = None) -> str:
-    """`core/lease.sh unpromoted <NN>`: the report-only first step of "release NN and delete its work" — what
-    `release NN --remove` would delete, deleting nothing. A verb of its own because `release --remove` was denied
-    by Claude Code's auto-mode classifier before it ran (another deployment, 2026-10-13), and because with nothing
-    unpromoted it deletes at once instead of reporting. Read-only on the leases: a shared lock, any session, a
-    visitor too. Two lines: the report, then DELETE_INVITATION (the agent repeats both word for word and the
-    operator's next yes is what `release --remove` checks). From a session (sid), the ask is witnessed under
-    state/release-asked/<NN>.json — the session id, the report, the problems and the work's fingerprint, the
-    latest ask for the number overwriting an earlier one; a visitor's ask is witnessed too (a visitor cannot
-    release). An operator shell leaves no marker: it needs none."""
+def unpromoted_report(root: Path, tokens: "list | str", sid: Optional[str] = None) -> str:
+    """`core/lease.sh unpromoted <NN> [<NN> …]`: the report-only first step of "release NN and delete its work" —
+    what `release NN --remove` would delete, deleting nothing. A verb of its own because `release --remove` was denied
+    by Claude Code's auto-mode classifier before it ran (another deployment, 2026-10-13). Read-only on the leases: a
+    shared lock, any session, a visitor too. One sentence per window, then — when any window has something to lose —
+    ONE line the operator's yes answers (delete_invitation: one window's line, or one line naming every window with
+    something to lose; v0.12.2). A window with nothing to lose (delete_risks is []) is said to need no yes, and
+    gets no witness. From a session (sid), each window with something to lose is witnessed under
+    state/release-asked/<NN>.json — the session id, its report, problems and fingerprint, the time and the group
+    of numbers the one line named, the latest ask for a number overwriting an earlier one; a visitor's ask is
+    witnessed too (a visitor cannot release). An operator shell leaves no marker: it needs none."""
+    tokens = [tokens] if isinstance(tokens, str) else list(tokens)
     with lock(root, shared=True):
         leases = read_all(root)
-        nn = number_of(leases, token, "unpromoted")
-        lease = leases.get(nn)
-        if lease is None:
-            raise Refused("There is no window %s." % nn)
-        _, _, problems = unpromoted_work(root, nn, lease)
-        fp = work_fingerprint(root, nn, lease)
-    if not problems:
-        report = ("Window %s has no unpromoted commits and no uncommitted changes; deleting its work removes only "
-                  "its worktree and branch." % nn)
-    else:
-        report = "Window %s %s." % (nn, ", and ".join(problems))
-    if sid is not None:
-        marker = release_asked_path(root, nn)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        tmp = marker.with_name(marker.name + ".tmp")
-        tmp.write_text(json.dumps({"lease": nn, "session_id": sid, "at": time.time(), "report": report,
-                                   "problems": problems, "fingerprint": fp}, indent=2))
-        os.replace(str(tmp), str(marker))
-    return "%s\n%s." % (report, DELETE_INVITATION % nn)
+        nns = []
+        for t in tokens:
+            nn = number_of(leases, t, "unpromoted")
+            if leases.get(nn) is None:
+                raise Refused("There is no window %s." % nn)
+            if nn not in nns:
+                nns.append(nn)
+        nns.sort()
+        risks = {nn: delete_risks(root, nn, leases[nn]) for nn in nns}
+        need = [nn for nn in nns if risks[nn]]
+        fps = {nn: work_fingerprint(root, nn, leases[nn]) for nn in need}
+    reports = {nn: ("Window %s %s." % (nn, ", and ".join(risks[nn])) if risks[nn] else NOTHING_TO_LOSE % nn)
+               for nn in nns}
+    if sid is not None and need:
+        at = time.time()
+        for nn in need:
+            marker = release_asked_path(root, nn)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            tmp = marker.with_name(marker.name + ".tmp")
+            tmp.write_text(json.dumps({"lease": nn, "session_id": sid, "at": at, "report": reports[nn],
+                                       "problems": risks[nn], "fingerprint": fps[nn], "group": need}, indent=2))
+            os.replace(str(tmp), str(marker))
+    lines = [reports[nn] for nn in nns]
+    if need:
+        lines.append(delete_invitation(need) + ".")
+    return "\n".join(lines)
 
 
 def _holder_or_shell(root: Path, nn: str, lease: dict, sid: Optional[str], cmd: str) -> None:
@@ -5856,9 +5987,9 @@ def main(argv: list) -> int:
             sys.stderr.write("daedalus: %s\n" % e); return 1
     if cmd == "unpromoted":
         if not args or args[0].startswith("--"):
-            sys.stderr.write("usage: core/lease.sh unpromoted <NN>\n"); return 2
+            sys.stderr.write("usage: core/lease.sh unpromoted <NN> [<NN> …]\n"); return 2
         try:
-            print(unpromoted_report(root, args[0], session_id_from_env())); return 0
+            print(unpromoted_report(root, [a for a in args if not a.startswith("--")], session_id_from_env())); return 0
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
     if cmd == "waiting-work":
@@ -5910,8 +6041,21 @@ def main(argv: list) -> int:
         if cmd == "release":
             # --operator-said carries the operator's whole reply to the delete line (the recorded yes, §4.2); read
             # here so its value is never mistaken for a token or a flag.
+            # several numbers (v0.12.2): the leading words before the first flag; they go only with --remove
+            nums = []
+            for a in args:
+                if a.startswith("--"):
+                    break
+                nums.append(a)
+            said = _after("--operator-said") if "--operator-said" in args else None
+            if len(nums) > 1:
+                if "--remove" not in args:
+                    sys.stderr.write("daedalus: Release one window at a time (each window releases itself); several "
+                                     "numbers go with --remove, which deletes their work.\n")
+                    return 1
+                return _refused(lambda: release_many(root, nums, sid, force="--force" in args, said=said))
             return _refused(lambda: release(root, args[0], sid, remove="--remove" in args, force="--force" in args,
-                                            said=_after("--operator-said") if "--operator-said" in args else None))
+                                            said=said))
         if cmd == "done":
             return _refused(lambda: mark_done(root, args[0], require_session(sid, "done"), _after("--summary")))
         if cmd == "sweep":
