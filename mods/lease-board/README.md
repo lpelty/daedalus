@@ -3,7 +3,9 @@
 A Claude Code mod that draws the lease board in the band above the prompt in
 every Daedalus window: this window's number, whether it holds the pen, and every
 other window's state (live, quiet, stale, finished, released), its changed-file
-count, its alias and its note. It refreshes every 2 seconds.
+count, its alias and its note. It refreshes every 2 seconds. After the windows,
+each swept number that still holds unpromoted work — new windows skip it — is
+one line with its commit count (0.1.4), as the last prompt's board found it.
 
 ```
 window 02 · this window · live · 4 changed · poc-ui

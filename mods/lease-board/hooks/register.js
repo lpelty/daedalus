@@ -66,6 +66,11 @@ function stateWords(w) {
       return 'finished — promote ' + w.nn + ' or release ' + w.nn
     case 'released':
       return 'released'
+    case 'swept-waiting': {
+      // a swept number still holding unpromoted work (board-json since 2026-10-19): new windows skip it
+      const n = typeof w.waiting_count === 'number' ? w.waiting_count : 0
+      return 'swept — ' + n + ' unpromoted commit' + (n === 1 ? '' : 's') + ' waiting — say "this is window ' + w.nn + '" to continue it'
+    }
     default:
       return String(w.state)
   }
@@ -85,6 +90,8 @@ function styleFor(state) {
       return { color: 'suggestion' }
     case 'released':
       return { dimColor: true }
+    case 'swept-waiting':
+      return { color: 'warning' }
     default:
       return {}
   }
@@ -95,6 +102,7 @@ function lineText(w) {
   if (w.is_this) parts.push('this window')
   if (w.is_prime) parts.push('holds the pen')
   parts.push(stateWords(w))
+  if (w.state === 'swept-waiting') return parts.join(' · ') // no lease: nothing changed, no alias, no peer
   parts.push((typeof w.changed_count === 'number' ? w.changed_count : 0) + ' changed')
   if (w.alias) parts.push(String(w.alias))
   // a derived name looks like a number and is not one (spec §4.1): named only when it differs

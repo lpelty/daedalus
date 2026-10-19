@@ -267,11 +267,12 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
   bj_check 'all(isinstance(w["changed_count"], int) and w["nn"].isdigit() and len(w["nn"]) == 2 for w in o["windows"])'
 }
 
-@test "board-json: exactly the five top-level keys (ami included) and exactly the nine window keys the contract names, nothing more" {
+@test "board-json: exactly the five top-level keys (ami included) and exactly the ten window keys the contract names, nothing more (waiting_count since 2026-10-19: null on a lease's row)" {
   LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
   bj_check 'sorted(o) == ["ami", "generated_epoch", "prime_window", "this_window", "windows"]'
-  bj_check 'len(o["windows"]) == 2 and all(sorted(w) == ["alias", "changed_count", "is_prime", "is_this", "last_seen_epoch", "nn", "note", "peer_name", "state"] for w in o["windows"])'
+  bj_check 'len(o["windows"]) == 2 and all(sorted(w) == ["alias", "changed_count", "is_prime", "is_this", "last_seen_epoch", "nn", "note", "peer_name", "state", "waiting_count"] for w in o["windows"])'
+  bj_check 'all(w["waiting_count"] is None for w in o["windows"])'
   bj_check 'o["windows"][1]["nn"] == "02" and o["windows"][1]["peer_name"] is None and o["windows"][1]["alias"] is None'   # created, never claimed
   rm -f "$DAEDALUS_HOME/state/leases/02.seen"
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
@@ -518,4 +519,92 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   bj_check '[w["changed_count"] for w in o["windows"] if w["nn"] == "01"] == [2]'
   run board sB; c="$(ctx)"     # sB is the reader: 01's sidecar is read, not recomputed
   case "$c" in *"- 01 — "*"2 changed: README.md, src/a.py"*) : ;; *) echo "$c"; return 1 ;; esac
+}
+
+# --- skipped numbers on the band (reported 2026-10-19: a new terminal became 05 with no 02 or 03 on the band) ------
+@test "board-json: a swept number holding unpromoted work is a swept-waiting row with its count, read from the unpromoted-work cache the model-facing board keeps — still no git; once a window takes the number back it is that lease's row only" {
+  LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  swept_with_work 02 03
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check '[w["nn"] for w in o["windows"]] == ["01"]'             # nothing known yet: no prompt has checked them
+  run board sA; c="$(ctx)"
+  # one commit in the outer repo and one in the nested one, per window
+  case "$c" in *"- 02 — swept, 2 unpromoted commits waiting"*"- 03 — swept, 2 unpromoted commits waiting"*) : ;; *) echo "$c"; return 1 ;; esac
+  shim="$BATS_TEST_TMPDIR/failgit"; mkdir -p "$shim"; ln -sf "$BATS_TEST_DIRNAME/fixtures/leases/fake-git-fail" "$shim/git"
+  run --separate-stderr env PATH="$shim:$PATH" python3 "$DAEDALUS_HOME/core/leaselib.py" board-json --session sA
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  bj_check '[(w["nn"], w["state"], w["waiting_count"]) for w in o["windows"]] == [("01", "live", None), ("02", "swept-waiting", 2), ("03", "swept-waiting", 2)]'
+  bj_check 'all(not w["is_this"] and not w["is_prime"] and w["changed_count"] == 0 and w["peer_name"] is None for w in o["windows"][1:])'
+  bind_live 03 sC                                                   # 'this is window 03': the number is a lease again
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check '[(w["nn"], w["state"]) for w in o["windows"]] == [("01", "live"), ("03", "live"), ("02", "swept-waiting")]'
+}
+
+@test "a number held back by a foreign checkout (no lease, worktrees/NN on another branch): create says why it skipped it, and doctor names it with the branch" {
+  LS create >/dev/null; bind_live 01 sA; LS create >/dev/null
+  git -C "$DAEDALUS_HOME/worktrees/02/thing/sub" checkout -q -b elsewhere     # registered to a branch other than lease/02
+  rm -f "$DAEDALUS_HOME/state/leases/02.json" "$DAEDALUS_HOME/state/leases/02.seen" "$DAEDALUS_HOME/state/leases/02.changed"
+  run LS create; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -f "$DAEDALUS_HOME/state/leases/03.json" ]
+  case "$output" in *"Numbered 03, not a lower number: 02 has worktrees/02 checked out on another branch (elsewhere)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lower number: 01"*) echo "the live 01 is named: $output"; return 1 ;; esac
+  run python3 "$DAEDALUS_HOME/core/leaselib.py" doctor-lines; [ "$status" -eq 0 ]
+  case "$output" in *"NOTE     leases: 02 has worktrees/02 checked out on another branch (elsewhere)"*"git worktree remove"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "board-json: a swept number whose cached answer is 'nothing waiting' is no row" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  rm -f "$DAEDALUS_HOME/state/leases/02.json" "$DAEDALUS_HOME/state/leases/02.seen" "$DAEDALUS_HOME/state/leases/02.changed"
+  run board sA
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check '[w["nn"] for w in o["windows"]] == ["01"]'
+}
+
+# --- the SessionEnd sweep (Larry, 2026-10-19): a window's own released lease goes when its session ends ----------
+SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end; }
+
+@test "session-end: the ending session's own released lease is removed (worktree and branch kept); another session's released lease, its own unreleased one, and a bad or empty payload are left — exit 0 and nothing printed every time" {
+  LS create >/dev/null; LS create >/dev/null; LS create >/dev/null
+  bind_live 01 sA; bind_live 02 sB; bind_live 03 sC
+  CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null; CLAUDE_CODE_SESSION_ID=sB LS release 02 >/dev/null
+  L="$DAEDALUS_HOME/state/leases"
+  run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sA","reason":"prompt_input_exit"}'
+  [ "$status" -eq 0 ] && [ -z "$output" ] && [ -z "$stderr" ] || { echo "$status: $output / $stderr"; return 1; }
+  [ ! -f "$L/01.json" ] && [ ! -f "$L/01.seen" ]; [ -f "$L/02.json" ]; [ -f "$L/03.json" ]
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; git -C "$DAEDALUS_HOME/target/thing" rev-parse -q --verify lease/01 >/dev/null
+  run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sC","reason":"other"}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$L/03.json" ]
+  for bad in 'not json' '{}' '[1]' '{"session_id":7}' ''; do
+    run --separate-stderr SE "$bad"; [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "payload '$bad': $status $output $stderr"; return 1; }
+  done
+  [ -f "$L/02.json" ]
+}
+
+@test "session-end: with the lease lock held it gives up within 2 s, exit 0, removing nothing; in a home with no state/leases/ it makes none" {
+  LS create >/dev/null; bind_live 01 sA; CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null
+  L="$DAEDALUS_HOME/state/leases"
+  python3 -c 'import fcntl,os,sys,time
+fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK_EX); time.sleep(8)' "$L/.lock" 3>&- </dev/null >/dev/null 2>&1 &
+  holder=$!; printf '%s\n' "$holder" >> "$BATS_TEST_TMPDIR/live-pids"
+  sleep 0.5
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run --separate-stderr SE '{"session_id":"sA","reason":"other"}'
+  t1="$(python3 -c 'import time; print(time.time())')"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$L/01.json" ]
+  python3 -c 'import sys; d=float(sys.argv[2])-float(sys.argv[1]); assert d < 2.0, "waited %.2fs" % d' "$t0" "$t1"
+  rm -rf "$L"
+  run --separate-stderr SE '{"session_id":"sA","reason":"other"}'
+  [ "$status" -eq 0 ]; [ ! -e "$L" ]
+}
+
+@test "the tracked settings.json runs session-end on SessionEnd beside the capture flush, with its own timeout" {
+  python3 - "$BATS_TEST_DIRNAME/../../.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))["hooks"]["SessionEnd"]
+hs = [h for g in d for h in g["hooks"]]
+se = [h for h in hs if h["command"] == 'python3 "$CLAUDE_PROJECT_DIR"/core/leaselib.py session-end']
+assert len(se) == 1 and isinstance(se[0].get("timeout"), int) and 1 <= se[0]["timeout"] <= 5, hs
+assert any("capture-tick.sh --final" in h["command"] for h in hs), hs
+PY
 }

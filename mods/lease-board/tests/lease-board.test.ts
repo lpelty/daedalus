@@ -94,6 +94,25 @@ test('draws this window first, in bold, and marks the window that holds the pen'
   expect(await ui.find({ type: 'Text', text: /^board unavailable/ })).toBeUndefined()
 })
 
+test('a swept number holding unpromoted work is a warning-coloured line with its count and how to continue it, after the windows', async ($, on) => {
+  const board = {
+    ...FIXTURE,
+    windows: [
+      ...FIXTURE.windows,
+      { nn: '06', alias: null, state: 'swept-waiting', changed_count: 0, peer_name: null, is_prime: false, is_this: false, last_seen_epoch: null, note: null, waiting_count: 3 },
+      { nn: '07', alias: null, state: 'swept-waiting', changed_count: 0, peer_name: null, is_prime: false, is_this: false, last_seen_epoch: null, note: null, waiting_count: 1 },
+    ],
+  }
+  stubs(on, () => ok(board))
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const lines = await windowLines(ui)
+  expect(lines.length).toBe(7)
+  expect(lines[5]).toBe('window 06 · swept — 3 unpromoted commits waiting — say "this is window 06" to continue it')
+  expect(lines[6]).toBe('window 07 · swept — 1 unpromoted commit waiting — say "this is window 07" to continue it')
+  expect((await ui.find({ type: 'Text', text: /^window 06 / }))?.props.color).toBe('warning')
+})
+
 test('runs board-json with this session id, in the Daedalus home, with a 5 s timeout, and no shell', async ($, on) => {
   const { runs, exists } = stubs(on, () => ok(FIXTURE))
   await start($)

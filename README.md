@@ -518,7 +518,11 @@ clean, nothing unpromoted — does not wait for a sweep: the next terminal
 start reclaims it (a resumed window too, before it rebinds; `create`,
 `spawn` and `adopt` before they choose a number), so the terminal you open
 in the morning is window 01 again and takes the pen from yesterday's
-session. A stale window that still holds work, or a background clone that never
+session. A released window needs no sweep either: its lease goes when its
+session ends (the SessionEnd hook), or at the next terminal start if that hook
+did not run. Its worktree and branch stay, and if the branch holds unpromoted
+commits the number stays with them — the board and the band show it as swept
+with work waiting, and a terminal numbered past it is told why. A stale window that still holds work, or a background clone that never
 reported, keeps its number until you continue it or release it. To continue
 window 01, say "this is window 01" in a new terminal: the number that terminal
 took at start has nothing in it, so `core/lease.sh claim 01` gives it up (its

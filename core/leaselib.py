@@ -971,19 +971,61 @@ def waiting_work_at(target: Path, trunk_sha: str, tip_sha: str, timeout: float =
     return subs
 
 
-def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: Dict[str, str]) -> str:
+def free_number(root: Path, leases: Dict[str, dict], target_base: Path, trunks: Dict[str, str],
+                skipped: Optional[list] = None) -> str:
     """The lowest number 01–99 that no lease file holds and no swept lease's
     unpromoted work is waiting under, and whose worktrees/<NN> is not another
-    branch's checkout (_foreign_numbers). Caller holds the lock."""
+    branch's checkout (_foreign_numbers). Caller holds the lock. `skipped`,
+    when given, receives (nn, why) for each lower number passed over whose
+    reason the band would not show as an open window — a lease that is
+    released, finished or stale, unpromoted work, a foreign checkout — so the
+    start can say why the number is not lower (reported 2026-10-19: a new
+    terminal was 05 with no 02 or 03 on the band). An open window (live,
+    quiet, resumed) is left out: the band already shows it."""
     foreign = _foreign_numbers(root, trunks)
     for i in range(1, 100):
         nn = "%02d" % i
-        if nn in leases or nn in foreign:
+        if nn in leases:
+            if skipped is not None:
+                why = _held_why(root, nn, leases[nn])
+                if why:
+                    skipped.append((nn, why))
             continue
-        if any(waiting_work(target_base / repo, trunks[repo], nn) for repo in trunks):
+        if nn in foreign:
+            if skipped is not None:
+                skipped.append((nn, FOREIGN_WHY % (nn, foreign[nn])))
+            continue
+        hit = next((repo for repo in trunks if waiting_work(target_base / repo, trunks[repo], nn)), None)
+        if hit is not None:
+            if skipped is not None:
+                skipped.append((nn, "has unpromoted commits on lease/%s%s"
+                                % (nn, "" if hit == target_name(root) else " in %s" % hit)))
             continue
         return nn
     raise Refused("no free window number: 01–99 are all held; run `core/lease.sh sweep`")
+
+
+FOREIGN_WHY = "has worktrees/%s checked out on another branch (%s), which new windows never take over"
+
+
+def _held_why(root: Path, nn: str, lease: dict) -> Optional[str]:
+    """Why a lease file keeps its number from a new window, in the words of free_number's `skipped` — None for an
+    open window (live, quiet, resumed), which the band shows as one."""
+    if lease.get("released"):
+        return "is released and its session is still open"
+    if lease.get("finished"):
+        return "is finished — promote %s or release %s" % (nn, nn)
+    if liveness(root, nn, lease) == "stale":
+        return "is stale (no live session) — say 'this is window %s' to a new window to continue it" % nn
+    return None
+
+
+def skipped_sentence(nn: str, skipped: list) -> Optional[str]:
+    """The start's one line on why window <nn> is not a lower number (free_number's `skipped`), None when nothing
+    needs saying."""
+    if not skipped:
+        return None
+    return "Numbered %s, not a lower number: %s." % (nn, "; ".join("%s %s" % (k, why) for k, why in skipped))
 
 
 # Every git command run here and by the upgrade in a target repository runs with submodule.recurse off. Set — in the
@@ -1396,11 +1438,12 @@ def _lock_words(err: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _foreign_numbers(root: Path, trunks: Dict[str, str]) -> set:
+def _foreign_numbers(root: Path, trunks: Dict[str, str]) -> Dict[str, str]:
     """Numbers whose worktrees/<NN>/<repo> is registered to a branch other than lease/<NN> — the debris of an adoption
     cut off by an earlier build: handing out that number gave the window someone else's checkout
-    (release-candidate review 3, finding 10)."""
-    nums = set()
+    (release-candidate review 3, finding 10). NN -> the branch it is on (the first one found), for the start's
+    sentence on skipped numbers."""
+    nums: Dict[str, str] = {}
     base = os.path.realpath(str(root / "worktrees"))
     for repo in trunks:
         code, out, _ = _git(root / "target" / repo, "worktree", "list", "--porcelain")
@@ -1411,7 +1454,7 @@ def _foreign_numbers(root: Path, trunks: Dict[str, str]) -> set:
             elif ln.startswith("branch refs/heads/") and path and path.startswith(base + os.sep):
                 nn = path[len(base) + 1:].split(os.sep, 1)[0]
                 if valid_id(nn) and ln[len("branch refs/heads/"):] != "lease/" + nn:
-                    nums.add(nn)
+                    nums.setdefault(nn, ln[len("branch refs/heads/"):])
             elif not ln.strip():
                 path = None
     return nums
@@ -1582,8 +1625,7 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
     RECORDED process is gone — liveness "stale" with a pid on file — never a
     lease that recorded no pid (its staleness is a heartbeat's age, not proof
     the terminal closed), never a finished clone (kept until promote or
-    release), never a released one (held until sweep, §4.2: its holder's
-    hooks may still be reading), and never a spawned clone that has not
+    release), and never a spawned clone that has not
     reported `done` (its STALE line on the board says to read its log before
     it is swept — spec §4.2 "How a spawned clone finishes"). A listing that
     cannot answer (Refused) keeps the lease: cannot tell is not "nothing".
@@ -1591,12 +1633,29 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
     fewer than RECLAIM_MIN_SECS remain, and each git call gets what is left.
     Added 2026-10-11: the operator's morning terminal reclaims yesterday's
     window 01 and its pen (first_up: previous holder gone) instead of numbering
-    02 beside a STALE 01 every day. CALLER HOLDS THE LOCK; mutates `leases`;
-    returns the numbers removed, with why, as (nn, sentence)."""
+    02 beside a STALE 01 every day. A RELEASED lease is removed on the
+    second leg alone — its session has ended (liveness "stale") — since
+    release already said there is nothing to keep it for; while its session
+    is open it is held, its holder's hooks may still be reading (2026-10-19).
+    CALLER HOLDS THE LOCK; mutates `leases`; returns the numbers removed,
+    with why, as (nn, sentence)."""
     out = []
     for nn in sorted(k for k in leases if k != "prime"):
         lease = leases[nn]
-        if lease.get("finished") or lease.get("released") or lease.get("spawned"):
+        if lease.get("released"):
+            # 2026-10-19 (Larry: no sweep typed by hand): a released lease goes once its session has ended — the hold
+            # was only for its holder's hooks, and they are gone. liveness "stale" alone: a pid on file that is dead
+            # and not resumed, or no pid and an old heartbeat (what `sweep` removes it on). What `sweep` does for a
+            # released lease, no more: no git, so it runs before the budget check, and the branch and worktree stay
+            # — unpromoted work on lease/<NN> still holds the number (free_number), and the board names it.
+            if liveness(root, nn, lease) != "stale":
+                continue
+            _remove_lease_files(root, nn)
+            del leases[nn]
+            out.append((nn, "Swept window %s: it was released and its session has ended; its worktree and branch are "
+                            "kept." % nn))
+            continue
+        if lease.get("finished") or lease.get("spawned"):
             continue
         if lease.get("pid") is None or liveness(root, nn, lease) != "stale":
             continue
@@ -1662,7 +1721,8 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
     THE LOCK (session_start_bind and claim call this from inside theirs; the
     lock is not re-entrant). `deadline` bounds the worktree adds
     (SessionStart's budget, §4.2). `notes`, when given, receives one sentence
-    per number reclaimed (reclaim_idle_locked); `reclaimed` True when the
+    per number reclaimed (reclaim_idle_locked), then one on why the number is
+    not lower when that needs saying (skipped_sentence); `reclaimed` True when the
     caller ran that pass itself under the same lock (session_start_bind)."""
     timeout = int(os.environ.get("LEASE_WORKTREE_TIMEOUT") or (timeout or 20))
     target_base = root / "target"
@@ -1673,7 +1733,8 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
                 notes.append(sentence)
     while True:
         leases = read_all(root)
-        nn = free_number(root, leases, target_base, trunks)
+        skipped: list = []
+        nn = free_number(root, leases, target_base, trunks, skipped=skipped)
         data = {"lease": nn, "session_id": sid, "peer_name": None, "pid": None, "proc_started": None,
                 "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn,
                 "repos": list(trunks), "trunks": trunks, "created": now_stamp(),
@@ -1694,6 +1755,9 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
         except FileExistsError:
             continue               # another allocator took this number: recompute under the same lock
         break
+    said = skipped_sentence(nn, skipped)
+    if said and notes is not None:
+        notes.append(said)
     try:
         ready = add_worktrees(root, nn, trunks, timeout=timeout, deadline=deadline)
     except BaseException:
@@ -3736,6 +3800,26 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
     return lines
 
 
+SESSION_END_LOCK_WAIT = 1.0     # seconds; SessionEnd's hooks share a short budget (the settings.json timeout raises it)
+
+
+def session_end_sweep(root: Path, sid: Optional[str]) -> Optional[str]:
+    """SessionEnd (2026-10-19, Larry: no sweep by hand): the ending session's own lease is removed when it is
+    released — the hold `release` leaves is for this session's hooks, and this is the last of them. What `sweep`
+    does for a released lease and no more: the worktree and branch stay, and unpromoted work on lease/<NN> keeps the
+    number (free_number). Never another session's lease, never an unreleased one (a window closed without release
+    is reclaim's or the board's), never makes state/leases/, and gives up when the lock stays busy past
+    SESSION_END_LOCK_WAIT (Refused; the next terminal start sweeps it — reclaim_idle_locked). Returns the number."""
+    if not sid or not leases_dir(root).is_dir():
+        return None
+    with lock(root, deadline=time.time() + SESSION_END_LOCK_WAIT, busy="the lease lock stayed busy at session end"):
+        nn, lease = lease_of_session(read_all(root), sid)
+        if nn is None or not (lease or {}).get("released"):
+            return None
+        _remove_lease_files(root, nn)
+        return nn
+
+
 def spawn(root: Path, task: str, note: Optional[str]) -> str:
     """create + launch a --bg clone on the next free number, spawned: true;
     the number reaches the clone as DAEDALUS_LEASE and its task always ends
@@ -5246,6 +5330,15 @@ def doctor_lines(root: Path) -> list:
     for nn in sorted(wr.unchecked):
         lines.append("NOTE     leases: %s swept, not checked for unpromoted work (a git call was cut off); run "
                      "core/lease.sh list to check it" % nn)
+    # numbers free_number passes over for a checkout no lease explains (2026-10-19): named nowhere else — the boards
+    # stay off this git call; doctor runs it once
+    try:
+        foreign = _foreign_numbers(root, {repo: "" for repo in repos_of(root)})     # it reads the repo names only
+    except (Refused, OSError):
+        foreign = {}
+    for nn in sorted(k for k in foreign if k not in numbered):
+        lines.append("NOTE     leases: %s %s; check what it holds and remove it (git worktree remove) to free the number"
+                     % (nn, FOREIGN_WHY % (nn, foreign[nn])))
     for repo in sorted(wr.unlisted):
         lines.append("NOTE     leases: target/%s's lease branches could not be listed (%s); run core/lease.sh list "
                      "to check them" % (repo, wr.unlisted[repo]))
@@ -5259,8 +5352,8 @@ def doctor_lines(root: Path) -> list:
 
 # --- The on-screen band's data (lease-board spec §3) ----------------------------
 
-# windows[].state. "swept-waiting" is reserved and never emitted here: knowing a swept number still has unpromoted
-# work needs git (waiting_numbers), which this reader never runs (spec §9 Q1).
+# windows[].state. "swept-waiting" (since 2026-10-19): a swept number with unpromoted work, as last found by the
+# model-facing board's waiting_numbers and read here from its cache — this reader still never runs git (spec §9 Q1).
 BOARD_STATES = ("live", "quiet", "stale", "finished", "released", "swept-waiting")
 
 
@@ -5311,7 +5404,9 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
     Keys (spec §3.4): this_window, prime_window, windows (this window first,
     then by number), generated_epoch, ami (frame-jack spec §9.1: board_ami,
     every sub-key always present); each window has exactly nn, alias, state,
-    changed_count, peer_name, is_prime, is_this, last_seen_epoch, note. One
+    changed_count, peer_name, is_prime, is_this, last_seen_epoch, note,
+    waiting_count (null on a lease's row; on a swept-waiting row, the
+    unpromoted commits the unpromoted-work cache holds for it). One
     more, `error`, only when a lease file could not be read: its operator
     sentence(s), while every readable window is still listed — one bad file
     must never blank the band (build brief, 2026-10-11; the spec's §3.5 exit 1
@@ -5372,7 +5467,21 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
             "is_this": nn == mine,
             "last_seen_epoch": float(seen[nn]) if seen[nn] is not None else None,
             "note": _band_text(d.get("note")),
+            "waiting_count": None,
         })
+    # Swept numbers still holding unpromoted work (2026-10-19: a terminal became 05 and the band showed no 02 or 03).
+    # From the unpromoted-work cache the model-facing board keeps (waiting_numbers, every prompt) — a file read, no
+    # git: as fresh as the last prompt's board, and a number no prompt has checked yet is no row. After the lease rows.
+    entries, _ = read_unpromoted_cache(root)
+    swept: Dict[str, int] = {}
+    for k, e in entries.items():
+        nn, _, _repo = k.partition(" ")
+        if valid_id(nn) and nn not in numbered:
+            swept[nn] = swept.get(nn, 0) + len(e["subjects"])
+    for nn in sorted(k for k, n in swept.items() if n):
+        windows.append({"nn": nn, "alias": None, "state": "swept-waiting", "changed_count": 0, "peer_name": None,
+                        "is_prime": False, "is_this": False, "last_seen_epoch": None, "note": None,
+                        "waiting_count": swept[nn]})
     obj: dict = {"this_window": mine, "prime_window": prime_nn, "windows": windows, "generated_epoch": time.time(),
                  "ami": board_ami(root, sid)}
     if errors:
@@ -5609,6 +5718,16 @@ def main(argv: list) -> int:
         # doctor.sh: the registry shape line(s), OK or NOTE only (lease-board spec §5)
         for line in doctor_registry_lines(root):
             print(line)
+        return 0
+    if cmd == "session-end":
+        # The tracked settings.json's SessionEnd hook: the payload on stdin; silent and exit 0 on every path — a hook
+        # that cannot end a session has nothing to say to it.
+        try:
+            d = json.loads(sys.stdin.read() or "{}")
+            sid = d.get("session_id") if isinstance(d, dict) else None
+            session_end_sweep(root, sid if isinstance(sid, str) else None)
+        except Exception:
+            pass
         return 0
     if cmd == "board-json":
         # The band above the prompt (the lease-board mod) runs this every 2 s in every window. A reader, so it sits

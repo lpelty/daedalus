@@ -668,7 +668,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   case "$output" in *"01"*"STALE"*) : ;; *) echo "no STALE line for 01: $output"; return 1 ;; esac
 }
 
-@test "reclaim keeps a quiet window (process alive, heartbeat old), a finished clone, a dead spawned clone that never reported done, a lease with no recorded pid, and a released window (held until sweep, as before)" {
+@test "reclaim keeps a quiet window (process alive, heartbeat old), a finished clone, a dead spawned clone that never reported done, a lease with no recorded pid, and a released window whose session is still open (its hooks may still read it)" {
   T1="$DAEDALUS_HOME/worktrees/01/thing"
   p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
   # quiet: the process is alive, the heartbeat is a day old
@@ -691,11 +691,57 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   [ "$(lease_json 04 spawned)" = "True" ]; [ "$(lease_json 04 session_id)" = "sX" ]
   case "$output" in *"04"*"STALE"*) : ;; *) echo "no STALE line for the dead clone: $output"; return 1 ;; esac
   bash "$DAEDALUS_HOME/core/lease.sh" release 04 --remove --force >/dev/null
-  # released: held until sweep, as the spec says — its holder's hooks may still be reading it
+  # released, its session still open: kept — its holder's hooks may still be reading it (swept once the session ends)
   DAEDALUS_SESSION_ID=sD bash "$DAEDALUS_HOME/core/lease.sh" release 05 >/dev/null
   p5="$(live_pid)"; registry_entry "$p5" sE
   run start sE startup; [ "$(first_line)" = "Daedalus session orientation: window 04, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
   [ "$(lease_json 05 session_id)" = "sD" ]; [ "$(lease_json 05 released)" != "None" ]
+}
+
+# --- released windows are swept without the operator (Larry, 2026-10-19: "I don't want to have to keep those extra
+# steps"): a released lease whose session has ended goes at the next terminal start, as reclaim removes an idle one.
+
+@test "a released window whose session has ended is swept by the next terminal start, with no sweep typed: its number comes back when nothing is unpromoted; while its session is open it is kept" {
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" release 01 >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB
+  run start sB startup; [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sA" ]; [ "$(lease_json 01 released)" != "None" ]     # its session is open: kept
+  kill "$p1"; wait "$p1" 2>/dev/null || true
+  p3="$(live_pid)"; registry_entry "$p3" sC
+  run start sC startup; [ "$status" -eq 0 ]
+  # the pen's holder (sA) has ended, so the new terminal takes it too
+  [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 session_id)" = "sC" ]; [ "$(lease_json 01 released)" = "None" ]
+  case "$output" in *"Swept window 01: it was released and its session has ended"*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse --abbrev-ref HEAD)" = "lease/01" ]
+}
+
+@test "a released window with unpromoted commits is swept once its session ends, but its number stays with the work: the new terminal is numbered after it and its start says why the lower number was skipped" {
+  T1="$DAEDALUS_HOME/worktrees/01/thing"
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  printf 'w\n' >> "$T1/a.txt"; git -C "$T1" -c user.email=t@x -c user.name=t commit -q -am "kept work"
+  DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" release 01 >/dev/null
+  kill "$p1"; wait "$p1" 2>/dev/null || true
+  p2="$(live_pid)"; registry_entry "$p2" sB
+  run start sB startup; [ "$status" -eq 0 ]
+  [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]
+  [ "$(git -C "$T1" log -1 --format=%s lease/01)" = "kept work" ]
+  case "$output" in *"Swept window 01"*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
+  case "$output" in *"Numbered 02, not a lower number: 01 has unpromoted commits on lease/01"*) : ;; *) echo "no skip sentence: $output"; return 1 ;; esac
+}
+
+@test "the skip sentence names a released window still open, and is silent when the only lower numbers are open windows" {
+  p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sB
+  run start sB startup; [ "$(first_line)" = "Daedalus session orientation: window 02, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  case "$output" in *"not a lower number"*) echo "a live 01 needs no explaining: $output"; return 1 ;; esac
+  DAEDALUS_SESSION_ID=sB bash "$DAEDALUS_HOME/core/lease.sh" release 02 >/dev/null
+  p3="$(live_pid)"; registry_entry "$p3" sC
+  run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 03, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  case "$output" in *"Numbered 03, not a lower number: 02 is released and its session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lower number: 01"*|*"; 01 "*) echo "the open 01 is named: $output"; return 1 ;; esac
 }
 
 @test "a resumed window reclaims too: the operator resumes yesterday's window 02 by session id while window 01's process is gone and clean — 02 stays 02, 01's lease is gone, and the pen moves to 02 (previous holder gone); a headless start never reclaims" {

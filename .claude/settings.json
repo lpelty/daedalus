@@ -35,7 +35,8 @@
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/verify-hook.py", "timeout": 60}]},
       {"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/capture-tick.sh", "timeout": 10}]}
     ],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/capture-tick.sh --final", "timeout": 5}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/capture-tick.sh --final", "timeout": 5},
+                              {"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/leaselib.py session-end", "timeout": 3}]}],
     "PreCompact": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py", "timeout": 5}]}
     ]
