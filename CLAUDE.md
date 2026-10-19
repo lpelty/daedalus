@@ -497,7 +497,9 @@ least the gates' time plus `verify.refute_timeout` (600 s default), or in the
 background — a timeout kills the run mid-review and it must be re-done. The review
 is a receipted call: to ask the reviewer about a finding, run
 `core/call-agent.sh --resume-review <NN> "<the operator's question>"` and repeat
-its answer — advice, never a new verdict.
+its answer — advice, never a new verdict. After a lens review it names each
+lens's call instead; the merged review says which lens found the finding, and
+`core/call-agent.sh --resume <call-id> "<question>"` asks that one.
 
 Criteria you write for a review (`GATES_CRITERIA=<file>`, a window's
 `core/lease.sh update <NN> --criteria <file>`) end with a **Scope** section:
@@ -510,6 +512,17 @@ widening the criteria each round ("no input shape crashes it") hands every
 review an unmeetable claim. After the second refutation of your branch,
 `gates.sh` prints the operator's three choices; stop and ask which, and take
 their answer in their own words. Do not start a third round on your own.
+
+A large change (by default 800 changed lines or 25 files) is reviewed by one
+fresh reviewer per lens — criteria, trust boundaries, upgrade and existing
+installs, failure handling — at once, their findings merged; the run says
+`review: 4 lenses …` and why. Plan for it: each lens is a full review under
+`verify.refute_timeout`. Your branch also keeps a findings ledger: the next
+review checks the findings earlier ones counted (`review: 3 earlier findings:
+2 resolved, 1 open`), then hunts in what changed since. So fix the counted
+findings and run the gates again — do not widen the change to answer
+findings that were set aside. Promote's review is one fresh reviewer that is
+told none of this.
 
 The AMI (the small local decision model behind `/frame-jack`) may be on.
 In this release it is a logged opinion and changes nothing you do: before a

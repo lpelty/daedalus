@@ -953,11 +953,17 @@ def managed_claude_md() -> Optional[str]:
     return None
 
 
+LENS_TAG = re.compile(r"(.+)-lens-([A-Za-z0-9_-]+)")
+
+
 def run_lease(root: Path, tag: Optional[str]) -> Optional[str]:
     if not tag:
         return None
+    # a lens's call is tagged <run-id>-lens-<name> (gates.sh); its window is its run's
+    run = LENS_TAG.fullmatch(tag)
     try:
-        return json.loads((root / "state" / "evidence" / tag / "run.json").read_text()).get("lease") or None
+        return json.loads((root / "state" / "evidence" / (run.group(1) if run else tag) / "run.json")
+                          .read_text()).get("lease") or None
     except (OSError, ValueError):
         return None
 
@@ -1526,6 +1532,24 @@ def latest_review(root: Path, token: str, view: dict) -> str:
                 best = rec
     if best is None:
         raise Refusal("no review has run for window %s yet" % token)
+    # A large change's review is several reviewers at once, one per lens, merged: resuming "the latest" would ask
+    # one lens a question about findings the others may have made. Name each lens's call instead; the merged review
+    # says which lens found each finding, and --resume <call-id> asks that one.
+    lens = LENS_TAG.fullmatch(str(best.get("tag") or ""))
+    if lens:
+        calls = []
+        for rj in (root / "state" / "direct-calls").glob("*/launch.json"):
+            try:
+                rec = json.loads(rj.read_text())
+            except (OSError, ValueError):
+                continue
+            m = LENS_TAG.fullmatch(str(rec.get("tag") or ""))
+            if rec.get("mode") == "refuter" and rec.get("window") == token and m and m.group(1) == lens.group(1):
+                calls.append((m.group(2), str(rec["call_id"])))
+        raise Refusal("Window %s's latest review (run %s) was %d reviewers at once, one per lens: %s. The merged "
+                      "review names the lens that found each finding; ask that one with `core/call-agent.sh --resume "
+                      "<call-id> \"<the operator's question>\"`." % (
+                          token, lens.group(1), len(calls), ", ".join("%s %s" % c for c in sorted(calls))))
     return str(best["call_id"])
 
 

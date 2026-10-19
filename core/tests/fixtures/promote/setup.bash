@@ -12,7 +12,7 @@ promote_fixture() {
   caller_fixture
   local src f; src="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   for f in promote.sh promote.py transcriptlib.py distcheck.py capture.py gates.sh manifest-append.py refute.sh \
-           refute-pitfalls.py pitfall-inject.py review-inputs.py lease-board.py prepush.py session-start.py; do
+           refute-pitfalls.py pitfall-inject.py review-inputs.py review-lenses.py lease-board.py prepush.py session-start.py; do
     [ -f "$src/$f" ] && cp "$src/$f" "$DAEDALUS_HOME/core/"
   done
   git -C "$DAEDALUS_HOME" add -A

@@ -42,7 +42,7 @@ EOF
 # commits the replacement (commit_core).
 install_refuter() {
   mkdir -p "$DAEDALUS_HOME/core/agents"
-  cp "$SRC/refute.sh" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" \
+  cp "$SRC/refute.sh" "$SRC/review-lenses.py" "$SRC/fingerprint.sh" "$SRC/agentdef.py" "$SRC/refute-pitfalls.py" "$SRC/pitfall-inject.py" \
      "$SRC/verifylib.py" "$SRC/leaselib.py" "$SRC/call-agent.sh" "$SRC/call_agent.py" "$SRC/distcheck.py" "$DAEDALUS_HOME/core/"
   cp "$SRC/agents/refuter.md" "$DAEDALUS_HOME/core/agents/"
   printf 'target/\nvault/\nstate/\nworktrees/\nconfig.yaml\n__pycache__/\n*.pyc\n' > "$DAEDALUS_HOME/.gitignore"
