@@ -102,8 +102,13 @@ for n, parts in heads:
         bad.append("F%s (needs one severity, one of observed/plausible/hypothetical, and in or out of scope)" % n)
         continue
     tag = "F%s %s, %s, %s" % (n, sev[0], st[0], "in scope" if sc[0] == "in" else "out of scope")
+    # A finding the reviewer marks `regressed L<n>` — an earlier finding's fix broke something (the findings ledger,
+    # core/review-lenses.py) — refutes whatever its labels: a fix that breaks what it fixed is not set aside.
+    regressed = any(re.match(r"regressed l\d+\b", p) for p in parts)
     refutes = (sc[0] == "in" and st[0] in ("observed", "plausible") and sev[0] in ("HIGH", "MEDIUM")) \
-        or (st[0] == "observed" and sev[0] == "HIGH")
+        or (st[0] == "observed" and sev[0] == "HIGH") or regressed
+    if regressed:
+        tag += ", regressed"
     if refutes or (sc[0] == "in" and st[0] != "hypothetical"):
         real[sev[0].lower()] += 1
     (counted if refutes else listed).append(tag)
@@ -357,6 +362,74 @@ if [ "$mode" = promote ] && [ "$render_only" -eq 0 ]; then
     || { rm -f "$paths" "$diff_file" "$pinned"; exit 2; }
 fi
 rm -f "$pinned"
+# --- Lenses and the findings ledger (branch mode only; core/review-lenses.py says why) -----------------------------
+# A large change gets one fresh reviewer per lens (verify.lenses), run at once and merged; a small one keeps one
+# reviewer. "Large": at least verify.lens_lines changed lines or verify.lens_files files (defaults 800 and 25 — a
+# 250-line fix stays with one reviewer, a 60-commit branch gets the lenses). Every window's branch keeps a ledger of
+# the findings its reviews counted (state/review-ledger/<NN>.json, started again on a new lease or a promote, as the
+# refutation count is): the next review is told them to check first, and the part of the change since the last
+# review to hunt in. Promote's review is the last gate and takes neither: one fresh reviewer, no earlier findings.
+lenses=(); section=""; delta_file=""; heads_now=""; earlier_json="-"; earlier_n=0; last_run="-"
+RL="$DAEDALUS_HOME/core/review-lenses.py"
+plural() { if [ "$1" -eq 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %ss' "$1" "$2"; fi; }
+if [ "$mode" = branch ]; then
+  lease_nn="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease 2>/dev/null || true)"
+  tbranch="$(git -C "$target" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  size="$(python3 "$RL" size "$diff_file" "$paths")" || { rm -f "$paths" "$diff_file"; exit 2; }
+  n_lines="${size% *}"; n_files="${size#* }"
+  lens_lines="$(cfg verify.lens_lines 2>/dev/null || printf 800)"
+  lens_files="$(cfg verify.lens_files 2>/dev/null || printf 25)"
+  case "$lens_lines" in ''|*[!0-9]*) lens_bad=1 ;; *) lens_bad=0 ;; esac
+  case "$lens_files" in ''|*[!0-9]*) lens_bad=1 ;; esac
+  if [ "$lens_bad" -eq 1 ]; then
+    rm -f "$paths" "$diff_file"
+    printf 'verify.lens_lines and verify.lens_files must be whole numbers (got: %s, %s) — cannot certify the run\n' "$lens_lines" "$lens_files" >&2
+    exit 2
+  fi
+  lens_list="$(python3 "$RL" lenses "$(cfg verify.lenses 2>/dev/null || true)")" || { rm -f "$paths" "$diff_file"; exit 2; }
+  why="$(plural "$n_lines" line) in $(plural "$n_files" file); lenses from $lens_lines lines or $lens_files files"
+  if [ "$n_lines" -ge "$lens_lines" ] || [ "$n_files" -ge "$lens_files" ]; then
+    while IFS= read -r l; do [ -n "$l" ] && lenses+=("$l"); done < <(printf '%s\n' "$lens_list")
+    printf 'review-plan: %s lenses (%s) — the change is large (%s)\n' "${#lenses[@]}" "$(printf '%s\n' "${lenses[@]}" | paste -sd, - | sed 's/,/, /g')" "$why" >&2
+  else
+    printf 'review-plan: one reviewer — the change is small (%s)\n' "$why" >&2
+  fi
+  section="$(mktemp)"; heads_prev="$(mktemp)"
+  ledger_out="$(python3 "$RL" open "$DAEDALUS_HOME" "$lease_nn" "$tbranch" "$section" "$heads_prev")" \
+    || { rm -f "$paths" "$diff_file" "$section" "$section.json" "$heads_prev"; exit 2; }
+  earlier_n="${ledger_out% *}"; last_run="${ledger_out#* }"
+  [ "$earlier_n" -gt 0 ] && earlier_json="$section.json"
+  # The part of the change since the last review: each repository from the commit that review saw. A commit no
+  # longer under HEAD (a rebase rewrote the branch) leaves nothing to narrow to — the whole diff is the hunt.
+  if [ "$last_run" != "-" ] && [ -s "$heads_prev" ]; then
+    delta_file="$(mktemp)"; delta_names="$(mktemp)"; rewritten=0
+    while IFS="$(printf '\t')" read -r rel sha; do
+      [ -n "$rel" ] || continue
+      if [ "$rel" = . ]; then repo="$target"; pfx=""; else repo="$target/$rel"; pfx="${rel%/}/"; fi
+      [ -d "$repo" ] || continue
+      if git -C "$repo" merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+        printf '### %s (since %s)\n' "$rel" "$(printf '%s' "$sha" | cut -c1-12)" >> "$delta_file"
+        if [ "$rel" = . ]; then
+          repo_diff "$repo" "" "$delta_names" "$delta_file" "$sha" ${outer_excl[@]+"${outer_excl[@]}"}
+        else
+          repo_diff "$repo" "$pfx" "$delta_names" "$delta_file" "$sha"
+        fi
+      else
+        rewritten=1
+      fi
+    done < "$heads_prev"
+    rm -f "$delta_names"
+    [ "$rewritten" -eq 0 ] || : > "$delta_file.rewritten"
+  fi
+  rm -f "$heads_prev"
+  # The heads this review sees, for the next one's narrowing.
+  heads_now="$(mktemp)"
+  printf '.\t%s\n' "$(git -C "$target" rev-parse HEAD 2>/dev/null)" >> "$heads_now"
+  for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
+    h="$(git -C "$target/$rel" rev-parse HEAD 2>/dev/null)" && printf '%s\t%s\n' "$rel" "$h" >> "$heads_now"
+  done
+fi
+[ "${#lenses[@]}" -gt 0 ] || lenses=(all)
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
@@ -374,13 +447,25 @@ prompt="$(mktemp)"
   printf '\n## Evidence\n'; cat "$evidence_file"
   printf '\n## Pitfalls that apply to the touched paths\n'
   if [ -n "$pitfalls_text" ]; then printf '%s\n' "$pitfalls_text"; else printf '(none)\n'; fi
+  if [ -n "$section" ] && [ -s "$section" ]; then printf '\n'; cat "$section"; fi
+  if [ -n "$delta_file" ]; then
+    printf '\n## Changed since the last review (run %s)\n' "$last_run"
+    if [ -f "$delta_file.rewritten" ]; then
+      printf 'The branch was rewritten since that review (the commit it saw is no longer under HEAD): hunt the whole diff below.\n'
+    elif grep -q '^diff --git ' "$delta_file"; then
+      printf 'Hunt for new findings in this part of the change; the whole diff below is there to read around it.\n'
+      cat "$delta_file"
+    else
+      printf 'Nothing changed since that review: check the earlier findings, then hunt the whole diff below.\n'
+    fi
+  fi
   printf '\n## Diff against %s\n' "$base"
   # One section per repository (assembled above). Branch: committed work since
   # the merge base, then uncommitted and untracked work against HEAD. Promote:
   # the merge, trunk_sha_at_prepare..merge_sha.
   cat "$diff_file"
 } > "$prompt"
-rm -f "$paths" "$diff_file"
+rm -f "$paths" "$diff_file" ${delta_file:+"$delta_file" "$delta_file.rewritten"}
 if [ "$render_only" -eq 1 ]; then
   cat "$prompt"; rm -f "$prompt"; exit 0
 fi
@@ -395,29 +480,89 @@ verdict_file="$ev/$run_id-review.md"
 # (write-once) or distribution code changed during the review. Anything else
 # is claude's own failure ("— failed: …"). All of them are exit 2 here:
 # unknown is never STANDS.
-launch_err="$(mktemp)"
-bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
-  --tag "$run_id" --verdict-file "$verdict_file" --mode "$mode" >/dev/null 2>"$launch_err"
-launch_rc=$?
-rm -f "$prompt"
-if [ "$launch_rc" -ne 0 ]; then
-  if [ "$launch_rc" -eq 124 ] && grep -q 'timed out after' "$launch_err"; then
-    printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$(refute_timeout 2>/dev/null || printf '?')" >&2
-  elif ! grep -q ' call [0-9a-f-]*.*; receipt ' "$launch_err"; then
-    sed 's/^daedalus: //' "$launch_err" >&2
-  elif refusal="$(sed -n 's/^.* orientation: .*; exit: 2 — //p' "$launch_err" | grep -v '^failed: ' | head -1)" \
+# launch_failure <rc> <launcher-stderr-file> — the one sentence for a launch that did not write its verdict.
+launch_failure() {
+  local rc="$1" err="$2" refusal
+  if [ "$rc" -eq 124 ] && grep -q 'timed out after' "$err"; then
+    printf 'refuter timed out after %ss (verify.refute_timeout) — killed with its process group; cannot certify the run\n' "$(refute_timeout 2>/dev/null || printf '?')"
+  elif ! grep -q ' call [0-9a-f-]*.*; receipt ' "$err"; then
+    sed 's/^daedalus: //' "$err"
+  elif refusal="$(sed -n 's/^.* orientation: .*; exit: 2 — //p' "$err" | grep -v '^failed: ' | head -1)" \
        && [ -n "$refusal" ]; then
-    printf '%s — cannot certify the run; receipt: %s\n' "$refusal" \
-      "$(sed -n 's/^.*; receipt //p' "$launch_err" | head -1)" >&2
+    printf '%s — cannot certify the run; receipt: %s\n' "$refusal" "$(sed -n 's/^.*; receipt //p' "$err" | head -1)"
   else
-    printf 'refuter CLI failed (exit %s, %s output) — cannot certify the run; receipt: %s\n' "$launch_rc" \
-      "$(grep -q '(with output)' "$launch_err" && printf with || printf no)" \
-      "$(sed -n 's/^.*; receipt //p' "$launch_err" | head -1)" >&2
+    printf 'refuter CLI failed (exit %s, %s output) — cannot certify the run; receipt: %s\n' "$rc" \
+      "$(grep -q '(with output)' "$err" && printf with || printf no)" "$(sed -n 's/^.*; receipt //p' "$err" | head -1)"
   fi
-  rm -f "$launch_err"
-  exit 2
+}
+cleanup_branch() { rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}; }
+if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ]; then
+  # One reviewer and no earlier findings to check: the launcher writes the review file itself, as it always has.
+  launch_err="$(mktemp)"
+  bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
+    --tag "$run_id" --verdict-file "$verdict_file" --mode "$mode" >/dev/null 2>"$launch_err"
+  launch_rc=$?
+  if [ "$launch_rc" -ne 0 ]; then
+    launch_failure "$launch_rc" "$launch_err" >&2
+    rm -f "$launch_err"; cleanup_branch
+    exit 2
+  fi
+  rm -f "$launch_err" "$prompt"
+else
+  # Each lens is a fresh reviewer of its own (tag <run-id>-lens-<name>, review <run-id>-lens-<name>-review.md),
+  # verify.lens_concurrency at a time (default 4), each under its own verify.refute_timeout. Every lens must
+  # finish with a review that can be certified; one that times out, fails or writes an unlabelled finding fails the
+  # whole run closed — a review with a lens missing is a smaller review than the one asked for, never a STANDS.
+  conc="$(cfg verify.lens_concurrency 2>/dev/null || printf 4)"
+  case "$conc" in ''|*[!0-9]*|0) conc=4 ;; esac
+  work="$(mktemp -d)"
+  i=0
+  for l in "${lenses[@]}"; do
+    {
+      if [ "$l" != all ]; then
+        printf 'Your lens: %s. %s Search the whole change through this lens first; report anything else you find too, labelled the same way.\n\n' \
+          "$l" "$(python3 "$RL" lens-text "$l")"
+      fi
+      cat "$prompt"
+    } > "$work/$l.prompt"
+    ( bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$work/$l.prompt" \
+        --tag "$run_id-lens-$l" --verdict-file "$ev/$run_id-lens-$l-review.md" --mode "$mode" >/dev/null 2>"$work/$l.err"
+      printf '%s\n' "$?" > "$work/$l.rc" ) &
+    i=$((i + 1))
+    [ $((i % conc)) -ne 0 ] || wait
+  done
+  wait
+  rm -f "$prompt"
+  failed=""; sources=()
+  for l in "${lenses[@]}"; do
+    lf="$ev/$run_id-lens-$l-review.md"
+    rc="$(cat "$work/$l.rc" 2>/dev/null || printf 2)"
+    if [ "$rc" -ne 0 ] || [ ! -f "$lf" ]; then
+      failed="${failed}the $l lens: $(launch_failure "$rc" "$work/$l.err" | tr '\n' ' ' | sed 's/ *$//'); "
+      continue
+    fi
+    # Written by the launcher under vault/evidence: manifested now, whatever the others did, so a lens review
+    # never sits there unaccounted for.
+    python3 "$DAEDALUS_HOME/core/manifest-append.py" "$lf" \
+      || { failed="${failed}the $l lens: its review could not be added to the evidence manifest; "; continue; }
+    lnotes="$(mktemp)"
+    verdict_of "$lf" run >/dev/null 2>"$lnotes"
+    if [ "$?" -eq 2 ]; then
+      failed="${failed}the $l lens: $(tr '\n' ' ' < "$lnotes" | sed 's/ *$//') ($lf); "
+    fi
+    rm -f "$lnotes"
+    sources+=("$l=$lf")
+  done
+  rm -rf "$work"
+  if [ -n "$failed" ]; then
+    printf '%s\n' "${failed%; } — cannot certify the run" >&2
+    cleanup_branch
+    exit 2
+  fi
+  # The merged review — what the run's verdict is read from — written beside the lenses' own.
+  python3 "$RL" merge "$verdict_file" "$run_id" "$earlier_json" "${sources[@]}" \
+    || { rm -f "$verdict_file"; cleanup_branch; exit 2; }
 fi
-rm -f "$launch_err"
 # Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
 # another window's gates run. The review file is written and manifested in the
 # same breath, so the RUNNING excuse covers the negligible window between.
@@ -444,10 +589,25 @@ if [ "$rc" -eq 2 ]; then
     printf 'refuter wrote no VERDICT line — cannot certify the run (%s)\n' "$verdict_file" >&2
   fi
   rm -f "$notes"
+  [ "$mode" != branch ] || cleanup_branch
   exit 2
 fi
 # Each note marked, so gates.sh shows these lines and nothing else this script happened to say on stderr.
 [ ! -s "$notes" ] || sed "s|^|verdict-note: |; s|\$| — see $verdict_file|" "$notes" >&2
 rm -f "$notes"
+# The ledger, after a review that gave a verdict: earlier findings resolved or still open, new counted ones added,
+# and the heads this review saw. A ledger that cannot be written costs the next review its narrowing, never this
+# verdict.
+if [ "$mode" = branch ]; then
+  if tally="$(python3 "$RL" record "$DAEDALUS_HOME" "$lease_nn" "$tbranch" "$run_id" "$verdict_file" "$heads_now" 2>/dev/null)"; then
+    set -- $tally
+    if [ "${1:-0}" -gt 0 ]; then
+      printf 'review-plan: %s: %s resolved, %s open\n' "$(plural "$1" "earlier finding")" "$2" "$3" >&2
+    fi
+  else
+    printf 'review-plan: the findings ledger could not be written (state/review-ledger/) — the next review starts cold\n' >&2
+  fi
+  cleanup_branch
+fi
 printf '%s\n' "$word"
 exit "$rc"

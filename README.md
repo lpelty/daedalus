@@ -1011,6 +1011,45 @@ reason — instead of leaving the loop to the builder. The count lives in
 `state/refutations/<NN>.json` and starts again after a promote or when the
 window is released and its number taken again.
 
+**A large change is reviewed through several lenses at once.** On a large
+branch one reviewer, within its timeout, can follow only a few threads, so
+each run was a different sample — a 56-commit branch was refuted ten times,
+each review right, each finding something new on code that had not changed.
+From `verify.lens_lines` changed lines or `verify.lens_files` files (800 and
+25 by default), a window's branch review runs one fresh reviewer per lens —
+`verify.lenses`, by default `criteria` (correctness against the criteria),
+`trust` (trust boundaries), `upgrade` (existing installs and upgrade) and
+`failure` (failure handling) — at the same time (`verify.lens_concurrency`,
+default 4), each under its own `verify.refute_timeout`. Their findings are
+merged into `<run>-review.md`: one finding per place, with the strongest
+labels any lens gave it and the lenses that found it; each lens's own review
+is kept beside it as `<run>-lens-<name>-review.md`. The verdict is computed
+from the merged findings exactly as from one review. A lens that times out,
+fails or writes an unlabelled finding fails the run as uncertifiable — a
+review with a lens missing is never a STANDS. A smaller change keeps one
+reviewer: lenses cost one review each for about the same wall-clock time.
+The run says which, and why: `review: 4 lenses (criteria, trust, upgrade,
+failure) — the change is large (1210 lines in 31 files; lenses from 800 lines
+or 25 files)`.
+
+**Every window's branch keeps a findings ledger**
+(`state/review-ledger/<NN>.json`, started again after a promote or a new
+lease, as the refutation count is). The next review of that branch is told
+the findings earlier reviews counted and asked to check them first: one
+fixed is named on a `Resolved:` line; one not fixed is reported again
+(`earlier L1` in its heading); one whose fix broke something is reported as
+`regressed L1`, which refutes whatever its labels. One it neither resolves
+nor reports again is carried into its verdict as it was. Then it hunts for
+new findings in what changed since the last review (its commits, from the
+commit the last review saw, and the uncommitted work), with the whole diff
+there to read around it; a rebase that rewrote the branch leaves the whole
+diff to hunt. The run says how the earlier findings fared:
+`review: 3 earlier findings: 2 resolved, 1 open`.
+
+**Promote's review takes neither.** It is the last gate: one fresh reviewer,
+not told what earlier reviews found — so it cannot inherit their blind spots
+— whose prompt is re-rendered byte for byte at confirm.
+
 The diff is assembled per repository: the target checkout against
 `origin/<target.branch>`, then each `target.nested` checkout against its
 origin's default branch, every path prefixed with the nested relpath so the

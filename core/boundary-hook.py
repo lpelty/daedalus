@@ -86,6 +86,9 @@ def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
     # blocked the Stop hook as protected dirt.
     if rid.endswith("-review"):
         rid = rid[:-len("-review")]
+        # One lens's review of a large change, <run-id>-lens-<name>-review.md (core/review-lenses.py): the same
+        # run's output, judged by the same run.json.
+        rid = re.sub(r"-lens-[a-z0-9_]{1,24}$", "", rid)
     rec = v.run_record(root, rid)
     return bool(rec) and rec.get("source") == "state"
 

@@ -355,6 +355,10 @@ PY
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
   refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" "$summary_tmp" 2>&1 >/dev/null)"
   refute_code=$?
+  # How the change was reviewed — one reviewer or several lenses, and why; how the earlier findings fared — shown
+  # whatever the verdict, and kept out of the message a failure shows (review-lenses.py, refute.sh).
+  printf '%s\n' "$refute_msg" | sed -n 's/^review-plan: //p' | while IFS= read -r ln; do log "review: $ln"; done
+  refute_msg="$(printf '%s\n' "$refute_msg" | grep -v '^review-plan: ')"
   if [ "$refute_code" -ne 0 ]; then
     result=FAIL; failed=1
     if [ "$refute_code" -eq 1 ]; then

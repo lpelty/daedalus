@@ -94,6 +94,17 @@ verify:
   # number of seconds, 1..9999999; absent or empty means 600 — so default-on
   # needs no timeout line. Anything else is refused before any gate runs.
   refute_timeout: 600
+  # A large change is reviewed through several lenses at once: one fresh
+  # reviewer per lens, their findings merged, each lens under refute_timeout.
+  # Large means at least lens_lines changed lines or lens_files files (absent:
+  # 800 and 25). A smaller change keeps one reviewer. Lens names: lowercase
+  # letters, digits and underscores; the four below are the defaults and carry
+  # their own instructions, any other name is told to focus on what it says.
+  # Promote's review always stays one reviewer.
+  # lenses: criteria, trust, upgrade, failure
+  # lens_lines: 800
+  # lens_files: 25
+  # lens_concurrency: 4
 
 boundary:
   # May Daedalus edit its own brief? false (the default): no. true: it edits
