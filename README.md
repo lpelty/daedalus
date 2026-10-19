@@ -458,7 +458,15 @@ start reclaims it (a resumed window too, before it rebinds; `create`,
 `spawn` and `adopt` before they choose a number), so the terminal you open
 in the morning is window 01 again and takes the pen from yesterday's
 session. A stale window that still holds work, or a background clone that never
-reported, keeps its number until you continue it or release it. Session logs
+reported, keeps its number until you continue it or release it. To continue
+window 01, say "this is window 01" in a new terminal: the number that terminal
+took at start has nothing in it, so `core/lease.sh claim 01` gives it up (its
+lease goes, as a reclaim's does, and the worktree is kept for the next number;
+the session keeps its log number) and binds 01. A window that holds work of its own (a commit not on the trunk, an
+uncommitted file) is refused, and the refusal names the work. You can also
+start the terminal on the number: `DAEDALUS_LEASE=01 claude` in the home binds
+window 01 at start, before any number is taken, as long as window 01 still has
+its lease file (the board lists it); a swept number is claimed instead. Session logs
 are named by date and one running counter per vault
 (`vault/sessions/YYYY/MM/YYYY-MM-DD-NNN.md`); the start says each session's
 path, and the window number is in the log's frontmatter.

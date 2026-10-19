@@ -410,11 +410,14 @@ PY
   [ "$(lease_json 01 session_id)" = "sA" ]; [ "$(lease_json 01 pid)" = "$pid" ]; [ "$(lease_json 01 peer_name)" = "daedalus-01" ]
   [ "$(lease_json 01 proc_started)" = "$(ps_ms "$pid")" ]
   CLAUDE_CODE_SESSION_ID=sA run LS claim 01; [ "$status" -eq 0 ]
-  # One lease per session id (§4.2 — a lease names one session, resolve/board/done assume it): the holder of 01 cannot take 02 too.
+  # One lease per session id (§4.2 — a lease names one session, resolve/board/done assume it): the holder of 01, while
+  # 01 holds work, cannot take 02 too (an empty 01 is given up instead: test_session_start.bats, 'this is window 01').
   LS create >/dev/null
+  printf 'u\n' > "$DAEDALUS_HOME/worktrees/01/thing/u.txt"
   CLAUDE_CODE_SESSION_ID=sA run LS claim 02
-  [ "$status" -ne 0 ]; case "$output" in *"This session is already window 01; say 'release 01' first."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -ne 0 ]; case "$output" in *"This session is already window 01, which has uncommitted changes in worktrees/01/thing (1 file: u.txt), so it cannot also be window 02. To continue window 02, say 'this is window 02' in a new terminal"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(lease_json 02 session_id)" = "None" ]; [ "$(lease_json 01 session_id)" = "sA" ]
+  rm "$DAEDALUS_HOME/worktrees/01/thing/u.txt"
   CLAUDE_CODE_SESSION_ID=sB run LS claim 01
   [ "$status" -ne 0 ]; case "$output" in *"Window 01 is held by a live session (peer name daedalus-01)"*) : ;; *) echo "$output"; return 1 ;; esac
   # A dead recorded pid whose session id is still live in the registry is a

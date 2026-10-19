@@ -720,6 +720,62 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 01, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
 }
 
+# --- 'this is window NN' from a new terminal (reported 2026-10-19): the start numbers every terminal, so the claim
+# must give up that fresh, empty number — the old refusal sent the operator to yet another terminal, numbered again.
+two_stale_windows() {   # 01 and 02 each hold an unpromoted commit and their sessions have ended; sC starts as 03
+  local nn p
+  for nn in 01 02; do
+    p="$(live_pid)"; registry_entry "$p" "s$nn" interactive cli "daedalus-$nn"; start "s$nn" startup >/dev/null
+    [ "$(lease_json "$nn" session_id)" = "s$nn" ] || { echo "setup: $nn not bound"; return 1; }
+    printf 'w%s\n' "$nn" >> "$DAEDALUS_HOME/worktrees/$nn/thing/a.txt"
+    git -C "$DAEDALUS_HOME/worktrees/$nn/thing" -c user.email=t@x -c user.name=t commit -q -am "work on $nn"
+    kill "$p"; wait "$p" 2>/dev/null || true
+  done
+  PC="$(live_pid)"; registry_entry "$PC" sC interactive cli daedalus-03
+  run start sC startup; [ "$(first_line)" = "Daedalus session orientation: window 03, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  START_LOG="$(lease_json 03 logs)"; [ "$START_LOG" != "None" ]
+}
+
+@test "'this is window 01' from a new terminal numbered 03 at start: claim 01 gives up the empty 03 (its lease files go, its number is free for the next allocation, its worktree kept as reclaim keeps it) and binds 01, whose unpromoted commit is intact; the session keeps the log number its start told it" {
+  two_stale_windows
+  T="$DAEDALUS_HOME/target/thing"
+  CLAUDE_CODE_SESSION_ID=sC run bash "$DAEDALUS_HOME/core/lease.sh" claim 01 </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"This session was window 03, which had nothing to lose (clean, nothing unpromoted); its lease is given up."*"This is window 01."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/03.json" ]; [ ! -e "$DAEDALUS_HOME/state/leases/03.seen" ]; [ ! -e "$DAEDALUS_HOME/state/leases/03.changed" ]
+  [ "$(lease_json 01 session_id)" = "sC" ]; [ "$(lease_json 01 pid)" = "$PC" ]
+  [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" log -1 --format=%s)" = "work on 01" ]
+  [ "$(git -C "$T" log -1 --format=%s lease/01)" = "work on 01" ]
+  [ "$(lease_json 01 logs)" = "$START_LOG" ] || { echo "logs: $(lease_json 01 logs) vs $START_LOG"; return 1; }
+  [ "$(lease_json 02 session_id)" = "s02" ]                       # the other stale window is untouched
+  [ "$(DAEDALUS_SESSION_ID=sC python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease)" = "01" ]
+  run bash "$DAEDALUS_HOME/core/lease.sh" create </dev/null       # 03 is free again: the next allocation re-uses it
+  case "$output" in *"Window 03 is ready"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "claim from a window that has work refuses, naming the work and a path that works (a new terminal); nothing moves. A released empty window is given up the same way" {
+  two_stale_windows
+  W3="$DAEDALUS_HOME/worktrees/03/thing"
+  printf 'w3\n' >> "$W3/a.txt"; git -C "$W3" -c user.email=t@x -c user.name=t commit -q -am "work on 03"
+  CLAUDE_CODE_SESSION_ID=sC run bash "$DAEDALUS_HOME/core/lease.sh" claim 01 </dev/null
+  [ "$status" -ne 0 ]
+  case "$output" in *"This session is already window 03, which has 1 unpromoted commit: \"work on 03\", so it cannot also be window 01. To continue window 01, say 'this is window 01' in a new terminal (or start it with \`DAEDALUS_LEASE=01 claude\`); this one stays window 03."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"say 'release"*) echo "dead path named: $output"; return 1 ;; esac
+  [ "$(lease_json 03 session_id)" = "sC" ]; [ "$(lease_json 01 session_id)" = "s01" ]; [ -d "$W3" ]
+  # released with work: still refused, with the same working path
+  CLAUDE_CODE_SESSION_ID=sC bash "$DAEDALUS_HOME/core/lease.sh" release 03 >/dev/null </dev/null
+  CLAUDE_CODE_SESSION_ID=sC run bash "$DAEDALUS_HOME/core/lease.sh" claim 01 </dev/null
+  [ "$status" -ne 0 ]
+  case "$output" in *"This session was window 03 and released it, and it still has 1 unpromoted commit: \"work on 03\"; this window is done — close it. To continue window 01, say 'this is window 01' in a new terminal"*) : ;; *) echo "$output"; return 1 ;; esac
+  # released and empty: given up, and 01 is bound
+  git -C "$W3" reset -q --hard origin/main
+  CLAUDE_CODE_SESSION_ID=sC run bash "$DAEDALUS_HOME/core/lease.sh" claim 01 </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"This session was window 03, which had nothing to lose"*"This is window 01."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/leases/03.json" ]
+  [ "$(lease_json 01 session_id)" = "sC" ]; [ "$(lease_json 01 released)" = "None" ]
+}
+
 # --- the document index follows the vault (reindex design 2026-10-15, §3.5) ---
 # recall_engine <body...> — vault-search.py in the home and a recall: block naming a fake index
 # engine that creates the store, then runs the body. Only these tests have the script: every other

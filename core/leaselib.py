@@ -1604,12 +1604,9 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
         if budget < RECLAIM_MIN_SECS:
             break                               # out of time: the rest are kept, as they were
         why = "its session (pid %s) has ended" % lease.get("pid")
-        lease_trunks = lease.get("trunks") or trunks
         seeds = {}
         try:
-            if any(_reclaim_waiting(root, repo, trunk, nn, budget, seeds) for repo, trunk in lease_trunks.items()):
-                continue
-            if any(dirty_files(root / "worktrees" / nn / repo, timeout=budget) for repo in lease_trunks):
+            if not nothing_to_lose(root, nn, lease.get("trunks") or trunks, budget, seeds):
                 continue
         except Refused:
             continue
@@ -1623,6 +1620,15 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
         out.append((nn, "Reclaimed window %s: %s, its worktree is clean and nothing is unpromoted; the number is free again."
                     % (nn, why)))
     return out
+
+
+def nothing_to_lose(root: Path, nn: str, lease_trunks: Dict[str, str], budget: int, seeds: dict) -> bool:
+    """The one test of "a window with nothing to lose" (reclaim_idle_locked, and claim dropping the claimer's own
+    window): no commit on lease/<NN> that origin/<trunk> lacks in any repo, and no uncommitted or untracked file in
+    any of its worktrees. Refused when either cannot be told — cannot tell is not "nothing"."""
+    if any(_reclaim_waiting(root, repo, trunk, nn, budget, seeds) for repo, trunk in lease_trunks.items()):
+        return False
+    return not any(dirty_files(root / "worktrees" / nn / repo, timeout=budget) for repo in lease_trunks)
 
 
 def _reclaim_waiting(root: Path, repo: str, trunk: str, nn: str, budget: int, seeds: dict) -> list:
@@ -1862,50 +1868,102 @@ def self_rebind(root: Path, sid: str, leases: Optional[Dict[str, dict]] = None,
 def claim(root: Path, token: str, sid: str) -> str:
     """Bind this session to window NN. A swept number (no lease file) whose
     lease/<NN> still carries unpromoted commits is adopted as-is and its
-    subjects are named — the one path that continues such work (§4.2)."""
+    subjects are named — the one path that continues such work (§4.2).
+    A session already holding another window with nothing to lose
+    (nothing_to_lose — the number every terminal takes at start, released or
+    not) gives it up: once NN is bound, that window's lease files are
+    removed as reclaim removes them — its worktree and branch are kept for the
+    next allocation to re-use (they may hold git-ignored files) — and its
+    session-log reservation moves to NN, so the session keeps the log number
+    it was told.
+    Added 2026-10-19: 'this is window 01' from a new terminal (numbered 03 at
+    start) refused, and a released 03 told the operator to open yet another
+    terminal, which was numbered again — a loop with no way back to 01."""
     with lock(root):
         leases = read_all(root)
         nn = number_of(leases, token, "claim")
         held, held_lease = lease_of_session(leases, sid)
+        drop = None
         if held and held != nn:
             # One lease per session id: resolve, the board, self_rebind and
             # done's prime lookup all read the ONE lease that names a session.
-            if held_lease.get("released"):
-                raise Refused("This session was window %s and released it; this window is done — close it and open a "
-                              "new terminal for a fresh number." % held)
-            raise Refused("This session is already window %s; say 'release %s' first." % (held, held))
-        if nn in leases:
-            before = leases[nn]
-            lease = bind(root, nn, sid)
-            line = "This is %s." % window_label(nn, lease)
-            if before.get("finished") and before.get("session_id") != sid:
-                line += (" An earlier session finished it (%s); that report is cleared — this window continues the work."
-                         % (before.get("summary") or "no summary"))
-            return line
-        trunks = trunks_of(root, root / "target")
-        subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
-        data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
-                "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn,
-                "repos": list(trunks), "trunks": trunks, "created": now_stamp(), "bound_at": None, "promoted": [],
-                "worktree_ready": False}   # as allocate_locked: ready only once the add returns True
-        write_lease(root, nn, data, exclusive=True)
-        try:
-            if add_worktrees(root, nn, trunks):
-                data.pop("worktree_ready", None)
-                write_lease(root, nn, data)
-            # else cut off (a git call timed out): left unfinished, so the bind
-            # just below — and any later claim — finishes it (§4.2). Plan 1
-            # discarded this False and wrote the window ready.
-            write_changed(root, nn, {})
-            lease = bind(root, nn, sid)
-        except BaseException:
-            # as allocate_locked: a number held by a lease with no tree or no
-            # holder would be skipped by every later allocation
+            held_trunks = held_lease.get("trunks") or trunks_of(root, root / "target")
             try:
-                os.unlink(str(lease_path(root, nn)))
-            except OSError:
-                pass
-            raise
+                empty, why = nothing_to_lose(root, held, held_trunks, 20, {}), None
+            except Refused as e:
+                empty, why = False, str(e)
+            if not empty:
+                raise Refused(_claim_held_refusal(root, nn, held, held_lease, why, leases))
+            drop = held
+        line = _claim_locked(root, nn, sid, leases)
+        if drop is None:
+            return line
+        logs = _reservations(held_lease)
+        _remove_lease_files(root, drop)     # as reclaim: worktree and branch kept for the next allocation to re-use
+        if logs:
+            claimed = read_lease(root, nn) or {}
+            if not _reservations(claimed):
+                claimed["logs"] = logs
+                write_lease(root, nn, claimed)
+        return ("This session was window %s, which had nothing to lose (clean, nothing unpromoted); its lease is given "
+                "up.\n%s" % (drop, line))
+
+
+def _claim_held_refusal(root: Path, nn: str, held: str, held_lease: dict, why: Optional[str],
+                        leases: Dict[str, dict]) -> str:
+    """claim's sentence when this session's own window has work: what it holds, and the path that works — a new
+    terminal, numbered at start with nothing in it, where 'this is window NN' gives that number up and binds NN."""
+    if why is None:
+        try:
+            problems = unpromoted_work(root, held, held_lease)[2]
+        except Refused as e:
+            problems = [str(e)]
+        why = ", and ".join(problems) or "has work"
+    else:
+        why = "cannot be checked (%s)" % why
+    hint = (" (or start it with `DAEDALUS_LEASE=%s claude`)" % nn) if nn in leases else ""
+    if held_lease.get("released"):
+        return ("This session was window %s and released it, and it still %s; this window is done — close it. To "
+                "continue window %s, say 'this is window %s' in a new terminal%s." % (held, why, nn, nn, hint))
+    return ("This session is already window %s, which %s, so it cannot also be window %s. To continue window %s, say "
+            "'this is window %s' in a new terminal%s; this one stays window %s." % (held, why, nn, nn, nn, hint, held))
+
+
+def _claim_locked(root: Path, nn: str, sid: str, leases: Dict[str, dict]) -> str:
+    """claim's bind of NN, the caller holding the lock: an existing lease through bind(), a swept number re-created
+    and adopted. Returns the sentence."""
+    if nn in leases:
+        before = leases[nn]
+        lease = bind(root, nn, sid)
+        line = "This is %s." % window_label(nn, lease)
+        if before.get("finished") and before.get("session_id") != sid:
+            line += (" An earlier session finished it (%s); that report is cleared — this window continues the work."
+                     % (before.get("summary") or "no summary"))
+        return line
+    trunks = trunks_of(root, root / "target")
+    subjects = [s for repo in trunks for s in waiting_work(root / "target" / repo, trunks[repo], nn)]
+    data = {"lease": nn, "session_id": None, "peer_name": None, "pid": None, "proc_started": None,
+            "worktree": "worktrees/%s" % nn, "branch": "lease/%s" % nn,
+            "repos": list(trunks), "trunks": trunks, "created": now_stamp(), "bound_at": None, "promoted": [],
+            "worktree_ready": False}   # as allocate_locked: ready only once the add returns True
+    write_lease(root, nn, data, exclusive=True)
+    try:
+        if add_worktrees(root, nn, trunks):
+            data.pop("worktree_ready", None)
+            write_lease(root, nn, data)
+        # else cut off (a git call timed out): left unfinished, so the bind
+        # just below — and any later claim — finishes it (§4.2). Plan 1
+        # discarded this False and wrote the window ready.
+        write_changed(root, nn, {})
+        lease = bind(root, nn, sid)
+    except BaseException:
+        # as allocate_locked: a number held by a lease with no tree or no
+        # holder would be skipped by every later allocation
+        try:
+            os.unlink(str(lease_path(root, nn)))
+        except OSError:
+            pass
+        raise
     if subjects:
         return "Window %s continues %d unpromoted commit%s from an earlier session (%s)." % (
             nn, len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects))
@@ -4805,7 +4863,7 @@ LAST_COMMIT_NOT_READ = "last commit not read this time"
 SWEPT_UNCHECKED = ("- %s — swept; not checked for unpromoted work this time — the next prompt finishes the check, "
                    "or run `core/lease.sh list` to check now")
 SWEPT_AT_LEAST = ("- %s — swept, at least %d unpromoted commit%s waiting (%s); not every repo was checked this time: say "
-                  "'this is window %s' to a window to continue it, or 'delete %s's work', or run `core/lease.sh list` "
+                  "'this is window %s' to a new window to continue it, or 'delete %s's work', or run `core/lease.sh list` "
                   "for the full count")
 CANNOT_TELL = "cannot tell whether lease/%s has unpromoted work in %s (git log origin/%s..lease/%s failed: %s)"
 SWEPT_CANNOT_TELL = "- %s — swept; %s; run `git -C target/%s log -1 refs/heads/lease/%s` to see the error"
@@ -4823,7 +4881,7 @@ def waiting_lines(w: "Waiting") -> list:
         if nn in w.incomplete:
             lines.append(SWEPT_AT_LEAST % (nn, len(subs), "" if len(subs) == 1 else "s", _quoted(subs), nn, nn))
         else:
-            lines.append("- %s — swept, %d unpromoted commit%s waiting (%s): say 'this is window %s' to a window to continue it, or 'delete %s's work'"
+            lines.append("- %s — swept, %d unpromoted commit%s waiting (%s): say 'this is window %s' to a new window to continue it, or 'delete %s's work'"
                          % (nn, len(subs), "" if len(subs) == 1 else "s", _quoted(subs), nn, nn))
     for nn in sorted(w.errors):
         repo, trunk, last = w.errors[nn]
@@ -5179,7 +5237,7 @@ def doctor_lines(root: Path) -> list:
         lines.append("NOTE     leases: cannot tell whether a swept number still has unpromoted work (%s)" % e)
     for nn in sorted(wr.waiting):
         k = len(wr.waiting[nn])
-        lines.append("NOTE     leases: %s swept with %d unpromoted commit%s waiting — say \"this is window %s\" to a window "
+        lines.append("NOTE     leases: %s swept with %d unpromoted commit%s waiting — say \"this is window %s\" to a new window "
                      "to continue it, or \"delete %s's work\"" % (nn, k, "" if k == 1 else "s", nn, nn))
     for nn in sorted(wr.errors):
         repo, trunk, last = wr.errors[nn]
@@ -5194,7 +5252,7 @@ def doctor_lines(root: Path) -> list:
     for where, paths in sorted(swept_loose(root, leases).items()):
         nn = where.split("/", 1)[0]
         lines.append("NOTE     leases: worktrees/%s holds uncommitted or untracked files of swept window %s (%s) — say "
-                     "\"this is window %s\" to a window to continue it, or remove them"
+                     "\"this is window %s\" to a new window to continue it, or remove them"
                      % (where, nn, name_paths(paths), nn))
     return lines
 

@@ -89,7 +89,7 @@ it.
 | "Which window is this?" / "who holds the pen?" | any window | Nothing to run: the board is on screen above the prompt in every window and refreshes itself. Answer from the orientation line only when the band is missing (then say so: the mod is not installed or failed). |
 | "Call this window the POC window" | that window | `core/lease.sh alias 03 poc`; say "Window 03 is now shown as poc on the board." Display only. |
 | "Note for this window: …" | that window | `core/lease.sh note 03 "<their words>"`; the board shows it; nothing is enforced by it. |
-| "This is window 2" (a session that did not number itself) | that session | `core/lease.sh claim 02`; say which waiting work it continues, if any. If there is no window 02 yet, run `core/lease.sh create` and claim the number it printed. |
+| "This is window 2" | that session | `core/lease.sh claim 02`; say which waiting work it continues, if any. A window numbered at start with nothing in it gives that number up (claim says so; say it in one line). If this window holds work of its own, claim refuses and names the way that works — repeat it. If there is no window 02 yet, run `core/lease.sh create` and claim the number it printed. |
 | "Start a background clone to …" | any window | `core/lease.sh spawn "<the task>"`; say "Window 04 is a background clone working on <the task>; it will report on the board when done." |
 | "Who is working on what?" / "what's open?" | any window | `core/lease.sh status`, repeated word for word. |
 | "Clean up the dead ones" | any window | Show the board, say which windows are stale and which are only quiet, run `core/lease.sh sweep`, then say what you left alone and why — including a swept number whose unpromoted work is still waiting. |

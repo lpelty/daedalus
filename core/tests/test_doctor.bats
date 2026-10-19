@@ -806,7 +806,7 @@ print(int(time.mktime(time.strptime(out,"%a %b %d %H:%M:%S %Y"))*1000))' "$$")"
   printf '{}' > "$DAEDALUS_HOME/state/pitfall-seen.json"
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ]
   case "$output" in *"NOTE     leases: 04 (spawned) FINISHED (promote 04 or release 04); 02 released (swept at next sweep)"*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *"NOTE     leases: 05 swept with 1 unpromoted commit waiting — say \"this is window 05\" to a window to continue it, or \"delete 05's work\""*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     leases: 05 swept with 1 unpromoted commit waiting — say \"this is window 05\" to a new window to continue it, or \"delete 05's work\""*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"OK       session registry: "*"sessions/ present (0 entries)"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"NOTE     state/pitfall-seen.json is the pre-v0.7.0 shared file — the upgrade removes it at the next session start"*) : ;; *) echo "$output"; return 1 ;; esac
   rm -rf "$BATS_TEST_TMPDIR/sessions"

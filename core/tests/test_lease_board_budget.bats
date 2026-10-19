@@ -325,7 +325,7 @@ complete_count() { ctx | grep -cE '^- [0-9]{2} — swept, [0-9]+ unpromoted comm
   LS create >/dev/null; LS create >/dev/null; bind_live 01 sA; swept_with_work 02
   export PATH="$(count_git):$PATH" FAKE_GIT_SLEEP_ON="log:--format=%H" FAKE_GIT_SLEEP_IN="/thing/sub" FAKE_GIT_SLEEP=3
   timed_board sA; c="$(ctx)"
-  case "$c" in *"- 02 — swept, at least 1 unpromoted commit waiting (\"work 02 in thing\"); not every repo was checked this time: say 'this is window 02' to a window to continue it, or 'delete 02's work', or run \`core/lease.sh list\` for the full count"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 02 — swept, at least 1 unpromoted commit waiting (\"work 02 in thing\"); not every repo was checked this time: say 'this is window 02' to a new window to continue it, or 'delete 02's work', or run \`core/lease.sh list\` for the full count"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"not checked for unpromoted work"*) echo "$c"; return 1 ;; esac
 }
 

@@ -73,7 +73,7 @@ bind_live() {  # bind_live <NN> <sid> [name] — claim with a live registry pid
   case "$c" in *"- 04 — "*"last seen"*) : ;; *) echo "resumed must render live: $c"; return 1 ;; esac
   [ "$(lease_json 04 pid)" = "$pr" ]
   case "$c" in *"- 05 (spawned) — FINISHED at 11:42: did the thing — promote 05 or release 05"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"- 06 — swept, 1 unpromoted commit waiting (\"waiting work\"): say 'this is window 06' to a window to continue it, or 'delete 06's work'"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 06 — swept, 1 unpromoted commit waiting (\"waiting work\"): say 'this is window 06' to a new window to continue it, or 'delete 06's work'"*) : ;; *) echo "$c"; return 1 ;; esac
   # a second LIVE registry entry for sA (a dead pid beside it changes nothing — Task 2 review)
   registry_entry "$(live_pid)" sA
   run board sA; c="$(ctx)"; case "$c" in *"- 01 (you) — open in two terminals (pids"*"close one"*) : ;; *) echo "$c"; return 1 ;; esac
