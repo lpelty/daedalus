@@ -35,6 +35,7 @@ let snapshot = null // null before the first check; { kind: 'ok', services } or 
 let checkedAt = 0 // when the last check finished, milliseconds since the epoch
 let tools = 'unknown' // 'connected', 'not-connected', or 'unknown' (inside the grace, or the list unread)
 let pastGrace = false
+let lastMcp = null // status.py's last memory_mcp answer that was not null: true, false, or null before any
 let inflight = false // one check at a time: a tick while status.py still runs starts no second one
 let prev = null // stem -> 'up' | 'down' as of the last check; null until the first check (no toast for it)
 let statusText = null // what the status line was last set to; null before the first check
@@ -86,21 +87,23 @@ function parseStatus(stdout) {
 }
 
 // The memory tools' row, read in the mod (spec §3; PROP-027): whether memory works, by either road. Only beside a
-// memory server status.py reports; not-set-up where it is. Tools connected are up. With no hindsight MCP server
-// configured, memory goes through the REST API capture and recall use, so the row follows the memory server and
-// capture at once — no grace, and no /mcp remedy. With one configured (or status.py unable to tell), the 0.1.0
-// rule: 'checking' (counted neither way) until the grace has passed, then down if the tools never came.
+// memory server status.py reports; not-set-up where it is. It counts down only for what no other row says — a
+// hindsight MCP server configured whose tools never came; a memory server or capture that is down is already its
+// own row, so here it is 'blocked' (dim, counted neither way, no toast) naming that row, never a second name in the
+// band nor an up over a dead server (review finding 1). Tools connected are up. With no hindsight MCP server
+// configured, memory goes through the REST API capture and recall use: up at once, no grace, no /mcp remedy. With
+// one configured (or status.py unable to tell), the 0.1.0 rule: 'checking' until the grace has passed, then down.
 function toolsRow(snap) {
   const services = snap.services
   const server = services.find((s) => s.stem === 'hindsight')
   if (!server) return null
   const row = { stem: 'memory-tools', name: 'memory tools' }
   if (server.state === 'not-set-up') return Object.assign(row, { state: 'not-set-up', detail: server.detail })
+  if (server.state === 'down') return Object.assign(row, { state: 'blocked', detail: 'the memory server is down' })
   if (tools === 'connected') return Object.assign(row, { state: 'up', detail: 'connected to this session' })
   if (snap.mcp === false) {
     const capture = services.find((s) => s.stem === 'capture')
-    if (server.state === 'down') return Object.assign(row, { state: 'down', detail: 'the memory server is down; no MCP server here' })
-    if (capture && capture.state === 'down') return Object.assign(row, { state: 'down', detail: 'memory capture is down; no MCP server here' })
+    if (capture && capture.state === 'down') return Object.assign(row, { state: 'blocked', detail: 'memory capture is down; no MCP server here' })
     return Object.assign(row, { state: 'up', detail: 'no MCP server here; capture and recall use the REST API' })
   }
   if (tools === 'not-connected') return Object.assign(row, { state: 'down', detail: 'not connected to this session' })
@@ -220,7 +223,14 @@ async function refresh($) {
         // whatever the exit code. It rejects if the program can't start or is still running at the timeout"
         // (api page); init "{ cwd, env, stdin, timeoutMs }" (the types).
         const r = await $.process.run(['python3', STATUS_PY, '--json'], { cwd: home, timeoutMs: TIMEOUT_MS })
-        snapshot = r.exitCode === 0 ? parseStatus(r.stdout) : { kind: 'failed', reason: firstLine(r.stderr) || 'core/status.py exited ' + r.exitCode }
+        const next = r.exitCode === 0 ? parseStatus(r.stdout) : { kind: 'failed', reason: firstLine(r.stderr) || 'core/status.py exited ' + r.exitCode }
+        // status.py could not tell this time (a .claude.json caught mid-write): the last answer it gave stands,
+        // so one unreadable read is not a down, a toast and a /mcp line (review finding 3)
+        if (next.kind === 'ok') {
+          if (next.mcp === null) next.mcp = lastMcp
+          else lastMcp = next.mcp
+        }
+        snapshot = next
       } catch (err) {
         snapshot = { kind: 'failed', reason: firstLine(err && err.message ? err.message : String(err)) || 'core/status.py did not run' }
       }

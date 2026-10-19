@@ -168,6 +168,36 @@ claude_json() { python3 -c 'import ast, json, sys; json.dump(ast.literal_eval(sy
   [ "$status" -eq 0 ]
   case "$(mcp)" in "null $CLAUDE_CONFIG_DIR/.claude.json could not be read"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(field hindsight state)" = not-set-up ]
+  # nested past the parser's depth: RecursionError is unknown too, never a crash (review finding 5)
+  python3 -c 'import sys; open(sys.argv[1], "w").write("[" * 1000000)' "$CLAUDE_CONFIG_DIR/.claude.json"
+  run S
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$(mcp)" in "null $CLAUDE_CONFIG_DIR/.claude.json could not be read"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the memory MCP server (PROP-027): a config directory that cannot be searched is unknown, not absent (review finding 4)" {
+  [ "$(id -u)" != 0 ] || skip "root reads through mode 000"
+  claude_json "{'mcpServers': {'hindsight': {}}}"
+  chmod 000 "$CLAUDE_CONFIG_DIR"
+  run S
+  chmod 755 "$CLAUDE_CONFIG_DIR"
+  case "$(mcp)" in "null $CLAUDE_CONFIG_DIR/.claude.json could not be read"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the memory MCP server (PROP-027): a server disabled for this project is not configured here — its tools never come, by choice (review finding 2)" {
+  REAL="$(cd "$H" && pwd -P)"
+  claude_json "{'mcpServers': {'hindsight': {}}, 'projects': {'$REAL': {'disabledMcpServers': ['hindsight']}}}"
+  run S
+  [ "$(mcp)" = "false hindsight is configured but disabled for this project" ] || { echo "$output"; return 1; }
+  claude_json "{'projects': {'$REAL': {'disabledMcpjsonServers': ['hindsight']}}}"
+  printf '{"mcpServers": {"hindsight": {"type": "http"}}}' > "$H/.mcp.json"
+  run S
+  [ "$(mcp)" = "false hindsight is configured but disabled for this project" ] || { echo "$output"; return 1; }
+  # disabled for another project only: still configured here
+  claude_json "{'mcpServers': {'hindsight': {}}, 'projects': {'/elsewhere': {'disabledMcpServers': ['hindsight']}}}"
+  rm "$H/.mcp.json"
+  run S
+  [ "$(mcp)" = "true user scope ($CLAUDE_CONFIG_DIR/.claude.json)" ] || { echo "$output"; return 1; }
 }
 
 # capture fixtures: offsets.json naming one transcript, captured <cap> seconds ago up to its current size, then rows

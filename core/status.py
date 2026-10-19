@@ -292,17 +292,28 @@ def check_code_graph(cfg: Config) -> Dict[str, str]:
 MCP_SERVER = "hindsight"            # the memory server's MCP name: the mod's tools are mcp__hindsight__*
 
 
-def _object_at(path: Path, keys: tuple) -> dict:
-    """The object at `keys` in the JSON file at `path`; {} when the file or a key is absent. A file that
-    cannot be read or parsed raises OSError or ValueError to the caller."""
-    if not path.exists():
+def _json_file(path: Path) -> object:
+    """The JSON in the file at `path`; {} when there is no such file. A file that cannot be read or parsed — a
+    directory on the way that cannot be searched, a write caught half-done, nesting past the parser's depth —
+    raises OSError or ValueError to the caller: cannot tell is never "absent" (review finding 4)."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
         return {}
-    node = json.loads(path.read_text())
-    for k in keys:
-        node = node.get(k) if isinstance(node, dict) else None
-        if node is None:
-            return {}
-    return node if isinstance(node, dict) else {}
+    try:
+        return json.loads(text)
+    except RecursionError as e:
+        raise ValueError("nested too deep") from e
+
+
+def _dict(node: object, key: str) -> dict:
+    v = node.get(key) if isinstance(node, dict) else None
+    return v if isinstance(v, dict) else {}
+
+
+def _names(node: object, key: str) -> list:
+    v = node.get(key) if isinstance(node, dict) else None
+    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
 
 def memory_mcp(home: Path) -> Dict[str, object]:
@@ -310,33 +321,43 @@ def memory_mcp(home: Path) -> Dict[str, object]:
     files Claude Code keeps it in (code.claude.com/docs/en/mcp, "Storage locations by scope"): local scope,
     .claude.json under projects.<project path>.mcpServers; user scope, .claude.json's top-level mcpServers; project
     scope, <home>/.mcp.json. .claude.json is in CLAUDE_CONFIG_DIR when that is set (verified 2026-10-19: `claude mcp
-    add -s local` under it wrote $CLAUDE_CONFIG_DIR/.claude.json), else in the home directory. Memory reaches
-    Hindsight either through these tools or through the REST API capture and recall use, so a deployment with no
-    such server is not missing one. configured: True, False, or None when a file could not be read (never a guess)."""
+    add -s local` under it wrote $CLAUDE_CONFIG_DIR/.claude.json), else in the home directory. A server the person
+    disabled for this project (the project's disabledMcpServers, or disabledMcpjsonServers for .mcp.json's) is not
+    configured here: its tools never come, by choice (review finding 2). Memory reaches Hindsight either through
+    these tools or through the REST API capture and recall use, so a deployment with no such server is not missing
+    one. configured: True, False, or None when a file could not be read (never a guess)."""
     conf = os.environ.get("CLAUDE_CONFIG_DIR")
     cj = Path(conf) / ".claude.json" if conf else Path(os.path.expanduser("~/.claude.json"))
+    mj = home / ".mcp.json"
     real = os.path.realpath(str(home))
     unread = None
     try:
-        # local scope is keyed by the project's path as Claude Code saw it, which may be a symlinked spelling of
-        # the home: every key that resolves to the home counts
-        projects = _object_at(cj, ("projects",))
-        for key, entry in projects.items():
-            servers = entry.get("mcpServers") if isinstance(entry, dict) else None
-            if isinstance(servers, dict) and MCP_SERVER in servers and os.path.realpath(key) == real:
-                return {"configured": True, "detail": "local scope (%s)" % cj}
+        claude = _json_file(cj)
     except (OSError, ValueError) as e:
-        unread = "%s could not be read (%s)" % (cj, type(e).__name__)
-    for scope, path, keys in (("user scope", cj, ("mcpServers",)), ("project scope", home / ".mcp.json", ("mcpServers",))):
-        try:
-            servers = _object_at(path, keys)
-        except (OSError, ValueError) as e:
-            unread = unread or "%s could not be read (%s)" % (path, type(e).__name__)
-            continue
-        if MCP_SERVER in servers:
-            return {"configured": True, "detail": "%s (%s)" % (scope, path)}
+        claude, unread = None, "%s could not be read (%s)" % (cj, type(e).__name__)
+    try:
+        project_file = _json_file(mj)
+    except (OSError, ValueError) as e:
+        project_file, unread = {}, unread or "%s could not be read (%s)" % (mj, type(e).__name__)
+    # local scope is keyed by the project's path as Claude Code saw it, which may be a symlinked spelling of the
+    # home: every key that resolves to the home counts
+    mine = [e for k, e in _dict(claude, "projects").items() if isinstance(e, dict) and os.path.realpath(k) == real]
+    disabled = {n for e in mine for n in _names(e, "disabledMcpServers")}
+    disabled_mcpjson = {n for e in mine for n in _names(e, "disabledMcpjsonServers")}
+    found = []
+    if any(MCP_SERVER in _dict(e, "mcpServers") for e in mine):
+        found.append(("local scope (%s)" % cj, MCP_SERVER in disabled))
+    if MCP_SERVER in _dict(claude, "mcpServers"):
+        found.append(("user scope (%s)" % cj, MCP_SERVER in disabled))
+    if MCP_SERVER in _dict(project_file, "mcpServers"):
+        found.append(("project scope (%s)" % mj, MCP_SERVER in disabled or MCP_SERVER in disabled_mcpjson))
+    for where, off in found:
+        if not off:
+            return {"configured": True, "detail": where}
     if unread:
         return {"configured": None, "detail": unread}
+    if found:
+        return {"configured": False, "detail": "%s is configured but disabled for this project" % MCP_SERVER}
     return {"configured": False, "detail": "no MCP server named %s in any scope" % MCP_SERVER}
 
 

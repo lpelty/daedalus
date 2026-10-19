@@ -60,8 +60,14 @@ With one configured, the memory tools are checked in the mod, from the
 session's tool list, with a 15-second grace after start while MCP servers
 connect. When they are missing and the memory server is up, the pane says what
 to do: `Memory tools aren't connected. Type /mcp and reconnect hindsight.`
-With none configured, the row follows the memory server and capture, with no
-grace and no `/mcp` line: there is no server to reconnect.
+With none configured, the row is up at once while the memory server and
+capture are, with no grace and no `/mcp` line: there is no server to
+reconnect. A server configured but disabled for this project counts as none.
+
+The row counts down only for what no other row says: a configured server
+whose tools never came. While the memory server (or, with no MCP server,
+capture) is down, the row reads `blocked`, dim and counted neither way, naming
+that row: never a second name in the band, and never up over a dead server.
 
 It reads only: it never restarts or fixes a service. `python3 core/status.py`
 (without `--json`) prints the same rows for a person at a shell.

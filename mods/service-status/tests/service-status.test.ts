@@ -272,23 +272,27 @@ test('no hindsight MCP server configured, memory server and capture up: memory-t
   expect(toasts).toEqual([])
 })
 
-test('no hindsight MCP server configured and memory capture down: memory-tools down, and no /mcp help (PROP-027)', async ($, on) => {
+test('no hindsight MCP server configured and memory capture down: memory-tools blocked (dim, not a second name), no /mcp help (PROP-027)', async ($, on) => {
   const { clock } = stubs(on, () => ok(withState({ capture: 'down' }), NO_MCP), () => NO_TOOLS)
   await start($, clock)
   await clock.advance(15000)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await summaryOf(band))?.children).toEqual(['capture down'])
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await pane.find({ key: 'row-memory-tools' }))?.children?.[0]?.children?.[0]).toMatch(/down {8}memory capture is down; no MCP server here$/)
+  const row = (await pane.find({ key: 'row-memory-tools' }))?.children?.[0]
+  expect(row?.children?.[0]).toMatch(/blocked {5}memory capture is down; no MCP server here$/)
+  expect(row?.props.dimColor).toBe(true)
   expect(await pane.find({ key: 'tools-help' })).toBeUndefined()
 })
 
-test('no hindsight MCP server configured and the memory server down: memory-tools down, and no /mcp help (PROP-027)', async ($, on) => {
+test('no hindsight MCP server configured and the memory server down: hindsight down alone in the band, memory-tools blocked, no /mcp help (PROP-027)', async ($, on) => {
   const { clock } = stubs(on, () => ok(withState({ hindsight: 'down' }), NO_MCP), () => NO_TOOLS)
   await start($, clock)
   await clock.advance(15000)
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await summaryOf(band))?.children).toEqual(['hindsight, memory-tools down'])
+  expect((await summaryOf(band))?.children).toEqual(['hindsight down'])
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await pane.find({ key: 'row-memory-tools' }))?.children?.[0]?.children?.[0]).toMatch(/down {8}the memory server is down; no MCP server here$/)
+  expect((await pane.find({ key: 'row-memory-tools' }))?.children?.[0]?.children?.[0]).toMatch(/blocked {5}the memory server is down$/)
   expect(await pane.find({ key: 'tools-help' })).toBeUndefined()
 })
 
@@ -317,6 +321,33 @@ test('tools connected win even where no server is configured (a plugin or a mana
   await start($, clock)
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await pane.find({ key: 'row-memory-tools' }))?.children?.[0]?.children?.[0]).toMatch(/up {10}connected to this session$/)
+})
+
+test('the memory server down with its tools still listed: memory-tools blocked, never up over a dead server; hindsight down alone in the band (review finding 1)', async ($, on) => {
+  const { clock, toasts } = stubs(on, () => ok(withState({ hindsight: 'down' }), LOCAL_MCP), () => WITH_TOOLS)
+  await start($, clock)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await summaryOf(band))?.children).toEqual(['hindsight down'])
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await pane.find({ key: 'row-memory-tools' }))?.children?.[0]?.children?.[0]).toMatch(/blocked {5}the memory server is down$/)
+  expect(await pane.find({ key: 'tools-help' })).toBeUndefined()
+  await clock.advance(60000)
+  expect(toasts).toEqual([])
+})
+
+test('a check where status.py could not tell (null) keeps the last answer it gave: no down, no toast, no /mcp line in a REST-only home (review finding 3)', async ($, on) => {
+  let mcp: any = NO_MCP
+  const { clock, toasts, statuses } = stubs(on, () => ok(ALL_UP, mcp), () => NO_TOOLS)
+  await start($, clock)
+  await clock.advance(15000)
+  mcp = { configured: null, detail: '/x/.claude.json could not be read (JSONDecodeError)' }
+  await clock.advance(60000)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await summaryOf(band))?.children).toEqual(['services ok'])
+  mcp = NO_MCP
+  await clock.advance(60000)
+  expect(toasts).toEqual([])
+  expect(statuses).toEqual([undefined])
 })
 
 test('a memory_mcp that is not the shape is read as unknown: the 0.1.0 tool-list rule, never a failed check (PROP-027)', async ($, on) => {
