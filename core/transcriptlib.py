@@ -54,6 +54,7 @@ import json
 import os
 import pwd
 import re
+import unicodedata
 import shutil
 import string
 import subprocess
@@ -224,49 +225,70 @@ def normalize(text: str) -> str:
 # Decision 30, as revised 2026-10-17 (v0.10.0) and again in v0.12.2: the operator's consent is whatever way they say
 # it. A message consents when one of its sentences that is not a question agrees (yes, sure, go ahead, sounds good …)
 # or asks for the action on a thing (delete them, push the work, promote it, ship it, skip the review …), and no
-# sentence of it refuses. A message that is only questions is neither, and so is a bare "ok" beside a question (the
-# operator listening, not agreeing). One rule for the transcribed reply, the tty line, release --remove and promote.
+# sentence of it refuses, holds, defers or makes it conditional. A message that is only questions is neither, and so
+# is a bare "ok" beside a question (the operator listening, not agreeing). One rule for the transcribed reply, the tty
+# line, release --remove and promote. The lists below are a filter, never the whole guard: find_consent also asks
+# that the operator's LATEST statement since the ask be the consent, so a no in words no list knows still stops it.
 _WORD = r"(?<![\w'])(?:%s)(?![\w'])"
 ASSENT_RE = re.compile(_WORD % "|".join((
-    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go ahead", "go for it", "go on", "go",
-    "proceed", "continue", "carry on", "approved?", "approve", "agreed?", "confirm(?:ed)?", "do it", "do that",
+    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go ahead", "go for it",
+    "proceed", "approved?", "approve", "agreed?", "confirm(?:ed)?", "do it", "do that",
     "do so", "please do", "make it so", "ship it", "push it", "sounds good", "lgtm", "alright", "all right",
-    "absolutely", "definitely", "of course", "affirmative", "works for me", "good to go")) + "|\U0001f44d")
+    "absolutely", "definitely", "certainly", "of course", "affirmative", "works for me", "good to go",
+    "fine by me", "that's fine", "that is fine")) + "|\U0001f44d|^(?:y|k|kk|go)$")
 # the words that only acknowledge: beside a question they are the operator listening, not agreeing
 BARE_ACK_RE = re.compile(r"^(?:%s)$" % "|".join(("ok", "okay", "k", "alright", "all right", "sure", "got it", "i see",
                                                  "right", "hmm+", "mm+")))
-# the action asked for on a thing: "delete them", "just push the work", "promote it", "skip the review" — or the verb
-# alone as the whole sentence ("delete"). "Remove the debug print in a.txt" names another thing and is not one.
-_VERBS = "delete|remove|clear|clean up|promote|push|merge|ship|release|deploy|land|skip"
+# the action asked for on a thing: "delete them", "just push the work", "promote it", "skip the review", "push to
+# main" — or the verb alone as the whole sentence ("delete"). "Remove the debug print in a.txt" names another thing.
+_VERBS = "delete|remove|clear|clean up|promote|push|merge|ship|release|deploy|land|skip|kill|nuke|drop|trash|scrap|wipe"
 _THINGS = (r"it|them|both|all(?: of them)?|that|this|these|those|everything|the work|the change|the changes|"
-           r"the commits?|the windows?|windows?(?: \d\d)?(?:(?:,| and) \d\d)*|the review|(?:\d\d(?:,| and)? ?)+")
-ACTION_RE = re.compile(r"(?<![\w'])(?:%s)(?: (?:it|them|that|this|the work|the change|the changes) to [\w/.-]+)?"
-                       r"(?: (?:%s))(?![\w'])|^(?:(?:just|please|then|so|ok|okay|yes|now) )*(?:%s)$"
-                       % (_VERBS, _THINGS, _VERBS))
-# A refusal: a sentence that opens with a no or a hold ("No, wait — what about F2?", "Not yet.", "Never.") — a
-# question too — or a sentence, not a question, that holds or takes something out anywhere ("yes, but wait",
-# "please don't push it", "Absolutely not.", "I am not ok with that", "Yes, but not 03", "keep it", "merge it later").
+           r"the commits?|the windows?|windows?(?: [0-9][0-9])?(?:(?:,| and) [0-9][0-9])*|the review|"
+           r"(?:[0-9][0-9](?:,| and)? ?)+|to (?:main|trunk|master)")
+ACTION_RE = re.compile(r"(?<![\w'])(?:%s)(?: (?:only|just))?(?: (?:%s))(?![\w'])|^(?:(?:just|please|then|so|ok|okay|yes|now) )*(?:%s)$"
+                       r"|, (?:just |then |so )?(?:%s)$" % (_VERBS, _THINGS, _VERBS, _VERBS))
+# A refusal, a hold, a deferral or a condition. Whole sentences that say no in a word or two ("Never.", "Hell no.",
+# "Negative.", "Keep it."); any sentence that opens with one ("No, wait — what about F2?"); and phrases anywhere in
+# a sentence that is not a question ("yes, but wait", "please don't push it", "Absolutely not", "I am not ok with
+# that", "Yes, but not 03", "merge it later", "push it tomorrow", "yes if tests pass", "once I've backed it up").
 # A bare "not" inside a sentence is not one: "F1 is not about real code, promote it" consents.
+WHOLE_DISSENT_RE = re.compile(r"^(?:%s)$" % "|".join((
+    "no+", "nope", "nah", "never", "negative", "not yet", "not now", "later", "wait", "stop", "pause", "hold on",
+    "cancel", "abort", "keep it", "keep them", "leave it", "nothing", "none", "no thanks", "rather not",
+    "i'?d rather not", "hell no", "heck no", "i said no", "the answer is no", "no way", "not really")))
 LEAD_DISSENT_RE = re.compile(r"^(?:%s)(?![\w'])" % "|".join((
-    "no", "nope", "nah", "never", "wait", "stop", "hold", "hang on", "cancel", "abort", "don't", "dont", "do not",
-    "not", "never mind", "nevermind", "later", "keep", "leave", "except")))
+    "no", "nope", "nah", "wait", "stop", "hold on", "hold off", "hang on", "cancel", "abort", "don't", "dont",
+    "do not", "not yet", "not now", "never mind", "nevermind", "except", "negative")))
 DISSENT_RE = re.compile(_WORD % "|".join((
-    "don't", "dont", "do not", "not yet", "not now", "hold off", "hold on", "wait", "stop", "cancel", "abort",
-    "never mind", "nevermind", "never", "later", "except", "but not", "not (?:ok|okay|fine|sure|happy|good|"
-    "comfortable|ready|that one|those|this one|these|[0-9][0-9]|window [0-9][0-9]|all|both|yet)", "(?:absolutely|of course|"
-    "certainly|definitely|really|just) not", "keep (?:it|them|that|this|those|these|window|[0-9][0-9])", "leave (?:it|them|that|"
-    "this|those|these|window|[0-9][0-9])[a-z0-9 ]*alone|leave (?:it|them|that|this|those|these|window [0-9][0-9]|[0-9][0-9]) (?:as is|be|there)",
-    "cannot", "can't", "won't", "shouldn't", "should not")))
+    "no", "don't", "dont", "do not", "not yet", "not now", "hold off", "hold on", "wait", "stop", "cancel", "abort",
+    "pause", "never mind", "nevermind", "except", "but not", "rather not", "rather you didn't", "rather you did not",
+    "nothing", "none of them", "stays?", "spare", "but [0-9][0-9]", r"not (?:ok|okay|fine|happy|comfortable|good) with",
+    "not sure", "not ready", "i'm not", "i am not", "(?:absolutely|of course|certainly|definitely|really|just) not",
+    r"keep (?:it|them|that|this|those|these|window|[0-9][0-9]|everything|all)",
+    r"leave (?:it|them|that|this|those|these|window [0-9][0-9]|[0-9][0-9])(?: (?:alone|as is|be|there))",
+    r"not (?:main|master|trunk|production|prod)", r"let me (?:think|look|check|see)",
+    r"i need to (?:think|look|check|see)", "think about it", "/s",
+    # deferred or conditional: not now
+    "later", "tomorrow", "tonight", r"next (?:week|sprint|time|month|release)", "eventually",
+    r"(?:on )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+    r"in a (?:minute|bit|moment|while|sec|second)", r"after (?:lunch|i|you|we|that|this|the|my|your)(?:'[a-z]+)?",
+    r"once (?:i|you|we|ci|the|it|that|this)(?:'[a-z]+)?", r"when (?:i|you|we|ci|the|it|that|this)(?:'[a-z]+)?",
+    r"if (?:the|tests?|ci|it|you|that|this|we|i|everything|all)(?:'[a-z]+)?")))
+END_DISSENT_RE = re.compile(r"(?:^|[^\w'])not$")
 # phrases that carry a hold word and mean yes
 BENIGN_RE = re.compile(_WORD % "|".join((
-    "no problem", "no worries", "no doubt", "not a problem", "why not", "no need to wait", "don't wait", "dont wait",
-    "do not wait", "without waiting", "stop asking", "don't need to wait", "can't wait", "no reason not to",
-    "not sure why not")))
+    "no problem", "no worries", "no doubt", "not a problem", "why not", "no need to wait", "no need", "no rush",
+    "don't wait", "dont wait", "do not wait", "without waiting", "stop asking", "don't need to wait", "can't wait",
+    "no reason not to", "not sure why not", "don't ask again", "no questions", "don't care", "dont care",
+    "don't mind", "dont mind", "do not mind")))
+_INVISIBLE = dict.fromkeys(map(ord, "​‌‍⁠﻿"), None)
 
 
 def _sentences(text: str) -> List[str]:
-    """The message cut into sentences after . ! ? ; and at line breaks, each keeping its own end mark."""
-    parts = re.split(r"(?<=[.!?;])\s+|\n+", (text or "").translate(_CURLY).strip())
+    """The message, NFKC-folded with zero-width characters removed, cut into sentences after . ! ? ; and at line
+    breaks, each keeping its own end mark."""
+    t = unicodedata.normalize("NFKC", text or "").translate(_INVISIBLE).translate(_CURLY).strip()
+    parts = re.split(r"(?<=[.!?;])\s+|\n+", t)
     return [p.strip() for p in parts if p and p.strip()]
 
 
@@ -280,25 +302,29 @@ def _statements(text: str) -> List[str]:
 
 
 def is_refusal(text: str) -> bool:
-    """A sentence of the message opens with a no or a hold, or a sentence that is not a question holds or takes
-    something out anywhere (a hold phrase that means yes — "no need to wait", "why not" — is read out first)."""
+    """A sentence of the message says no in a word or two, or opens with a no or a hold, or — not a question — holds,
+    defers, makes it conditional or takes something out anywhere (a hold phrase that means yes, such as "no need to
+    wait" or "why not", is read out first)."""
     for x in _sentences(text):
-        n = BENIGN_RE.sub(" ", normalize(x)).strip(EDGES)
+        raw = normalize(x)
+        if raw and WHOLE_DISSENT_RE.match(raw):
+            return True
+        n = BENIGN_RE.sub(" ", raw).strip(EDGES)
         if not n:
             continue
         if LEAD_DISSENT_RE.search(n):
             return True
-        if not _is_question(x) and DISSENT_RE.search(n):
+        if not _is_question(x) and (DISSENT_RE.search(n) or END_DISSENT_RE.search(n)):
             return True
     return False
 
 
 def is_assent(text: str) -> bool:
     """The operator's message consents (Decision 30, revised in v0.10.0 and v0.12.2): a sentence that is not a
-    question agrees or asks for the action on a thing, and no sentence refuses; beside a question, a bare "ok" is
-    listening, not agreeing. 'Okay, yes, proceed.', 'delete', 'Same reason: just push the work.' and 'Why the timing
-    test? Anyway, ship it.' are; 'no, wait', 'Absolutely not.', 'Yes, but not 03.', 'Ok. Which commit is that?',
-    'okay but why?', 'yesterday was fine' and '' are not."""
+    question agrees or asks for the action on a thing, and no sentence refuses, holds, defers or makes it
+    conditional; beside a question, a bare "ok" is listening, not agreeing. 'Okay, yes, proceed.', 'delete', 'Same
+    reason: just push the work.' and 'Why the timing test? Anyway, ship it.' are; 'no, wait', 'Absolutely not.',
+    'Yes, but not 03.', 'Push it tomorrow.', 'Ok. Which commit is that?', 'okay but why?' and '' are not."""
     st = _statements(text)
     if not st or is_refusal(text):
         return False
@@ -308,6 +334,13 @@ def is_assent(text: str) -> bool:
     if len(st) < len(_sentences(text)) and all(BARE_ACK_RE.match(n) for n in agreeing):
         return False                 # "Ok. Which commit is that?" — listening
     return True
+
+
+def substance(text: str) -> int:
+    """How many words the message has beyond its yes and its instruction: a reason to skip a review must have three."""
+    n = " ".join(_statements(text))
+    n = ACTION_RE.sub(" ", ASSENT_RE.sub(" ", n))
+    return len([w for w in re.split(r"[^\w'-]+", n) if w])
 
 
 def only_questions(text: str) -> bool:
@@ -697,14 +730,15 @@ def find_consent(path: Path, after: float, quote: Optional[str] = None, reason: 
     """v0.12.2 — the operator's consent, in whatever words they gave it: {"transcript_ref", "shown_ref": None, "text"}
     for an operator-typed turn of this session after `after` (the report or prepare that asked; a new ask moves it)
     that Claude Code wrote into the conversation (harness_wrote) and reported as a prompt (submitted) — so a yes the
-    model wrote, or a line added to the file, never counts — and that consents (is_assent). Nothing about the
-    turn's place matters: the agent's replies, the operator's questions and notifications between the ask and the
-    turn do not reset it, and no closing line is looked for. The operator's turns are read in order: a consent
-    holds until a later turn refuses (is_refusal); a turn that is only questions changes nothing. Of the consents
-    still standing, the one that loosely matches `quote` (the agent's citation: either normalized text inside the
-    other) is returned, else the latest — a citation that does not match is never the refusal.
-    reason=True (promote --skip-review): the turn is a reason — at least three words, not a refusal, not only
-    questions — matching `quote` loosely, else the latest such turn that also consents.
+    model wrote, or a line added to the file, never counts — and that consents (is_assent). Where the turn stands
+    does not matter: the agent's replies, the operator's questions and notifications between the ask and the turn do
+    not reset it, and no closing line is looked for. But it must be the operator's LATEST statement since the ask:
+    any later turn of theirs that is not only questions and does not consent — a no in any words, a hold, a change
+    of subject — takes its place, so a refusal the word lists miss still stops the action. `quote` (the agent's
+    citation) is never needed and never the refusal; the transcript is read for the operator's own words.
+    reason=True (promote --skip-review): the consent must come with a reason — three words or more beside the
+    instruction ("Same reason: just push the work."), or a statement of three words or more just before it ("F1
+    is test-only." then "push it") — and the reason's turn is returned.
     The read is retried CONSENT_TRIES times, CONSENT_PAUSE apart, while the only turn that would count fails because
     nothing Claude Code wrote follows it yet; the last read accepts it as the chain's last entry, vouched for by
     `submitted`. Raises Missing, Unreadable (fail closed), NotWritten, NotSubmitted, Declined or NotFound."""
@@ -736,24 +770,14 @@ def _find_consent_once(path: Path, after: float, quote: Optional[str], reason: b
     if drift:
         raise Unreadable(drift)
 
-    want = normalize(quote or "")
-
-    def cited(n: str) -> bool:
-        """The citation and the turn match loosely: one inside the other, at word boundaries."""
-        if not want or not n:
-            return False
-        w = r"(?<![\w'])%s(?![\w'])"
-        return re.search(w % re.escape(want), n) is not None or re.search(w % re.escape(n), want) is not None
-
-    def qualifies(t: str) -> bool:
-        if reason:
-            # a reason that also asks to go on ("…; promote it"), or one the agent cites in three words or more
-            return (len(normalize(t).split()) >= 3 and not is_refusal(t) and not only_questions(t)
-                    and (is_assent(t) or (len(want.split()) >= 3 and cited(normalize(t)))))
-        return is_assent(t)
-
-    standing: list = []             # verified consents since the last refusal
-    declined: Optional[dict] = None
+    # The operator's turns are read in order, and only their LATEST statement since the ask decides: a consent stands
+    # only while nothing they said after it, other than questions, takes its place. So a no in words the lists do
+    # not know ("Hell no", "leave it be") still stops the action — it is a statement, and not a consent — and a
+    # consent is never kept alive under a later change of mind (review 2026-10-19, second pass, finding 1).
+    consent: Optional[dict] = None          # the latest statement, when it consents and is verified
+    statement: Optional[dict] = None        # the latest statement of any kind
+    candidate: Optional[dict] = None        # reason=True: a reason given as its own statement, just before the consent
+    reason_e: Optional[dict] = None         # reason=True: the turn that holds the reason for the standing consent
     not_written = False
     not_submitted: Optional[str] = None
     unknown_hit = asked = False
@@ -762,38 +786,34 @@ def _find_consent_once(path: Path, after: float, quote: Optional[str], reason: b
         if kind not in ("operator", "queued", "unknown_provenance"):
             continue
         t = e["text"]
-        if is_refusal(t):
-            # a hold counts as typed, whoever wrote it — it can only stop the action, never start it — and so does
-            # one typed while the session was still working (queued)
-            standing, declined = [], e
-            continue
-        if kind == "unknown_provenance":
-            unknown_hit = unknown_hit or qualifies(t)
-            continue
-        if kind == "queued":
-            continue        # a consent typed before what it answers was on screen does not count
-        ok = qualifies(t)
-        if not ok:
-            asked = asked or only_questions(t)
+        if only_questions(t) and not is_refusal(t):
+            asked = asked or consent is None
+            continue                         # a question changes nothing
+        agrees = is_assent(t)
+        if kind == "queued" and agrees:
+            continue                         # typed before what it answers was on screen: neither counts nor cancels
+        if kind != "operator" or not agrees:
+            # a statement that does not consent — a no, a hold, something else — takes the place of any earlier
+            # consent, whoever wrote it: it can only stop the action
+            unknown_hit = unknown_hit or (kind == "unknown_provenance" and agrees)
+            consent, reason_e, statement = None, None, e
+            candidate = e if (reason and not is_refusal(t) and len(normalize(t).split()) >= 3) else None
             continue
         if not harness_wrote(seen, e, allow_tip):
-            not_written = not_written or ok
+            not_written = True
             continue
         why = submitted(path, entries, e, None, after)
         if why:
-            not_submitted = not_submitted or (why if ok else None)
+            not_submitted = not_submitted or why
             continue
-        standing.append(e)
-    if standing:
-        pick = next((e for e in reversed(standing) if cited(normalize(e["text"]))), None)
-        if pick is None and reason:
-            pick = next((e for e in reversed(standing) if is_assent(e["text"])), None)
-        if pick is None and not reason:
-            pick = standing[-1]
-        if pick is not None:
-            return {"transcript_ref": _ref(pick), "shown_ref": None, "text": pick["text"]}
-    if declined is not None:
-        raise Declined("the operator's last word on it was \"%s\"" % " ".join(declined["text"].split()))
+        if reason:
+            reason_e = e if substance(t) >= 3 else (candidate if statement is candidate else None)
+        consent, statement, candidate = e, e, None
+    if consent is not None and (not reason or reason_e is not None):
+        e = reason_e if reason else consent
+        return {"transcript_ref": _ref(e), "shown_ref": None, "text": e["text"]}
+    if consent is None and statement is not None and not unknown_hit:
+        raise Declined("the operator's last word on it was \"%s\"" % " ".join(statement["text"].split()))
     if not_written:
         raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
                          "chain, so it was added to the file afterwards")
@@ -802,6 +822,8 @@ def _find_consent_once(path: Path, after: float, quote: Optional[str], reason: b
     if unknown_hit:
         raise Unreadable("the words are only in a user entry that carries no origin field, so who typed it "
                          "cannot be told")
+    if reason and consent is not None:
+        raise NotFound("the operator agreed but gave no reason of three words or more")
     if asked:
         raise NotFound("the operator has only asked questions")
     raise NotFound("nothing the operator typed agrees or asks for it")

@@ -2100,6 +2100,25 @@ LINE0203="Delete the work of windows 02 and 03?"
   [ -d "$W" ]; [ ! -d "$W3" ]
 }
 
+@test "the operator's latest statement decides (v0.12.2, review second pass): a yes followed by a no in words no list knows is no consent; a consent naming only some of the windows deletes none of them" {
+  group_fixture
+  R="$(DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02 03)"; P="$(now)"
+  tx "$TX" operator "yes, delete them" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" operator "Hmm, leave it be for now." "$(plus "$P" 2)" >/dev/null
+  DAEDALUS_SESSION_ID=sA run LS release 02 03 --remove --force --operator-said "yes, delete them"
+  [ "$status" -ne 0 ]; case "$output" in *"last word on it was"*"leave it be for now"*) : ;; *) echo "$output"; return 1 ;; esac
+  for words in "Yes, but only 02." "Delete 02; 03 stays." "Delete window 2, keep 3."; do
+    tx "$TX" operator "$words" "$(plus "$P" 3)" >/dev/null
+    DAEDALUS_SESSION_ID=sA run LS release 02 03 --remove --force --operator-said "$words"
+    [ "$status" -ne 0 ]; case "$output" in *"name only some of windows 02 and 03"*|*"has not agreed"*) : ;; *) echo "<$words>: $output"; return 1 ;; esac
+  done
+  [ -d "$W" ]; [ -d "$W3" ]
+  tx "$TX" operator "Delete 02 and 03." "$(plus "$P" 4)" >/dev/null
+  DAEDALUS_SESSION_ID=sA run --separate-stderr LS release 02 03 --remove --force --operator-said "Delete 02 and 03."
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ ! -d "$W" ]; [ ! -d "$W3" ]
+}
+
 @test "release with several numbers but no --remove is refused (one window releases itself; several numbers go with deleting their work)" {
   group_fixture
   DAEDALUS_SESSION_ID=sA run LS release 02 03

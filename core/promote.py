@@ -675,11 +675,12 @@ def marker_started(root: Path, sid: Optional[str], nn: str) -> float:
 
 def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str], mode: str) -> dict:
     """§7.1 step 8, before any git work: the operator's written reason for
-    skipping the review — in transcribed mode a turn of the operator's, at least
-    three words, typed after the latest prepare of this window (or since this
-    session started when there is none), in their own words, recorded as they typed
-    it (transcribed_yes, v0.12.2: no closing line, nothing about where the turn
-    stands); in tty mode typed at a terminal — and the REFUTED review it
+    skipping the review — in transcribed mode the operator's consent with a
+    reason of three words or more (beside the instruction, or the statement
+    just before it), their latest statement since the prepare of the review it
+    sets aside (or since this session started when there is none), recorded as
+    they typed it (transcribed_yes, v0.12.2); in tty mode typed at a terminal
+    — and the REFUTED review it
     sets aside (Decision 31): the latest REFUTED review of this window's current
     occupant that no promotion has settled, however many prepares came after it
     (Decision 51)."""
@@ -911,14 +912,14 @@ def confirm_mode(root: Path) -> str:
 
 
 def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, reason: bool = False) -> dict:
-    """The operator's words, found in the confirming session's own transcript (§7.2 step 2; v0.12.2): a turn the
-    operator typed after `after` (the prepare that asked; a new prepare moves it), in any words — for the confirm,
-    any that agree or ask for the push and are not taken back by a later no or wait; for a skipped review
-    (reason=True), a reason of at least three words. Nothing about where the turn stands matters: replies,
-    questions and notifications between the block and the words do not reset it, and no closing line is looked
-    for. `said` is the agent's citation: it picks among their words when it matches loosely and is never itself the
-    refusal (transcriptlib.find_consent). A turn the model wrote, or a line added to the file, never counts; an
-    unreadable transcript, or one outside the denied directories (Decision 36), is never a pass (A12)."""
+    """The operator's words, found in the confirming session's own transcript (§7.2 step 2; v0.12.2): their latest
+    statement since `after` (the prepare that asked; a new prepare moves it), typed by them, in any words that agree
+    or ask for the push — any later statement that does not agree takes its place. For a skipped review
+    (reason=True) the consent must come with a reason: three words or more beside the instruction, or a statement of
+    three words or more just before it. Replies, questions and notifications between do not matter, and no closing
+    line is looked for. `said` is the agent's citation and is never itself the refusal (transcriptlib.find_consent).
+    A turn the model wrote, or a line added to the file, never counts; an unreadable transcript, or one outside the
+    denied directories (Decision 36), is never a pass (A12)."""
     if me["kind"] != "prime-session":
         raise Stop("In transcribed mode the prime window records the operator's yes; from a shell, set "
                    "`promote.confirm: tty` and run the confirm there.")

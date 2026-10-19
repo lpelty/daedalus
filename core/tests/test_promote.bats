@@ -411,16 +411,24 @@ PY
   [ "$(origin_main)" = "$before" ]; [ ! -f "$(dirname "$(prepared)")/pushed" ]
 }
 
-@test "--skip-review (v0.12.2, review finding 5): a statement that neither asks to go on nor is cited in three words is no reason — 'Let me think about F1 for a bit' with --reason F1 is refused" {
+@test "--skip-review (v0.12.2, review findings 5, 6, 10): a deferral is no reason, whatever the agent cites; a bare go-ahead after it is a consent with no reason; a reason of three words or more just before the go-ahead is one" {
   work_on_02
   FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   P="$(pj prepared_ts)"
   tx "$TXP" assistant "Reviewer on the merged change: REFUTED — one high finding." "$(plus "$P" 1)" >/dev/null
   tx "$TXP" operator "Let me think about F1 for a bit" "$(plus "$P" 2)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "F1"
-  refused "I could not find the operator's reason since the review was shown"
+  refused "The operator has not agreed: the operator's last word on it was \"Let me think about F1 for a bit\"."
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "think about F1 for a bit"
-  [ "$status" -eq 0 ] || { echo "a cited reason: $output"; return 1; }
+  refused "The operator has not agreed"
+  tx "$TXP" operator "Yes go ahead" "$(plus "$P" 3)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "go ahead"
+  refused "the operator agreed but gave no reason of three words or more"
+  tx "$TXP" operator "F1 only touches test fixtures." "$(plus "$P" 4)" >/dev/null
+  tx "$TXP" operator "push it" "$(plus "$P" 5)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "push it"
+  [ "$status" -eq 0 ] || { echo "reason before the go-ahead: $output"; return 1; }
+  [ "${lines[3]}" = "Reviewer: skipped by the operator because: F1 only touches test fixtures." ]
 }
 
 @test "PROP-030 replayed — promote (v0.12.2): a skip reason after a reply that ended with a recommendation; 'Same reason: just push the work.' after questions, answers and a background notification; and the confirm's 'push the work' after the same — each goes through" {
@@ -853,7 +861,7 @@ PY
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "promote it anyway, F1 is about a test file"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   trunk_moves b.txt "elsewhere"
-  P="$(pj prepared_ts)"; why="same reason as before, really"
+  P="$(pj prepared_ts)"; why="same reason as before, really; push it"
   tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$P" 1)" >/dev/null
   tx "$TXP" operator "$why" "$(plus "$P" 2)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }

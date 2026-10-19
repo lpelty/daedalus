@@ -2376,9 +2376,10 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
          window refuses the whole delete by name — nothing is deleted, and the report is made again;
       4. the consent: a turn the operator typed in this session after the latest of those asks and the windows' own
          times, in any words that agree or ask for the delete, not taken back by a later no or wait
-         (transcriptlib.find_consent: a model-written yes, or a line added to the file, never counts). `said` (the
-         agent's --operator-said) is a citation: it picks among their consents when it matches one loosely, and is
-         never itself a reason to refuse."""
+         (transcriptlib.find_consent: a model-written yes, or a line added to the file, never counts; their latest
+         statement since the report decides). `said` (the agent's --operator-said) is a citation only, never itself
+         a reason to refuse;
+      5. a consent that names windows must name every one being deleted, and take none out ("Yes, but only 02")."""
     import transcriptlib as tl
     nns = sorted(set(nns))
     nums = " ".join(nns)
@@ -2443,8 +2444,28 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
         raise Refused("The operator has not agreed to delete window%s %s's work yet (%s since the report). Nothing "
                       "was deleted; tell them what would be lost and ask — any words that agree are enough."
                       % ("s" if len(nns) > 1 else "", and_list(nns), e))
+    named = windows_named(found["text"])
+    if named and (not set(nns) <= named or PARTIAL_RE.search(tl.normalize(found["text"]))):
+        # "Yes, but only 02", "Delete 02; 03 stays": a consent that names some of the windows is not a consent to all
+        raise Refused("The operator's words name only some of window%s %s (\"%s\"). Nothing was deleted; ask which "
+                      "to delete, then run release with just those." % ("s" if len(nns) > 1 else "", and_list(nns),
+                                                                          " ".join(found["text"].split())))
     return {"transcript_ref": found["transcript_ref"], "shown_ref": found["shown_ref"], "cutoff": cutoff,
             "text": found["text"], "markers": markers}
+
+
+# The window numbers a consent names: zero-padded ("02", "03") anywhere, or after "window"/"windows" ("window 2 and
+# 3"). A bare small number elsewhere ("3 commits") is not a window.
+_WINDOW_LIST_RE = re.compile(r"(?<![\w'])windows?\s+((?:[0-9]{1,2}(?:\s*(?:,|and|&)\s*)?)+)", re.I)
+_PADDED_RE = re.compile(r"(?<![\w.])0[1-9](?!\w|\.[0-9])")
+PARTIAL_RE = re.compile(r"(?<![\w'])(?:keep|keeps|stay|stays|leave|except|but|not|spare|save)(?![\w'])")
+
+
+def windows_named(text: str) -> set:
+    out = set(_PADDED_RE.findall(text or ""))
+    for grp in _WINDOW_LIST_RE.findall(text or ""):
+        out.update("%02d" % int(d) for d in re.findall(r"[0-9]{1,2}", grp) if 0 < int(d) < 100)
+    return out
 
 
 def deletion_confirmed(root: Path, sid: str, nns: "list | str", said: Optional[str]) -> Optional[str]:

@@ -201,6 +201,14 @@ bad = ["no, wait", "yesterday was fine", "okay but why?", "hold on", "not yet", 
        "Never.", "Keep it.", "Leave window 03 alone.", "Not 03, just 02.", "Ok. Which commit is that?",
        "Remove the debug print in a.txt", "Plot x against y."]
 ok += ["Go ahead, no need to wait.", "Stop asking and push it.", "Delete them, they are not needed.", "skip the review, it is a docs change"]
+# the second pass: a no in other words, a deferral, a condition, a sarcastic yes; and yeses that carry a hold word
+bad += ["Hell no.", "Hmm, no.", "I\u0027d rather not.", "Negative.", "I said no.", "My answer is no, delete nothing.", "Pause.",
+        "\uff2e\uff4f", "Push it tomorrow.", "Merge it on Monday.", "Yes, after lunch.", "Yes if tests pass.",
+        "Ship it once CI passes.", "Go ahead once I\u0027ve backed up 03.", "Push the work to a branch, not main.",
+        "Go on, tell me more.", "ok no", "yes no", "ok\u200bno", "Yes sure, NOT.", "yes /s", "Let me think about F1 for a bit"]
+ok += ["Yes, I won\u0027t need it.", "Delete it, we won\u0027t use it.", "Keep going, delete it.", "Leave it to you, delete it.",
+       "F1 can\u0027t happen in prod, it is test-only code; promote it", "The reviewer is wrong about F1 and I don\u0027t care, promote it",
+       "y", "Push to main.", "Kill it.", "Fine by me.", "Certainly.", "Yes, and don\u0027t ask again.", "\uff39\uff25\uff33"]
 wrong = [t for t in ok if not tl.is_assent(t)] + [t for t in bad if tl.is_assent(t)]
 assert not wrong, wrong
 assert tl.is_yes is tl.is_assent
