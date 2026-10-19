@@ -172,7 +172,7 @@ PY
   run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/lease.sh" prime take; [ "$status" -ne 0 ]
   printf '%s\n' "$output" >> "$M"; case "$output" in *"held by a live session"*) : ;; *) echo "$output"; return 1 ;; esac
   run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 3 ]
-  printf '%s\n' "$output" >> "$M"; case "$output" in *"which is live: its next vault commit carries every window's files"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '%s\n' "$output" >> "$M"; case "$output" in *"holds the pen and commits the vault, this session's files included"*) : ;; *) echo "$output"; return 1 ;; esac
   board_as s1 >> "$M"
   # every backticked command in what s1 was shown
   run python3 - "$M" "$DAEDALUS_HOME" "$DAEDALUS_HOME/core" <<'PY'
@@ -222,7 +222,7 @@ PY
   touch "$DAEDALUS_HOME/state/leases/01.seen"
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
   run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 3 ]
-  [ "$output" = "daedalus: The vault is left for the pen's holder, window 01, which is live: its next vault commit carries every window's files, this session's included, and once it ends the next close takes the pen and commits them." ] || { echo "$output"; return 1; }
+  [ "$output" = "daedalus: Window 01 holds the pen and commits the vault, this session's files included." ] || { echo "$output"; return 1; }
   kill "$pa"; wait "$pa" 2>/dev/null || true
   printf 'h\n' > "$DAEDALUS_HOME/vault/hot.md"
   run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/vault-commit.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }

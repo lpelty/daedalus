@@ -21,7 +21,7 @@ doc() { # doc <relpath> <status> <lease> [evidence-run]
   doc proposals/PROP-1.md PROPOSED 02
   run --separate-stderr env DAEDALUS_SESSION_ID=sB bash "$VC"; [ "$status" -eq 3 ] || { echo "$status $output $stderr"; return 1; }
   [ -z "$output" ] || { echo "stdout: $output"; return 1; }
-  [ "$stderr" = "daedalus: The vault is left for the pen's holder, window 01, which is live: its next vault commit carries every window's files, this session's included, and once it ends the next close takes the pen and commits them." ] || { echo "$stderr"; return 1; }
+  [ "$stderr" = "daedalus: Window 01 holds the pen and commits the vault, this session's files included." ] || { echo "$stderr"; return 1; }
   case "$stderr" in *daedalus-0*) echo "$stderr"; return 1 ;; *) : ;; esac
   [ -z "$(git -C "$DAEDALUS_HOME/vault" diff --cached --name-only)" ]
   [ "$(git -C "$DAEDALUS_HOME/vault" log --format=%s | wc -l | tr -d ' ')" = 2 ]
@@ -233,4 +233,98 @@ wait_log() {   # wait_log <text> — up to 6 s for the log's last line to carry 
   run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "runner broken"; [ "$status" -eq 0 ]
   case "$output" in *"committed: runner broken"*"document index: not started (core/vault-search.py exited 3); run it with python3 core/vault-search.py index"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$DAEDALUS_HOME/vault" log -1 --format=%s)" = "runner broken" ]
+}
+
+# The pen commits every window's session log (2026-10-19): a window that closes while the pen's holder is live marks
+# its log for the holder (close.sh → mark-log-pending); the holder's Stop and SessionEnd hooks commit the marked logs
+# and nothing else; its full commits leave out an open window's log (work in progress) and name whose logs they carried.
+own_log() { # own_log <NN> <session> <date> <n> — reserve the log in the lease and write it
+  python3 - "$DAEDALUS_HOME/state/leases/$1.json" "$3" "$4" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["logs"] = {sys.argv[2]: int(sys.argv[3])}; json.dump(d, open(p, "w"))
+PY
+  mkdir -p "$DAEDALUS_HOME/vault/sessions/${3:0:4}/${3:5:2}"
+  printf -- '---\ntype: session\nlease: %s\n---\n# log of %s\n' "$1" "$2" > "$DAEDALUS_HOME/vault/sessions/${3:0:4}/${3:5:2}/$3-$(printf %03d "$4").md"
+}
+closes() { # closes <session> — what close.sh does past capture: the vault commit, then on exit 3 the pending mark
+  local rc=0 out
+  out="$(env DAEDALUS_SESSION_ID="$1" bash "$VC" 2>&1)" || rc=$?
+  printf '%s\n' "$out"
+  if [ "$rc" -eq 3 ]; then env DAEDALUS_SESSION_ID="$1" python3 "$DAEDALUS_HOME/core/leaselib.py" mark-log-pending; fi
+  return "$rc"
+}
+stop_hook() { printf '{"session_id":"%s","hook_event_name":"Stop"}' "$1" | CLAUDE_PROJECT_DIR="$DAEDALUS_HOME" bash "$DAEDALUS_HOME/core/vault-pending-hook.sh"; }
+
+@test "a window closes while the pen's holder is live: its log is saved and it is told plainly who commits it; the holder's next Stop commits that log alone; the holder's close then commits the rest; no order, no pen move" {
+  own_log 02 sB 2026-10-19 7
+  own_log 01 sA 2026-10-19 6                                            # the holder's own log, still being written
+  printf 'prime notes\n' > "$DAEDALUS_HOME/vault/notes.md"               # the holder's unrelated edit
+  n0="$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)"
+  run closes sB; [ "$status" -eq 3 ] || { echo "$status $output"; return 1; }
+  case "$output" in *"Window 01 holds the pen and commits the vault, this session's files included."*"Your log is saved; window 01 holds the pen and commits it."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)" = "$n0" ]   # nothing committed by window 02
+  run stop_hook sA; [ "$status" -eq 0 ]; [ -z "$output" ]
+  [ "$(git -C "$DAEDALUS_HOME/vault" show --name-only --format= HEAD)" = "sessions/2026/10/2026-10-19-007.md" ]
+  git -C "$DAEDALUS_HOME/vault" status --porcelain | grep -q '^?? notes.md$'
+  git -C "$DAEDALUS_HOME/vault" status --porcelain -uall | grep -q '2026-10-19-006.md'
+  [ -z "$(ls -A "$DAEDALUS_HOME/state/vault-pending")" ]                 # the marker went with the commit
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "holder closes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -z "$(git -C "$DAEDALUS_HOME/vault" status --porcelain)" ]
+}
+
+@test "only the pen's holder's hook commits pending logs: another window's Stop, or a hook with no session id, commits nothing" {
+  own_log 02 sB 2026-10-19 7
+  run closes sB; [ "$status" -eq 3 ]
+  n0="$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)"
+  run stop_hook sB; [ "$status" -eq 0 ]; [ -z "$output" ]
+  run bash -c "printf '{}' | CLAUDE_PROJECT_DIR='$DAEDALUS_HOME' bash '$DAEDALUS_HOME/core/vault-pending-hook.sh'"; [ "$status" -eq 0 ]
+  [ "$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)" = "$n0" ]
+}
+
+@test "the holder's full commit leaves out a still-open window's log and says so; once that window has closed, the next commit carries it and names whose it was" {
+  own_log 02 sB 2026-10-19 7
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "first"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"left out, still being written: the session log of window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$DAEDALUS_HOME/vault" status --porcelain -uall | grep -q '2026-10-19-007.md'
+  run closes sB; [ "$status" -eq 3 ]
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "second"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"carried the session log of window 02 (2026-10-19-007)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -z "$(git -C "$DAEDALUS_HOME/vault" status --porcelain)" ]
+  [ -z "$(ls -A "$DAEDALUS_HOME/state/vault-pending" 2>/dev/null)" ]
+}
+
+@test "the other order: the holder has closed and its session ended; the window that closes next takes the pen and commits its own log with everything else" {
+  own_log 02 sB 2026-10-19 7
+  rm -f "$BATS_TEST_TMPDIR"/sessions/*.json                               # both sessions gone from the registry ...
+  pb="$(live_pid)"; registry_entry "$pb" sB                               # ... window 02 is back, in a terminal
+  printf '{"lease":"02","session_id":"sB","worktree":"worktrees/02","pid":%s,"proc_started":%s,"logs":{"2026-10-19":7}}' "$pb" "$(ps_ms "$pb")" > "$DAEDALUS_HOME/state/leases/02.json"
+  run closes sB; [ "$status" -eq 0 ] || { echo "$status $output"; return 1; }
+  git -C "$DAEDALUS_HOME/vault" show --name-only --format= HEAD | grep -q 'sessions/2026/10/2026-10-19-007.md'
+  [ -z "$(git -C "$DAEDALUS_HOME/vault" status --porcelain)" ]
+}
+
+@test "a vault tracked by the home repository: the pending commit and the still-open hold work on vault/ paths" {
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  sed -i '' '/^vault\/$/d' "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add -A; git -C "$DAEDALUS_HOME" -c user.email=t@x -c user.name=t commit -q -m "vault absorbed"
+  own_log 02 sB 2026-10-19 7
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "hold"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"left out, still being written: the session log of window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run closes sB; [ "$status" -eq 3 ]
+  run stop_hook sA; [ "$status" -eq 0 ]
+  [ "$(git -C "$DAEDALUS_HOME" show --name-only --format= HEAD)" = "vault/sessions/2026/10/2026-10-19-007.md" ]
+}
+
+@test "the tracked settings.json runs vault-pending-hook.sh on Stop and on SessionEnd, each with a timeout; with nothing pending it returns at once and prints nothing" {
+  python3 - "$BATS_TEST_DIRNAME/../../.claude/settings.json" <<'PY'
+import json, sys
+h = json.load(open(sys.argv[1]))["hooks"]
+cmd = 'bash "$CLAUDE_PROJECT_DIR"/core/vault-pending-hook.sh'
+for ev in ("Stop", "SessionEnd"):
+    hs = [x for g in h[ev] for x in g["hooks"] if x["command"] == cmd]
+    assert len(hs) == 1 and isinstance(hs[0].get("timeout"), int) and hs[0]["timeout"] <= 10, (ev, h[ev])
+PY
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run stop_hook sA; [ "$status" -eq 0 ]; [ -z "$output" ]
+  python3 -c "import time,sys; sys.exit(0 if time.time() - $t0 < 1.0 else 1)"
 }
