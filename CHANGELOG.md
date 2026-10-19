@@ -4,6 +4,67 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.3 — a large change is reviewed through several lenses at once, and each window says what it is working on
+
+**In short.** A large change is no longer reviewed one slice at a time.
+Several fresh reviewers look at it at once, each through one lens, and their
+findings are merged. Every window's branch keeps a ledger of what its reviews
+found, so the next review checks those first. Every window now keeps one line
+on the board saying what it is working on, and reads the others' before it
+starts.
+
+**What went wrong.**
+- One reviewer read a large change and could follow only a few threads before
+  it stopped. Each run found a different slice, so a large branch was refuted
+  round after round.
+- Each review started cold. It did not see what earlier reviews had found or
+  which of those were fixed.
+- A window given a task started at once. It met another window's work only
+  when it tried to change a file that window had already changed.
+
+**What changed.**
+- From 800 changed lines or 25 files, a window's branch is reviewed by several
+  fresh reviewers at once. Each looks through one lens: the criteria, trust
+  boundaries, existing installs and upgrade, and failure handling.
+- Their findings are merged into one review, one finding per place, judged at
+  the strongest labels any lens gave it.
+- If one lens fails or times out, the whole run fails. It never stands on part
+  of a review.
+- A smaller change keeps one reviewer.
+- The thresholds, the lenses and how many run at once are set in config.yaml
+  under verify.
+- Every window's branch keeps a ledger of the findings its reviews counted.
+  The next review checks those first, then looks for new problems in what
+  changed since the last review.
+- A finding no review has checked is carried forward. A fix that broke what it
+  fixed refutes.
+- Promote's review is still one fresh reviewer with no earlier findings.
+- Asking the reviewer about a finding after a lens review names each lens's
+  call. The merged review says which lens found it, so you ask that one.
+- Every window keeps one line on the board for what it is working on. When
+  you give a window a task, it writes that line first, then reads what the
+  other windows are doing.
+- If another window is working on the same thing, it sends that window one
+  message before it starts.
+- You never set this line yourself, and your own note for a window stays as
+  you wrote it. A window clears its line when it is done. A background clone
+  starts with its task already set.
+- The task is on the board the windows read. The band above the prompt does
+  not show it, so its rows stay short.
+
+**What you will see.**
+- The gates say how a change was reviewed and why, for example
+  `review: 4 lenses (criteria, trust, upgrade, failure) — the change is large`.
+- A re-review says how the earlier findings fared, for example
+  `review: 3 earlier findings: 2 resolved, 1 open`.
+- A window asked to start work tells you if another window's task overlaps.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.3`. The board each
+window reads shows `task:` on a window that has one.
+
 ## v0.12.2 — your yes in your own words, a small fix stops looping in review, and the window holding the pen commits every window's log
 
 **In short.** Deleting a window's work and promoting take your consent in
