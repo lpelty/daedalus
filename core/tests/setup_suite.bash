@@ -3,6 +3,7 @@
 setup_suite() {
   # Many suites run the whole upgrade or setup in a fixture home under the real HOME. Without this, the upgrade's
   # step 7 and setup's command phase would write ~/.local/bin/daedalus on the machine running the tests, pointing
-  # at a temporary home. The tests of the shim unset it and point HOME and SHELL at scratch.
+  # at a temporary home, and register that home in ~/.config/daedalus/homes.json. The tests of the shim unset it and
+  # point HOME, XDG_CONFIG_HOME and SHELL at scratch.
   export DAEDALUS_NO_COMMAND=1
 }

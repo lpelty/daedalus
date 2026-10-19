@@ -223,6 +223,13 @@ leases:
   # --force. An integer with an m, h or d suffix; default 4h.
   stale_after: 4h
 
+# Optional. daedalus start: how long the banner and the service lines stay on
+# screen before Claude Code takes the terminal. Seconds; default 1.5; 0 skips
+# the hold. The banner is banner.txt in this home when there is one (it is
+# git-ignored, like this file), else core/banner.txt.
+# start:
+#   pause: 1.5
+
 promote:
   # How the operator's yes reaches core/promote.sh. transcribed = the prime
   # types the operator's words and promote checks them against the session's

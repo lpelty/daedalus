@@ -1517,14 +1517,17 @@ EOF2
   printf 'more\n' >> "$DAEDALUS_HOME/CLAUDE.md"
   S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S"
   printf '#!/bin/sh\nPATH="/usr/bin:/bin" exec /bin/sh -c "$3"\n' > "$BATS_TEST_TMPDIR/zsh"; chmod +x "$BATS_TEST_TMPDIR/zsh"
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/doctor.sh"
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   case "$output" in *"MISSING  local edits in tracked files: CLAUDE.md — run daedalus update, which moves them into the local layer"*"1 problem(s) found"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"NOTE     command: ~/.local/bin/daedalus is absent; core/setup.sh installs it"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     daedalus command: this home is not in ~/.config/daedalus/homes.json"*) : ;; *) echo "$output"; return 1 ;; esac
   git -C "$DAEDALUS_HOME" checkout -q CLAUDE.md
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/doctor.sh"
+  env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL=/nonexistent python3 "$DAEDALUS_HOME/core/update.py" --install-shim --home "$DAEDALUS_HOME" </dev/null >/dev/null
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" bash "$DAEDALUS_HOME/core/doctor.sh"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"OK       tracked files: CLAUDE.md and .claude/settings.json carry no local edits"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"OK       daedalus command: 1 home, default "*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "doctor: a pushed promotion that still holds scratch is a NOTE naming it and core/promote.sh NN --clean; records alone, or an unpushed promotion's scratch, are not; doctor stays green" {
