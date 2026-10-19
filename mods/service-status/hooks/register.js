@@ -3,7 +3,8 @@
 // a status line under the prompt while anything is down.
 //
 // A reader. Once at start (not awaited) and every 60 s it runs `python3 core/status.py --json` in the Daedalus
-// home, and reads the session's tool list for the memory tools (the hindsight MCP server). It never writes a file,
+// home, and reads the session's tool list for the memory tools (the hindsight MCP server, where status.py says one
+// is configured; memory reaches Hindsight through the REST API where none is — PROP-027). It never writes a file,
 // never restarts or fixes a service, and never throws: a failure is one word in the band and a line in the pane.
 //
 // It shares the band. Its band hook draws one row, the next mod's tree on the flexible left and the summary on the
@@ -77,17 +78,31 @@ function parseStatus(stdout) {
     if (s.state !== 'up' && s.state !== 'down' && s.state !== 'not-set-up') return { kind: 'failed', reason: 'core/status.py printed a state it does not have' }
     services.push({ stem: s.stem, name: s.name, state: s.state, detail: typeof s.detail === 'string' ? s.detail : '' })
   }
-  return { kind: 'ok', services }
+  // memory_mcp (PROP-027): whether an MCP server named hindsight is configured here — true, false, or null when
+  // status.py could not tell. Absent or any other shape is null: the 0.1.0 rule, never a failed check.
+  const m = data.memory_mcp
+  const mcp = m && typeof m === 'object' && typeof m.configured === 'boolean' ? m.configured : null
+  return { kind: 'ok', services, mcp }
 }
 
-// The memory tools' row, read in the mod (spec §3): only beside a memory server status.py reports, not-set-up
-// where it is, and 'checking' (counted neither way) until the grace has passed.
-function toolsRow(services) {
+// The memory tools' row, read in the mod (spec §3; PROP-027): whether memory works, by either road. Only beside a
+// memory server status.py reports; not-set-up where it is. Tools connected are up. With no hindsight MCP server
+// configured, memory goes through the REST API capture and recall use, so the row follows the memory server and
+// capture at once — no grace, and no /mcp remedy. With one configured (or status.py unable to tell), the 0.1.0
+// rule: 'checking' (counted neither way) until the grace has passed, then down if the tools never came.
+function toolsRow(snap) {
+  const services = snap.services
   const server = services.find((s) => s.stem === 'hindsight')
   if (!server) return null
   const row = { stem: 'memory-tools', name: 'memory tools' }
   if (server.state === 'not-set-up') return Object.assign(row, { state: 'not-set-up', detail: server.detail })
   if (tools === 'connected') return Object.assign(row, { state: 'up', detail: 'connected to this session' })
+  if (snap.mcp === false) {
+    const capture = services.find((s) => s.stem === 'capture')
+    if (server.state === 'down') return Object.assign(row, { state: 'down', detail: 'the memory server is down; no MCP server here' })
+    if (capture && capture.state === 'down') return Object.assign(row, { state: 'down', detail: 'memory capture is down; no MCP server here' })
+    return Object.assign(row, { state: 'up', detail: 'no MCP server here; capture and recall use the REST API' })
+  }
   if (tools === 'not-connected') return Object.assign(row, { state: 'down', detail: 'not connected to this session' })
   return Object.assign(row, { state: 'checking', detail: 'checking…' })
 }
@@ -95,7 +110,7 @@ function toolsRow(services) {
 // Every row the band, the pane, the toasts and the status line read: status.py's, then the memory tools'.
 function rowsOf(snap) {
   if (!snap || snap.kind !== 'ok') return []
-  const t = toolsRow(snap.services)
+  const t = toolsRow(snap)
   return t ? snap.services.concat([t]) : snap.services.slice()
 }
 
@@ -254,7 +269,9 @@ function paneLines(Text, Box) {
       out.push(line('row-' + r.stem, props, text))
     }
     const server = snapshot.services.find((s) => s.stem === 'hindsight')
-    if (tools === 'not-connected' && server && server.state === 'up') {
+    // only where a hindsight MCP server is configured (or status.py could not tell): with none, /mcp has nothing
+    // to reconnect (PROP-027)
+    if (tools === 'not-connected' && server && server.state === 'up' && snapshot.mcp !== false) {
       // indented by layout, so a wrapped line keeps the indent (the reference status band)
       out.push(Box({ key: 'tools-help', paddingLeft: 2, children: [Text({ children: [TOOLS_HELP] })] }))
     }

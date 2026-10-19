@@ -4,7 +4,8 @@
     python3 core/status.py [--json] [--home <Daedalus home>]
 
 One fast reader for the service-status mod's band and pane, and for a person at a shell. It reads
-config.yaml (the way lib.sh cfg reads it), a few files under state/, one HTTP GET to the memory server's
+config.yaml (the way lib.sh cfg reads it), a few files under state/, Claude Code's .claude.json and the home's
+.mcp.json (for the hindsight MCP server's name only), one HTTP GET to the memory server's
 /health (1 s), and the AMI switch through amilib (one 100 ms TCP connect). It never runs git, a model or
 any program, never writes a file, and never reaches the network beyond this machine: a memory server
 configured on another host is not checked.
@@ -12,9 +13,12 @@ configured on another host is not checked.
 --json prints one object in the shape another harness's status band already reads, so such a band reads it
 unchanged:
 
-    {"services": [{"stem", "name", "state", "detail"}], "checked_at": "<ISO 8601, UTC>"}
+    {"services": [{"stem", "name", "state", "detail"}], "checked_at": "<ISO 8601, UTC>",
+     "memory_mcp": {"configured": true | false | null, "detail"}}
 
-`state` is up, down or not-set-up. A service the deployment never configured is not-set-up, never down, so a
+memory_mcp (PROP-027) says whether an MCP server named hindsight is configured for this home, read from Claude
+Code's own config files (memory_mcp below); the mod's memory-tools row reads it, a band that knows only the
+services ignores it. `state` is up, down or not-set-up. A service the deployment never configured is not-set-up, never down, so a
 deployment shows only what it set up. Exit 0 whenever the object was printed (whatever the states); exit 2
 with one sentence on stderr when there is no config.yaml in the home.
 
@@ -285,6 +289,57 @@ def check_code_graph(cfg: Config) -> Dict[str, str]:
     return row("code-graph", "down", "context.graph is missing")
 
 
+MCP_SERVER = "hindsight"            # the memory server's MCP name: the mod's tools are mcp__hindsight__*
+
+
+def _object_at(path: Path, keys: tuple) -> dict:
+    """The object at `keys` in the JSON file at `path`; {} when the file or a key is absent. A file that
+    cannot be read or parsed raises OSError or ValueError to the caller."""
+    if not path.exists():
+        return {}
+    node = json.loads(path.read_text())
+    for k in keys:
+        node = node.get(k) if isinstance(node, dict) else None
+        if node is None:
+            return {}
+    return node if isinstance(node, dict) else {}
+
+
+def memory_mcp(home: Path) -> Dict[str, object]:
+    """Whether an MCP server named hindsight is configured for a session in this home (PROP-027), read from the
+    files Claude Code keeps it in (code.claude.com/docs/en/mcp, "Storage locations by scope"): local scope,
+    .claude.json under projects.<project path>.mcpServers; user scope, .claude.json's top-level mcpServers; project
+    scope, <home>/.mcp.json. .claude.json is in CLAUDE_CONFIG_DIR when that is set (verified 2026-10-19: `claude mcp
+    add -s local` under it wrote $CLAUDE_CONFIG_DIR/.claude.json), else in the home directory. Memory reaches
+    Hindsight either through these tools or through the REST API capture and recall use, so a deployment with no
+    such server is not missing one. configured: True, False, or None when a file could not be read (never a guess)."""
+    conf = os.environ.get("CLAUDE_CONFIG_DIR")
+    cj = Path(conf) / ".claude.json" if conf else Path(os.path.expanduser("~/.claude.json"))
+    real = os.path.realpath(str(home))
+    unread = None
+    try:
+        # local scope is keyed by the project's path as Claude Code saw it, which may be a symlinked spelling of
+        # the home: every key that resolves to the home counts
+        projects = _object_at(cj, ("projects",))
+        for key, entry in projects.items():
+            servers = entry.get("mcpServers") if isinstance(entry, dict) else None
+            if isinstance(servers, dict) and MCP_SERVER in servers and os.path.realpath(key) == real:
+                return {"configured": True, "detail": "local scope (%s)" % cj}
+    except (OSError, ValueError) as e:
+        unread = "%s could not be read (%s)" % (cj, type(e).__name__)
+    for scope, path, keys in (("user scope", cj, ("mcpServers",)), ("project scope", home / ".mcp.json", ("mcpServers",))):
+        try:
+            servers = _object_at(path, keys)
+        except (OSError, ValueError) as e:
+            unread = unread or "%s could not be read (%s)" % (path, type(e).__name__)
+            continue
+        if MCP_SERVER in servers:
+            return {"configured": True, "detail": "%s (%s)" % (scope, path)}
+    if unread:
+        return {"configured": None, "detail": unread}
+    return {"configured": False, "detail": "no MCP server named %s in any scope" % MCP_SERVER}
+
+
 def status(home: Path, now: Optional[float] = None) -> dict:
     cfg = Config((home / "config.yaml").read_text())
     now = time.time() if now is None else now
@@ -294,7 +349,7 @@ def status(home: Path, now: Optional[float] = None) -> dict:
                   lambda: check_code_graph(cfg)):
         services.append(check())
     stamp = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
-    return {"services": services, "checked_at": stamp}
+    return {"services": services, "checked_at": stamp, "memory_mcp": memory_mcp(home)}
 
 
 def _human(data: dict) -> str:
