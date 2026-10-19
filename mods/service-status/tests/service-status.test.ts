@@ -27,7 +27,7 @@ function ok(services: Row[], mcp?: { configured: boolean | null; detail: string 
 }
 
 const NO_MCP = { configured: false, detail: 'no MCP server named hindsight in any scope' }
-const LOCAL_MCP = { configured: true, detail: 'local scope (/Users/x/.claude.json)' }
+const LOCAL_MCP = { configured: true, detail: 'local scope (/home/x/.claude.json)' }
 
 const tool = (name: string, mcp = false) => ({ name, description: '', mcp })
 const WITH_TOOLS = [tool('Bash'), tool('Read'), tool('mcp__hindsight__recall', true), tool('mcp__hindsight__retain', true)]
