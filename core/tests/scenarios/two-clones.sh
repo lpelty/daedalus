@@ -314,14 +314,14 @@ if [ "$mode" = rehearse ]; then
 fi
 check "origin's main is the promoted merge" test "$(origin_main)" = "$(pj merge_sha 2>/dev/null)"
 check "promotions.log has one line" test "$(grep -c . "$H/vault/evidence/promotions.log" 2>/dev/null)" = 1
-check "the block was shown before the yes (run.json promotion.shown_ref)" test -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["promotion"].get("shown_ref") or "")' "$H/state/evidence/$(pj run_id)/run.json" 2>/dev/null)"
+check "the operator's yes is recorded from the transcript (run.json promotion.transcript_ref)" test -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["promotion"].get("transcript_ref") or "")' "$H/state/evidence/$(pj run_id)/run.json" 2>/dev/null)"
 if [ "$mode" = rehearse ]; then
   st="$(printf '{"hook_event_name":"Stop","session_id":"sP","transcript_path":"%s"}' "$(txp sP)" | (cd "$H" && python3 core/boundary-hook.py) 2>&1; echo "exit=$?")"
   check "terminal 1's next Stop is not blocked" has "$st" "exit=0"
 fi
 
-step 7b "Terminal 2, then terminal 1" "delete the assertion from tests/test_capture.py and commit that on your branch. — then, in terminal 1: promote window 2. — what did the reviewer find? — ask the reviewer what its first finding meant. — go ahead anyway. — promote it anyway, because this is a scenario and the assertion goes back in step 7c. — yes" \
-  "the block's reviewer line says REFUTED; the review repeated word for word, signed as the reviewer; the reviewer's answer about its first finding, word for word; \"go ahead anyway\" is refused — a reason in your words is needed; then a fresh block whose reviewer line reads \"skipped by the operator because: this is a scenario and the assertion goes back in step 7c\", and after the yes, Promoted"
+step 7b "Terminal 2, then terminal 1" "delete the assertion from tests/test_capture.py and commit that on your branch. — then, in terminal 1: promote window 2. — what did the reviewer find? — ask the reviewer what its first finding meant. — promote it anyway, because this is a scenario and the assertion goes back in step 7c. — yes" \
+  "the block's reviewer line says REFUTED; the review repeated word for word, signed as the reviewer; the reviewer's answer about its first finding, word for word; then a fresh block whose reviewer line reads \"skipped by the operator because: promote it anyway, because this is a scenario and the assertion goes back in step 7c\", and after the yes, Promoted"
 if [ "$mode" = rehearse ]; then
   said sC "delete the assertion from tests/test_capture.py and commit that on your branch."
   as sC bash core/lease.sh rebase 02 >/dev/null 2>&1 || fail "rebase 02 onto the promoted trunk"
