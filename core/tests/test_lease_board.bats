@@ -584,6 +584,25 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   [ -f "$L/02.json" ]
 }
 
+@test "session-end: a released session still open in another terminal (two live registry entries) keeps its lease — that terminal's hooks still read it (review 2026-10-19, finding 2)" {
+  LS create >/dev/null; bind_live 01 sA; CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null
+  p2="$(live_pid)"; registry_entry "$p2" sA interactive cli daedalus-01        # the same session resumed in a second terminal
+  run --separate-stderr SE '{"session_id":"sA","reason":"prompt_input_exit"}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$DAEDALUS_HOME/state/leases/01.json" ]
+}
+
+@test "release --remove from a shell drops the number's unpromoted-work cache entries, so the band shows no work that is gone (review 2026-10-19, finding 4)" {
+  LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
+  swept_with_work 02
+  run board sA
+  run --separate-stderr BJ --session sA; bj_check '[w["nn"] for w in o["windows"]] == ["01", "02"]'
+  LS claim 02 >/dev/null 2>&1 || true
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 '{"lease":"02","session_id":null,"worktree":"worktrees/02","branch":"lease/02","trunks":{"thing":"main","thing/sub":"main"}}'
+  run bash "$DAEDALUS_HOME/core/lease.sh" release 02 --remove --force; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check '[w["nn"] for w in o["windows"]] == ["01"]'
+}
+
 @test "session-end: with the lease lock held it gives up within 2 s, exit 0, removing nothing; in a home with no state/leases/ it makes none" {
   LS create >/dev/null; bind_live 01 sA; CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null
   L="$DAEDALUS_HOME/state/leases"

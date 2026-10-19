@@ -1644,11 +1644,13 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
         lease = leases[nn]
         if lease.get("released"):
             # 2026-10-19 (Larry: no sweep typed by hand): a released lease goes once its session has ended — the hold
-            # was only for its holder's hooks, and they are gone. liveness "stale" alone: a pid on file that is dead
-            # and not resumed, or no pid and an old heartbeat (what `sweep` removes it on). What `sweep` does for a
-            # released lease, no more: no git, so it runs before the budget check, and the branch and worktree stay
-            # — unpromoted work on lease/<NN> still holds the number (free_number), and the board names it.
-            if liveness(root, nn, lease) != "stale":
+            # was only for its holder's hooks, and they are gone. A pid on file that is dead and not resumed (liveness
+            # "stale" with a pid), as for an idle one below: a lease with no pid is left to `sweep` and SessionEnd,
+            # since a heartbeat's age is not proof its terminal closed (review 2026-10-19, finding 3). What `sweep`
+            # does for a released lease, no more: no git, so it runs before the budget check, and the branch and
+            # worktree stay — unpromoted work on lease/<NN> still holds the number (free_number), and the board
+            # names it.
+            if lease.get("pid") is None or liveness(root, nn, lease) != "stale":
                 continue
             _remove_lease_files(root, nn)
             del leases[nn]
@@ -2084,8 +2086,9 @@ def _remove_lease_files(root: Path, nn: str) -> None:
 
 def release(root: Path, token: str, sid: Optional[str], remove: bool = False, force: bool = False,
             said: Optional[str] = None) -> str:
-    """The holder ends its lease: released: <time> (removed at the next
-    sweep, so the holder's own hooks can still read the state). Any other
+    """The holder ends its lease: released: <time> (removed when its session
+    ends — the SessionEnd hook, or the next terminal start's reclaim — or at
+    a sweep, so the holder's own hooks can still read the state). Any other
     session is refused while the holder is live; a stale lease may be released
     from anywhere, and an operator shell (sid None) may release anything.
     --remove deletes worktree and branch, refusing unpromoted commits and
@@ -2143,6 +2146,9 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
             for ref in split_refs.split():
                 _git(src, "update-ref", "-d", ref)
         _remove_lease_files(root, nn)
+        # the branch is gone, so is its work: drop its unpromoted-work answers, or the band (which reads the cache and
+        # never git) shows a swept number with work until some prompt's board rewrites it (review 2026-10-19, finding 4)
+        write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)
         if authorised is not None:
             out.append("Window %s released; its worktree and branch are deleted (after the operator said: \"%s\")."
                        % (nn, authorised["text"]))
@@ -3816,6 +3822,10 @@ def session_end_sweep(root: Path, sid: Optional[str]) -> Optional[str]:
         nn, lease = lease_of_session(read_all(root), sid)
         if nn is None or not (lease or {}).get("released"):
             return None
+        if len(registry_live_entries(sid)) > 1:
+            # the session is open in another terminal too (claude --resume): that one's hooks still read the lease;
+            # it goes when the last of them ends, or at a start once none is live (review 2026-10-19, finding 2)
+            return None
         _remove_lease_files(root, nn)
         return nn
 
@@ -3859,7 +3869,8 @@ def prime_holder_live(root: Path, leases: Dict[str, dict], holder: str) -> Tuple
     both required (§4.8 'refuses when the current holder is live'): the
     holder's numbered lease, when it has one, judged by liveness(); and,
     when it holds ONLY the pen — reachable because `release <NN>` keeps the
-    pen (§4.4) and sweep removes a released lease before it looks at
+    pen (§4.4) and sweep (or session end, or a start's reclaim once its
+    session has ended) removes a released lease before it looks at
     liveness — the registry, through the same live-entry check liveness()
     uses for "resumed". Judging by the lease alone called a live prime-only
     holder "gone", and both prime take and first-up rebound the pen under

@@ -732,6 +732,15 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   case "$output" in *"Numbered 02, not a lower number: 01 has unpromoted commits on lease/01"*) : ;; *) echo "no skip sentence: $output"; return 1 ;; esac
 }
 
+@test "a released lease that recorded no pid is not swept at start on heartbeat age — an old heartbeat is not proof its terminal closed (review 2026-10-19, finding 3)" {
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null                 # 01, never bound: pid null
+  bash "$DAEDALUS_HOME/core/lease.sh" release 01 >/dev/null
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"
+  p1="$(live_pid)"; registry_entry "$p1" sA
+  run start sA startup; [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
+  [ "$(lease_json 01 released)" != "None" ]
+}
+
 @test "the skip sentence names a released window still open, and is silent when the only lower numbers are open windows" {
   p1="$(live_pid)"; registry_entry "$p1" sA; start sA startup >/dev/null
   p2="$(live_pid)"; registry_entry "$p2" sB
