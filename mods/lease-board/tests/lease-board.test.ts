@@ -113,7 +113,7 @@ test('a swept number holding unpromoted work is a warning-coloured line with its
   expect((await ui.find({ type: 'Text', text: /^window 06 / }))?.props.color).toBe('warning')
 })
 
-test('a window\'s task comes right after its state, cut at 48 characters with an ellipsis; a window with no task, or an older board-json with no task key, draws as before (v0.12.3)', async ($, on) => {
+test('a window\'s task is never drawn in the band: rows keep their shape with or without a task key (v0.12.3)', async ($, on) => {
   const long = 'Zoom converter: read the meeting_transcript field one pilot account sends'
   const board = {
     ...FIXTURE,
@@ -127,8 +127,9 @@ test('a window\'s task comes right after its state, cut at 48 characters with an
   await start($)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   const lines = await windowLines(ui)
-  expect(lines[0]).toMatch(/^window 03 · this window · quiet since \S+( \d\d:\d\d)? · lease board: show each window's task · 0 changed$/)
-  expect(lines[1]).toBe('window 01 · holds the pen · live · ' + long.slice(0, 47) + '… · 0 changed')
+  expect(lines[0]).toMatch(/^window 03 · this window · quiet since \S+( \d\d:\d\d)? · 0 changed$/)
+  expect(lines[1]).toBe('window 01 · holds the pen · live · 0 changed')
+  expect(lines.join('\n')).not.toContain('Zoom converter')
   expect(lines[3]).toBe('window 04 · finished — promote 04 or release 04 · 2 changed')
 })
 

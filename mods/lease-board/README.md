@@ -3,16 +3,15 @@
 A Claude Code mod that draws the lease board in the band above the prompt in
 every Daedalus window: this window's number, whether it holds the pen, and every
 other window's state (live, quiet, stale, finished, released), its changed-file
-count, its alias and its note. Right after a window's state comes its task —
-the one line the window keeps for what it is working on, cut at 48 characters
-(0.1.5) — so you and every window can see what the others are doing. It
-refreshes every 2 seconds. After the windows,
+count, its alias and its note. It refreshes every 2 seconds. After the windows,
 each swept number that still holds unpromoted work — new windows skip it — is
 one line with its commit count (0.1.4), as the last prompt's board found it.
+A window's task line is not drawn here (0.1.5): it is on the board the windows
+read each prompt, where it does its work, and a long one cut the band's rows.
 
 ```
-window 02 · this window · live · lease board: show each window's task · 4 changed · poc-ui
-window 01 · holds the pen · live · Zoom converter: read the meeting_transcript fi… · 0 changed
+window 02 · this window · live · 4 changed · poc-ui
+window 01 · holds the pen · live · 0 changed
 window 03 · quiet since 09:40 · 14 changed · electron · peer name daedalus-07
 ```
 
