@@ -144,6 +144,10 @@ with open(path, "a") as f:
         kind, age = spec.split(":"); age = float(age)
         rec = {"type": kind, "timestamp": stamp(age)}
         if kind == "system": rec["subtype"] = "away_summary"
+        # a slash command's rows (/reload-plugins): user rows the engine writes with no model turn, so no Stop follows
+        if kind == "command": rec = {"type": "user", "timestamp": stamp(age), "message": {"role": "user", "content": "<command-name>/reload-plugins</command-name>"}}
+        # a compaction's summary: a user row written before the next turn
+        if kind == "compact": rec = {"type": "user", "timestamp": stamp(age), "isCompactSummary": True, "message": {"role": "user", "content": "This session is being continued"}}
         f.write(json.dumps(rec) + "\n")
         newest = age if newest is None else min(newest, age)
 age = newest if newest is not None else cap
@@ -170,6 +174,20 @@ PY
   run S
   [ "$(field capture state)" = up ] || { echo "$output"; return 1; }
   [ "$(field capture detail)" = "last capture 40 min ago; no session activity since" ]
+}
+
+@test "memory capture: a slash command or a compaction with no reply after it is not a miss — no turn ran, so no Stop could capture it (2026-10-18: capture read down after /reload-plugins until the next message)" {
+  memory_block "http://127.0.0.1:9"
+  capture_fixture 2400 command:1800
+  run S
+  [ "$(field capture state)" = up ] || { echo "$output"; return 1; }
+  capture_fixture 2400 compact:1800
+  run S
+  [ "$(field capture state)" = up ] || { echo "$output"; return 1; }
+  # the same rows followed by a reply that capture missed: still down
+  capture_fixture 2400 command:1800 assistant:1790
+  run S
+  [ "$(field capture state)" = down ] || { echo "$output"; return 1; }
 }
 
 @test "memory capture: a turn still running (a row within 3 intervals), and a short turn the Stop tick throttled, are not misses" {

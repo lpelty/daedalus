@@ -146,9 +146,11 @@ def _interval(cfg: Config) -> int:
 
 
 def _newest_message(path: str, offset: int, size: int) -> Optional[float]:
-    """The time of the newest user or assistant row past `offset` (what capture has not taken), read from at most
-    the file's last TAIL_CAP bytes; None when there is none. The engine's own rows after a turn (the Stop hook's
-    summary, the turn's duration, an away summary written minutes later) are not session activity."""
+    """The time of the newest assistant row past `offset` (what capture has not taken), read from at most the
+    file's last TAIL_CAP bytes; None when there is none. Only a reply counts: every turn ends in one and its Stop
+    ticks capture. User rows with no reply after them come from no turn (a slash command such as /reload-plugins, a
+    compaction's summary) and no Stop follows them, so counting them read capture as down until the next message
+    (2026-10-18). The engine's own rows after a turn (the turn's duration, an away summary) are not activity either."""
     start = max(offset, size - TAIL_CAP)
     if start >= size:
         return None
@@ -160,11 +162,11 @@ def _newest_message(path: str, offset: int, size: int) -> Optional[float]:
         return None
     newest = None
     for ln in tail.splitlines():
-        if b'"user"' not in ln and b'"assistant"' not in ln:
+        if b'"assistant"' not in ln:
             continue                                # most rows: no JSON parse
         try:
             r = json.loads(ln)
-            if r.get("type") not in ("user", "assistant"):
+            if r.get("type") != "assistant":
                 continue
             t = datetime.fromisoformat(str(r["timestamp"]).replace("Z", "+00:00")).timestamp()
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -176,7 +178,7 @@ def _newest_message(path: str, offset: int, size: int) -> Optional[float]:
 def check_capture(home: Path, cfg: Config, now: float) -> Dict[str, str]:
     """Up while the last capture is within 3 x capture_interval of now, or there was no session activity since
     (§3). "Activity since" is read per transcript from state/hindsight/offsets.json (the byte offset capture has
-    taken, and its `last_capture` time) and the transcript's rows past that offset: a user or assistant row
+    taken, and its `last_capture` time) and the transcript's rows past that offset: an assistant row (a reply)
     written more than one capture_interval after that transcript's last capture (so the Stop that ended its turn
     was not throttled and should have captured it), and quiet for 3 intervals since (so the turn has ended), is
     activity capture missed. A turn still running, and a short turn the Stop tick throttled (SessionEnd takes
