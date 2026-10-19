@@ -97,12 +97,21 @@ function styleFor(state) {
   }
 }
 
+const TASK_BAND = 48 // the band's share for a task; the board the model reads keeps 90
+
+function taskText(task) {
+  const t = String(task)
+  return t.length <= TASK_BAND ? t : t.slice(0, TASK_BAND - 1) + '…'
+}
+
 function lineText(w) {
   const parts = ['window ' + w.nn]
   if (w.is_this) parts.push('this window')
   if (w.is_prime) parts.push('holds the pen')
   parts.push(stateWords(w))
   if (w.state === 'swept-waiting') return parts.join(' · ') // no lease: nothing changed, no alias, no peer
+  // the window's task (board-json since v0.12.3), right after its state: what it is doing before what it touched
+  if (w.task) parts.push(taskText(w.task))
   parts.push((typeof w.changed_count === 'number' ? w.changed_count : 0) + ' changed')
   if (w.alias) parts.push(String(w.alias))
   // a derived name looks like a number and is not one (spec §4.1): named only when it differs

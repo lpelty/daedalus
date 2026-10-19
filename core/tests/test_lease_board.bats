@@ -267,12 +267,12 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
   bj_check 'all(isinstance(w["changed_count"], int) and w["nn"].isdigit() and len(w["nn"]) == 2 for w in o["windows"])'
 }
 
-@test "board-json: exactly the five top-level keys (ami included) and exactly the ten window keys the contract names, nothing more (waiting_count since 2026-10-19: null on a lease's row)" {
+@test "board-json: exactly the five top-level keys (ami included) and exactly the eleven window keys the contract names, nothing more (waiting_count since 2026-10-19: null on a lease's row; task since v0.12.3)" {
   LS create >/dev/null; LS create >/dev/null; bind_live 01 sA
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
   bj_check 'sorted(o) == ["ami", "generated_epoch", "prime_window", "this_window", "windows"]'
-  bj_check 'len(o["windows"]) == 2 and all(sorted(w) == ["alias", "changed_count", "is_prime", "is_this", "last_seen_epoch", "nn", "note", "peer_name", "state", "waiting_count"] for w in o["windows"])'
-  bj_check 'all(w["waiting_count"] is None for w in o["windows"])'
+  bj_check 'len(o["windows"]) == 2 and all(sorted(w) == ["alias", "changed_count", "is_prime", "is_this", "last_seen_epoch", "nn", "note", "peer_name", "state", "task", "waiting_count"] for w in o["windows"])'
+  bj_check 'all(w["waiting_count"] is None and w["task"] is None for w in o["windows"])'
   bj_check 'o["windows"][1]["nn"] == "02" and o["windows"][1]["peer_name"] is None and o["windows"][1]["alias"] is None'   # created, never claimed
   rm -f "$DAEDALUS_HOME/state/leases/02.seen"
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
@@ -630,4 +630,25 @@ se = [h for h in hs if h["command"] == 'python3 "$CLAUDE_PROJECT_DIR"/core/lease
 assert len(se) == 1 and isinstance(se[0].get("timeout"), int) and 1 <= se[0]["timeout"] <= 5, hs
 assert any("capture-tick.sh --final" in h["command"] for h in hs), hs
 PY
+}
+
+@test "task: the board shows each window's task right after its label, before files and commits, cut at 90 characters; a released window shows none; board-json carries it as stored (one line, at most 120) (v0.12.3)" {
+  LS create >/dev/null; LS create >/dev/null; LS create >/dev/null
+  bind_live 01 sA; bind_live 02 sB; bind_live 03 sC
+  LS alias 02 poc-ui >/dev/null
+  LS task 01 "Zoom converter: read meeting_transcript" >/dev/null
+  LS task 02 "$(printf 'y%.0s' $(seq 1 130))" >/dev/null
+  run board sA; [ "$status" -eq 0 ]
+  c="$(ctx)"
+  case "$c" in *"- 01 (you) — task: Zoom converter: read meeting_transcript — 0 changed"*) : ;; *) echo "$c"; return 1 ;; esac
+  y89="$(printf 'y%.0s' $(seq 1 89))"
+  case "$c" in *"- 02 (poc-ui) — task: ${y89}… — 0 changed"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 03 — 0 changed"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"read the other windows' tasks"*) : ;; *) echo "$c"; return 1 ;; esac
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check '[w["task"] for w in o["windows"]][0] == "Zoom converter: read meeting_transcript" and len(o["windows"][1]["task"]) == 120 and o["windows"][2]["task"] is None'
+  set_lease 02 '{"released": "2026-10-19T12:00:00Z"}'
+  run board sA; c="$(ctx)"
+  case "$c" in *"- 02 (poc-ui) — released"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"task: yyy"*) echo "a released window shows no task: $c"; return 1 ;; *) : ;; esac
 }

@@ -1715,6 +1715,7 @@ def _reclaim_waiting(root: Path, repo: str, trunk: str, nn: str, budget: int, se
 
 
 def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, criteria: Optional[str] = None,
+                    task: Optional[str] = None,
                     spawned: bool = False, timeout: Optional[int] = None,
                     deadline: Optional[float] = None, notes: Optional[list] = None,
                     reclaimed: bool = False) -> Tuple[str, dict]:
@@ -1745,6 +1746,8 @@ def allocate_locked(root: Path, sid: Optional[str], note: Optional[str] = None, 
             data["note"] = note
         if criteria:
             data["criteria"] = criteria
+        if task:
+            data["task"] = task
         if spawned:
             data["spawned"] = True
         # Written unfinished and marked ready only once the add returns True:
@@ -2034,6 +2037,17 @@ def _claim_locked(root: Path, nn: str, sid: str, leases: Dict[str, dict]) -> str
         return "Window %s continues %d unpromoted commit%s from an earlier session (%s)." % (
             nn, len(subjects), "" if len(subjects) == 1 else "s", _quoted(subjects))
     return "This is %s." % window_label(nn, lease)
+
+
+TASK_MAX = 120            # stored: the board cuts it to TASK_SHOWN, the band to its own width
+TASK_SHOWN = 90
+
+
+def task_line(text: object, limit: int = TASK_MAX) -> str:
+    """One line of a window's task: every run of whitespace or control characters is one space, at most `limit`
+    characters (the last an ellipsis when cut); "" when nothing is left."""
+    flat = " ".join(_CONTROL_RUN.sub(" ", str(text or "")).split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
 
 
 def set_field(root: Path, token: str, cmd: str, key: str, value: object) -> str:
@@ -3978,7 +3992,8 @@ def spawn(root: Path, task: str, note: Optional[str]) -> str:
     import subprocess
     target = root / "target" / target_name(root)
     fetch_origin(target, timeout=60)
-    nn, _ = allocate(root, None, note=note, spawned=True)
+    first = next((ln for ln in task.splitlines() if ln.strip()), "")
+    nn, _ = allocate(root, None, note=note, spawned=True, task=task_line(first) or None)
     full = ('%s\n\nWhen the work is done or you are stuck, run `core/lease.sh done %s --summary "<one paragraph: what changed, '
             'what is untested, what you need>"` as your final action.' % (task, nn))
     env = dict(os.environ, DAEDALUS_LEASE=nn)
@@ -4924,7 +4939,7 @@ VISITOR_LINE = "This is a direct-call session; it holds no lease and cannot take
 # not only create/claim/spawn: sweep and release delete lease files, and
 # `prime take` would move the pen to a read-only headless session that exits
 # in minutes. list/status stay allowed (they read).
-VISITOR_REFUSED = ("create", "claim", "alias", "note", "update", "spawn", "release", "done", "sweep", "prime",
+VISITOR_REFUSED = ("create", "claim", "alias", "note", "task", "update", "spawn", "release", "done", "sweep", "prime",
                    "rebase", "split", "adopt", "log")
 # what makes, moves or removes a window's worktree in target/'s repositories: refused while the upgrade's safety copy
 # of target/ is not taken (safety-copy review 3, finding 4)
@@ -4934,6 +4949,8 @@ WINDOW_MAKERS = ("create", "claim", "spawn", "adopt", "split")
 COPY_GATED = ("create", "claim", "spawn", "release", "done", "sweep", "rebase", "split", "adopt")
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
+TASK_LINE = ("When the operator gives you a task: set yours with `core/lease.sh task <NN> \"<one line>\"`, read the other "
+             "windows' tasks above, and message a window whose task overlaps yours before you start.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
                 "from this board) before changing it.")
 
@@ -5055,6 +5072,9 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
             marks.append("(spawned)")
         label = "- %s%s" % (nn, (" " + " ".join(marks)) if marks else "")
         parts = []
+        # v0.12.3: the window's task first, so a window given a task sees what the others are doing before it starts
+        if d.get("task") and not d.get("released"):
+            parts.append("task: %s" % task_line(d["task"], TASK_SHOWN))
         state = states.get(nn, "stale")
         entries = live_map.get(str(d.get("session_id")), []) if d.get("session_id") else []
         if d.get("released"):
@@ -5119,6 +5139,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
         # is pending the nag's remedy is refused (create/claim), so the sentence names the upgrade instead.
         ps = pending_stop(root)
         lines.append(no_window_pending(ps) if ps else UNLEASED_NAG)
+    if len(numbered) > 1 and not visitor:
+        lines.append(TASK_LINE)
     lines.append(MESSAGE_LINE)
     return "\n".join(lines)
 
@@ -5755,6 +5777,7 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
             "is_this": nn == mine,
             "last_seen_epoch": float(seen[nn]) if seen[nn] is not None else None,
             "note": _band_text(d.get("note")),
+            "task": None if d.get("released") else (task_line(d.get("task")) or None),
             "waiting_count": None,
         })
     # Swept numbers still holding unpromoted work (2026-10-19: a terminal became 05 and the band showed no 02 or 03).
@@ -5769,7 +5792,7 @@ def board_json(root: Path, sid: Optional[str]) -> dict:
     for nn in sorted(k for k, n in swept.items() if n):
         windows.append({"nn": nn, "alias": None, "state": "swept-waiting", "changed_count": 0, "peer_name": None,
                         "is_prime": False, "is_this": False, "last_seen_epoch": None, "note": None,
-                        "waiting_count": swept[nn]})
+                        "task": None, "waiting_count": swept[nn]})
     obj: dict = {"this_window": mine, "prime_window": prime_nn, "windows": windows, "generated_epoch": time.time(),
                  "ami": board_ami(root, sid)}
     if errors:
@@ -6079,7 +6102,7 @@ def main(argv: list) -> int:
     # and releases LOCK_SH itself. list/status do it through the board (Task 8);
     # create and resolve do not (a spawner's create may run hook-adjacent, and
     # resolve is on every target_path).
-    recompute = cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase",
+    recompute = cmd in ("claim", "alias", "note", "task", "update", "release", "done", "sweep", "spawn", "prime", "rebase",
                         "split")
     if cmd == "prime":
         # a session holding no window takes the pen running no git at all (the pre-pass runs git in every window's
@@ -6172,7 +6195,7 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e); return 1
         return 0
-    if cmd in ("claim", "alias", "note", "update", "release", "done", "sweep", "spawn", "prime", "rebase", "split"):
+    if cmd in ("claim", "alias", "note", "task", "update", "release", "done", "sweep", "spawn", "prime", "rebase", "split"):
         def _refused(fn):
             try:
                 out = fn()
@@ -6205,6 +6228,15 @@ def main(argv: list) -> int:
             if len(args) < 2:
                 sys.stderr.write('usage: core/lease.sh note <NN> "..."\n'); return 2
             return _refused(lambda: "Noted for window %s." % set_field(root, args[0], "note", "note", args[1]))
+        if cmd == "task":
+            # v0.12.3: the window's own one line for its current task, apart from the operator's `note`; the board
+            # shows it first on the window's line, so a window given a task can see what the others are doing
+            if "--clear" in args:
+                return _refused(lambda: "Window %s has no task on the board now." % set_field(root, args[0], "task", "task", None))
+            text = task_line(args[1]) if len(args) >= 2 else ""
+            if not text:
+                sys.stderr.write('usage: core/lease.sh task <NN> "<one line: what this window is working on>" | task <NN> --clear\n'); return 2
+            return _refused(lambda: "Window %s's task is on the board: %s" % (set_field(root, args[0], "task", "task", text), text))
         if cmd == "update":
             return _refused(lambda: "Window %s's criteria file is %s."
                             % (set_field(root, args[0], "update", "criteria", _after("--criteria")), _after("--criteria")))

@@ -456,7 +456,7 @@ per-deployment.
 
 The tracked `.claude/settings.json` wires this: `core/session-start.py`
 numbers the window and prints the **lease board** (one line per open window —
-number, alias, changed files, last commit, last seen); `core/lease-board.py`
+number, alias, task, changed files, last commit, last seen); `core/lease-board.py`
 prints it again on every prompt and is the window's heartbeat; a
 `PreToolUse(Edit|Write)` line runs `core/boundary-hook.py` before a write, so
 the first attempt to change a file another window has already changed is
@@ -512,7 +512,9 @@ board on screen`) and whether the session registry still has the shape
 liveness reads (`registry shape`).
 
 `core/lease.sh` drives it from a session or your shell: `create`, `claim <NN>`,
-`alias <NN> <word>`, `note`, `update`, `spawn`, `list`, `status`,
+`alias <NN> <word>`, `note`, `task <NN> "<one line>"` (the window's own line
+for what it is working on, first on its board line; `--clear` when done),
+`update`, `spawn`, `list`, `status`,
 `log` (this session's log path for today — the counter is reserved in the
 lease, never counted from the directory), `unpromoted <NN>` (what `release <NN> --remove` would delete; deletes nothing),
 `release <NN>`, `done <NN>`, `sweep` (removes windows with no live session),

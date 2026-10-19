@@ -43,12 +43,24 @@ Build in your own worktree — never in `target/<repo>/`, which is the prime's
 read-only mirror of trunk.
 
 The **lease board** arrives at start and with every prompt: one line per open
-window — its number, alias, the files it has changed so far, its last commit,
-when it was last seen. If you need a file another window has already changed,
+window — its number, alias, its task, the files it has changed so far, its
+last commit, when it was last seen. If you need a file another window has already changed,
 message that window first (SendMessage to the peer name the board shows). The
 first attempt to change such a file is stopped with that advice; trying
 again lets it through — which you do only once that window has answered, or
 the operator has said so (see "Messages between windows").
+
+**Your task on the board.** When the operator gives you a task, before you
+start: set it in one line — `core/lease.sh task 02 "Zoom converter: read
+meeting_transcript"` — then read the other windows' tasks on the board. If one
+overlaps yours (the same feature, the same files, the same interface), message
+that window once, in the shape under "Messages between windows" ("This is
+window 03. My task is …; the board says yours is …. I will change … and leave
+… to you. Tell me if that collides."), then go on with the part that does not
+collide. Set it again when the task changes; `core/lease.sh task 02 --clear`
+when it is done. The task is yours to keep: the operator never sets it, and
+it is not their `note`. A spawned clone starts with the first line of its
+task already set.
 
 One window holds the **pen** (the board marks it `prime`): only it writes
 `hot.md` and commits the vault, always through `core/vault-commit.sh`, which
@@ -115,7 +127,8 @@ it.
 ## Messages between windows
 
 Windows talk with the `ListAgents` and `SendMessage` tools; the board gives
-each window's peer name. Message another window in three cases only: a file
+each window's peer name. Message another window in these cases only: its task on the
+board overlaps the one you were just given (once, before you start); a file
 you need has already been changed there (the stop-once warning named it); you
 found something it will hit — a test broken on trunk, a pitfall for its files,
 an interface you changed that its files use; or you need the prime — a vault

@@ -497,6 +497,30 @@ PY
   run LS update 01 --criteria "$BATS_TEST_TMPDIR/crit.md"; [ "$status" -eq 0 ]; [ "$(lease_json 01 criteria)" = "$BATS_TEST_TMPDIR/crit.md" ]
 }
 
+@test "task: a window sets one line naming its current task, apart from the operator's note; control characters become one space; --clear removes it; an empty task is a usage error; an alias is refused naming the number (v0.12.3)" {
+  LS create >/dev/null; LS alias 01 poc-ui >/dev/null; LS note 01 "the operator's words" >/dev/null
+  run LS task 01 "capture: read the meeting_transcript field"; [ "$status" -eq 0 ]
+  case "$output" in *"Window 01's task is on the board: capture: read the meeting_transcript field"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json 01 task)" = "capture: read the meeting_transcript field" ]
+  [ "$(lease_json 01 note)" = "the operator's words" ]       # the operator's note is never touched by a task
+  run LS task 01 "$(printf 'two\n\tlines')"; [ "$status" -eq 0 ]; [ "$(lease_json 01 task)" = "two lines" ]
+  run LS task poc-ui "x"; [ "$status" -ne 0 ]; case "$output" in *"poc-ui is an alias; window 01 carries it — say \`task 01\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  run LS task 01; [ "$status" -eq 2 ]
+  run LS task 01 "   "; [ "$status" -eq 2 ]
+  run LS task 01 --clear; [ "$status" -eq 0 ]; [ "$(lease_json 01 task)" = "None" ]
+  case "$output" in *"Window 01 has no task on the board now."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "spawn: the clone's task is on the board from its first line, one line, at most 120 characters (v0.12.3)" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-claude" "$BATS_TEST_TMPDIR/bin/claude"; chmod +x "$BATS_TEST_TMPDIR/bin/claude"
+  export FAKE_CLAUDE_LOG="$BATS_TEST_TMPDIR/claude.log"
+  long="$(printf 'x%.0s' $(seq 1 200))"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run LS spawn "$(printf 'fix the thing\nwith detail')"; [ "$status" -eq 0 ]
+  [ "$(lease_json 01 task)" = "fix the thing" ]
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run LS spawn "$long"; [ "$status" -eq 0 ]
+  t="$(lease_json 02 task)"; [ "${#t}" -eq 120 ]; case "$t" in *"…") : ;; *) echo "$t"; return 1 ;; esac
+}
+
 @test "release: by a non-holder of a live lease refused with the holder's peer name; by the holder marks released; of a stale lease succeeds from anywhere; --remove refuses unmerged commits without --force and deletes worktree and branch with it" {
   LS create >/dev/null
   pid="$(live_pid)"; registry_entry "$pid" sA interactive cli daedalus-01
