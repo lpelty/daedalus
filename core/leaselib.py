@@ -1643,7 +1643,7 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
     for nn in sorted(k for k in leases if k != "prime"):
         lease = leases[nn]
         if lease.get("released"):
-            # 2026-10-19 (Larry: no sweep typed by hand): a released lease goes once its session has ended — the hold
+            # 2026-10-19 (the operator: no sweep typed by hand): a released lease goes once its session has ended — the hold
             # was only for its holder's hooks, and they are gone. A pid on file that is dead and not resumed (liveness
             # "stale" with a pid), as for an idle one below: a lease with no pid is left to `sweep` and SessionEnd,
             # since a heartbeat's age is not proof its terminal closed (review 2026-10-19, finding 3). What `sweep`
@@ -3810,7 +3810,7 @@ SESSION_END_LOCK_WAIT = 1.0     # seconds; SessionEnd's hooks share a short budg
 
 
 def session_end_sweep(root: Path, sid: Optional[str]) -> Optional[str]:
-    """SessionEnd (2026-10-19, Larry: no sweep by hand): the ending session's own lease is removed when it is
+    """SessionEnd (2026-10-19, the operator: no sweep by hand): the ending session's own lease is removed when it is
     released — the hold `release` leaves is for this session's hooks, and this is the last of them. What `sweep`
     does for a released lease and no more: the worktree and branch stay, and unpromoted work on lease/<NN> keeps the
     number (free_number). Never another session's lease, never an unreleased one (a window closed without release

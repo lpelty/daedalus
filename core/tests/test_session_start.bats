@@ -698,7 +698,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   [ "$(lease_json 05 session_id)" = "sD" ]; [ "$(lease_json 05 released)" != "None" ]
 }
 
-# --- released windows are swept without the operator (Larry, 2026-10-19: "I don't want to have to keep those extra
+# --- released windows are swept without the operator (the operator, 2026-10-19: "I don't want to have to keep those extra
 # steps"): a released lease whose session has ended goes at the next terminal start, as reclaim removes an idle one.
 
 @test "a released window whose session has ended is swept by the next terminal start, with no sweep typed: its number comes back when nothing is unpromoted; while its session is open it is kept" {

@@ -560,7 +560,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   bj_check '[w["nn"] for w in o["windows"]] == ["01"]'
 }
 
-# --- the SessionEnd sweep (Larry, 2026-10-19): a window's own released lease goes when its session ends ----------
+# --- the SessionEnd sweep (the operator, 2026-10-19): a window's own released lease goes when its session ends ----------
 SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end; }
 
 @test "session-end: the ending session's own released lease is removed (worktree and branch kept); another session's released lease, its own unreleased one, and a bad or empty payload are left — exit 0 and nothing printed every time" {
