@@ -13,20 +13,33 @@
 # (leases: …)", then kick the document index rebuild in the background
 # (core/vault-search.py index --background — a line, never a failed commit);
 # 6. --push pushes a vault that has an origin.
+# Session logs (2026-10-19): a full commit leaves out another session's log while that session is still open and
+# has not closed (its work in progress), carries every other one, and names whose logs it carried; the pending
+# markers closed windows left (state/vault-pending/) are cleared once their logs are in.
+#   core/vault-commit.sh --pending — the pen's holder's Stop and SessionEnd hooks: commit only the logs closed
+# windows marked pending (git commit --only), nothing else; silent, exit 0 on every path.
 # guard-bash.py denies raw git add/commit/stash under vault/ from every
 # session so that this check is never skipped; an operator at a shell is
 # free to type git commit there.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 V="$DAEDALUS_HOME/vault"
 LL="$DAEDALUS_HOME/core/leaselib.py"
-msg=""; push=0
+msg=""; push=0; pending_only=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    -m) [ $# -ge 2 ] || die 'usage: core/vault-commit.sh [-m "<message>"] [--push]'; msg="$2"; shift 2 ;;
+    -m) [ $# -ge 2 ] || die 'usage: core/vault-commit.sh [-m "<message>"] [--push] | --pending'; msg="$2"; shift 2 ;;
     --push) push=1; shift ;;
-    *) die 'usage: core/vault-commit.sh [-m "<message>"] [--push]' ;;
+    --pending) pending_only=1; shift ;;
+    *) die 'usage: core/vault-commit.sh [-m "<message>"] [--push] | --pending' ;;
   esac
 done
+# --pending: never a word, never a failure (a hook's) — every refusal below ends it quietly.
+if [ "$pending_only" -eq 1 ]; then
+  [ -n "$(python3 "$LL" pending-logs 2>/dev/null)" ] || exit 0
+  python3 "$LL" is-prime >/dev/null 2>&1 || exit 0          # the pen's holder only; never a take from a hook
+  exec >/dev/null 2>&1
+  die() { exit 0; }
+fi
 # The vault is its own repository, or a directory the Daedalus home repository
 # tracks (the two layouts doctor accepts). In the second, the commit is made in
 # that repository and must carry the vault alone: work the operator has staged
@@ -55,9 +68,50 @@ elif git -C "$DAEDALUS_HOME" ls-files --error-unmatch vault >/dev/null 2>&1; the
   done <<EOF
 $(git -C "$G" -c core.quotepath=false diff --cached --name-only)
 EOF
-  [ -z "$staged" ] || die "the repository holding the vault has staged changes outside vault/ (${staged% }); commit or unstage them first, then run core/vault-commit.sh again"
+  # (--pending commits named paths with --only, which other staged work cannot ride on)
+  [ -z "$staged" ] || [ "$pending_only" -eq 1 ] || die "the repository holding the vault has staged changes outside vault/ (${staged% }); commit or unstage them first, then run core/vault-commit.sh again"
 else
   die "the vault at $V is neither its own git repository nor tracked by the Daedalus home repository ($DAEDALUS_HOME)"
+fi
+
+# git_path <home-relative path> — the path as git -C "$G" takes it (vault/x in the home layout, x in the vault's own).
+git_path() { if [ -n "$SPEC" ]; then printf '%s' "$1"; else printf '%s' "${1#vault/}"; fi; }
+# vault_ident — the vault's own identity when it has one; a placeholder only where none is configured.
+vault_ident() {
+  if ! git -C "$G" config user.email >/dev/null 2>&1 || ! git -C "$G" config user.name >/dev/null 2>&1; then
+    printf '%s' "-c user.email=${GIT_AUTHOR_EMAIL:-daedalus@localhost} -c user.name=${GIT_AUTHOR_NAME:-daedalus}"
+  fi
+}
+# clear_landed — drop each pending marker whose log is now committed (clean in git).
+clear_landed() {
+  local rel landed=""
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -n "$(git -C "$G" status --porcelain -- "$(git_path "$rel")" 2>/dev/null)" ] || landed="$landed $rel"
+  done <<PEND
+$(python3 "$LL" pending-logs 2>/dev/null)
+PEND
+  # shellcheck disable=SC2086
+  [ -z "$landed" ] || python3 "$LL" clear-pending $landed >/dev/null 2>&1 || true
+}
+
+if [ "$pending_only" -eq 1 ]; then
+  set -- ; names=""
+  while IFS= read -r rel; do
+    [ -n "$rel" ] && [ -f "$DAEDALUS_HOME/$rel" ] || continue
+    gp="$(git_path "$rel")"
+    [ -n "$(git -C "$G" status --porcelain -- "$gp" 2>/dev/null)" ] || continue
+    set -- "$@" "$gp"; names="${names:+$names, }$(basename "$rel" .md)"
+  done <<PEND
+$(python3 "$LL" pending-logs 2>/dev/null)
+PEND
+  if [ $# -gt 0 ]; then
+    ident="$(vault_ident)"
+    # shellcheck disable=SC2086
+    git -C "$G" add -- "$@" && git -C "$G" $ident commit -q --only -m "vault: closed windows' session logs ($names)" -- "$@" || exit 0
+  fi
+  clear_landed
+  exit 0
 fi
 
 # 1. The pen's holder commits (§4.7); a shell with no session identity is the operator. A pen whose
@@ -118,6 +172,14 @@ fi
 leases="$(python3 "$LL" numbers 2>&1)" || die "${leases#daedalus: }"
 leases="$(printf '%s\n' "$leases" | tr '\n' ',' | sed 's/^,*//; s/,$//; s/,/, /g')"
 report="$(python3 "$DAEDALUS_HOME/core/verifylib.py" --vault-claims)" || die "the vault's claims could not be checked, so nothing was staged"
+# Session logs, read here with the other lease inputs (never after staging): one TSV row per reserved log —
+# path, owner, mine, hold (another session still open and not closed: its work in progress).
+logrows="$(python3 "$LL" vault-logs)" || die "the session logs could not be judged, so nothing was staged"
+logrows="$(printf '%s\n' "$logrows" | python3 -c 'import json,sys
+for ln in sys.stdin:
+    if ln.strip():
+        d=json.loads(ln); print("\t".join([d["path"], d["owner"], "1" if d["mine"] else "0", "1" if d["hold"] else "0"]))')" \
+  || die "the session logs could not be judged, so nothing was staged"
 skip=""
 while IFS= read -r row; do
   [ -n "$row" ] || continue
@@ -146,18 +208,34 @@ retry_git add -A ${SPEC:+-- "$SPEC"} >/dev/null || die "git add failed in the va
 while IFS= read -r p; do [ -n "$p" ] && git -C "$G" reset -q -- "$p"; done <<EOF
 $skip
 EOF
+# Session logs: another open session's log is its work in progress (left out, named); every other session's log in
+# this commit is carried, and the line names whose.
+held=""; carried=""
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  rel="${f%%	*}"; rest="${f#*	}"; owner="${rest%%	*}"; rest="${rest#*	}"; mine="${rest%%	*}"; hold="${rest#*	}"
+  gp="$(git_path "$rel")"
+  [ -n "$(git -C "$G" diff --cached --name-only -- "$gp")" ] || continue
+  if [ "$hold" = 1 ]; then
+    retry_git reset -q -- "$gp" >/dev/null || die "could not leave $(basename "$rel") out of the commit (git reset failed); nothing was committed"
+    held="${held:+$held, }$owner"
+  elif [ "$mine" = 0 ]; then
+    carried="${carried:+$carried, }$owner ($(basename "$rel" .md))"
+  fi
+done <<EOF
+$logrows
+EOF
+[ -z "$held" ] || log "left out, still being written: the session log of $held"
+[ -z "$carried" ] || log "carried the session log of $carried"
 if git -C "$G" diff --cached --quiet; then
   log "nothing to commit"
 else
   [ -n "$msg" ] || msg="vault: prime commit $(date +%Y-%m-%d) (leases: ${leases:-none})"
-  # The vault's own identity when it has one; a placeholder only where none is configured.
-  ident=""
-  if ! git -C "$G" config user.email >/dev/null 2>&1 || ! git -C "$G" config user.name >/dev/null 2>&1; then
-    ident="-c user.email=${GIT_AUTHOR_EMAIL:-daedalus@localhost} -c user.name=${GIT_AUTHOR_NAME:-daedalus}"
-  fi
+  ident="$(vault_ident)"
   # shellcheck disable=SC2086
   retry_git $ident commit -q -m "$msg" >/dev/null || die "commit failed in the vault"
   log "committed: $msg"
+  clear_landed
   # 5b. The document index follows the vault (reindex design 2026-10-15): kicked after a commit it
   # made, in the background, never holding this turn; a failure is a line, never a failed commit.
   # The kick's cwd is the home, so a close.sh run from a worktree still resolves the right script.

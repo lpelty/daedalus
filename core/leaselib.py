@@ -32,7 +32,7 @@ import tempfile
 import time
 import unicodedata
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import verifylib as v  # noqa: E402
@@ -4322,6 +4322,144 @@ def session_log_locked(root: Path, sid: str, leases: Dict[str, dict], today: str
     return log_path_locked(root, key, leases, today, new_day=new_day)
 
 
+# --- The pen commits every window's session log (2026-10-19) ------------------
+# The pen's holder stays the one vault committer. A window that closes while the pen's holder is live leaves its log
+# with a marker under state/vault-pending/ (close.sh, `mark-log-pending`); the holder commits the marked logs at its
+# next Stop, at its SessionEnd, and in every full vault commit it makes, and says whose logs it carried. A live other
+# window's log with no marker is its own session's work in progress: a full commit leaves it out ("hold").
+
+def pending_dir(root: Path) -> Path:
+    return root / "state" / "vault-pending"
+
+
+def pending_logs(root: Path) -> List[str]:
+    """The home-relative log paths closed windows left for the pen's holder (one marker file each). Lock-free: the
+    markers are written whole (tmp + os.replace) and only ever added or removed. A marker counts only while its log
+    is as it was at the close (same mtime_ns): a session that goes on after close.sh — another question, a restart the
+    same day — writes to the same log, and from then on that log is its work in progress again, never committed by
+    the pen's holder until it closes again (review 2026-10-19, M1)."""
+    d = pending_dir(root)
+    out = []
+    try:
+        names = sorted(os.listdir(str(d)))
+    except OSError:
+        return []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            m = json.loads((d / name).read_text())
+            rel, at = m.get("path"), m.get("mtime_ns")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not (isinstance(rel, str) and _LOG_PATH_RE.match(rel)):
+            continue
+        try:
+            if os.stat(str(root / rel)).st_mtime_ns != at:
+                continue
+        except OSError:
+            continue
+        out.append(rel)
+    return out
+
+
+_LOG_PATH_RE = re.compile(r"^vault/sessions/[0-9]{4}/[0-9]{2}/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{3,}\.md$")
+
+
+def clear_pending(root: Path, paths: List[str]) -> None:
+    for rel in paths:
+        try:
+            (pending_dir(root) / (Path(rel).stem + ".json")).unlink()
+        except OSError:
+            pass
+
+
+def _session_reservations(root: Path, leases: Dict[str, dict], sid: str) -> List[str]:
+    """Every log path session sid has reserved, in any store: its numbered lease, prime.json when it holds the pen,
+    its unwindowed.json entry. CALLER HOLDS THE LOCK."""
+    stores = []
+    nn, lease = lease_of_session(leases, sid)
+    if lease is not None:
+        stores.append(lease)
+    prime = leases.get("prime") or {}
+    if prime.get("session_id") == sid:
+        stores.append(prime)
+    if lease_path(root, UNWINDOWED).exists():
+        entry = read_unwindowed(root).get(sid)
+        if isinstance(entry, dict):
+            stores.append(entry)
+    paths = {_log_file(day, n) for store in stores for day, n in _reservations(store).items()}
+    return sorted(paths)
+
+
+def mark_log_pending(root: Path, sid: Optional[str]) -> str:
+    """close.sh, when vault-commit.sh did not commit here (exit 3): mark this session's own logs that exist on disk
+    as closed, so whichever session commits the vault next carries them (a marker keeps a log from being held as
+    work in progress). The plain sentence — "Your log is saved; window NN holds the pen and commits it." — only when
+    the pen's holder is another session that is live; every other exit 3 already said its own line (review
+    2026-10-19, M2). Nothing for an operator shell or a direct-call visitor, which holds no log."""
+    if not sid or os.environ.get("DIRECT_CALL_ID") or not leases_dir(root).is_dir():
+        return ""
+    with lock(root, shared=True):
+        leases = read_all(root)
+        mine = [p for p in _session_reservations(root, leases, sid) if (root / p).is_file()]
+        holder = (leases.get("prime") or {}).get("session_id")
+        who = None
+        if holder and holder != sid and holder_ended(root, leases, holder) is False:
+            who = _holder_words(leases, str(holder))[0]
+    if not mine:
+        return ""
+    d = pending_dir(root)
+    d.mkdir(parents=True, exist_ok=True)
+    for rel in mine:
+        tmp = d / (".%s.%d.tmp" % (Path(rel).stem, os.getpid()))
+        tmp.write_text(json.dumps({"path": rel, "session_id": sid, "at": now_stamp(),
+                                   "mtime_ns": os.stat(str(root / rel)).st_mtime_ns}))
+        os.replace(str(tmp), str(d / (Path(rel).stem + ".json")))
+    return ("Your log is saved; %s holds the pen and commits it." % who) if who else ""
+
+
+def vault_log_rows(root: Path, sid: Optional[str]) -> List[dict]:
+    """`leaselib.py vault-logs` (vault-commit.sh's full commit): one row per reserved session log, any session —
+    {path, owner, mine, hold}. hold: another session's log while that session is still open (live, quiet or
+    resumed) and has not closed (no pending marker) — its work in progress, never committed by someone else.
+    One shared lock."""
+    if not leases_dir(root).is_dir():
+        return []
+    pending = set(pending_logs(root))
+    rows: Dict[str, dict] = {}
+    with lock(root, shared=True):
+        leases = read_all(root)
+        for nn in sorted(k for k in leases if k != "prime"):
+            lease = leases[nn]
+            mine = bool(sid) and lease.get("session_id") == sid
+            live = liveness(root, nn, lease) in HELD_BY_LIVE
+            for day, n in _reservations(lease).items():
+                rel = _log_file(day, n)
+                rows[rel] = {"path": rel, "owner": "window %s" % nn, "mine": mine,
+                             "hold": live and not mine and rel not in pending}
+        prime = leases.get("prime") or {}
+        holder = prime.get("session_id")
+        if holder:
+            ended = holder_ended(root, leases, holder)
+            for day, n in _reservations(prime).items():
+                rel = _log_file(day, n)
+                mine = holder == sid
+                rows.setdefault(rel, {"path": rel, "owner": _holder_words(leases, str(holder))[0], "mine": mine,
+                                      "hold": ended is not True and not mine and rel not in pending})
+        if lease_path(root, UNWINDOWED).exists():
+            for other, entry in read_unwindowed(root).items():
+                if not isinstance(entry, dict):
+                    continue
+                mine = other == sid
+                live = bool(registry_live_entries(str(other))) if registry_present() else True
+                for day, n in _reservations(entry).items():
+                    rel = _log_file(day, n)
+                    rows.setdefault(rel, {"path": rel, "owner": "a session with no window", "mine": mine,
+                                          "hold": live and not mine and rel not in pending})
+    return [rows[k] for k in sorted(rows)]
+
+
 def _reservations(lease: dict) -> Dict[str, int]:
     """The lease's logs: {"<date>": N} with every entry that is not a date
     and a positive int left out — only leaselib writes it, so a corrupt value
@@ -4676,9 +4814,7 @@ def prime_take_windowless(root: Path, sid: str, reason: Optional[str]) -> str:
 # --- The pen at a vault commit (close-commits design 2026-10-16) ------------------------------------------
 
 PEN_TAKEN_AT_COMMIT = "The pen's holder, %s, has ended; this session holds the pen now and commits the vault%s."
-PEN_HELD_AT_COMMIT = ("The vault is left for the pen's holder, %s, which is live: its next vault commit carries every "
-                      "window's files, this session's included, and once it ends the next close takes the pen and "
-                      "commits them.")
+PEN_HELD_AT_COMMIT = "%s holds the pen and commits the vault, this session's files included."
 PEN_UNTOLD_AT_COMMIT = ("The vault is left for the pen's holder, %s; this build cannot tell whether it is live, so it is "
                         "not taken — `core/lease.sh prime take` moves it, or the operator commits from their own shell: "
                         "`cd %s && core/vault-commit.sh`.")
@@ -4746,7 +4882,7 @@ def pen_for_commit(root: Path, sid: Optional[str]) -> Tuple[int, str]:
         if ended is None:
             return 3, PEN_UNTOLD_AT_COMMIT % (label, root)
         if not ended:
-            return 3, PEN_HELD_AT_COMMIT % label
+            return 3, PEN_HELD_AT_COMMIT % (label[:1].upper() + label[1:])
         registry_entry_for(sid)            # a session open in two terminals is refused, as at every take
         if not is_terminal_window(sid):
             if not registry_present():     # no registry: no session can be told a terminal one, so never "not one"
@@ -5822,6 +5958,30 @@ def main(argv: list) -> int:
         if not sid:
             return 1
         print(sid); return 0
+    if cmd == "vault-logs":
+        # vault-commit.sh's full commit: one JSON row per reserved session log (vault_log_rows).
+        try:
+            for row in vault_log_rows(root, session_id_from_env()):
+                print(json.dumps(row))
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+        return 0
+    if cmd == "mark-log-pending":
+        # close.sh after vault-commit.sh exit 3: one plain sentence, or nothing.
+        try:
+            line = mark_log_pending(root, session_id_from_env())
+        except Refused as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+        if line:
+            print(line)
+        return 0
+    if cmd == "pending-logs":
+        for rel in pending_logs(root):
+            print(rel)
+        return 0
+    if cmd == "clear-pending":
+        clear_pending(root, list(args))
+        return 0
     if cmd == "pen-for-commit":
         # vault-commit.sh step 1: exit 0 commit (a line when the pen moved), 3 the pen's holder commits (its line),
         # 1 a lease file cannot be read. Lines go to stdout; vault-commit.sh decides where they are shown.

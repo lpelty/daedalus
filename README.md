@@ -463,7 +463,14 @@ the first attempt to change a file another window has already changed is
 stopped once with the advice to message that window, and goes through on the
 next try (`core/guard-bash.py` does the same for Bash write operands). One
 window holds the pen — the board marks it `prime` — and only it writes
-`vault/hot.md` and commits the vault, through `core/vault-commit.sh`.
+`vault/hot.md` and commits the vault, through `core/vault-commit.sh`. It
+commits every window's session log too. A window that closes while the pen's
+holder is live is told "Your log is saved; window NN holds the pen and
+commits it", and the holder commits that log at its next turn or when it
+ends, whichever comes first. You never close windows in an order or move the
+pen for a log to land. The holder's own commits leave out the log of a window
+that is still open (it is still being written) and name whose logs they
+carried.
 
 A session that started while an upgrade was pending holds no window: none
 opens until the upgrade finishes, so its safety copy reads `target/` first.
@@ -782,7 +789,9 @@ capture is off.
   `core/vault-commit.sh`; `--no-commit` skips that (`--commit`, the old
   opt-in, is still accepted). When another live session holds the pen,
   `core/vault-commit.sh` says so in one line and exits 3, and the close still
-  succeeds: that session's next commit carries this one's files. When the
+  succeeds: the close says "Your log is saved; window NN holds the pen and
+  commits it", and that window commits the log at its next turn or when it
+  ends (`core/vault-pending-hook.sh`, on Stop and SessionEnd). When the
   pen's holder has ended, a terminal session takes the pen and commits; a
   headless one never takes it. If the commit fails for another reason, the
   close exits 4: the session is recorded, so fix what the line names and run

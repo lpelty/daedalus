@@ -228,12 +228,12 @@ stop_stub() {
   run bash "$CLOSE"; [ "$status" -ne 0 ]; case "$output" in *VAULT-COMMIT-RAN*) echo "must not commit after a failed capture: $output"; return 1 ;; *) : ;; esac
 }
 
-@test "close.sh: a vault commit left to the pen's live holder (exit 3) is a successful close — its one line once, then close complete (the vault is the pen holder's to commit); any other commit failure exits 4 saying the session is recorded" {
+@test "close.sh: a vault commit left to the pen's live holder (exit 3) is a successful close — its one line once, then close complete; any other commit failure exits 4 saying the session is recorded" {
   printf '#!/usr/bin/env bash\necho "daedalus: The vault is left for the pen'"'"'s holder, window 01, which is live." >&2\nexit 3\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
   configure_capture; start_stub
   run bash "$CLOSE"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(printf '%s\n' "$output" | grep -c "which is live")" -eq 1 ] || { echo "$output"; return 1; }
-  [ "$(printf '%s\n' "$output" | tail -1)" = "daedalus: close complete (the vault is the pen holder's to commit)" ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | tail -1)" = "daedalus: close complete" ] || { echo "$output"; return 1; }
   printf '#!/usr/bin/env bash\necho "daedalus: PROP-2.md claims IMPLEMENTED with no evidence-run" >&2\nexit 1\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
   printf '{"type":"user","message":{"role":"user","content":"one more turn"}}\n' >> "$TRANSCRIPT_DIR/session-a.jsonl"
   run bash "$CLOSE"; [ "$status" -eq 4 ] || { echo "$status: $output"; return 1; }

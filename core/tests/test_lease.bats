@@ -2317,7 +2317,7 @@ PFC() { python3 "$LL" pen-for-commit; }
   pb="$(live_pid)"; registry_entry "$pb" sB; win 02 sB "$pb"
   before="$(cat "$DAEDALUS_HOME/state/leases/prime.json")"
   DAEDALUS_SESSION_ID=sB run PFC; [ "$status" -eq 3 ]
-  [ "$output" = "The vault is left for the pen's holder, window 01, which is live: its next vault commit carries every window's files, this session's included, and once it ends the next close takes the pen and commits them." ] || { echo "$output"; return 1; }
+  [ "$output" = "Window 01 holds the pen and commits the vault, this session's files included." ] || { echo "$output"; return 1; }
   touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"; [ "$(python3 "$LL" liveness 01)" = quiet ]
   DAEDALUS_SESSION_ID=sB run PFC; [ "$status" -eq 3 ]
   [ "$(cat "$DAEDALUS_HOME/state/leases/prime.json")" = "$before" ]

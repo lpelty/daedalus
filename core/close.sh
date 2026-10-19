@@ -3,9 +3,10 @@
 # with the one sanctioned vault commit (core/vault-commit.sh, spec §4.7) unless
 # --no-commit. (--commit, the old opt-in, is still accepted and changes nothing.)
 # When another live session holds the pen, vault-commit.sh says so in one line
-# and exits 3: that session's next commit carries this one's files, and the
-# close still succeeds. When the pen's holder has ended, this session takes the
-# pen there and commits.
+# and exits 3: this session's log is marked for the pen's holder, which commits
+# it at its next turn or when it ends (vault-pending-hook.sh), and the close
+# still succeeds — no window has to close first. When the pen's holder has
+# ended, this session takes the pen there and commits.
 #
 # The SessionEnd hook runs capture too, and capture is offset-tracked, so
 # running both is safe and never double-captures. This exists because a
@@ -87,7 +88,10 @@ if [ "$commit" -eq 1 ]; then
   err="$(cat "$errf")"; rm -f "$errf"
   case $rc in
     0) : ;;
-    3) log "close complete (the vault is the pen holder's to commit)"; exit 0 ;;
+    3) # this session's log is left for the pen's holder, which commits it at its next turn or end (vault-pending-hook.sh)
+       said="$(python3 "$DAEDALUS_HOME/core/leaselib.py" mark-log-pending 2>&1)" || said=""
+       [ -z "$said" ] || log "$said"
+       log "close complete"; exit 0 ;;
     *) last="$(printf '%s\n' "$err" | sed '/^$/d' | tail -1)"; last="${last#daedalus: }"
        printf 'daedalus: %s\n' "the session is recorded; the vault commit did not run: ${last:-core/vault-commit.sh exited $rc}" >&2
        exit 4 ;;
