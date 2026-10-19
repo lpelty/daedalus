@@ -307,6 +307,51 @@ write_summary "$summary_tmp" "$result"
 } | python3 "$DAEDALUS_HOME/core/manifest-append.py" - \
   || die "cannot append to the evidence manifest"
 
+# refuted_choices <lease-nn> — count this REFUTED against the window's branch, and from the second on print the
+# operator's three choices (2026-10-19). A small fix to code that reads an outside service was refuted five runs
+# running and the loop was left to the builder, who kept widening the change; after two refutations the call is the
+# operator's. The count lives in state/refutations/<NN>.json and starts again when the window's lease is new (its
+# created time changed: released and taken again) or has promoted since (its promoted list grew); an unleased run
+# counts against the target's checked-out branch. Never fails the run: a count it cannot keep is a count not shown.
+refuted_choices() {
+  local n script branch
+  branch="$(git -C "$(target_path 2>/dev/null || printf .)" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  # read, not a heredoc inside $(...): bash 3.2 mis-parses quotes in a heredoc body there
+  IFS= read -r -d '' script <<'PY'
+import json, os, sys
+home, nn, branch = sys.argv[1:4]
+key = {"lease": nn or None, "branch": branch or None}
+if nn:
+    try:
+        lease = json.load(open(os.path.join(home, "state", "leases", nn + ".json")))
+    except (OSError, ValueError):
+        lease = {}
+    key.update(created=lease.get("created"), promoted=len(lease.get("promoted") or []))
+d = os.path.join(home, "state", "refutations")
+os.makedirs(d, exist_ok=True)
+path = os.path.join(d, (nn or "unleased") + ".json")
+try:
+    rec = json.load(open(path))
+except (OSError, ValueError):
+    rec = {}
+count = (rec.get("count") or 0) + 1 if rec.get("key") == key else 1
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump({"key": key, "count": count}, fh)
+os.replace(tmp, path)
+print(count)
+PY
+  n="$(python3 -c "$script" "$DAEDALUS_HOME" "${1:-}" "$branch" 2>/dev/null)" || return 0
+  case "$n" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$n" -ge 2 ] || return 0
+  local who="this branch"
+  [ -z "${1:-}" ] || who="window $1's branch"
+  log "${who} has been refuted $n times. The operator chooses, in their own words, one of three:"
+  log "  another round — fix the counted findings and run the gates again;"
+  log "  promote with the remaining findings filed as backlog rows (the reason names the rows);"
+  log "  or skip the review with the operator's reason: core/promote.sh ${1:-<NN>} --skip-review --reason \"<their reason>\"."
+}
+
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
   refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" "$summary_tmp" 2>&1 >/dev/null)"
   refute_code=$?
@@ -315,6 +360,8 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
     if [ "$refute_code" -eq 1 ]; then
       # Exit 1 = REFUTED; the review file is the fail_log.
       fail_log="$ev_vault/$run_id-review.md"
+      [ -z "$refute_msg" ] || log "review: $refute_msg"
+      refuted_choices "$lease_nn"
     else
       # Exit 2 = the refuter could not certify: CLI missing, python3 missing,
       # CLI failed or timed out and was killed (no review file was written),
@@ -328,6 +375,12 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
       fail_log="$refute_msg"
     fi
   fi
+fi
+
+# A STANDS that listed findings it did not count (hypothetical, out of scope, LOW — refute.sh's verdict_of) says so,
+# with the review file, so the operator can see what was set aside and why.
+if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ] && [ -n "${refute_msg:-}" ]; then
+  log "review STANDS; $refute_msg"
 fi
 
 # The vault summary, with the verdict folded into `result`, so this file and

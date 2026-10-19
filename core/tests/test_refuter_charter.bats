@@ -55,7 +55,9 @@ print(eval(sys.argv[1], {"d": d}))' "$1"
   prompt="$(field 'd["prompt"]')"
   for needle in 'Never validate' 'Never summarize' 'Refuse to guess' 'overconfident' 'never STANDS' \
                 'Correctness' 'Regression risk' 'Test honesty' 'Pitfall and boundary compliance' 'Claim' \
-                'How to confirm' 'VERDICT: REFUTED' 'VERDICT: STANDS'; do
+                'How to confirm' 'VERDICT: REFUTED' 'VERDICT: STANDS' \
+                'observed' 'plausible' 'hypothetical' 'in scope' 'out of scope' 'Scope section' \
+                'computed from your labels'; do
     [ "$(printf '%s\n' "$prompt" | grep -cF -- "$needle")" -ge 1 ] || { echo "charter prompt lacks: $needle"; return 1; }
   done
   # The frontmatter is not part of the prompt.

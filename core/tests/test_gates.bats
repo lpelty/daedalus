@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   DAEDALUS_HOME="$BATS_TEST_TMPDIR/dae"
   mkdir -p "$DAEDALUS_HOME/core" "$DAEDALUS_HOME/target/thing"
@@ -1029,6 +1031,158 @@ PY
   printf '> VERDICT: **REFUTED**\n' > "$f"; vo "$f"; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
   printf 'End with a line VERDICT: REFUTED or VERDICT: STANDS.\n' > "$f"; vo "$f"; [ "$status" -eq 2 ]; [ "$output" = NONE ]
   vo "$BATS_TEST_TMPDIR/none.md"; [ "$status" -eq 2 ]
+}
+
+# --- the refuter's bar: labelled findings, the verdict computed from the labels (2026-10-19) -----------------
+
+# labelled <file> <reviewer-verdict> <heading-tail>... — a review with one "### F<n> — f.py:<n> — <tail>" heading per
+# tail, each with its body lines, then the reviewer's own verdict line.
+labelled() {
+  local f="$1" v="$2" n=0 t; shift 2
+  : > "$f"
+  for t in "$@"; do
+    n=$((n + 1))
+    printf '### F%s — core/x.py:%s — %s\nWhat is wrong: something.\nInput: why.\nHow to confirm: read it.\n\n' "$n" "$n" "$t" >> "$f"
+  done
+  printf 'Correctness: WEAK (F1)\n\nVERDICT: %s\n' "$v" >> "$f"
+}
+
+@test "the verdict is computed from the finding labels: only in-scope observed or plausible HIGH/MEDIUM findings, or an observed HIGH, refute; the rest are listed, not counted" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$f"; }
+  # Only hypothetical findings, even HIGH and in scope, and the reviewer said REFUTED: STANDS, each one listed.
+  labelled "$f" REFUTED "hypothetical — in scope — HIGH" "hypothetical — in scope — MEDIUM"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  printf '%s\n' "$stderr" | grep -q 'F1.*hypothetical' || { echo "stderr: $stderr"; return 1; }
+  printf '%s\n' "$stderr" | grep -q 'F2.*hypothetical'
+  printf '%s\n' "$stderr" | grep -qi 'not counted'
+  # One in-scope plausible MEDIUM refutes.
+  labelled "$f" STANDS "hypothetical — in scope — HIGH" "plausible — in scope — MEDIUM"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  printf '%s\n' "$stderr" | grep -q 'F2'
+  # An out-of-scope plausible HIGH is listed and does not refute.
+  labelled "$f" REFUTED "plausible — out of scope — HIGH"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  printf '%s\n' "$stderr" | grep -q 'F1.*out of scope'
+  # An observed HIGH refutes on its own, whatever its scope label.
+  labelled "$f" STANDS "observed — out of scope — HIGH"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  labelled "$f" STANDS "observed — in scope — HIGH"
+  vo; [ "$status" -eq 1 ]
+  # A LOW finding never refutes, even observed and in scope (a missing scope section is reported as one).
+  labelled "$f" REFUTED "observed — in scope — LOW"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  # Dressing: bold, en dash or hyphen separators, 'in-scope', any order of the three labels.
+  printf '## **F1** - core/x.py:3 - MEDIUM - in-scope - Plausible\nWhat is wrong: x.\n\n**VERDICT**: STANDS\n' > "$f"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+}
+
+@test "a labelled review fails closed: a finding with a missing or unknown label, or no verdict line, cannot be certified" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$f"; }
+  # One finding labelled, one with no standing: malformed, never STANDS.
+  labelled "$f" STANDS "hypothetical — in scope — LOW" "in scope — HIGH"
+  vo; [ "$status" -eq 2 ]; [ "$output" = NONE ]
+  printf '%s\n' "$stderr" | grep -q 'F2'
+  # No scope label.
+  labelled "$f" STANDS "observed — HIGH"
+  vo; [ "$status" -eq 2 ]
+  # No severity.
+  labelled "$f" STANDS "plausible — in scope"
+  vo; [ "$status" -eq 2 ]
+  # Two standings on one finding.
+  labelled "$f" STANDS "plausible — hypothetical — in scope — HIGH"
+  vo; [ "$status" -eq 2 ]
+  # Labelled findings and no verdict line: a truncated review.
+  labelled "$f" STANDS "hypothetical — in scope — LOW"; sed -i.bak '/VERDICT/d' "$f"
+  vo; [ "$status" -eq 2 ]; [ "$output" = NONE ]
+  # Unlabelled findings (an older review, promote's re-read of it): the reviewer's own verdict, as before.
+  printf '### F1 — core/x.py:1 — LOW\nWhat is wrong: x.\n\nVERDICT: REFUTED\n' > "$f"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  printf '### F1 — core/x.py:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$f"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+}
+
+@test "the review prompt asks for the labels: standing (observed, plausible, hypothetical) and scope on every finding" {
+  install_refuter
+  bin="$BATS_TEST_TMPDIR/binp"; mkdir -p "$bin"; recording_stub "$bin"
+  git_target
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for needle in observed plausible hypothetical 'in scope' 'out of scope' 'VERDICT: REFUTED or VERDICT: STANDS'; do
+    grep -qF -- "$needle" "$bin/stdin" || { echo "prompt lacks: $needle"; return 1; }
+  done
+}
+
+# lease_for <nn> <session> [promoted-count] — a lease file this session holds, so gates.sh's my-lease names it.
+lease_for() {
+  mkdir -p "$DAEDALUS_HOME/state/leases"
+  python3 - "$DAEDALUS_HOME/state/leases/$1.json" "$2" "${3:-0}" <<'PY'
+import json, sys
+out, sid, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+json.dump({"lease": out.rsplit("/", 1)[1][:2], "session_id": sid, "created": "2026-10-19T09:00:00",
+           "promoted": ["p%d" % i for i in range(n)], "branch": "lease/03"}, open(out, "w"))
+PY
+}
+
+@test "the second refutation of a window's branch prints the operator's three choices; the first does not; a promote resets the count" {
+  install_refuter
+  bin="$BATS_TEST_TMPDIR/binr"; mkdir -p "$bin"
+  cat > "$bin/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '### F1 — core/x.py:1 — observed — in scope — HIGH\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
+STUB
+  chmod +x "$bin/claude"
+  git_target
+  write_config "  - true" "  refute: true"
+  export DAEDALUS_SESSION_ID=sess-r
+  lease_for 03 sess-r
+  # A leased session's gates run in its window's checkout.
+  mkdir -p "$DAEDALUS_HOME/worktrees/03"; cp -R "$DAEDALUS_HOME/target/thing" "$DAEDALUS_HOME/worktrees/03/thing"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qi 'another round' && { echo "choices after the first refutation: $output"; return 1; }
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q 'refuted 2 times' || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -qi 'another round'
+  printf '%s\n' "$output" | grep -qi 'backlog'
+  printf '%s\n' "$output" | grep -q -- '--skip-review'
+  # The window promoted: its lease records one more promotion, and the count starts again.
+  lease_for 03 sess-r 1
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -qi 'another round' && { echo "choices right after a promote: $output"; return 1; }
+  # Released and the number taken again: a new lease (a new created time) starts again too.
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  printf '%s\n' "$output" | grep -q 'refuted 2 times'
+  python3 - "$DAEDALUS_HOME/state/leases/03.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["created"] = "2026-10-19T15:00:00"; json.dump(d, open(sys.argv[1], "w"))
+PY
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  printf '%s\n' "$output" | grep -qi 'another round' && { echo "choices on a new lease: $output"; return 1; }
+  true
+}
+
+@test "a STANDS with findings it did not count says so in one line, naming the review file" {
+  install_refuter
+  bin="$BATS_TEST_TMPDIR/bins"; mkdir -p "$bin"
+  cat > "$bin/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '### F1 — core/x.py:1 — hypothetical — in scope — HIGH\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
+STUB
+  chmod +x "$bin/claude"
+  git_target
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
+  printf '%s\n' "$output" | grep -q "1 finding not counted.*$id-review.md" || { echo "$output"; return 1; }
 }
 
 # --- gates_setup: commands that prepare the tree under test before the gates (2026-10-14) ---------
