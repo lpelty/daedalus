@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""daedalus update | daedalus version — taking a release in one step (update-command design, 2026-10-15).
+"""daedalus update | daedalus version — taking a release in one step (update-command design, 2026-10-15);
+daedalus start | daedalus homes — which home a command means (daedalus-start design, 2026-10-19).
 
-    daedalus update     close every Daedalus window first, then type this in a terminal
-    daedalus version    the release this home runs, its remote and its tag
+    daedalus start [home] [--window NN] [-- <claude args>]
+                        the banner, the services, then Claude Code in the home (core/start.py)
+    daedalus update [home]
+                        close every Daedalus window first, then type this in a terminal
+    daedalus version [home]
+                        the release a home runs, its remote and its tag
+    daedalus homes [rename <old> <new> | default <name>]
+                        the homes in ~/.config/daedalus/homes.json, and editing their names and the default
 
-The `daedalus` command on PATH is a shim that runs this file with `--home <this home>`. Every path comes from
+The `daedalus` command on PATH is one shim for every home: it runs some home's copy of this file with the command's
+words and no --home. That copy resolves the home (resolve_home: the name given, else the home the current directory
+is in, else the default; an unknown name, a gone home, or several homes and no default is one sentence, exit 2) and
+runs that home's own core/update.py <verb> --home <home>, or its core/start.py, in its place. Every path comes from
 --home: this script reads nothing from its own directory (a later release runs it from a temporary copy, and the
 first update runs it from a temporary file the README's one line saves it to), never reads stdin, and closes stdin for every program it runs. Standard library
 only; the home's own core/upgrade.py is imported for one thing, its liveness check.
@@ -46,12 +56,13 @@ Exit 0: updated or up to date; 1: refused (nothing changed) or restored; 2: upda
 something.
 
 Two more forms are not verbs of the command; setup, the upgrade and doctor run them:
-    python3 core/update.py --install-shim --home <home>   writes ~/.local/bin/daedalus for this home (never over a
-        file it did not write, nor over one serving another home that is still there) and says how to reach it
-        from the login shell; one line per thing to say, exit 0 always
+    python3 core/update.py --install-shim --home <home>   registers the home and writes ~/.local/bin/daedalus, the
+        one shim for every home (never over a file it did not write, nor over a newer release's shim; an old
+        single-home shim is rewritten, the home it served registered too) and says how to reach it from the
+        login shell; one line per thing to say, exit 0 always
     python3 core/update.py --doctor --home <home>         doctor's lines: local edits in tracked files, a stale
-        auto-mode line, the command
-DAEDALUS_NO_COMMAND set (the test suite sets it, core/tests/setup_suite.bash) writes and checks no shim.
+        auto-mode line, the command, the registry
+DAEDALUS_NO_COMMAND set (the test suite sets it, core/tests/setup_suite.bash) writes and checks no shim or registry.
 
 Tests replace the upgrade and doctor with DAEDALUS_UPDATE_UPGRADE / DAEDALUS_UPDATE_DOCTOR (a command, split as a
 shell would, given the same arguments).
@@ -81,7 +92,8 @@ UPDATE_LOCK = Path("state") / ".update.lock"
 STAMP = Path("state") / "upgraded-to"
 LOCK_WAIT_SECS = 2      # a session start holds the lock shared for a moment; a second update holds it throughout
 NOTHING = "Nothing in this home was changed."
-USAGE = "usage: daedalus update | daedalus version   (python3 core/update.py <verb> --home <absolute path>)"
+USAGE = ("usage: daedalus start [home] [--window NN] [-- <claude args>] | daedalus update [home] | daedalus version "
+         "[home] | daedalus homes [rename <old> <new> | default <name>]")
 SELF = Path("core") / "update.py"
 JOURNAL = "SOUL.md"     # the deployment's journal: modified in the working tree, kept across the move
 GITIGNORE = ".gitignore"
@@ -1574,12 +1586,277 @@ def finish(home: Path, first: str, move: str = "", notes: Optional[List[str]] = 
     return lines, code
 
 
-# --- the command on PATH: the shim (Decision 1, §4.1) and doctor's lines (§4.5) --------------------------------------
+# --- which home a command means: the registry and the resolver (daedalus-start design §2) ----------------------------
+# ~/.config/daedalus/homes.json ($XDG_CONFIG_HOME/daedalus when that is set) names every home on this machine:
+#     {"default": "work", "homes": {"work": "/home/me/daedalus", "lares": "/home/me/daedalus-lares"}}
+# Setup and the upgrade register their home (install_shim); `daedalus homes` lists and edits it. A command means, in
+# order: the home named on it; else the home the current directory is in; else the default (exactly one live home
+# is the default). An unknown name, a gone home, or several homes with no default is one sentence, exit 2 — never a
+# fallback to some other home.
 
-SHIM_MARKER = "# daedalus shim — installed by core/setup.sh for the home below; safe to delete"
-NO_COMMAND = "DAEDALUS_NO_COMMAND"      # set (the test suite sets it): no shim is written and none is checked
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+REGISTRY_LOCK_SECS = 2.0
+
+
+class Unresolved(Exception):
+    """One sentence: which home was meant cannot be told (exit 2)."""
+
+
+def registry_path() -> Path:
+    x = os.environ.get("XDG_CONFIG_HOME") or ""
+    base = Path(x) if os.path.isabs(x) else Path(os.path.expanduser("~")) / ".config"
+    return base / "daedalus" / "homes.json"
+
+
+def read_registry(strict: bool = False) -> Dict[str, Any]:
+    """{"default": name or None, "homes": {name: path}}. Absent is empty; a file that is not the registry's JSON is
+    empty too, or Unresolved when strict (a write never replaces a file it cannot read)."""
+    path = registry_path()
+    try:
+        d = json.loads(path.read_text())
+        homes = d.get("homes") if isinstance(d, dict) else None
+        if not isinstance(homes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in homes.items()):
+            raise ValueError("no homes object")
+        default = d.get("default")
+        return {"default": default if isinstance(default, str) else None, "homes": dict(homes)}
+    except FileNotFoundError:
+        return {"default": None, "homes": {}}
+    except (OSError, ValueError, UnicodeDecodeError):
+        if strict:
+            raise Unresolved("%s is not a homes file this command can read; fix it or move it aside"
+                             % _tilde(path))
+        return {"default": None, "homes": {}}
+
+
+def write_registry(reg: Dict[str, Any]) -> None:
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = {"default": reg.get("default"), "homes": dict(sorted(reg["homes"].items()))}
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".homes.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(out, indent=2) + "\n")
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class _RegistryLock:
+    """An exclusive lock beside homes.json for a read-change-write (two homes upgrading at once)."""
+
+    def __enter__(self) -> "_RegistryLock":
+        path = registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+        end = time.time() + REGISTRY_LOCK_SECS
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.time() > end:
+                    os.close(self.fd)
+                    raise Unresolved("another daedalus command is changing %s; try again" % _tilde(path))
+                time.sleep(0.05)
+
+    def __exit__(self, *exc: Any) -> None:
+        os.close(self.fd)
+
+
+def is_home(d: Path) -> bool:
+    """A Daedalus home: core/update.py, config.yaml and VERSION (a worktree of the release has no config.yaml)."""
+    return (d / SELF).is_file() and (d / "config.yaml").is_file() and (d / "VERSION").is_file()
+
+
+def home_from(cwd: Path) -> Optional[Path]:
+    """The first directory at or above cwd that is a home."""
+    d = cwd
+    while True:
+        if is_home(d):
+            return d
+        if d.parent == d:
+            return None
+        d = d.parent
+
+
+def derived_name(home: Path) -> str:
+    """The folder name minus a leading daedalus- (daedalus-lares is lares); a bare daedalus folder is main."""
+    base = home.name.lower()
+    if base.startswith("daedalus-"):
+        base = base[len("daedalus-"):]
+    elif base == "daedalus":
+        base = ""
+    base = re.sub(r"[^a-z0-9._-]+", "-", base).strip("-._")[:40]
+    return base or "main"
+
+
+def _live(path: str) -> bool:
+    return is_home(Path(path))
+
+
+def _registered_as(reg: Dict[str, Any], home: Path) -> Optional[str]:
+    for name, p in reg["homes"].items():
+        if _same(p, str(home)):
+            return name
+    return None
+
+
+def home_name(home: Path) -> str:
+    return _registered_as(read_registry(), home) or derived_name(home)
+
+
+def _home_names(reg: Dict[str, Any]) -> str:
+    return ", ".join(sorted(n for n, p in reg["homes"].items() if _live(p))) or "none"
+
+
+def resolve_home(name: Optional[str], cwd: Path, verb: str = "start") -> Tuple[Path, str]:
+    """(home, its name) for a command, or Unresolved."""
+    reg = read_registry()
+    if name is not None:
+        if name not in reg["homes"]:
+            raise Unresolved('no home named "%s"; the homes are %s (daedalus homes lists them)'
+                             % (name, _home_names(reg)))
+        p = reg["homes"][name]
+        if not _live(p):
+            raise Unresolved('home "%s" is registered at %s, which is gone; the homes are %s'
+                             % (name, _tilde(p), _home_names(reg)))
+        return Path(p).resolve(), name
+    here = home_from(cwd)
+    if here is not None:
+        return here.resolve(), _registered_as(reg, here) or derived_name(here)
+    live = {n: p for n, p in reg["homes"].items() if _live(p)}
+    default = reg["default"]
+    if default is not None and default in reg["homes"]:
+        if default not in live:
+            raise Unresolved('the default home "%s" (%s) is gone; name one of %s, or set another with daedalus '
+                             'homes default <name>' % (default, _tilde(reg["homes"][default]), _home_names(reg)))
+        return Path(live[default]).resolve(), default
+    if len(live) == 1:
+        (n, p), = live.items()
+        return Path(p).resolve(), n
+    if not live:
+        raise Unresolved("you are not in a Daedalus home and none is registered; cd into one (its core/setup.sh "
+                         "registers it)")
+    raise Unresolved("you are not in a Daedalus home and no default is set; name one: daedalus %s %s (or set one "
+                     "with daedalus homes default <name>)" % (verb, " | ".join(sorted(live))))
+
+
+def register_home(home: Path, dry: bool = False, also: Optional[Path] = None) -> List[str]:
+    """Put this home (and `also`, the home an old shim served) in the registry under its derived name, -2, -3 … when
+    a live home holds that name; a name held by a gone path is taken over. One line per home newly registered."""
+    said: List[str] = []
+    with _RegistryLock():
+        reg = read_registry(strict=True)
+        changed = False
+        for h in [home] + ([also] if also is not None else []):
+            if _registered_as(reg, h):
+                continue
+            base, n, i = derived_name(h), derived_name(h), 1
+            while n in reg["homes"] and _live(reg["homes"][n]) and not _same(reg["homes"][n], str(h)):
+                i += 1
+                n = "%s-%d" % (base, i)
+            reg["homes"][n] = str(h)
+            changed = True
+            said.append(("would register %s as %s in %s." if dry else "Registered %s as %s in %s.")
+                        % (_tilde(h), n, _tilde(registry_path())))
+        if changed and not dry:
+            write_registry(reg)
+    return said
+
+
+def homes_verb(args: List[str]) -> int:
+    """daedalus homes | daedalus homes rename <old> <new> | daedalus homes default <name>"""
+    try:
+        if not args:
+            reg = read_registry(strict=True)
+            if not reg["homes"]:
+                print("No Daedalus home is registered in %s; a home's core/setup.sh registers it."
+                      % _tilde(registry_path()))
+                return 0
+            live = [n for n, p in reg["homes"].items() if _live(p)]
+            dflt = reg["default"] if reg["default"] in reg["homes"] else (live[0] if len(live) == 1 else None)
+            width = max(len(n) for n in reg["homes"])
+            for n in sorted(reg["homes"]):
+                p = reg["homes"][n]
+                tag = "  (gone)" if not _live(p) else ("  (default)" if n == dflt else "")
+                print("%-*s  %s%s" % (width, n, _tilde(p), tag))
+            return 0
+        if args[0] == "rename" and len(args) == 3:
+            old, new = args[1], args[2]
+            with _RegistryLock():
+                reg = read_registry(strict=True)
+                if old not in reg["homes"]:
+                    raise Unresolved('no home named "%s"; the homes are %s' % (old, _home_names(reg)))
+                if not NAME_RE.match(new):
+                    raise Unresolved('"%s" is not a home name: lower-case letters, digits, . _ and -, up to 40' % new)
+                if new in reg["homes"] and new != old:
+                    raise Unresolved('"%s" is already the name of %s' % (new, _tilde(reg["homes"][new])))
+                reg["homes"][new] = reg["homes"].pop(old)
+                if reg["default"] == old:
+                    reg["default"] = new
+                write_registry(reg)
+            print("Renamed %s to %s." % (old, new))
+            return 0
+        if args[0] == "default" and len(args) == 2:
+            name = args[1]
+            with _RegistryLock():
+                reg = read_registry(strict=True)
+                if name not in reg["homes"] or not _live(reg["homes"][name]):
+                    raise Unresolved('no live home named "%s"; the homes are %s' % (name, _home_names(reg)))
+                reg["default"] = name
+                write_registry(reg)
+            print("%s is now the default home (%s)." % (name, _tilde(reg["homes"][name])))
+            return 0
+    except Unresolved as e:
+        sys.stderr.write("daedalus: %s.\n" % e)
+        return 2
+    sys.stderr.write(USAGE + "\n")
+    return 2
+
+
+# --- the command on PATH: the shim (Decision 1, §4.1; daedalus-start design §4) and doctor's lines (§4.5) ------------
+# One shim serves every home: it finds a home's core/update.py (the default's, any registered home's, else the
+# current directory's) and runs it with the command's words; that update.py resolves the home and runs the home's
+# own script. The shim carries a revision: a home never rewrites one a newer release wrote.
+
+OLD_SHIM_MARKER = "# daedalus shim — installed by core/setup.sh for the home below; safe to delete"
+SHIM_MARKER = "# daedalus shim — installed by core/setup.sh; one command for every Daedalus home here; safe to delete"
+SHIM_REVISION = 1
+NO_COMMAND = "DAEDALUS_NO_COMMAND"      # set (the test suite sets it): no shim or registry is written or checked
 LOGIN_TIMEOUT = 5.0
 _END = "__daedalus_login_end__"
+
+_SHIM_FINDER = r'''
+import json, os
+x = os.environ.get("XDG_CONFIG_HOME", "")
+reg = os.path.join(x if os.path.isabs(x) else os.path.expanduser("~/.config"), "daedalus", "homes.json")
+def home(d):
+    return isinstance(d, str) and all(os.path.isfile(os.path.join(d, f)) for f in ("core/update.py", "config.yaml", "VERSION"))
+def resolves(d):
+    try:
+        return "def dispatch(" in open(os.path.join(d, "core", "update.py")).read()
+    except Exception:
+        return False
+try:
+    r = json.load(open(reg))
+    homes = r.get("homes") or {}
+    picks = [homes.get(r.get("default") or "")] + sorted(homes.values())
+except Exception:
+    picks = []
+up, d = [], os.getcwd()
+while True:
+    up.append(d)
+    if d == os.path.dirname(d):
+        break
+    d = os.path.dirname(d)
+new = [p for p in picks + up if home(p) and resolves(p)]
+old = [p for p in up if home(p)]
+print(new[0] if new else ("old:" + old[0] if old else ""))
+'''
 
 
 def shim_path() -> Path:
@@ -1592,17 +1869,23 @@ def _tilde(p: Any) -> str:
     return "~" + s[len(user):] if user not in ("", "/") and (s == user or s.startswith(user + os.sep)) else s
 
 
-def shim_text(home: Path) -> str:
-    return '#!/usr/bin/env bash\n%s\nexec python3 "%s/core/update.py" "$@" --home "%s"\n' % (SHIM_MARKER, home, home)
+def shim_text() -> str:
+    return ('#!/usr/bin/env bash\n%s\n# revision %d. A home\'s core/update.py picks the home: the one named, else the '
+            'current directory\'s, else the default.\nh="$(python3 -c \'%s\' 2>/dev/null)"\nif [ -z "$h" ]; then\n'
+            '  echo "daedalus: no Daedalus home here or registered; cd into one, or run its core/setup.sh" >&2\n'
+            '  exit 2\nfi\ncase "$h" in old:*)   # a home of a release before one command served every home\n'
+            '  h="${h#old:}"; exec python3 "$h/core/update.py" "$@" --home "$h" ;;\nesac\n'
+            'exec python3 "$h/core/update.py" "$@"\n' % (SHIM_MARKER, SHIM_REVISION, _SHIM_FINDER))
 
 
 def _full_path(home: Path) -> str:
     return "python3 %s/core/update.py update --home %s" % (home, home)
 
 
-def shim_owner(path: Path) -> Tuple[str, Optional[str]]:
-    """What ~/.local/bin/daedalus is: ("absent", None), ("foreign", None) — not a file this install wrote — or
-    ("shim", the home its exec line names)."""
+def shim_owner(path: Path) -> Tuple[str, Any]:
+    """What ~/.local/bin/daedalus is: ("absent", None); ("foreign", None) — not a file this install wrote;
+    ("old", the one home its exec line names) — a shim of a release before one command served every home; or
+    ("shim", its revision)."""
     if not os.path.lexists(str(path)):
         return "absent", None
     if path.is_symlink() or not path.is_file():
@@ -1611,10 +1894,13 @@ def shim_owner(path: Path) -> Tuple[str, Optional[str]]:
         lines = path.read_text().splitlines()
     except (OSError, UnicodeDecodeError):
         return "foreign", None
-    if len(lines) < 3 or lines[1] != SHIM_MARKER:
-        return "foreign", None
-    m = re.match(r'^exec python3 "(.+)/core/update\.py" "\$@" --home "(.+)"$', lines[2])
-    return ("shim", m.group(2)) if m else ("foreign", None)
+    if len(lines) >= 3 and lines[1] == OLD_SHIM_MARKER:
+        m = re.match(r'^exec python3 "(.+)/core/update\.py" "\$@" --home "(.+)"$', lines[2])
+        return ("old", m.group(2)) if m else ("foreign", None)
+    if len(lines) >= 3 and lines[1] == SHIM_MARKER:
+        m = re.match(r"^# revision (\d+)\.", lines[2])
+        return ("shim", int(m.group(1))) if m else ("foreign", None)
+    return "foreign", None
 
 
 def _same(a: str, b: str) -> bool:
@@ -1657,35 +1943,45 @@ def path_sentence(path: Path, timeout: float) -> Optional[str]:
 
 
 def install_shim(home: Path, dry: bool = False, timeout: float = LOGIN_TIMEOUT) -> List[str]:
-    """Install ~/.local/bin/daedalus for this home and say how to reach it, never over a file this install did not
-    write or one serving another home that is still there. [] when it is in place and the login shell finds it.
-    Never raises: every refusal is a line (setup and the upgrade go on)."""
+    """Register this home and install ~/.local/bin/daedalus, the one command for every home, and say how to reach
+    it — never over a file this install did not write, nor over a shim a newer release wrote. An old single-home
+    shim is rewritten, the home it served registered first, so it stays on the command. [] when all is in place and
+    the login shell finds it. Never raises: every refusal is a line (setup and the upgrade go on)."""
     if os.environ.get(NO_COMMAND):
         return []
     path = shim_path()
-    want = shim_text(home)
+    want = shim_text()
     kind, other = shim_owner(path)
-    lines: List[str] = []
+    served = Path(other) if kind == "old" and other != str(home) and is_home(Path(other)) else None
+    try:
+        lines = register_home(home, dry=dry, also=served)
+    except (Unresolved, OSError) as e:
+        lines = ["this home was not registered for the daedalus command (%s)" % (e if isinstance(e, Unresolved)
+                                                                                 else e.strerror or e)]
     if kind == "foreign":
-        return ["%s is not a shim daedalus wrote, so it was left as it is; type %s instead."
-                % (_tilde(path), _full_path(home))]
-    if kind == "shim" and other != str(home) and (Path(other) / SELF).is_file():
-        return ["%s serves %s; this home is not on the command, so type %s here." % (_tilde(path), other,
-                                                                                      _full_path(home))]
+        return lines + ["%s is not a shim daedalus wrote, so it was left as it is; type %s instead."
+                        % (_tilde(path), _full_path(home))]
+    if kind == "shim" and other > SHIM_REVISION:
+        return lines        # a newer release's shim: it serves this home too
     current = _read(path) if kind == "shim" else None
     if current != want:
         if kind == "absent":
             said = ("Installed the daedalus command at %s; type daedalus update in a terminal (or %s update)."
                     % (_tilde(path), _tilde(path)))
             would = "would install the daedalus command at %s." % _tilde(path)
-        elif other != str(home):
-            said = "%s served %s, which has no core/update.py any more; it now serves this home." % (_tilde(path), other)
-            would = "would rewrite %s, which serves %s (gone), for this home." % (_tilde(path), other)
+        elif kind == "old" and other != str(home):
+            how = "which is still there and stays on it" if served else "which is not a Daedalus home any more"
+            said = ("%s served only %s, %s; it now serves every home (daedalus homes lists them)."
+                    % (_tilde(path), _tilde(other), how))
+            would = "would rewrite %s, which serves only %s, to serve every home." % (_tilde(path), _tilde(other))
+        elif kind == "old":
+            said = "Rewrote %s: it now serves every home (daedalus homes lists them)." % _tilde(path)
+            would = "would rewrite %s, which serves only this home, to serve every home." % _tilde(path)
         else:
-            said = "Rewrote %s for this home (its text was an older shim's)." % _tilde(path)
-            would = "would rewrite %s for this home (its text is an older shim's)." % _tilde(path)
+            said = "Rewrote %s (its text was an older shim's)." % _tilde(path)
+            would = "would rewrite %s (its text is an older shim's)." % _tilde(path)
         if dry:
-            return [would]
+            return lines + [would]
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".daedalus.")
@@ -1701,12 +1997,12 @@ def install_shim(home: Path, dry: bool = False, timeout: float = LOGIN_TIMEOUT) 
                     pass
                 raise
         except OSError as e:      # a ~/.local left root-owned by an installer run with sudo, say
-            return ["%s could not be %s (%s); the daedalus command was not installed, so type %s instead."
-                    % (_tilde(path.parent), "written" if path.parent.is_dir() else "made", e.strerror or e,
-                       _full_path(home))]
+            return lines + ["%s could not be %s (%s); the daedalus command was not installed, so type %s instead."
+                            % (_tilde(path.parent), "written" if path.parent.is_dir() else "made",
+                               e.strerror or e, _full_path(home))]
         lines.append(said)
     elif dry:
-        return []
+        return lines
     advice = path_sentence(path, timeout)
     if advice:
         lines.append(advice)
@@ -1714,8 +2010,8 @@ def install_shim(home: Path, dry: bool = False, timeout: float = LOGIN_TIMEOUT) 
 
 
 def command_line(home: Path) -> Optional[str]:
-    """Doctor's command line: OK when the login shell finds this home's shim; else a NOTE with the install rule's
-    sentence. None while DAEDALUS_NO_COMMAND is set."""
+    """Doctor's command line: OK when the login shell finds the shim; else a NOTE with the install rule's sentence.
+    None while DAEDALUS_NO_COMMAND is set."""
     if os.environ.get(NO_COMMAND):
         return None
     path = shim_path()
@@ -1725,16 +2021,36 @@ def command_line(home: Path) -> Optional[str]:
                 % (_tilde(path), _full_path(home)))
     if kind == "foreign":
         return ("NOTE     command: %s is not a shim daedalus wrote; type %s instead" % (_tilde(path), _full_path(home)))
-    if other != str(home):
-        if not (Path(other) / SELF).is_file():
-            return ("NOTE     command: %s names %s, which has no core/update.py; core/setup.sh rewrites it for this "
-                    "home" % (_tilde(path), other))
-        return ("NOTE     command: %s serves %s; this home is not on the command (type %s)"
-                % (_tilde(path), other, _full_path(home)))
+    if kind == "old":
+        return ("NOTE     command: %s serves only %s; core/setup.sh or daedalus update rewrites it to serve every home"
+                % (_tilde(path), _tilde(other)))
     advice = path_sentence(path, LOGIN_TIMEOUT)
     if advice:
         return "NOTE     command: " + advice.rstrip(".")
     return "OK       command: daedalus on PATH (%s)" % _tilde(path)
+
+
+def registry_line(home: Path) -> Optional[str]:
+    """Doctor's registry line: how many homes the command serves and which is the default. None while
+    DAEDALUS_NO_COMMAND is set."""
+    if os.environ.get(NO_COMMAND):
+        return None
+    try:
+        reg = read_registry(strict=True)
+    except Unresolved as e:
+        return "NOTE     daedalus command: %s" % e
+    if not _registered_as(reg, home):
+        return ("NOTE     daedalus command: this home is not in %s, so a name cannot reach it; core/setup.sh "
+                "registers it" % _tilde(registry_path()))
+    live = sorted(n for n, p in reg["homes"].items() if _live(p))
+    gone = len(reg["homes"]) - len(live)
+    tail = ", %d gone (daedalus homes)" % gone if gone else ""
+    count = "%d home%s" % (len(live), "" if len(live) == 1 else "s")
+    dflt = reg["default"] if reg["default"] in live else (live[0] if len(live) == 1 else None)
+    if dflt is None:
+        return ("NOTE     daedalus command: %s, no default%s — outside a home, name one, or set it with daedalus "
+                "homes default <name>" % (count, tail))
+    return "OK       daedalus command: %s, default %s%s" % (count, dflt, tail)
 
 
 def _offline_trunk(home: Path) -> Optional[str]:
@@ -1793,9 +2109,9 @@ def doctor_lines(home: Path) -> List[str]:
     if auto_mode_note(home):
         lines.append("NOTE     brief: ~/.claude/settings.json's autoMode.allow names CLAUDE.md in this home; reword it "
                      "to CLAUDE.local.md (README, \"Letting Daedalus edit its own brief\")")
-    cmd = command_line(home)
-    if cmd:
-        lines.append(cmd)
+    for ln in (command_line(home), registry_line(home)):
+        if ln:
+            lines.append(ln)
     return lines
 
 
@@ -1989,6 +2305,68 @@ def version(home: Path) -> int:
     return 0
 
 
+def _split_start(rest: List[str]) -> Tuple[Optional[str], List[str]]:
+    """`start`'s words: (the home's name or None, the words start.py takes — --window NN and -- <claude args>).
+    More than one name is Unresolved."""
+    name: Optional[str] = None
+    passed: List[str] = []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--":
+            passed += rest[i:]
+            break
+        if a == "--window" and i + 1 < len(rest):
+            passed += rest[i:i + 2]
+            i += 2
+            continue
+        if a.startswith("-"):
+            passed.append(a)        # start.py says what it does not take
+        elif name is None:
+            name = a
+        else:
+            raise Unresolved("start takes one home name, not %s and %s" % (name, a))
+        i += 1
+    return name, passed
+
+
+def dispatch(args: List[str]) -> int:
+    """The command's words without --home (the shim's form): resolve the home (design §2), then run that home's own
+    script in this process's place — core/update.py <verb> --home <home>, or core/start.py, whose last step execs
+    claude — so the program a verb runs is always the home's own."""
+    verb = args[0] if args else None
+    if verb == "homes":
+        return homes_verb(args[1:])
+    if verb not in ("start", "update", "version"):
+        sys.stderr.write(USAGE + "\n")
+        return 2
+    rest = args[1:]
+    try:
+        if verb == "start":
+            name, passed = _split_start(rest)
+        elif len(rest) <= 1 and not any(a.startswith("-") for a in rest):
+            name, passed = (rest[0] if rest else None), []
+        else:
+            sys.stderr.write(USAGE + "\n")
+            return 2
+        home, hname = resolve_home(name, Path(os.getcwd()), verb)
+    except Unresolved as e:
+        sys.stderr.write("daedalus: %s.\n" % e)
+        return 2
+    if verb == "start":
+        script = home / "core" / "start.py"
+        if not script.is_file():
+            sys.stderr.write("daedalus: %s (%s) runs Daedalus %s, which has no daedalus start; type daedalus update "
+                             "%s first.\n" % (hname, _tilde(home), home_version(home) or "(no VERSION)", hname))
+            return 2
+        argv = [sys.executable, str(script), "--home", str(home), "--name", hname] + passed
+    else:
+        argv = [sys.executable, str(home / SELF), verb, "--home", str(home)]
+    sys.stdout.flush()
+    os.execv(sys.executable, argv)
+    return 0        # not reached
+
+
 def main(argv: List[str]) -> int:
     args = argv[1:]
     handed_off = "--handed-off" in args
@@ -2021,6 +2399,8 @@ def main(argv: List[str]) -> int:
         for ln in out:
             print(ln)
         return 0
+    if home_arg is None and not handed_off and lock_fd is None:
+        return dispatch(args)
     if home_arg is None or len(args) != 1 or args[0] not in ("update", "version") or not os.path.isabs(home_arg):
         sys.stderr.write(USAGE + "\n")
         return 2

@@ -479,21 +479,21 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
   [ "$status" -eq 0 ]; [ "$output" = "Already upgraded to $CUR; nothing to do." ] || { echo "$output"; return 1; }
 }
 
-# v0.11.0 adds one step (step 9, the service-status mod beside a local-scope lease board) and no migration: a home
-# stamped 0.10.0 with no such board takes it with the completion line alone, so `daedalus update` (which runs this
-# upgrade) handles it.
-@test "0.10.0 to 0.11.0 is a no-op beyond the stamp: a home stamped 0.10.0 without the lease board at local scope says only the completion line and nothing else changes" {
+# v0.12.0 adds no step and no migration: step 7's install now also registers the home and rewrites an old
+# single-home shim, which the suite's DAEDALUS_NO_COMMAND keeps silent, so a home stamped 0.11.0 takes it with the
+# completion line alone, and `daedalus update` (which runs this upgrade) handles it.
+@test "0.11.0 to 0.12.0 is a no-op beyond the stamp: a home stamped 0.11.0 says only the completion line and nothing else changes" {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
-  [ "$(sed -n 1p "$REPO/VERSION")" = 0.11.0 ]
-  printf '0.10.0\n' > "$DAEDALUS_HOME/VERSION"
-  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.10.0 ]
+  [ "$(sed -n 1p "$REPO/VERSION")" = 0.12.0 ]
   printf '0.11.0\n' > "$DAEDALUS_HOME/VERSION"
+  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.11.0 ]
+  printf '0.12.0\n' > "$DAEDALUS_HOME/VERSION"
   before="$(snapshot | grep -v 'state/upgraded-to')"
   run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$output" = "Upgrade to 0.11.0: complete. What changed is in CHANGELOG.md under v0.11.0; what the target's agent may ask of you is in docs/handoff-reverse-caller.md." ] || { echo "$output"; return 1; }
-  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.11.0 ]
-  [ "$(snapshot | grep -v 'state/upgraded-to')" = "$before" ] || { echo "the 0.11.0 upgrade changed something"; return 1; }
+  [ "$output" = "Upgrade to 0.12.0: complete. What changed is in CHANGELOG.md under v0.12.0; what the target's agent may ask of you is in docs/handoff-reverse-caller.md." ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.12.0 ]
+  [ "$(snapshot | grep -v 'state/upgraded-to')" = "$before" ] || { echo "the 0.12.0 upgrade changed something"; return 1; }
 }
 
 # --- step 7: the daedalus command (update-command design §4.7, Decision 18) -----------------------------------------
@@ -501,19 +501,19 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
   v061_state
   S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S"
   printf '#!/bin/sh\nPATH="%s/.local/bin:/usr/bin:/bin" exec /bin/sh -c "$3"\n' "$S" > "$BATS_TEST_TMPDIR/zsh"; chmod +x "$BATS_TEST_TMPDIR/zsh"
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP" --setup
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP" --setup
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ ! -e "$S/.local/bin/daedalus" ] || { echo "--setup wrote the shim"; return 1; }
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP" --dry-run
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP" --dry-run
   case "$output" in *"Upgrade to 0.7.0: would install the daedalus command at ~/.local/bin/daedalus"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -e "$S/.local/bin/daedalus" ]
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP"
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(printf '%s\n' "$output" | grep -n 'Upgrade to 0.7.0: Installed the daedalus command at ~/.local/bin/daedalus' | cut -d: -f1)" = \
     "$(( $(printf '%s\n' "$output" | grep -n 'Upgrade to 0.7.0: complete' | cut -d: -f1) - 1 ))" ] || { echo "$output"; return 1; }
-  grep -q -- "--home \"$DAEDALUS_HOME\"" "$S/.local/bin/daedalus"
+  grep -q '^exec python3 "$h/core/update.py" "$@"$' "$S/.local/bin/daedalus"     # one shim for every home
   rm "$DAEDALUS_HOME/state/upgraded-to"
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP"
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL="$BATS_TEST_TMPDIR/zsh" python3 "$UP"
   [ "$status" -eq 0 ]; case "$output" in *daedalus\ command*) echo "$output"; return 1 ;; esac
   run python3 - "$DAEDALUS_HOME/core" <<'PY'
 import inspect, re, sys
@@ -551,7 +551,7 @@ PY
 
 @test "step 7 never stops the upgrade: a file in ~/.local/bin it did not write is a line, it is left, and the stamp is written" {
   S="$BATS_TEST_TMPDIR/scratch-home"; mkdir -p "$S/.local/bin"; printf '#!/bin/sh\necho mine\n' > "$S/.local/bin/daedalus"
-  run env -u DAEDALUS_NO_COMMAND HOME="$S" SHELL=/nonexistent python3 "$UP"
+  run env -u DAEDALUS_NO_COMMAND -u XDG_CONFIG_HOME HOME="$S" SHELL=/nonexistent python3 "$UP"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Upgrade to 0.7.0: ~/.local/bin/daedalus is not a shim daedalus wrote, so it was left as it is"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(cat "$S/.local/bin/daedalus")" = "$(printf '#!/bin/sh\necho mine')" ]

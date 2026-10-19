@@ -112,10 +112,12 @@ else
     || log "service status: the install did not finish — run the install command in mods/service-status/README.md yourself"
 fi
 
-# The daedalus command (update-command design Decision 1, §4.1): ~/.local/bin/daedalus, a shim running this
-# home's core/update.py, so `daedalus update` takes a release in one line from any terminal. update.py's own
-# install decides: never over a file it did not write, nor over one serving another home still there; each thing
-# to say (written, left, how to reach it from the login shell) is one line. It never fails setup.
+# The daedalus command (update-command design Decision 1, §4.1; daedalus-start design §4): ~/.local/bin/daedalus,
+# one shim for every home on this machine, so `daedalus start` and `daedalus update` work from any terminal.
+# update.py's own install registers this home in ~/.config/daedalus/homes.json and decides: never over a file it
+# did not write, nor over a newer release's shim; an old single-home shim is rewritten with its home registered.
+# Each thing to say (registered, written, left, how to reach it from the login shell) is one line. It never fails
+# setup.
 log "command: daedalus on PATH"
 if [ -f "$DAEDALUS_HOME/core/update.py" ]; then
   python3 "$DAEDALUS_HOME/core/update.py" --install-shim --home "$DAEDALUS_HOME" </dev/null 2>&1 \

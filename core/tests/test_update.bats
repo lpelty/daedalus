@@ -16,7 +16,7 @@ setup() {
   export HOME="$B/home" GIT_CONFIG_GLOBAL="$B/gitconfig" GIT_CONFIG_NOSYSTEM=1 CLAUDE_CONFIG_DIR="$B"
   mkdir -p "$HOME" "$B/sessions" "$B/log"; : > "$GIT_CONFIG_GLOBAL"
   git config --global user.email t@x; git config --global user.name t; git config --global advice.detachedHead false
-  unset DAEDALUS_HOME DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID DAEDALUS_LEASE DIRECT_CALL_ID
+  unset DAEDALUS_HOME DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID DAEDALUS_LEASE DIRECT_CALL_ID XDG_CONFIG_HOME
   N="$(sed -n 1p "$REPO/VERSION")"
   N1="$(python3 -c 'import sys; a = sys.argv[1].split("."); a[2] = str(int(a[2]) + 1); print(".".join(a))' "$N")"
   R="$B/release.git"
@@ -263,10 +263,11 @@ The upgrade that had stopped has finished." ] || { echo "$output"; return 1; }
 
 @test "update: no verb, an unknown verb, or no --home is the usage line, exit 2" {
   run python3 "$H/core/update.py" --home "$H" </dev/null
-  [ "$status" -eq 2 ]; case "$output" in *"usage: daedalus update | daedalus version"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -eq 2 ]; case "$output" in *"usage: daedalus start [home]"*"daedalus update [home]"*) : ;; *) echo "$output"; return 1 ;; esac
   run python3 "$H/core/update.py" rollback --home "$H" </dev/null
   [ "$status" -eq 2 ]
-  run python3 "$H/core/update.py" update </dev/null
+  # no --home resolves the home (daedalus-start design §2): from scratch, with nothing registered, there is none
+  cd "$B"; run python3 "$H/core/update.py" update </dev/null
   [ "$status" -eq 2 ]
 }
 
@@ -629,14 +630,14 @@ login_shells() {
 shim() { python3 "${2:-$H}/core/update.py" --install-shim --home "${2:-$H}" </dev/null; }
 sha() { shasum < "$1" | cut -c1-40; }
 
-@test "shim: absent, it is written mode 755 with the marker naming this home and runs daedalus version; a second install says nothing and leaves it; one for this home with another body is rewritten" {
+@test "shim: absent, it is written mode 755, the home registered, and runs daedalus version; a second install says nothing and leaves it; one with another body is rewritten" {
   login_shells
+  cd "$B"         # the shim resolves from the current directory: never a live home's
   run shim
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
-  [ "$output" = "Installed the daedalus command at ~/.local/bin/daedalus; type daedalus update in a terminal (or ~/.local/bin/daedalus update)." ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = "Registered $H as dae in ~/.config/daedalus/homes.json." ] || { echo "$output"; return 1; }
+  [ "${lines[1]}" = "Installed the daedalus command at ~/.local/bin/daedalus; type daedalus update in a terminal (or ~/.local/bin/daedalus update)." ] || { echo "$output"; return 1; }
   [ "$(stat -f %Lp "$SHIM")" = 755 ]
-  [ "$(sed -n 2p "$SHIM")" = "# daedalus shim — installed by core/setup.sh for the home below; safe to delete" ]
-  [ "$(sed -n 3p "$SHIM")" = "exec python3 \"$H/core/update.py\" \"\$@\" --home \"$H\"" ] || { cat "$SHIM"; return 1; }
   run "$SHIM" version
   case "$output" in "Daedalus $N (home $H, remote origin"*) : ;; *) echo "$output"; return 1 ;; esac
   before="$(sha "$SHIM")"; touch -t 202001010000 "$SHIM"
@@ -645,27 +646,20 @@ sha() { shasum < "$1" | cut -c1-40; }
   [ "$(sha "$SHIM")" = "$before" ]; [ "$(stat -f %Sm -t %Y "$SHIM")" = 2020 ]
   printf '# an older body\n' >> "$SHIM"
   run shim
-  [ "$output" = "Rewrote ~/.local/bin/daedalus for this home (its text was an older shim's)." ] || { echo "$output"; return 1; }
+  [ "$output" = "Rewrote ~/.local/bin/daedalus (its text was an older shim's)." ] || { echo "$output"; return 1; }
   [ "$(sha "$SHIM")" = "$before" ]
 }
 
-@test "shim: one serving another live home is left with a line; one whose home has moved (no core/update.py there) is rewritten with a line; a file the install did not write is left with a line" {
+@test "shim: an old single-home shim whose home has moved (no Daedalus home there) is rewritten to serve every home, with a line, and the gone home is not registered" {
   login_shells
-  O="$B/other"; mkdir -p "$O/core"; cp "$H/core/update.py" "$O/core/update.py"
-  run shim "" "$O"; [ -f "$SHIM" ] || { echo "$output"; return 1; }
-  before="$(sha "$SHIM")"
+  mkdir -p "$(dirname "$SHIM")"
+  printf '#!/usr/bin/env bash\n# daedalus shim — installed by core/setup.sh for the home below; safe to delete\nexec python3 "%s/core/update.py" "$@" --home "%s"\n' \
+    "$B/moved" "$B/moved" > "$SHIM"
   run shim
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
-  [ "$output" = "~/.local/bin/daedalus serves $O; this home is not on the command, so type python3 $H/core/update.py update --home $H here." ] || { echo "$output"; return 1; }
-  [ "$(sha "$SHIM")" = "$before" ]
-  rm -rf "$O"
-  run shim
-  [ "$output" = "~/.local/bin/daedalus served $O, which has no core/update.py any more; it now serves this home." ] || { echo "$output"; return 1; }
-  grep -q -- "--home \"$H\"" "$SHIM"
-  printf '#!/bin/sh\necho mine\n' > "$SHIM"; before="$(sha "$SHIM")"
-  run shim
-  [ "$output" = "~/.local/bin/daedalus is not a shim daedalus wrote, so it was left as it is; type python3 $H/core/update.py update --home $H instead." ] || { echo "$output"; return 1; }
-  [ "$(sha "$SHIM")" = "$before" ]
+  [ "${lines[1]}" = "~/.local/bin/daedalus served only $B/moved, which is not a Daedalus home any more; it now serves every home (daedalus homes lists them)." ] || { echo "$output"; return 1; }
+  ! grep -q moved "$SHIM"
+  ! grep -q moved "$HOME/.config/daedalus/homes.json"
 }
 
 @test "shim: a ~/.local that cannot be written is one line naming it, and nothing is written" {
@@ -674,7 +668,7 @@ sha() { shasum < "$1" | cut -c1-40; }
   run shim
   chmod 755 "$HOME/.local"
   [ "$status" -eq 0 ] || { echo "status $status: $output"; return 1; }
-  case "$output" in "~/.local/bin could not be made ("*"); the daedalus command was not installed, so type python3 $H/core/update.py update --home $H instead.") : ;; *) echo "$output"; return 1 ;; esac
+  case "${lines[1]}" in "~/.local/bin could not be made ("*"); the daedalus command was not installed, so type python3 $H/core/update.py update --home $H instead.") : ;; *) echo "$output"; return 1 ;; esac
   [ ! -e "$HOME/.local/bin" ]
 }
 

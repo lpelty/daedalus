@@ -26,9 +26,10 @@ step is idempotent — the second run changes nothing — and says one line the 
      cut-off git left, a checkout on a branch that is gone, branch names that differ only in case, a local branch
      named origin/<trunk>, and an untracked or ignored file where the checkout back to the trunk would write each
      stop too, naming what to do; a checkout or reset `lease.sh adopt` began and was cut off is finished.
-  7. the daedalus command: ~/.local/bin/daedalus for this home (core/update.py --install-shim's rules — never over
-     a file it did not write, nor over one serving another home still there), and how to reach it from the login
-     shell; it never stops the upgrade (update-command design §4.7)
+  7. the daedalus command: this home registered in ~/.config/daedalus/homes.json and ~/.local/bin/daedalus, one
+     shim for every home (core/update.py --install-shim's rules — never over a file it did not write nor over a
+     newer release's shim; an old single-home shim is rewritten, the home it served registered too), and how to
+     reach it from the login shell; it never stops the upgrade (update-command design §4.7, daedalus-start §4)
   8. a config.yaml naming its one callee in the legacy direct_call keys is told, once, its callee key (SPEC-011 §4);
      config.yaml is read, never written
   9. the service-status mod, installed at local scope beside the lease board for a deployment that has the board
@@ -3736,8 +3737,9 @@ def _snap_doctor(root: Path) -> None:
 
 
 def step_command(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
-    """Step 7 (update-command design §4.7): the daedalus command in ~/.local/bin for this home, by core/update.py's
-    own install (never over a file it did not write), with how to reach it from the login shell. It never stops the
+    """Step 7 (update-command design §4.7, daedalus-start design §4): this home registered and the daedalus command in
+    ~/.local/bin, one shim for every home, by core/update.py's own install (never over a file it did not write), with
+    how to reach it from the login shell. It never stops the
     upgrade: what it cannot do is a line. The login-shell check takes at most 5 s, less near a start's deadline."""
     if not (root / "core" / "update.py").is_file():
         return []
