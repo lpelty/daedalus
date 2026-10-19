@@ -25,12 +25,14 @@ Verbs (all print to stdout; a failure is a sentence on stderr and exit 2 — ref
         the merged review: findings of every lens, one per file:line with the strongest labels and the lenses
         that found it, earlier findings re-reported kept by id, unchecked open ones carried; prints the plan note
   record <home> <nn> <branch> <run-id> <review-file> <heads-file>
-        the ledger after a run with a verdict; prints "<earlier> <resolved> <open>"
+        the ledger after a run with a verdict; prints "<earlier> <resolved> <open> <new>"
 """
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 DEFAULT_LENSES = ("criteria", "trust", "upgrade", "failure")
@@ -53,6 +55,8 @@ SEV, STAND = ("HIGH", "MEDIUM", "LOW"), ("observed", "plausible", "hypothetical"
 REF = re.compile(r"\b(earlier|regressed|carried)\s+(L\d+)\b", re.I)
 RESOLVED = re.compile(r"^[\s*>-]*\**Resolved\**\s*:\s*\**\s*((?:L\d+[\s,;and]*)+)", re.I | re.M)
 LOC = re.compile(r"^(.+?):(\d+)(?:[-–]\d+)?$")
+# refute.sh's verdict grammar (V and E there): a lens that says REFUTED and names no labelled finding still refutes.
+SAID_REFUTED = re.compile(r"^[*#>0-9.\s-]*VERDICT[*\s]*:?[*\s]*REFUTED[*\s.!]*$", re.M)
 
 
 def die(msg):
@@ -226,14 +230,18 @@ def cmd_merge(out, run_id, open_json, sources):
     merged = {}     # (file, line) -> {d, lenses, bodies}
     order = []
     resolved = set()
+    bare = []       # lenses that said REFUTED and named no labelled finding
     for lens, path in sources:
         text = open(path, encoding="utf-8", errors="replace").read()
         resolved |= resolved_ids(text)
+        if not findings(text) and SAID_REFUTED.search(text):
+            bare.append((lens, path))
         for parts, body in findings(text):
             d = describe(parts, body)
             if d is None:
                 die("the %s lens's review has a finding without its labels — cannot certify the run (%s)" % (lens, path))
-            k = (d["file"], d["line"]) if d["line"] else (d["file"], d["what"])
+            ids = sorted({i for _, i in d["refs"]})
+            k = ("ref",) + tuple(ids) if ids else ((d["file"], d["line"]) if d["line"] else (d["file"], d["what"]))
             if k not in merged:
                 merged[k] = {"d": d, "lenses": [], "bodies": []}
                 order.append(k)
@@ -280,20 +288,34 @@ def cmd_merge(out, run_id, open_json, sources):
         n += 1
         d = {"file": f["file"], "line": f.get("line") or 0, "severity": f["severity"], "standing": f["standing"],
              "scope": f["scope"]}
-        lines.append(heading(n, d, ["carried %s (no review checked it)" % f["id"]]))
+        extra = ["carried %s (no review checked it)" % f["id"]]
+        if f.get("regressed"):
+            extra.append("regressed %s" % f["id"])      # still a regression until a review says it is fixed (review F1)
+        lines.append(heading(n, d, extra))
         lines.append("What is wrong: %s" % (f.get("what") or "(as the earlier review said)"))
         lines.append("Input: as the earlier review said.")
         lines.append("How to confirm: the earlier review of this branch.")
+        lines.append("")
+        any_counted = True
+    for lens, path in bare:
+        # verdict_of refutes a review that says REFUTED and names no finding; the merge must too, or a lens that wrote
+        # its findings as prose would vanish into a STANDS (review F2). Marked `unlabelled`, so the ledger skips it.
+        n += 1
+        lines.append("### F%d — %s — observed — in scope — HIGH — unlabelled refutation by the %s lens"
+                     % (n, os.path.basename(path), lens))
+        lines.append("What is wrong: the %s lens said REFUTED and named no labelled finding; read its review." % lens)
+        lines.append("Input: %s." % os.path.basename(path))
+        lines.append("How to confirm: read that review.")
         lines.append("")
         any_counted = True
     done = sorted((resolved & {f["id"] for f in earlier}) - reported, key=lambda i: int(i[1:]))
     if done:
         lines += ["## Earlier findings resolved", "Resolved: %s" % ", ".join(done), ""]
     lines.append("VERDICT: %s" % ("REFUTED" if any_counted else "STANDS"))
-    tmp = out + ".tmp"
-    with open(tmp, "w") as fh:
+    fd, tmp = tempfile.mkstemp(prefix="review-merge-")
+    with os.fdopen(fd, "w") as fh:
         fh.write("\n".join(lines) + "\n")
-    os.replace(tmp, out)
+    shutil.move(tmp, out)
 
 
 def cmd_record(home, nn, branch, run_id, review, heads_file):
@@ -302,21 +324,17 @@ def cmd_record(home, nn, branch, run_id, review, heads_file):
     byid = {f["id"]: f for f in d["findings"]}
     earlier = [f for f in d["findings"] if f.get("status") == "open"]
     resolved = resolved_ids(text)
-    seen = set()
+    again = {}      # earlier id -> the re-reports of it in this review
+    new = 0
     nxt = 1 + max([int(f["id"][1:]) for f in d["findings"]] or [0])
     for parts, body in findings(text):
         desc = describe(parts, body)
-        if desc is None:
+        if desc is None or any(p.lower().startswith("unlabelled refutation") for p in parts):
             continue
-        ids = [i for _, i in desc["refs"]]
-        old = [i for i in ids if i in byid]
+        old = [i for _, i in desc["refs"] if i in byid]
         if old:
             for i in old:
-                seen.add(i)
-                f = byid[i]
-                f.update(file=desc["file"], line=desc["line"], severity=desc["severity"], standing=desc["standing"],
-                         scope=desc["scope"], last_run=run_id)
-                f["status"] = "open" if counted(desc) else "set aside"
+                again.setdefault(i, []).append(desc)
             continue
         if not counted(desc):
             continue
@@ -324,12 +342,21 @@ def cmd_record(home, nn, branch, run_id, review, heads_file):
              "standing": desc["standing"], "scope": desc["scope"], "what": desc["what"], "status": "open",
              "first_run": run_id, "last_run": run_id}
         nxt += 1
+        new += 1
         d["findings"].append(f)
         byid[f["id"]] = f
+    for i, reports in again.items():
+        # Open while any re-report of it counts (review F3); its labels are those of the strongest counting one, and a
+        # regression stays marked so that, carried unchecked later, it still refutes (review F1).
+        f = byid[i]
+        live = [r for r in reports if counted(r)]
+        pick = min(live or reports, key=lambda r: (SEV.index(r["severity"]), STAND.index(r["standing"])))
+        f.update(file=pick["file"], line=pick["line"], severity=pick["severity"], standing=pick["standing"],
+                 scope=pick["scope"], last_run=run_id)
+        f["regressed"] = any(k == "regressed" for r in reports for k, _ in r["refs"])
+        f["status"] = "open" if live else "set aside"
     for f in earlier:
-        if f["id"] in seen:
-            continue
-        if f["id"] in resolved:
+        if f["id"] not in again and f["id"] in resolved:
             f["status"] = "resolved"
             f["last_run"] = run_id
     heads = {}
@@ -343,7 +370,7 @@ def cmd_record(home, nn, branch, run_id, review, heads_file):
     ids = {f["id"] for f in earlier}
     still = sum(1 for f in d["findings"] if f["id"] in ids and f.get("status") == "open")
     gone = sum(1 for f in d["findings"] if f["id"] in ids and f.get("status") in ("resolved", "set aside"))
-    print("%d %d %d" % (len(earlier), gone, still))
+    print("%d %d %d %d" % (len(earlier), gone, still, new))
 
 
 def main(argv):

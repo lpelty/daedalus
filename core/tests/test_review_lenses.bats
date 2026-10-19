@@ -271,3 +271,69 @@ print("ok")
 PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+# --- review 2026-10-19 (fresh-context, under the labelled bar) ------------------------------------------------------
+
+refute_l1() {
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+}
+
+@test "review F1: a regression carried unchecked into a later review still refutes" {
+  lease_for 03; write_config; small_change; refute_l1
+  gates; [ "$status" -ne 0 ]
+  printf 'two\n' >> "$T/marker.txt"
+  printf '### F1 — marker.txt:3 — hypothetical — in scope — LOW — regressed L1\nWhat is wrong: broke.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates; [ "$status" -ne 0 ]
+  printf 'three\n' >> "$T/marker.txt"
+  printf 'Nothing.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  id="$(run_id)"
+  grep -q 'carried L1.*regressed L1' "$DAEDALUS_HOME/vault/evidence/$id-review.md" || { cat "$DAEDALUS_HOME/vault/evidence/$id-review.md"; return 1; }
+}
+
+@test "review F2: a lens that says REFUTED and names no labelled finding refutes the merged run" {
+  write_config; large_change
+  printf '1. The parser drops the last line.\n\nVERDICT: REFUTED\n' > "$STUB/out-criteria"
+  gates
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  id="$(run_id)"
+  grep -q 'unlabelled refutation by the criteria lens' "$DAEDALUS_HOME/vault/evidence/$id-review.md"
+}
+
+@test "review F3/F4: lenses re-reporting one earlier finding at different lines keep it open on the strongest; a new defect on a re-reported line gets its own id" {
+  lease_for 03; write_config; small_change; refute_l1
+  gates; [ "$status" -ne 0 ]
+  rm -f "$STUB/out-all"; large_change
+  printf '### F1 — big.txt:7 — observed — in scope — HIGH — earlier L1\nWhat is wrong: still.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-trust"
+  printf '### F1 — big.txt:8 — hypothetical — in scope — LOW — earlier L1\nWhat is wrong: maybe.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-upgrade"
+  printf '### F1 — big.txt:7 — observed — in scope — HIGH\nWhat is wrong: a new defect.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-failure"
+  gates; [ "$status" -ne 0 ]
+  python3 -c "
+import json,sys; d=json.load(open(sys.argv[1])); f={x['id']: x for x in d['findings']}
+assert f['L1']['status']=='open' and f['L1']['severity']=='HIGH', d
+assert 'L2' in f and f['L2']['what']=='a new defect.', d" "$DAEDALUS_HOME/state/review-ledger/03.json"
+  printf '%s\n' "$output" | grep -q 'review: 1 earlier finding: 0 resolved, 1 open; 1 new' || { echo "$output"; return 1; }
+}
+
+@test "review F5: the first run says what it recorded; a run that gives no verdict says the earlier findings stay as they were" {
+  lease_for 03; write_config "  refute_timeout: 2"; small_change; refute_l1
+  gates; [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q 'review: 1 counted finding recorded for the next review to check' || { echo "$output"; return 1; }
+  echo 30 > "$STUB/sleep-all"
+  printf 'two\n' >> "$T/marker.txt"
+  gates; [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q 'review: 1 earlier finding shown to the reviewers; the ledger is unchanged' || { echo "$output"; return 1; }
+}
+
+@test "review F7: verify.lens_concurrency is checked, and bounds how many lenses run at once" {
+  write_config "  lens_concurrency: 00"; large_change
+  gates; [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q 'verify.lens_concurrency must be' || { echo "$output"; return 1; }
+  write_config "  lens_concurrency: 1"
+  for l in criteria trust upgrade failure; do echo 1 > "$STUB/sleep-$l"; done
+  start=$(date +%s)
+  gates
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ $(( $(date +%s) - start )) -ge 4 ] || { echo "one at a time took $(( $(date +%s) - start ))s"; return 1; }
+}

@@ -495,7 +495,16 @@ launch_failure() {
       "$(grep -q '(with output)' "$err" && printf with || printf no)" "$(sed -n 's/^.*; receipt //p' "$err" | head -1)"
   fi
 }
-cleanup_branch() { rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}; }
+# cleanup_branch — the branch review's temporary files; and, when it ends without a verdict, a line saying the earlier
+# findings the reviewers were shown stay as they were (the ledger is written only after a verdict).
+recorded=0
+cleanup_branch() {
+  if [ "$recorded" -eq 0 ] && [ "${earlier_n:-0}" -gt 0 ]; then
+    printf 'review-plan: %s shown to the reviewers; the ledger is unchanged, as this review gave no verdict\n' \
+      "$(plural "$earlier_n" "earlier finding")" >&2
+  fi
+  rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}
+}
 if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ]; then
   # One reviewer and no earlier findings to check: the launcher writes the review file itself, as it always has.
   launch_err="$(mktemp)"
@@ -514,7 +523,16 @@ else
   # finish with a review that can be certified; one that times out, fails or writes an unlabelled finding fails the
   # whole run closed — a review with a lens missing is a smaller review than the one asked for, never a STANDS.
   conc="$(cfg verify.lens_concurrency 2>/dev/null || printf 4)"
-  case "$conc" in ''|*[!0-9]*|0) conc=4 ;; esac
+  case "$conc" in
+    ''|*[!0-9]*) conc=0 ;;
+    *) conc=$((10#$conc)) ;;
+  esac
+  if [ "$conc" -lt 1 ]; then
+    printf 'verify.lens_concurrency must be a whole number of 1 or more (got: %s) — cannot certify the run\n' \
+      "$(cfg verify.lens_concurrency 2>/dev/null)" >&2
+    cleanup_branch
+    exit 2
+  fi
   work="$(mktemp -d)"
   i=0
   for l in "${lenses[@]}"; do
@@ -602,11 +620,15 @@ if [ "$mode" = branch ]; then
   if tally="$(python3 "$RL" record "$DAEDALUS_HOME" "$lease_nn" "$tbranch" "$run_id" "$verdict_file" "$heads_now" 2>/dev/null)"; then
     set -- $tally
     if [ "${1:-0}" -gt 0 ]; then
-      printf 'review-plan: %s: %s resolved, %s open\n' "$(plural "$1" "earlier finding")" "$2" "$3" >&2
+      printf 'review-plan: %s: %s resolved, %s open%s\n' "$(plural "$1" "earlier finding")" "$2" "$3" \
+        "$([ "${4:-0}" -gt 0 ] && printf '; %s new' "$4")" >&2
+    elif [ "${4:-0}" -gt 0 ]; then
+      printf 'review-plan: %s recorded for the next review to check\n' "$(plural "$4" "counted finding")" >&2
     fi
   else
     printf 'review-plan: the findings ledger could not be written (state/review-ledger/) — the next review starts cold\n' >&2
   fi
+  recorded=1
   cleanup_branch
 fi
 printf '%s\n' "$word"
