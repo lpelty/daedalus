@@ -54,17 +54,21 @@ E='[*[:space:].!]*$'
 # kind, or that has no verdict line, is NONE (exit 2) — never STANDS. A review with no labelled finding headings
 # (an older review re-read by promote, or a reviewer that did not label) keeps the grammar it was written for: the
 # reviewer's own VERDICT line, REFUTED first.
-verdict_of() {
-  python3 - "$1" <<'PY'
-import re, sys
-text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+verdict_of() {   # verdict_of <review file> run|reread|counts
+  python3 - "$1" "$2" <<'PY'
+import json, re, sys
+path, mode = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8", errors="replace").read()
 V = r"^[*#>0-9.\s-]*VERDICT[*\s]*:?[*\s]*"
 E = r"[*\s.!]*$"
 said = ("REFUTED" if re.search(V + "REFUTED" + E, text, re.M) else
         "STANDS" if re.search(V + "STANDS" + E, text, re.M) else None)
-HEAD = re.compile(r"^#{1,4}[ \t]*\**[ \t]*F(\d+)\b\**(.*)$", re.M)
+# A finding heading: F<n> at the start of a line after any number of #s or in bold, then a separator — so a
+# level-5 heading or a bold line is read as the finding it is, never skipped (review 2026-10-19, F1).
+# A heading is marked as one (#s or bold); a plain "F1 — nothing found." is prose.
+HEAD = re.compile(r"^[ \t>]*(?:#{1,6}[ \t]*(?:\*\*|__)?|\*\*|__)[ \t]*F(\d+)\b(?:\*\*|__)?[ \t]*([\u2014\u2013:|-].*)$", re.M)
 SEV, STAND = ("HIGH", "MEDIUM", "LOW"), ("observed", "plausible", "hypothetical")
-heads = [(m.group(1), [p.strip(" *`_").lower() for p in re.split(r"\s+[\u2014\u2013-]+\s+|\s*\|\s*", m.group(2))])
+heads = [(m.group(1), [p.strip(" *`_:").lower() for p in re.split(r"\s*[\u2014\u2013|]+\s*|\s+-+\s+|^-+\s*|^:\s*", m.group(2))])
          for m in HEAD.finditer(text)]
 def labels(parts):
     sev = [p.upper() for p in parts if p.upper() in SEV]
@@ -73,16 +77,25 @@ def labels(parts):
           if p in ("in scope", "in-scope", "out of scope", "out-of-scope")]
     return sev, st, sc
 labelled = [h for h in heads if labels(h[1])[1] or labels(h[1])[2]]
-def done(word, code):
+def done(word, code, counts=None):
+    if mode == "counts":
+        print(json.dumps(counts or {"high": 0, "medium": 0, "low": 0, "set_aside": 0}))
+        sys.exit(0)
     print(word)
     sys.exit(code)
-if not labelled:
+def legacy():
+    sev = [s for _, parts in heads for s in labels(parts)[0][:1]]
+    c = {s.lower(): sev.count(s) for s in SEV}
+    c["set_aside"] = 0
     if said == "REFUTED":
-        done("REFUTED", 1)
+        done("REFUTED", 1, c)
     if said == "STANDS":
-        done("STANDS", 0)
-    done("NONE", 2)
+        done("STANDS", 0, c)
+    done("NONE", 2, c)
+if not labelled and mode != "run":
+    legacy()                       # a review written before the labels (promote re-reads it): its own verdict line
 bad, counted, listed = [], [], []
+real = {"high": 0, "medium": 0, "low": 0}
 for n, parts in heads:
     sev, st, sc = labels(parts)
     if len(sev) != 1 or len(st) != 1 or len(sc) != 1:
@@ -91,26 +104,48 @@ for n, parts in heads:
     tag = "F%s %s, %s, %s" % (n, sev[0], st[0], "in scope" if sc[0] == "in" else "out of scope")
     refutes = (sc[0] == "in" and st[0] in ("observed", "plausible") and sev[0] in ("HIGH", "MEDIUM")) \
         or (st[0] == "observed" and sev[0] == "HIGH")
+    if refutes or (sc[0] == "in" and st[0] != "hypothetical"):
+        real[sev[0].lower()] += 1
     (counted if refutes else listed).append(tag)
+counts = dict(real, set_aside=len(heads) - len(bad) - sum(real.values()))
 if bad:
     sys.stderr.write("review findings without their labels: %s — cannot certify the run\n" % "; ".join(bad))
-    done("NONE", 2)
+    done("NONE", 2, counts)
 if said is None:
-    sys.stderr.write("labelled review has no VERDICT line (a truncated review?) — cannot certify the run\n")
-    done("NONE", 2)
+    sys.stderr.write("review has no VERDICT line (a truncated review?) — cannot certify the run\n")
+    done("NONE", 2, counts)
+if not heads and said == "REFUTED":
+    done("REFUTED", 1, counts)     # names no finding: a fail either way, and the reviewer's word is the safe one
 if counted:
     sys.stderr.write("counted: %s\n" % "; ".join(counted))
 if listed:
     sys.stderr.write("%d finding%s not counted (hypothetical, out of scope or LOW): %s\n"
                      % (len(listed), "" if len(listed) == 1 else "s", "; ".join(listed)))
-done("REFUTED", 1) if counted else done("STANDS", 0)
+if not counted:
+    # The rubric is the audit trail, not a second verdict (2026-10-19): a dimension scored FAIL with no finding
+    # that counts behind it is set aside like its findings, and said so.
+    fails = re.findall(r"^[\s*#>-]*\**(Correctness|Regression risk|Test honesty|Pitfall and boundary compliance|"
+                       r"Claim[^:*]*)\**\s*[:\u2014-]+\s*\**FAIL\b", text, re.M)
+    if fails:
+        sys.stderr.write("rubric FAIL on %s set aside: no finding that counts supports it\n" % ", ".join(fails))
+done("REFUTED", 1, counts) if counted else done("STANDS", 0, counts)
 PY
 }
-# refute.sh --verdict-of <review file>: STANDS (exit 0), REFUTED (1), NONE (2). Runs nothing.
+# refute.sh --verdict-of <review file>: STANDS (exit 0), REFUTED (1), NONE (2). Runs nothing. A re-read: a review
+# written before the labels keeps its own verdict line; one written since gives the verdict its run gave.
 if [ "${1:-}" = "--verdict-of" ]; then
   f="${2:-}"
   [ -f "$f" ] || { printf 'refute.sh --verdict-of: no review file at %s\n' "$f" >&2; exit 2; }
-  verdict_of "$f"
+  verdict_of "$f" reread
+  exit $?
+fi
+# refute.sh --counts-of <review file>: one JSON line — high, medium and low among the findings that are real (in
+# scope and observed or plausible, or an observed HIGH), and how many were set aside — for promote's decision block,
+# so the counts the operator reads and the verdict come from the same reading.
+if [ "${1:-}" = "--counts-of" ]; then
+  f="${2:-}"
+  [ -f "$f" ] || { printf 'refute.sh --counts-of: no review file at %s\n' "$f" >&2; exit 2; }
+  verdict_of "$f" counts
   exit $?
 fi
 # refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]
@@ -400,7 +435,7 @@ python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
 # The verdict: verdict_of, defined at the top of this file. Its notes (what it counted, what it listed and did not
 # count) go to stderr with the review file named, for gates.sh to show the operator.
 notes="$(mktemp)"
-word="$(verdict_of "$verdict_file" 2>"$notes")"
+word="$(verdict_of "$verdict_file" run 2>"$notes")"
 rc=$?
 if [ "$rc" -eq 2 ]; then
   if [ -s "$notes" ]; then
@@ -411,7 +446,8 @@ if [ "$rc" -eq 2 ]; then
   rm -f "$notes"
   exit 2
 fi
-[ ! -s "$notes" ] || sed "s|\$| — see $verdict_file|" "$notes" >&2
+# Each note marked, so gates.sh shows these lines and nothing else this script happened to say on stderr.
+[ ! -s "$notes" ] || sed "s|^|verdict-note: |; s|\$| — see $verdict_file|" "$notes" >&2
 rm -f "$notes"
 printf '%s\n' "$word"
 exit "$rc"

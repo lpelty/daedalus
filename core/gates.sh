@@ -360,7 +360,8 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
     if [ "$refute_code" -eq 1 ]; then
       # Exit 1 = REFUTED; the review file is the fail_log.
       fail_log="$ev_vault/$run_id-review.md"
-      [ -z "$refute_msg" ] || log "review: $refute_msg"
+      notes="$(printf '%s\n' "$refute_msg" | sed -n 's/^verdict-note: //p')"
+      [ -z "$notes" ] || log "review REFUTED; $notes"
       refuted_choices "$lease_nn"
     else
       # Exit 2 = the refuter could not certify: CLI missing, python3 missing,
@@ -379,8 +380,9 @@ fi
 
 # A STANDS that listed findings it did not count (hypothetical, out of scope, LOW — refute.sh's verdict_of) says so,
 # with the review file, so the operator can see what was set aside and why.
-if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ] && [ -n "${refute_msg:-}" ]; then
-  log "review STANDS; $refute_msg"
+if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
+  notes="$(printf '%s\n' "${refute_msg:-}" | sed -n 's/^verdict-note: //p')"
+  [ -z "$notes" ] || log "review STANDS; $notes"
 fi
 
 # The vault summary, with the verdict folded into `result`, so this file and

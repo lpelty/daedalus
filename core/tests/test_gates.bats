@@ -1115,6 +1115,39 @@ labelled() {
   done
 }
 
+@test "review 2026-10-19: a finding under a level-5 heading or in bold is read; a new run never falls back to the reviewer's word over an unlabelled finding; a rubric FAIL with nothing counted behind it is named as set aside" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$f"; }
+  printf '##### F1 — x:1 — observed — in scope — HIGH\nW.\n\nVERDICT: STANDS\n' > "$f"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  printf '**F1 — x:1 — observed — in scope — HIGH**\nW.\n\nVERDICT: STANDS\n' > "$f"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  # A rubric FAIL resting on a LOW finding: STANDS, and the set-aside FAIL is said.
+  printf '### F1 — x:1 — observed — in scope — LOW\nW.\n\nTest honesty: FAIL (F1)\n\nVERDICT: REFUTED\n' > "$f"
+  vo; [ "$status" -eq 0 ]; printf '%s\n' "$stderr" | grep -q 'rubric FAIL on Test honesty set aside'
+  # --counts-of: the real findings by severity and how many were set aside.
+  printf '### F1 — x:1 — hypothetical — in scope — HIGH\n\n### F2 — x:2 — plausible — in scope — MEDIUM\n\n### F3 — x:3 — observed — out of scope — HIGH\n\nVERDICT: REFUTED\n' > "$f"
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --counts-of "$f"
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"high": 1, "medium": 1, "low": 0, "set_aside": 1}' ] || { echo "$output"; return 1; }
+}
+
+@test "a new run's review with an unlabelled finding heading is uncertifiable even when the reviewer says STANDS" {
+  install_refuter
+  bin="$BATS_TEST_TMPDIR/binu"; mkdir -p "$bin"
+  cat > "$bin/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '##### F1 — core/x.py:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n'
+STUB
+  chmod +x "$bin/claude"
+  git_target
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q 'without their labels' || { echo "$output"; return 1; }
+}
+
 # lease_for <nn> <session> [promoted-count] — a lease file this session holds, so gates.sh's my-lease names it.
 lease_for() {
   mkdir -p "$DAEDALUS_HOME/state/leases"

@@ -975,8 +975,14 @@ in-scope observed or plausible HIGH or MEDIUM finding refutes, and so does
 any observed HIGH; hypothetical, out-of-scope and LOW findings are listed
 for the operator ("N findings not counted … — see <review file>") and do not.
 A labelled heading missing a label, or a review with no verdict line, is
-uncertifiable (FAIL), never STANDS. A review with no labelled findings — an
-older one promote re-reads — keeps its own verdict line.
+uncertifiable (FAIL), never STANDS; a new run never falls back to the
+reviewer's word over an unlabelled finding. A review with no labelled
+findings that promote re-reads from before this release keeps its own verdict
+line. The rubric is the audit trail, not a second verdict: a dimension scored
+FAIL with nothing counted behind it is named as set aside. Promote's decision
+block reads its counts from the same labels (`refute.sh --counts-of`), so it
+says how many findings were set aside rather than "2 high findings" over two
+hypothetical ones.
 
 **Criteria carry a Scope section** — what the change covers, the evidence
 it rests on, and what is out of scope — and the reviewer judges against it.

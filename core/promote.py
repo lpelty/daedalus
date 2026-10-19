@@ -475,10 +475,22 @@ def review(root: Path, run_id: str, tree: Path) -> dict:
         raise Stop("The review could not be completed (%s). A missing review is not a pass." % last_line(err), code=1)
     text = vf.read_text()
     fm = v.parse_frontmatter(text)
-    sev = FINDING.findall(text)
     return {"call_id": fm.get("call-id"), "verdict": "STANDS" if code == 0 else "REFUTED", "file": rel(root, vf),
             "fingerprint": fm.get("fingerprint"), "request_sha": fm.get("request-sha"),
-            "findings": {s.lower(): sev.count(s) for s in ("HIGH", "MEDIUM", "LOW")}}
+            "findings": review_counts(root, vf, text)}
+
+
+def review_counts(root: Path, vf: Path, text: str) -> dict:
+    """high/medium/low among the findings that are real, and set_aside: refute.sh --counts-of, the same reading of
+    the labels the verdict came from, so the decision block never says "STANDS — 2 high findings" over two
+    hypothetical ones (2026-10-19). A review that cannot be read that way is counted as before, by severity."""
+    _code, out, _err = run(["bash", str(root / "core" / "refute.sh"), "--counts-of", str(vf)])
+    try:
+        c = json.loads(out.strip().splitlines()[-1])
+        return {k: int(c.get(k) or 0) for k in ("high", "medium", "low", "set_aside")}
+    except (ValueError, IndexError, AttributeError, TypeError):
+        sev = FINDING.findall(text)
+        return {s.lower(): sev.count(s) for s in ("HIGH", "MEDIUM", "LOW")}
 
 
 # --- the decision block (§7.1 step 10) --------------------------------------------------------------
@@ -493,6 +505,8 @@ def reviewer_line(rv: Optional[dict], skipped: Optional[str]) -> str:
     f = rv.get("findings") or {}
     rest = [("one" if f.get(s) == 1 else str(f.get(s))) + " " + s for s in ("medium", "low") if f.get(s)]
     counted = n_words(f.get("high", 0), "high finding") + (", " + " and ".join(rest) if rest else "")
+    if f.get("set_aside"):
+        counted += "; %d set aside (hypothetical or out of scope)" % f["set_aside"]
     return "Reviewer on the merged change: %s — %s." % (rv["verdict"], counted)
 
 
@@ -589,8 +603,9 @@ def code_context(root: Path, p: dict, pdir: Path) -> Tuple[str, dict]:
 
 def refuted_sentence(p: dict) -> str:
     rv = p["review"]
-    high = (rv.get("findings") or {}).get("high", 0)
-    return ("The reviewer REFUTED the merged change (%d HIGH finding%s; the review is at %s). If the operator wants to "
+    f = rv.get("findings") or {}
+    high = f.get("high", 0) + f.get("medium", 0)
+    return ("The reviewer REFUTED the merged change (%d HIGH or MEDIUM finding%s; the review is at %s). If the operator wants to "
             "ask the reviewer about a finding, run `core/call-agent.sh --resume-review %s \"<the operator's question>\"` "
             "and repeat the answer. To promote anyway, the operator must give a written reason: `promote %s "
             "--skip-review --reason \"...\"`." % (high, "" if high == 1 else "s", rv["file"], p["lease"], p["lease"]))

@@ -86,7 +86,10 @@ unverified, and unverified is a finding.
 Score every dimension on every run, even when a dimension has no finding;
 an unscored dimension is an unreviewed dimension. For each, write one line:
 the dimension name, a score of PASS, WEAK or FAIL, and the finding numbers
-that support the score.
+that support the score. The rubric is the audit trail, not a second
+verdict: score FAIL only where a finding that counts (below) supports it; a
+FAIL resting on hypothetical, out-of-scope or LOW findings is set aside with
+them.
 
 - **Correctness** — does the change do what the criteria say, for every
   input the criteria imply, including the boundaries and the error paths?
@@ -123,7 +126,14 @@ How to confirm: <the command, the input, or the read that would show it>
   could occur (a format change the criteria name, a documented variant of
   the service). `hypothetical`: it is possible, and nothing points to it.
 - **scope** — `in scope` or `out of scope` of the criteria's Scope section.
-- **severity** — `HIGH`, `MEDIUM` or `LOW`.
+- **severity** — `HIGH`: the change fails a criterion, loses or corrupts
+  data, breaks a caller or a consumer of a changed format, or weakens a
+  guard. `MEDIUM`: a wrong result on a path the criteria cover that is not
+  data loss — an error path mishandled, a test that cannot fail, a claim the
+  evidence does not support. `LOW`: no wrong result anyone would see —
+  naming, comments, a missing Scope section, an inefficiency. A defect with
+  a wrong result someone would see is never LOW; several LOWs that are one
+  defect are one finding at that defect's severity.
 
 Then the rubric, one line per dimension as described above.
 

@@ -142,15 +142,15 @@ PY
 
 @test "the reviewer: REFUTED writes prepared.json with the verdict, shows the block that says so, names the resume and the written-reason routes, exit 1; a review that cannot complete is not a pass" {
   work_on_02
-  export FAKE_ANSWER="### F1 — c.txt:1 — HIGH
+  export FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
 What is wrong: a.
 How to confirm: b.
-### F2 — c.txt:2 — HIGH
+### F2 — c.txt:2 — observed — in scope — HIGH
 What is wrong: c.
 How to confirm: d.
 VERDICT: REFUTED"
   run as_prime bash "$PROMOTE" 02
-  refused "The reviewer REFUTED the merged change (2 HIGH findings; the review is at vault/evidence/$(pj run_id)-review.md)." 1
+  refused "The reviewer REFUTED the merged change (2 HIGH or MEDIUM findings; the review is at vault/evidence/$(pj run_id)-review.md)." 1
   case "$output" in *"Reviewer on the merged change: REFUTED — 2 high findings."*"Nothing has been pushed. Ask me to ask the reviewer why, or give a written reason to promote without the review."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"core/call-agent.sh --resume-review 02"*"promote 02 --skip-review --reason"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(pj review.verdict)" = "REFUTED" ]
@@ -162,7 +162,7 @@ VERDICT: STANDS" FAKE_EXIT=1
 
 @test "a second prepare of the same change after a REFUTED review says so: the block names the earlier verdict, prepared.json records it (Decision 39)" {
   work_on_02
-  FAKE_ANSWER="### F1 — c.txt:1 — HIGH
+  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
@@ -422,7 +422,7 @@ PY
 
 @test "evidence, re-derived: a REFUTED prepare is refused even with prepared.json edited to STANDS; a review whose request-sha is not the re-render's; a review of other distribution code; modified distribution code" {
   work_on_02
-  FAKE_ANSWER="### F1 — c.txt:1 — HIGH
+  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
@@ -580,7 +580,7 @@ PY
 
 @test "the ledger names an earlier REFUTED review of the same change even when prepared.json's list was emptied, and the review's call id from its own frontmatter" {
   work_on_02
-  FAKE_ANSWER="### F1 — c.txt:1 — HIGH
+  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]; refuted_call="$(pj review.call_id)"
@@ -726,7 +726,7 @@ PY
   [ -f "$(dirname "$(prepared)")/pushed" ]
 }
 
-REFUTE_ONE="### F1 — c.txt:1 — HIGH
+REFUTE_ONE="### F1 — c.txt:1 — observed — in scope — HIGH
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED"
