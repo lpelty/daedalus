@@ -652,3 +652,15 @@ PY
   case "$c" in *"- 02 (poc-ui) — released"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"task: yyy"*) echo "a released window shows no task: $c"; return 1 ;; *) : ;; esac
 }
+
+@test "task line: shown only to a reader holding a live window, with another window open; never to a single window, a session with no window, a released window or a visitor; it says once (review 2026-10-19, F2 F3)" {
+  LS create >/dev/null; bind_live 01 sA
+  run board sA; c="$(ctx)"; case "$c" in *"read the other windows' tasks"*) echo "single window: $c"; return 1 ;; *) : ;; esac
+  LS create >/dev/null; bind_live 02 sB
+  run board sA; c="$(ctx)"
+  case "$c" in *"message a window whose task overlaps yours once, before you start."*) : ;; *) echo "$c"; return 1 ;; esac
+  registry_entry "$(live_pid)" sX interactive cli daedalus-x
+  run board sX; c="$(ctx)"; case "$c" in *"read the other windows' tasks"*) echo "no window: $c"; return 1 ;; *) : ;; esac
+  set_lease 02 '{"released": "2026-10-19T12:00:00Z"}'
+  run board sB; c="$(ctx)"; case "$c" in *"read the other windows' tasks"*) echo "released: $c"; return 1 ;; *) : ;; esac
+}

@@ -51,14 +51,15 @@ again lets it through — which you do only once that window has answered, or
 the operator has said so (see "Messages between windows").
 
 **Your task on the board.** When the operator gives you a task, before you
-start: set it in one line — `core/lease.sh task 02 "Zoom converter: read
-meeting_transcript"` — then read the other windows' tasks on the board. If one
+start: set it in one line, on your own number — `core/lease.sh task <your NN>
+"Zoom converter: read meeting_transcript"` — then read the other windows' tasks on the board. If one
 overlaps yours (the same feature, the same files, the same interface), message
 that window once, in the shape under "Messages between windows" ("This is
 window 03. My task is …; the board says yours is …. I will change … and leave
 … to you. Tell me if that collides."), then go on with the part that does not
-collide. Set it again when the task changes; `core/lease.sh task 02 --clear`
-when it is done. The task is yours to keep: the operator never sets it, and
+collide. Set it again when the task changes; `core/lease.sh task <your NN>
+--clear` when it is done (`done` clears it too). Another live window's task is
+not yours to set. The task is yours to keep: the operator never sets it, and
 it is not their `note`. A spawned clone starts with the first line of its
 task already set.
 

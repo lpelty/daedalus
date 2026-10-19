@@ -2050,6 +2050,29 @@ def task_line(text: object, limit: int = TASK_MAX) -> str:
     return flat if len(flat) <= limit else flat[:limit - 1] + "…"
 
 
+def set_task(root: Path, token: str, sid: Optional[str], value: Optional[str]) -> str:
+    """`task`: like set_field, but a window's task is its own session's while that session is live — another
+    window setting it would put words on the board that window never chose (review 2026-10-19, F1). A stale
+    window's may be set from anywhere, and an operator shell (sid None) may set any. Returns the number."""
+    with lock(root):
+        leases = read_all(root)
+        nn = number_of(leases, token, "task")
+        lease = leases.get(nn)
+        if lease is None:
+            raise Refused("There is no window %s." % nn)
+        holder = lease.get("session_id")
+        if sid is not None and holder and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+            mine, _ = lease_of_session(leases, sid)
+            raise Refused("Window %s's task is its own session's to set; set yours with `core/lease.sh task %s \"<one "
+                          "line>\"`." % (nn, mine or "<NN>"))
+        if value is None:
+            lease.pop("task", None)
+        else:
+            lease["task"] = value
+        write_lease(root, nn, lease)
+        return nn
+
+
 def set_field(root: Path, token: str, cmd: str, key: str, value: object) -> str:
     """alias / note / update --criteria: one field, under the lock. An alias
     must pass valid_alias and be unique among the leases on disk (§4.1);
@@ -3887,6 +3910,7 @@ def mark_done(root: Path, token: str, sid: str, summary: str) -> str:
             raise Refused("Only window %s's own session may mark it done." % nn)
         lease["finished"] = now_stamp()
         lease["summary"] = summary
+        lease.pop("task", None)     # the summary says what it did; a task left up would draw overlap messages to a session that ended
         write_lease(root, nn, lease)
         prime = leases.get("prime") or {}
     _, prime_lease = lease_of_session(leases, str(prime.get("session_id")))
@@ -3992,7 +4016,8 @@ def spawn(root: Path, task: str, note: Optional[str]) -> str:
     import subprocess
     target = root / "target" / target_name(root)
     fetch_origin(target, timeout=60)
-    first = next((ln for ln in task.splitlines() if ln.strip()), "")
+    # the first line that says something: not blank and not a markdown heading ("# Context")
+    first = next((ln for ln in task.splitlines() if ln.strip() and not ln.lstrip().startswith("#")), "")
     nn, _ = allocate(root, None, note=note, spawned=True, task=task_line(first) or None)
     full = ('%s\n\nWhen the work is done or you are stuck, run `core/lease.sh done %s --summary "<one paragraph: what changed, '
             'what is untested, what you need>"` as your final action.' % (task, nn))
@@ -4950,7 +4975,7 @@ COPY_GATED = ("create", "claim", "spawn", "release", "done", "sweep", "rebase", 
 VISITOR_REFUSAL = ("This is a direct-call session (a visitor): it never creates, claims or changes a window and "
                    "cannot take the pen. `core/lease.sh %s` is refused here; ask the operator to run it from a window.")
 TASK_LINE = ("When the operator gives you a task: set yours with `core/lease.sh task <NN> \"<one line>\"`, read the other "
-             "windows' tasks above, and message a window whose task overlaps yours before you start.")
+             "windows' tasks above, and message a window whose task overlaps yours once, before you start.")
 MESSAGE_LINE = ("If you need a file another window has changed, message that window (SendMessage to its peer name, "
                 "from this board) before changing it.")
 
@@ -5139,7 +5164,8 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
         # is pending the nag's remedy is refused (create/claim), so the sentence names the upgrade instead.
         ps = pending_stop(root)
         lines.append(no_window_pending(ps) if ps else UNLEASED_NAG)
-    if len(numbered) > 1 and not visitor:
+    # only to a reader that can act on it: a live window of its own, and another window to compare with (F3)
+    if len(numbered) > 1 and not visitor and mine and not numbered[mine].get("released"):
         lines.append(TASK_LINE)
     lines.append(MESSAGE_LINE)
     return "\n".join(lines)
@@ -6230,13 +6256,15 @@ def main(argv: list) -> int:
             return _refused(lambda: "Noted for window %s." % set_field(root, args[0], "note", "note", args[1]))
         if cmd == "task":
             # v0.12.3: the window's own one line for its current task, apart from the operator's `note`; the board
-            # shows it first on the window's line, so a window given a task can see what the others are doing
-            if "--clear" in args:
-                return _refused(lambda: "Window %s has no task on the board now." % set_field(root, args[0], "task", "task", None))
-            text = task_line(args[1]) if len(args) >= 2 else ""
-            if not text:
+            # shows it first on the window's line, so a window given a task can see what the others are doing.
+            # Exactly <NN> and one quoted line, or <NN> --clear: an unquoted task would otherwise keep its first word.
+            clear = args[1:] == ["--clear"]
+            text = task_line(args[1]) if len(args) == 2 and not clear else ""
+            if not clear and (not text or args[1].startswith("--")):
                 sys.stderr.write('usage: core/lease.sh task <NN> "<one line: what this window is working on>" | task <NN> --clear\n'); return 2
-            return _refused(lambda: "Window %s's task is on the board: %s" % (set_field(root, args[0], "task", "task", text), text))
+            if clear:
+                return _refused(lambda: "Window %s has no task on the board now." % set_task(root, args[0], sid, None))
+            return _refused(lambda: "Window %s's task is on the board: %s" % (set_task(root, args[0], sid, text), text))
         if cmd == "update":
             return _refused(lambda: "Window %s's criteria file is %s."
                             % (set_field(root, args[0], "update", "criteria", _after("--criteria")), _after("--criteria")))

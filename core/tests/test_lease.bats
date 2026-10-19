@@ -511,7 +511,23 @@ PY
   case "$output" in *"Window 01 has no task on the board now."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "spawn: the clone's task is on the board from its first line, one line, at most 120 characters (v0.12.3)" {
+@test "task: only the window's own session sets or clears its task while that session is live; a stale window's, or any from an operator shell, may be set; extra words are a usage error, not a silently shorter task; done clears it (review 2026-10-19, F1 F4 F5)" {
+  LS create >/dev/null; LS create >/dev/null
+  pid="$(live_pid)"; registry_entry "$pid" sA interactive cli daedalus-01
+  env CLAUDE_CODE_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" claim 01 >/dev/null
+  pid2="$(live_pid)"; registry_entry "$pid2" sB interactive cli daedalus-02
+  env CLAUDE_CODE_SESSION_ID=sB bash "$DAEDALUS_HOME/core/lease.sh" claim 02 >/dev/null
+  CLAUDE_CODE_SESSION_ID=sA run LS task 01 "mine"; [ "$status" -eq 0 ]; [ "$(lease_json 01 task)" = "mine" ]
+  CLAUDE_CODE_SESSION_ID=sB run LS task 01 "theirs"; [ "$status" -ne 0 ]
+  case "$output" in *"Window 01's task is its own session's to set; set yours with \`core/lease.sh task 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  CLAUDE_CODE_SESSION_ID=sB run LS task 01 --clear; [ "$status" -ne 0 ]; [ "$(lease_json 01 task)" = "mine" ]
+  run LS task 01 "set from the operator's shell"; [ "$status" -eq 0 ]; [ "$(lease_json 01 task)" = "set from the operator's shell" ]
+  CLAUDE_CODE_SESSION_ID=sA run LS task 01 fix the zoom bug; [ "$status" -eq 2 ]; [ "$(lease_json 01 task)" = "set from the operator's shell" ]
+  CLAUDE_CODE_SESSION_ID=sA run LS task 01 "x" --clear; [ "$status" -eq 2 ]
+  CLAUDE_CODE_SESSION_ID=sA run LS done 01 --summary "s"; [ "$status" -eq 0 ]; [ "$(lease_json 01 task)" = "None" ]
+}
+
+@test "spawn: the clone's task is on the board from its first line that is not blank or a heading, one line, at most 120 characters (v0.12.3)" {
   mkdir -p "$BATS_TEST_TMPDIR/bin"; cp "$BATS_TEST_DIRNAME/fixtures/leases/fake-claude" "$BATS_TEST_TMPDIR/bin/claude"; chmod +x "$BATS_TEST_TMPDIR/bin/claude"
   export FAKE_CLAUDE_LOG="$BATS_TEST_TMPDIR/claude.log"
   long="$(printf 'x%.0s' $(seq 1 200))"
@@ -519,6 +535,8 @@ PY
   [ "$(lease_json 01 task)" = "fix the thing" ]
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" run LS spawn "$long"; [ "$status" -eq 0 ]
   t="$(lease_json 02 task)"; [ "${#t}" -eq 120 ]; case "$t" in *"…") : ;; *) echo "$t"; return 1 ;; esac
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run LS spawn "$(printf '# Context\n\nfix the other thing')"; [ "$status" -eq 0 ]
+  [ "$(lease_json 03 task)" = "fix the other thing" ]
 }
 
 @test "release: by a non-holder of a live lease refused with the holder's peer name; by the holder marks released; of a stale lease succeeds from anywhere; --remove refuses unmerged commits without --force and deletes worktree and branch with it" {
@@ -809,7 +827,7 @@ PY
   LS create >/dev/null                        # window 01, unbound, made from an operator shell
   snap() { ( cd "$DAEDALUS_HOME/state/leases" && ls -A | sort && cat ./*.json ./*.changed 2>/dev/null ) | shasum; }
   before="$(snap)"
-  for args in "create" "claim 01" "spawn do-a-thing" "prime take" "alias 01 poc" "note 01 x" "update 01 --criteria c.md" "release 01" "done 01 --summary s" "sweep"; do
+  for args in "create" "claim 01" "spawn do-a-thing" "prime take" "alias 01 poc" "note 01 x" "task 01 x" "update 01 --criteria c.md" "release 01" "done 01 --summary s" "sweep"; do
     DIRECT_CALL_ID=call-1 CLAUDE_CODE_SESSION_ID=sV run LS $args
     [ "$status" -eq 1 ] || { echo "$args -> status $status: $output"; return 1; }
     case "$output" in
