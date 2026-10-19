@@ -4,6 +4,59 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.1 — released windows clear themselves, a skipped number says why, and memory reads up by either path
+
+**In short.** A released window no longer sits on the board until you
+sweep it. When a new window takes a higher number than you expect, Daedalus
+says why. The memory row on the service band reads up when memory works,
+whether it goes through the REST API or through MCP tools.
+
+**What went wrong.**
+- A released window kept its number until someone ran
+  `core/lease.sh sweep`. Nothing ran it on its own.
+- A number held by unpromoted commits on `lease/NN`, or by a worktree
+  checked out on another branch, was skipped with no word. The board showed
+  nothing there, so a new window took 05 beside an empty-looking 02.
+- The memory row looked only for MCP tools. A home that reaches memory
+  through the REST API alone, with no MCP server, read down while memory
+  worked.
+
+**What changed.**
+- A released window is removed at the next window start once its process
+  is gone. Its worktree and branch are kept, as `sweep` keeps them.
+- At exit, a session removes its own lease when it released it. A `/clear`
+  keeps it, and so does a session still open in another terminal. This is a
+  new SessionEnd hook in `.claude/settings.json`.
+- A released lease with no recorded process waits for that exit or for
+  `sweep`. A heartbeat's age is not proof the terminal closed.
+- Start and `create` say in one line why lower numbers were passed over.
+- The band shows a number held by unpromoted work as its own row. Doctor
+  names a worktree checked out on another branch.
+- `core/status.py --json` reports whether a memory MCP server is
+  configured, read from Claude Code's own config files.
+- The memory row is up when the MCP tools are connected. With no MCP server
+  configured, it is up when the memory server and capture are up.
+- It reads down only when a configured MCP server's tools never appear.
+  Only then does it show the `/mcp` line.
+- When the memory server itself is down, the row reads blocked. It is dim
+  and not counted twice.
+- Mods: lease-board 0.1.4, service-status 0.1.1.
+
+**What you will see.**
+- At start, a line such as
+  `Numbered 03, not a lower number: 02 is released and its session is still open.`
+- On the band, a row such as
+  `swept — 3 unpromoted commits waiting — say "this is window 02" to continue it`.
+- On a home with no memory MCP server, the memory row reads up, and
+  `services ok` when the rest are up.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.12.0 -> 0.12.1; doctor OK.`
+The new exit hook and both mod updates come with it.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.1`. A released
+window is gone from the board once its terminal is closed.
+
 ## v0.12.0 — daedalus start, and one command for every home
 
 **In short.** `daedalus start` starts Daedalus in the right home. It shows
