@@ -68,7 +68,8 @@ elif git -C "$DAEDALUS_HOME" ls-files --error-unmatch vault >/dev/null 2>&1; the
   done <<EOF
 $(git -C "$G" -c core.quotepath=false diff --cached --name-only)
 EOF
-  [ -z "$staged" ] || die "the repository holding the vault has staged changes outside vault/ (${staged% }); commit or unstage them first, then run core/vault-commit.sh again"
+  # (--pending commits named paths with --only, which other staged work cannot ride on)
+  [ -z "$staged" ] || [ "$pending_only" -eq 1 ] || die "the repository holding the vault has staged changes outside vault/ (${staged% }); commit or unstage them first, then run core/vault-commit.sh again"
 else
   die "the vault at $V is neither its own git repository nor tracked by the Daedalus home repository ($DAEDALUS_HOME)"
 fi
@@ -171,6 +172,14 @@ fi
 leases="$(python3 "$LL" numbers 2>&1)" || die "${leases#daedalus: }"
 leases="$(printf '%s\n' "$leases" | tr '\n' ',' | sed 's/^,*//; s/,$//; s/,/, /g')"
 report="$(python3 "$DAEDALUS_HOME/core/verifylib.py" --vault-claims)" || die "the vault's claims could not be checked, so nothing was staged"
+# Session logs, read here with the other lease inputs (never after staging): one TSV row per reserved log —
+# path, owner, mine, hold (another session still open and not closed: its work in progress).
+logrows="$(python3 "$LL" vault-logs)" || die "the session logs could not be judged, so nothing was staged"
+logrows="$(printf '%s\n' "$logrows" | python3 -c 'import json,sys
+for ln in sys.stdin:
+    if ln.strip():
+        d=json.loads(ln); print("\t".join([d["path"], d["owner"], "1" if d["mine"] else "0", "1" if d["hold"] else "0"]))')" \
+  || die "the session logs could not be judged, so nothing was staged"
 skip=""
 while IFS= read -r row; do
   [ -n "$row" ] || continue
@@ -201,17 +210,15 @@ $skip
 EOF
 # Session logs: another open session's log is its work in progress (left out, named); every other session's log in
 # this commit is carried, and the line names whose.
-logrows="$(python3 "$LL" vault-logs 2>&1)" || die "${logrows#daedalus: }"
 held=""; carried=""
-while IFS= read -r row; do
-  [ -n "$row" ] || continue
-  f="$(printf '%s' "$row" | python3 -c 'import json,sys
-d=json.load(sys.stdin); print("\t".join([d["path"], d["owner"], "1" if d["mine"] else "0", "1" if d["hold"] else "0"]))')"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
   rel="${f%%	*}"; rest="${f#*	}"; owner="${rest%%	*}"; rest="${rest#*	}"; mine="${rest%%	*}"; hold="${rest#*	}"
   gp="$(git_path "$rel")"
   [ -n "$(git -C "$G" diff --cached --name-only -- "$gp")" ] || continue
   if [ "$hold" = 1 ]; then
-    git -C "$G" reset -q -- "$gp"; held="${held:+$held, }$owner"
+    retry_git reset -q -- "$gp" >/dev/null || die "could not leave $(basename "$rel") out of the commit (git reset failed); nothing was committed"
+    held="${held:+$held, }$owner"
   elif [ "$mine" = 0 ]; then
     carried="${carried:+$carried, }$owner ($(basename "$rel" .md))"
   fi

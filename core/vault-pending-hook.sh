@@ -8,11 +8,9 @@ d="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 payload="$(cat 2>/dev/null)"
 set -- "$d"/state/vault-pending/*.json
 [ -e "$1" ] || exit 0
-sid="$(printf '%s' "$payload" | python3 -c 'import json,sys
-try:
-    d=json.load(sys.stdin); print(d.get("session_id") or "")
-except Exception:
-    pass' 2>/dev/null)"
+# Every window but the pen's holder stops here, on two greps: no python in a window that is not the holder.
+sid="$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 [ -n "$sid" ] || exit 0
+grep -qF "\"$sid\"" "$d/state/leases/prime.json" 2>/dev/null || exit 0
 DAEDALUS_SESSION_ID="$sid" bash "$d/core/vault-commit.sh" --pending </dev/null >/dev/null 2>&1
 exit 0

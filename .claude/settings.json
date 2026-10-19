@@ -38,7 +38,7 @@
     ],
     "SessionEnd": [{"hooks": [{"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/capture-tick.sh --final", "timeout": 5},
                               {"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/leaselib.py session-end", "timeout": 3},
-                              {"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/vault-pending-hook.sh", "timeout": 5}]}],
+                              {"type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR\"/core/vault-pending-hook.sh", "timeout": 10}]}],
     "PreCompact": [
       {"hooks": [{"type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR\"/core/pitfall-inject.py", "timeout": 5}]}
     ]

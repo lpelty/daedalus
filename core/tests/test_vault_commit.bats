@@ -328,3 +328,27 @@ PY
   run stop_hook sA; [ "$status" -eq 0 ]; [ -z "$output" ]
   python3 -c "import time,sys; sys.exit(0 if time.time() - $t0 < 1.0 else 1)"
 }
+
+@test "a window that goes on after its close writes to its log again: the marker no longer counts, so the holder neither commits nor carries it until that window closes again (review M1)" {
+  own_log 02 sB 2026-10-19 7
+  run closes sB; [ "$status" -eq 3 ]
+  sleep 1; printf '## Continued\n' >> "$DAEDALUS_HOME/vault/sessions/2026/10/2026-10-19-007.md"
+  n0="$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)"
+  run stop_hook sA; [ "$status" -eq 0 ]
+  [ "$(git -C "$DAEDALUS_HOME/vault" rev-list --count HEAD)" = "$n0" ]
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" -m "holder"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"left out, still being written: the session log of window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run closes sB; [ "$status" -eq 3 ]
+  run stop_hook sA; [ "$status" -eq 0 ]
+  git -C "$DAEDALUS_HOME/vault" show HEAD:sessions/2026/10/2026-10-19-007.md | grep -q 'Continued'
+}
+
+@test "the plain sentence is said only when another live session holds the pen; with the holder ended the log is still marked, nothing false is said; a visitor marks nothing (review M2)" {
+  own_log 02 sB 2026-10-19 7
+  printf '{"session_id":"sGone","history":[]}' > "$DAEDALUS_HOME/state/leases/prime.json"   # a holder in no registry
+  run env DAEDALUS_SESSION_ID=sB python3 "$DAEDALUS_HOME/core/leaselib.py" mark-log-pending; [ "$status" -eq 0 ]; [ -z "$output" ]
+  [ -f "$DAEDALUS_HOME/state/vault-pending/2026-10-19-007.json" ]
+  rm -rf "$DAEDALUS_HOME/state/vault-pending"
+  run env DIRECT_CALL_ID=x DAEDALUS_SESSION_ID=sB python3 "$DAEDALUS_HOME/core/leaselib.py" mark-log-pending; [ "$status" -eq 0 ]; [ -z "$output" ]
+  [ ! -e "$DAEDALUS_HOME/state/vault-pending" ]
+}

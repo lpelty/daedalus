@@ -4193,7 +4193,10 @@ def pending_dir(root: Path) -> Path:
 
 def pending_logs(root: Path) -> List[str]:
     """The home-relative log paths closed windows left for the pen's holder (one marker file each). Lock-free: the
-    markers are written whole (tmp + os.replace) and only ever added or removed."""
+    markers are written whole (tmp + os.replace) and only ever added or removed. A marker counts only while its log
+    is as it was at the close (same mtime_ns): a session that goes on after close.sh — another question, a restart the
+    same day — writes to the same log, and from then on that log is its work in progress again, never committed by
+    the pen's holder until it closes again (review 2026-10-19, M1)."""
     d = pending_dir(root)
     out = []
     try:
@@ -4204,11 +4207,18 @@ def pending_logs(root: Path) -> List[str]:
         if not name.endswith(".json"):
             continue
         try:
-            rel = json.loads((d / name).read_text()).get("path")
+            m = json.loads((d / name).read_text())
+            rel, at = m.get("path"), m.get("mtime_ns")
         except (OSError, ValueError, AttributeError):
             continue
-        if isinstance(rel, str) and _LOG_PATH_RE.match(rel):
-            out.append(rel)
+        if not (isinstance(rel, str) and _LOG_PATH_RE.match(rel)):
+            continue
+        try:
+            if os.stat(str(root / rel)).st_mtime_ns != at:
+                continue
+        except OSError:
+            continue
+        out.append(rel)
     return out
 
 
@@ -4242,24 +4252,30 @@ def _session_reservations(root: Path, leases: Dict[str, dict], sid: str) -> List
 
 
 def mark_log_pending(root: Path, sid: Optional[str]) -> str:
-    """close.sh, when vault-commit.sh left the vault to a live pen holder (exit 3): mark this session's own logs
-    that exist on disk as pending for the holder and say so in one plain sentence. Nothing for an operator shell."""
-    if not sid or not leases_dir(root).is_dir():
+    """close.sh, when vault-commit.sh did not commit here (exit 3): mark this session's own logs that exist on disk
+    as closed, so whichever session commits the vault next carries them (a marker keeps a log from being held as
+    work in progress). The plain sentence — "Your log is saved; window NN holds the pen and commits it." — only when
+    the pen's holder is another session that is live; every other exit 3 already said its own line (review
+    2026-10-19, M2). Nothing for an operator shell or a direct-call visitor, which holds no log."""
+    if not sid or os.environ.get("DIRECT_CALL_ID") or not leases_dir(root).is_dir():
         return ""
     with lock(root, shared=True):
         leases = read_all(root)
         mine = [p for p in _session_reservations(root, leases, sid) if (root / p).is_file()]
         holder = (leases.get("prime") or {}).get("session_id")
-        who = _holder_words(leases, str(holder))[0] if holder else "the next window to close"
+        who = None
+        if holder and holder != sid and holder_ended(root, leases, holder) is False:
+            who = _holder_words(leases, str(holder))[0]
     if not mine:
         return ""
     d = pending_dir(root)
     d.mkdir(parents=True, exist_ok=True)
     for rel in mine:
         tmp = d / (".%s.%d.tmp" % (Path(rel).stem, os.getpid()))
-        tmp.write_text(json.dumps({"path": rel, "session_id": sid, "at": now_stamp()}))
+        tmp.write_text(json.dumps({"path": rel, "session_id": sid, "at": now_stamp(),
+                                   "mtime_ns": os.stat(str(root / rel)).st_mtime_ns}))
         os.replace(str(tmp), str(d / (Path(rel).stem + ".json")))
-    return "Your log is saved; %s holds the pen and commits it." % who
+    return ("Your log is saved; %s holds the pen and commits it." % who) if who else ""
 
 
 def vault_log_rows(root: Path, sid: Optional[str]) -> List[dict]:
