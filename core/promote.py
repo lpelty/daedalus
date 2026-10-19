@@ -1007,7 +1007,7 @@ def tty_yes(root: Path, p: dict) -> dict:
     decision, _ = decision_block(root, p)
     paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --confirm`" % (root, p["lease"])
     try:
-        text, name = tl.tty_answer("%s\n\nType yes to push window %s's work to %s: " % (decision, p["lease"], p["trunk"]),
+        text, name = tl.tty_answer("%s\n\nPush window %s's work to %s? " % (decision, p["lease"], p["trunk"]),
                                    root)
     except tl.NotAPerson as e:
         raise Stop("The confirm must be typed by a person in their own terminal: %s. %s" % (e, paste))

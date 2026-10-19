@@ -4,6 +4,92 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.2 — your yes in your own words, a small fix stops looping in review, and the window holding the pen commits every window's log
+
+**In short.** Deleting a window's work and promoting take your consent in
+whatever words you give it. Nothing has to be typed word for word or answer a
+set line. A window with nothing to lose is deleted without asking, and one yes
+deletes several windows. A small fix no longer goes round the review loop
+forever. A window's session log no longer depends on the order you close
+windows in.
+
+**What went wrong.**
+- The delete and the promote looked for one exact line, and your yes counted
+  only as your first reply after it.
+- A yes to a reply that covered two windows was refused. So was "delete", and
+  so was a reason given after a question or a notification.
+- A yes typed at the prompt was sometimes refused as added to the file
+  afterwards: the check read the transcript before the reply was written.
+- A window with no commits and no changes still needed a report and a yes, and
+  deleting several looped, one window per yes.
+- The reviewer refuted a change on any finding. A finding that needs an input
+  nobody has seen blocked a promote as hard as a real one. A small fix grew
+  each round and never passed.
+- A window that closed while another held the pen left its log uncommitted
+  until that window happened to commit again. Sometimes that was the next day,
+  unless you closed the windows in the right order.
+
+**What changed.**
+- After the report or the prepare, your latest message that agrees or asks for
+  the action is the yes. Questions, answers and notifications between do not
+  matter.
+- Yes, ok, go ahead, delete them, push the work and ship it all count. So does
+  a sentence that agrees beside a question.
+- Anything else you say after it takes its place: a no in any words, wait,
+  keep it, not yet, push it tomorrow, yes if tests pass.
+- A message that is only a question changes nothing. A bare ok beside a
+  question is not a yes.
+- Your words must still be typed by you in that session. A yes the agent wrote,
+  or a line added to the file, is refused.
+- The check reads the transcript again for about two seconds before it refuses
+  a yes whose reply is not written yet.
+- A window with no unpromoted commit, no uncommitted file and its worktree on
+  its own branch is deleted at once, saying no yes was needed.
+- `core/lease.sh unpromoted 02 03 04` reports several windows, and
+  `core/lease.sh release 02 03 04 --remove` deletes them under one yes.
+- One yes answers one report. Windows reported apart are refused until one
+  report names them all.
+- A yes that names some of the windows deletes none ("yes, but only 02"). A
+  change in any window since the report refuses the whole delete by name.
+- To skip a refuted review, your yes needs a reason of three words or more,
+  in the same message or the one just before it.
+- The report and the promote block end with a plain question that nothing
+  checks.
+- Each finding the reviewer writes now says how likely its input is:
+  observed, plausible or hypothetical. It also says whether it falls inside
+  the change's scope.
+- Only in-scope observed or plausible findings of high or medium severity
+  refute a change. Any observed high one does too. The rest are listed for you
+  and set aside.
+- The verdict is worked out from those labels, not taken from the reviewer's
+  last line. A review that cannot be read still fails.
+- Criteria now carry a Scope section: what is covered, what it rests on, and
+  what is out.
+- After a window's branch is refuted twice, the gates print your three
+  choices instead of starting another round.
+- If you close a window while another window holds the pen, that window
+  commits the log when its current turn ends or when it closes.
+- The window holding the pen leaves out the log of any window that is still
+  open, because that log is still being written. It names the windows whose
+  logs it committed.
+
+**What you will see.**
+- After a report, "delete them" or "ok" deletes the windows it named.
+- After a prepare, "Same reason: just push the work." skips the review.
+- A window with nothing on it is deleted with the line
+  `Window 03 had no unpromoted commits and no uncommitted changes, so no yes was needed.`
+- Promote's summary says how many findings were set aside.
+- Closing a window while another holds the pen says
+  `Your log is saved; window 01 holds the pen and commits it.`
+- You never move the pen to get a log committed.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. A promotion prepared before the update is prepared again,
+because the review's instructions changed.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.2`. The promote block
+ends with `Push window 02's work to main?`.
+
 ## v0.12.1 — released windows clear themselves, a skipped number says why, and memory reads up by either path
 
 **In short.** A released window no longer sits on the board until you

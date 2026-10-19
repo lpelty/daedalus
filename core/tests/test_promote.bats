@@ -718,9 +718,9 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]; refuted_
   work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   m="$(pj merge_sha)"; pid="$(pj promote_id)"
-  run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm
+  run type_into "yes" "work to main? " bash "$PROMOTE" 02 --confirm
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"Ready to promote window 02's work onto main."*"Type yes to push window 02's work to main: "*"Promoted window 02's work to main (merge commit ${m:0:7};"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Ready to promote window 02's work onto main."*"Push window 02's work to main? "*"Promoted window 02's work to main (merge commit ${m:0:7};"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(origin_main)" = "$m" ]
   python3 - "$DAEDALUS_HOME" "$pid" "$m" "$(pj run_id)" <<'PY'
 import json, sys
@@ -746,7 +746,7 @@ PY
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   m="$(pj merge_sha)"; pid="$(pj promote_id)"; S="$DAEDALUS_HOME/state/promote/$pid/pushed"
   printf 'local\n' >> "$T/a.txt"; before="$(git -C "$T" rev-parse HEAD)"
-  run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm
+  run type_into "yes" "work to main? " bash "$PROMOTE" 02 --confirm
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"target/thing has uncommitted changes; the trunk ref is updated, the checkout is untouched."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(git -C "$T" rev-parse HEAD)" = "$before" ]; [ "$(origin_main)" = "$m" ]
@@ -764,7 +764,7 @@ PY
 @test "tty mode: anything but an acknowledgement at the terminal pushes nothing; a transcribed confirm's stamp is never announced as pushed from a shell" {
   work_on_02; printf 'promote:\n  confirm: tty\n' >> "$DAEDALUS_HOME/config.yaml"
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"
-  run type_into "not yet" "Type yes to push" bash "$PROMOTE" 02 --confirm
+  run type_into "not yet" "work to main? " bash "$PROMOTE" 02 --confirm
   [ "$status" -eq 2 ]; case "$output" in *"The operator's words are not an acknowledgement (typed: \"not yet\"). Nothing was pushed."*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(origin_main)" = "$before" ]
   sed -i '' 's/^  confirm: tty$/  confirm: transcribed/' "$DAEDALUS_HOME/config.yaml"
@@ -922,7 +922,7 @@ PY
   run type_into "a docs-only change" "without the review?" bash "$PROMOTE" 02 --skip-review
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(pj review_skipped_reason)" = "a docs-only change" ]; [ "$(pj skip_typed.text)" = "a docs-only change" ]
-  run type_into "yes" "Type yes to push" bash "$PROMOTE" 02 --confirm; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run type_into "yes" "work to main? " bash "$PROMOTE" 02 --confirm; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
 
