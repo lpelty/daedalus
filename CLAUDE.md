@@ -483,7 +483,9 @@ least the gates' time plus `verify.refute_timeout` (600 s default), or in the
 background — a timeout kills the run mid-review and it must be re-done. The review
 is a receipted call: to ask the reviewer about a finding, run
 `core/call-agent.sh --resume-review <NN> "<the operator's question>"` and repeat
-its answer — advice, never a new verdict.
+its answer — advice, never a new verdict. After a lens review it names each
+lens's call instead; the merged review says which lens found the finding, and
+`core/call-agent.sh --resume <call-id> "<question>"` asks that one.
 
 Criteria you write for a review (`GATES_CRITERIA=<file>`, a window's
 `core/lease.sh update <NN> --criteria <file>`) end with a **Scope** section:

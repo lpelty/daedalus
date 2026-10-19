@@ -1116,7 +1116,10 @@ review names it (`managed-claude-md:`).
 what it meant — the same session, with its findings in context —
 `core/call-agent.sh --resume-review 02 "Finding F2 says the lock is not
 released on the error path. Show me the line."` resumes the most recent
-review of window 02. The answer is advice, never a verdict: a resumed review
+review of window 02. After a lens review (several reviewers at once) it
+resumes none of them: it names each lens's call, and the merged review says
+which lens found each finding — `core/call-agent.sh --resume <call-id> "…"`
+asks that one. The answer is advice, never a verdict: a resumed review
 cannot write the review file, and a new verdict needs a new run.
 
 It is **on by default**: an unset `verify.refute` means `true`. To turn it

@@ -337,3 +337,14 @@ assert 'L2' in f and f['L2']['what']=='a new defect.', d" "$DAEDALUS_HOME/state/
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ $(( $(date +%s) - start )) -ge 4 ] || { echo "one at a time took $(( $(date +%s) - start ))s"; return 1; }
 }
+
+@test "--resume-review after a lens run names each lens's call instead of resuming one lens as if it were the review" {
+  write_config; lease_for 03; large_change
+  gates
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  PATH="$STUB:$PATH" run bash "$DAEDALUS_HOME/core/call-agent.sh" --resume-review 03 "why F1?"
+  [ "$status" -eq 2 ] || { echo "$output"; return 1; }
+  case "$output" in *"Window 03's latest review (run "*") was 4 reviewers at once, one per lens: criteria "*", failure "*", trust "*", upgrade "*"core/call-agent.sh --resume <call-id>"*) : ;; *) echo "$output"; return 1 ;; esac
+  # nothing was resumed: no reviewer ran past the four lenses
+  [ "$(ls "$STUB" | grep -c '^prompt-')" -eq 4 ]
+}
