@@ -12,6 +12,8 @@ setup() {
   mkdir -p "$H/state"
   : > "$H/config.yaml"
   TD="$BATS_TEST_TMPDIR/transcripts"; mkdir -p "$TD"
+  # Claude Code's config directory, where its .claude.json lives when the variable is set: a fixture, never the real one
+  export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/claude-config"; mkdir -p "$CLAUDE_CONFIG_DIR"
   PIDS=()
 }
 
@@ -66,7 +68,8 @@ memory_block() { printf 'memory:\n  bank: test\n  api_url: %s\n  capture_interva
 import json, sys, time
 from datetime import datetime
 d = json.loads(sys.argv[1])
-assert set(d) == {"services", "checked_at"}, d
+assert set(d) == {"services", "checked_at", "memory_mcp"}, d
+assert set(d["memory_mcp"]) == {"configured", "detail"} and d["memory_mcp"]["configured"] in (True, False, None), d
 assert [s["stem"] for s in d["services"]] == ["hindsight", "capture", "vault-index", "ami", "code-graph"], d
 for s in d["services"]:
     assert set(s) == {"stem", "name", "state", "detail"}, s
@@ -120,6 +123,81 @@ PY
   printf 'memory:\n  bank: test\n' > "$H/config.yaml"
   run env -u HINDSIGHT_API_URL python3 "$ST" --json --home "$H"
   case "$(field hindsight detail)" in "127.0.0.1:8888 "*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# mcp — the memory_mcp object of the last `run S`, as "<configured> <detail>"
+mcp() {
+  printf '%s' "$output" | python3 -c 'import json, sys
+m = json.load(sys.stdin)["memory_mcp"]
+print("%s %s" % ({True: "true", False: "false", None: "null"}[m["configured"]], m["detail"]))'
+}
+
+# claude_json <python literal> — the fixture .claude.json in CLAUDE_CONFIG_DIR
+claude_json() { python3 -c 'import ast, json, sys; json.dump(ast.literal_eval(sys.argv[1]), open(sys.argv[2], "w"))' "$1" "$CLAUDE_CONFIG_DIR/.claude.json"; }
+
+@test "the memory MCP server (PROP-027): not configured with no .claude.json and no .mcp.json; another project's, or another name, does not count" {
+  REAL="$(cd "$H" && pwd -P)"
+  run S
+  [ "$status" -eq 0 ]
+  [ "$(mcp)" = "false no MCP server named hindsight in any scope" ] || { echo "$output"; return 1; }
+  claude_json "{'mcpServers': {'notion': {}}, 'projects': {'/elsewhere': {'mcpServers': {'hindsight': {}}}, '$REAL': {'mcpServers': {'chroma': {}}}}}"
+  run S
+  [ "$(mcp)" = "false no MCP server named hindsight in any scope" ] || { echo "$output"; return 1; }
+}
+
+@test "the memory MCP server (PROP-027): configured at local scope (the home's real path, or its path as given), user scope, or project scope (.mcp.json)" {
+  REAL="$(cd "$H" && pwd -P)"
+  claude_json "{'projects': {'$REAL': {'mcpServers': {'hindsight': {'type': 'http'}}}}}"
+  run S
+  [ "$(mcp)" = "true local scope ($CLAUDE_CONFIG_DIR/.claude.json)" ] || { echo "$output"; return 1; }
+  claude_json "{'projects': {'$H': {'mcpServers': {'hindsight': {'type': 'http'}}}}}"
+  run S
+  [ "$(mcp)" = "true local scope ($CLAUDE_CONFIG_DIR/.claude.json)" ] || { echo "$output"; return 1; }
+  claude_json "{'mcpServers': {'hindsight': {'type': 'http'}}}"
+  run S
+  [ "$(mcp)" = "true user scope ($CLAUDE_CONFIG_DIR/.claude.json)" ] || { echo "$output"; return 1; }
+  rm "$CLAUDE_CONFIG_DIR/.claude.json"
+  printf '{"mcpServers": {"hindsight": {"type": "http"}}}' > "$H/.mcp.json"
+  run S
+  [ "$(mcp)" = "true project scope ($REAL/.mcp.json)" ] || [ "$(mcp)" = "true project scope ($H/.mcp.json)" ] || { echo "$output"; return 1; }
+}
+
+@test "the memory MCP server (PROP-027): a .claude.json that cannot be read is unknown (null), never a guess; the rows are unchanged" {
+  printf '{not json' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  run S
+  [ "$status" -eq 0 ]
+  case "$(mcp)" in "null $CLAUDE_CONFIG_DIR/.claude.json could not be read"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(field hindsight state)" = not-set-up ]
+  # nested past the parser's depth: RecursionError is unknown too, never a crash (review finding 5)
+  python3 -c 'import sys; open(sys.argv[1], "w").write("[" * 1000000)' "$CLAUDE_CONFIG_DIR/.claude.json"
+  run S
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$(mcp)" in "null $CLAUDE_CONFIG_DIR/.claude.json could not be read"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the memory MCP server (PROP-027): a config directory that cannot be searched is unknown, not absent (review finding 4)" {
+  [ "$(id -u)" != 0 ] || skip "root reads through mode 000"
+  claude_json "{'mcpServers': {'hindsight': {}}}"
+  chmod 000 "$CLAUDE_CONFIG_DIR"
+  run S
+  chmod 755 "$CLAUDE_CONFIG_DIR"
+  case "$(mcp)" in "null $CLAUDE_CONFIG_DIR/.claude.json could not be read"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "the memory MCP server (PROP-027): a server disabled for this project is not configured here — its tools never come, by choice (review finding 2)" {
+  REAL="$(cd "$H" && pwd -P)"
+  claude_json "{'mcpServers': {'hindsight': {}}, 'projects': {'$REAL': {'disabledMcpServers': ['hindsight']}}}"
+  run S
+  [ "$(mcp)" = "false hindsight is configured but disabled for this project" ] || { echo "$output"; return 1; }
+  claude_json "{'projects': {'$REAL': {'disabledMcpjsonServers': ['hindsight']}}}"
+  printf '{"mcpServers": {"hindsight": {"type": "http"}}}' > "$H/.mcp.json"
+  run S
+  [ "$(mcp)" = "false hindsight is configured but disabled for this project" ] || { echo "$output"; return 1; }
+  # disabled for another project only: still configured here
+  claude_json "{'mcpServers': {'hindsight': {}}, 'projects': {'/elsewhere': {'disabledMcpServers': ['hindsight']}}}"
+  rm "$H/.mcp.json"
+  run S
+  [ "$(mcp)" = "true user scope ($CLAUDE_CONFIG_DIR/.claude.json)" ] || { echo "$output"; return 1; }
 }
 
 # capture fixtures: offsets.json naming one transcript, captured <cap> seconds ago up to its current size, then rows

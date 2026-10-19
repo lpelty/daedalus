@@ -47,12 +47,27 @@ band could read it unchanged:
 | vault search | `vault-index` | `recall.store` is a readable directory | no `recall:` block |
 | decider | `ami` | frame-jack is on and the daemon's port answers | no `ami:` block, or frame-jack never switched on, off, or paused on battery |
 | code graph | `code-graph` | `context.graph` is executable | no `context:` block |
-| memory tools | `memory-tools` | the session's tool list holds an `mcp__hindsight__` tool | where the memory server is not set up |
+| memory tools | `memory-tools` | the session's tool list holds an `mcp__hindsight__` tool; or, with no hindsight MCP server configured, the memory server and capture are up | where the memory server is not set up |
 
-The memory tools are checked in the mod, from the session's tool list, with a
-15-second grace after start while MCP servers connect. When they are missing
-and the memory server is up, the pane says what to do: `Memory tools aren't
-connected. Type /mcp and reconnect hindsight.`
+Memory reaches Hindsight by either road: the hindsight MCP server's tools, or
+the REST API that capture and recall use (PROP-027). `status.py --json` also
+prints `"memory_mcp": {"configured": true | false | null, "detail"}` — whether
+an MCP server named `hindsight` is configured for this home, read from Claude
+Code's `.claude.json` (local and user scope) and the home's `.mcp.json`
+(project scope); `null` when a file could not be read.
+
+With one configured, the memory tools are checked in the mod, from the
+session's tool list, with a 15-second grace after start while MCP servers
+connect. When they are missing and the memory server is up, the pane says what
+to do: `Memory tools aren't connected. Type /mcp and reconnect hindsight.`
+With none configured, the row is up at once while the memory server and
+capture are, with no grace and no `/mcp` line: there is no server to
+reconnect. A server configured but disabled for this project counts as none.
+
+The row counts down only for what no other row says: a configured server
+whose tools never came. While the memory server (or, with no MCP server,
+capture) is down, the row reads `blocked`, dim and counted neither way, naming
+that row: never a second name in the band, and never up over a dead server.
 
 It reads only: it never restarts or fixes a service. `python3 core/status.py`
 (without `--json`) prints the same rows for a person at a shell.
