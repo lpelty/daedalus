@@ -95,6 +95,66 @@ own journal, is not denied by the distribution since 2026-10-15, and no
 release changes it (a test pins the tracked file to its seed); `daedalus
 update` keeps the deployment's copy.
 
+## Starting Daedalus (`daedalus start`)
+
+Type one command in a terminal:
+
+```
+daedalus start
+```
+
+It goes to the home, prints the banner and one line under it,
+`Daedalus 0.12.0 · lares · ~/daedalus-lares`, then one line per service this
+deployment set up, from `core/status.py`:
+
+```
+✓ memory server
+✗ memory capture — last capture 40 min ago
+```
+
+A service that was never set up is left out. When the check fails or takes
+more than 2 seconds the line is `services: couldn't check`. It starts, stops
+and fixes nothing, and a service that is down never stops the start. The
+screen holds for `start.pause` seconds (`config.yaml`, default 1.5; 0 skips
+it), then Claude Code takes the terminal.
+
+- `daedalus start --window 03` starts the session in window 03
+  (`DAEDALUS_LEASE=03`): the way back into a window you parked.
+- Anything after `--` goes to Claude Code: `daedalus start -- --resume`.
+- The banner is `banner.txt` in the home when there is one (git-ignored, like
+  `config.yaml`), else the release's `core/banner.txt`.
+
+### Which home a command means
+
+Every verb — `start`, `update`, `version` — picks its home the same way:
+
+1. a name on the command: `daedalus start lares`, `daedalus update work`;
+2. else the home the current directory is in, from anywhere under it (a
+   window's worktree too);
+3. else the default home. With exactly one home, that is the default.
+
+An unknown name is refused with the valid names, exit 2. So is a bare command
+outside every home when there are several homes and no default. A command
+never falls back to some other home.
+
+The homes are listed in `~/.config/daedalus/homes.json`
+(`$XDG_CONFIG_HOME/daedalus/` when that is set). `core/setup.sh` and the
+upgrade register their home. Its name is the folder's name without a leading
+`daedalus-` (`daedalus-lares` is `lares`), and a folder named `daedalus` is
+`main`.
+
+```
+daedalus homes                        # each home, its path, the default, any gone
+daedalus homes rename main work
+daedalus homes default work
+```
+
+A home whose folder is gone is listed as gone and never used. One
+`~/.local/bin/daedalus` serves every home. Setup and the upgrade rewrite a
+shim from an earlier release, which served one home, and register that home
+too. They never touch a file there they did not write. Doctor says
+`OK       daedalus command: 2 homes, default work`.
+
 ## Upgrading
 
 Close every Daedalus window, then type one command in a terminal:
@@ -231,8 +291,9 @@ line when it does:
    the upgrade or `lease.sh` runs touches a submodule's files, even where
    `submodule.recurse` is set. A checkout or reset "pick it up" began and was
    cut off is finished by the next start, or by picking it up again;
-7. installs the daedalus command at `~/.local/bin/daedalus`, never over a file
-   it did not write, and says how to reach it from your shell;
+7. registers the home and installs the daedalus command at
+   `~/.local/bin/daedalus`, one for every home, never over a file it did not
+   write, and says how to reach it from your shell;
 8. says, once, that a callee named the 0.9.0 way (`direct_call.callee_name`)
    now has a key, its name in lower case, and that nothing needs changing; it
    never writes `config.yaml`;

@@ -4,6 +4,65 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.0 — daedalus start, and one command for every home
+
+**In short.** `daedalus start` starts Daedalus in the right home. It shows
+the banner and whether the services are up, then Claude Code takes the
+terminal. The `daedalus` command now serves every home on the machine, not
+just one: a command means the home you name, else the one you are in, else
+the default.
+
+**What went wrong.** `~/.local/bin/daedalus` was written for one home. On a
+machine with two homes, `daedalus update` typed anywhere updated that one
+home, never the other.
+
+**What changed.**
+- `daedalus start [home] [--window NN] [-- <claude args>]` goes to the home,
+  prints the banner, a version line and one line per service, waits
+  `start.pause` seconds, then runs Claude Code in its place.
+- The service lines come from `core/status.py --json`. A service that was
+  never set up is left out. A failed or slow check is one line. Nothing is
+  started, stopped or fixed.
+- `--window NN` starts the session in window NN. Arguments after `--` go to
+  Claude Code.
+- The banner is the home's own `banner.txt` when it has one, git-ignored
+  like `config.yaml`. Otherwise it is the release's `core/banner.txt`.
+- `start`, `update` and `version` pick their home the same way: a name on
+  the command, else the home the current directory is in, else the default.
+- An unknown name is refused with the valid names, exit 2. So is a bare
+  command outside every home with several homes and no default. Nothing
+  falls back to another home.
+- The homes are listed in `~/.config/daedalus/homes.json`. Setup and the
+  upgrade register their home, named after its folder without a leading
+  `daedalus-`; a folder named `daedalus` is `main`.
+- `daedalus homes` lists them. `daedalus homes rename <old> <new>` and
+  `daedalus homes default <name>` edit the list.
+- One shim serves every home. The upgrade rewrites the old one-home shim it
+  wrote and registers the home that shim served. It still never touches a
+  file it did not write.
+- Doctor prints one more line: how many homes the command serves and which
+  is the default.
+
+**What you will see.**
+- `daedalus start` prints the banner, then
+  `Daedalus 0.12.0 · lares · ~/daedalus-lares`, then lines such as
+  `✓ memory server` or `✗ memory capture — last capture 40 min ago`.
+- The upgrade says, once, `Registered ~/daedalus-lares as lares in ~/.config/daedalus/homes.json.`
+- Where an old shim served another home, it says the shim now serves every
+  home (`daedalus homes lists them`).
+- Doctor: `OK       daedalus command: 2 homes, default work`. With several
+  homes and no default it is a NOTE naming `daedalus homes default <name>`.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. It prints `Daedalus updated 0.11.0 -> 0.12.0; doctor OK.`
+With a second home, then type `daedalus update` and its name, such as
+`daedalus update main`; `daedalus homes` lists the names. Set the default
+once, for example `daedalus homes rename main work`, then
+`daedalus homes default work`.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.0`. `daedalus homes`
+lists your homes. `daedalus start` shows the banner, then Claude Code.
+
 ## v0.11.0 — the services at a glance, beside the lease board
 
 **In short.** Every window now shows whether this deployment's services are
