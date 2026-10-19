@@ -574,6 +574,10 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; git -C "$DAEDALUS_HOME/target/thing" rev-parse -q --verify lease/01 >/dev/null
   run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sC","reason":"other"}'
   [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$L/03.json" ]
+  # /clear: the terminal goes on (session-start treats a clear as continuing the session) — its released lease stays
+  # until the terminal really ends, as before
+  run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sB","reason":"clear"}'
+  [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$L/02.json" ]
   for bad in 'not json' '{}' '[1]' '{"session_id":7}' ''; do
     run --separate-stderr SE "$bad"; [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "payload '$bad': $status $output $stderr"; return 1; }
   done

@@ -5725,7 +5725,10 @@ def main(argv: list) -> int:
         try:
             d = json.loads(sys.stdin.read() or "{}")
             sid = d.get("session_id") if isinstance(d, dict) else None
-            session_end_sweep(root, sid if isinstance(sid, str) else None)
+            # reason "clear": the terminal goes on (session-start reads a clear as continuing the session), so its
+            # released lease is left for the real end, or for the next start's reclaim once the process is gone
+            if isinstance(d, dict) and d.get("reason") != "clear":
+                session_end_sweep(root, sid if isinstance(sid, str) else None)
         except Exception:
             pass
         return 0
