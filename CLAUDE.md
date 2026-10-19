@@ -485,6 +485,18 @@ is a receipted call: to ask the reviewer about a finding, run
 `core/call-agent.sh --resume-review <NN> "<the operator's question>"` and repeat
 its answer — advice, never a new verdict.
 
+Criteria you write for a review (`GATES_CRITERIA=<file>`, a window's
+`core/lease.sh update <NN> --criteria <file>`) end with a **Scope** section:
+what the change covers, the evidence it rests on (the inputs actually seen),
+and what is out of scope. The reviewer labels each finding observed,
+plausible or hypothetical and in or out of that scope, and only in-scope
+observed or plausible HIGH or MEDIUM findings (or an observed HIGH) refute;
+the rest are listed and set aside. So promise only what the evidence covers:
+widening the criteria each round ("no input shape crashes it") hands every
+review an unmeetable claim. After the second refutation of your branch,
+`gates.sh` prints the operator's three choices; stop and ask which, and take
+their answer in their own words. Do not start a third round on your own.
+
 The AMI (the small local decision model behind `/frame-jack`) may be on.
 In this release it is a logged opinion and changes nothing you do: before a
 full suite run it answers "would a targeted run do?" (and, only where the

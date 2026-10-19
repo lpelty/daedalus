@@ -34,13 +34,119 @@ set +e
 # VERDICT: STANDS") must match neither.
 V='^[*#>0-9.[:space:]-]*VERDICT[*[:space:]]*:?[*[:space:]]*'
 E='[*[:space:].!]*$'
-# refute.sh --verdict-of <review file>: STANDS (exit 0), REFUTED (1), NONE (2). Runs nothing.
+# verdict_of <review file> — the verdict, from the file alone: STANDS (exit 0), REFUTED (1), NONE (2), the word on
+# stdout and the findings it did or did not count on stderr. The one place a review becomes a verdict: this run's
+# end and promote's re-read (--verdict-of) both call it, so the two can never disagree.
+#
+# The bar (2026-10-19). A reviewer told only "find what is wrong" always finds something in code that reads an
+# outside service's replies — a field that is a list, a number where text goes — and every such finding refuted as
+# hard as a real one, so a 40-line fix was refuted five runs running and grew to 250 lines answering inputs no
+# account had sent. So each finding carries three labels in its heading (charter, "Output format"): a severity
+# (HIGH, MEDIUM, LOW), its input's standing (observed — in the evidence, fixtures, criteria or the target's own
+# code paths; plausible — a stated, specific reason it could occur; hypothetical — possible, nothing points to it)
+# and its scope (in scope or out of scope of the criteria). What refutes: an in-scope observed or plausible HIGH or
+# MEDIUM finding, or an observed HIGH whatever its scope label (a real defect in the change is not waved off by
+# calling it out of scope). Everything else is listed on stderr as not counted, each with its labels, and the review
+# file keeps the reasoning. The reviewer's own VERDICT line is still required — it is how a truncated review is
+# told from a finished one — but in a labelled review the labels decide, in both directions.
+#
+# Fail closed: a labelled review in which any finding heading lacks a label, carries an unknown one or two of one
+# kind, or that has no verdict line, is NONE (exit 2) — never STANDS. A review with no labelled finding headings
+# (an older review re-read by promote, or a reviewer that did not label) keeps the grammar it was written for: the
+# reviewer's own VERDICT line, REFUTED first.
+verdict_of() {   # verdict_of <review file> run|reread|counts
+  python3 - "$1" "$2" <<'PY'
+import json, re, sys
+path, mode = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8", errors="replace").read()
+V = r"^[*#>0-9.\s-]*VERDICT[*\s]*:?[*\s]*"
+E = r"[*\s.!]*$"
+said = ("REFUTED" if re.search(V + "REFUTED" + E, text, re.M) else
+        "STANDS" if re.search(V + "STANDS" + E, text, re.M) else None)
+# A finding heading: F<n> at the start of a line after any number of #s or in bold, then a separator — so a
+# level-5 heading or a bold line is read as the finding it is, never skipped (review 2026-10-19, F1).
+# A heading is marked as one (#s or bold); a plain "F1 — nothing found." is prose.
+HEAD = re.compile(r"^[ \t>]*(?:#{1,6}[ \t]*(?:\*\*|__)?|\*\*|__)[ \t]*F(\d+)\b(?:\*\*|__)?[ \t]*([\u2014\u2013:|-].*)$", re.M)
+SEV, STAND = ("HIGH", "MEDIUM", "LOW"), ("observed", "plausible", "hypothetical")
+heads = [(m.group(1), [p.strip(" *`_:").lower() for p in re.split(r"\s*[\u2014\u2013|]+\s*|\s+-+\s+|^-+\s*|^:\s*", m.group(2))])
+         for m in HEAD.finditer(text)]
+def labels(parts):
+    sev = [p.upper() for p in parts if p.upper() in SEV]
+    st = [p for p in parts if p in STAND]
+    sc = ["in" if p in ("in scope", "in-scope") else "out" for p in parts
+          if p in ("in scope", "in-scope", "out of scope", "out-of-scope")]
+    return sev, st, sc
+labelled = [h for h in heads if labels(h[1])[1] or labels(h[1])[2]]
+def done(word, code, counts=None):
+    if mode == "counts":
+        print(json.dumps(counts or {"high": 0, "medium": 0, "low": 0, "set_aside": 0}))
+        sys.exit(0)
+    print(word)
+    sys.exit(code)
+def legacy():
+    sev = [s for _, parts in heads for s in labels(parts)[0][:1]]
+    c = {s.lower(): sev.count(s) for s in SEV}
+    c["set_aside"] = 0
+    if said == "REFUTED":
+        done("REFUTED", 1, c)
+    if said == "STANDS":
+        done("STANDS", 0, c)
+    done("NONE", 2, c)
+if not labelled and mode != "run":
+    legacy()                       # a review written before the labels (promote re-reads it): its own verdict line
+bad, counted, listed = [], [], []
+real = {"high": 0, "medium": 0, "low": 0}
+for n, parts in heads:
+    sev, st, sc = labels(parts)
+    if len(sev) != 1 or len(st) != 1 or len(sc) != 1:
+        bad.append("F%s (needs one severity, one of observed/plausible/hypothetical, and in or out of scope)" % n)
+        continue
+    tag = "F%s %s, %s, %s" % (n, sev[0], st[0], "in scope" if sc[0] == "in" else "out of scope")
+    refutes = (sc[0] == "in" and st[0] in ("observed", "plausible") and sev[0] in ("HIGH", "MEDIUM")) \
+        or (st[0] == "observed" and sev[0] == "HIGH")
+    if refutes or (sc[0] == "in" and st[0] != "hypothetical"):
+        real[sev[0].lower()] += 1
+    (counted if refutes else listed).append(tag)
+counts = dict(real, set_aside=len(heads) - len(bad) - sum(real.values()))
+if bad:
+    sys.stderr.write("review findings without their labels: %s — cannot certify the run\n" % "; ".join(bad))
+    done("NONE", 2, counts)
+if said is None:
+    sys.stderr.write("review has no VERDICT line (a truncated review?) — cannot certify the run\n")
+    done("NONE", 2, counts)
+if not heads and said == "REFUTED":
+    done("REFUTED", 1, counts)     # names no finding: a fail either way, and the reviewer's word is the safe one
+if counted:
+    sys.stderr.write("counted: %s\n" % "; ".join(counted))
+if listed:
+    sys.stderr.write("%d finding%s not counted (hypothetical, out of scope or LOW): %s\n"
+                     % (len(listed), "" if len(listed) == 1 else "s", "; ".join(listed)))
+if not counted:
+    # The rubric is the audit trail, not a second verdict (2026-10-19): a dimension scored FAIL with no finding
+    # that counts behind it is set aside like its findings, and said so.
+    fails = re.findall(r"^[\s*#>-]*\**(Correctness|Regression risk|Test honesty|Pitfall and boundary compliance|"
+                       r"Claim[^:*]*)\**\s*[:\u2014-]+\s*\**FAIL\b", text, re.M)
+    if fails:
+        sys.stderr.write("rubric FAIL on %s set aside: no finding that counts supports it\n" % ", ".join(fails))
+done("REFUTED", 1, counts) if counted else done("STANDS", 0, counts)
+PY
+}
+# refute.sh --verdict-of <review file>: STANDS (exit 0), REFUTED (1), NONE (2). Runs nothing. A re-read: a review
+# written before the labels keeps its own verdict line; one written since gives the verdict its run gave.
 if [ "${1:-}" = "--verdict-of" ]; then
   f="${2:-}"
   [ -f "$f" ] || { printf 'refute.sh --verdict-of: no review file at %s\n' "$f" >&2; exit 2; }
-  if grep -qE "${V}REFUTED${E}" "$f"; then printf 'REFUTED\n'; exit 1; fi
-  if grep -qE "${V}STANDS${E}" "$f"; then printf 'STANDS\n'; exit 0; fi
-  printf 'NONE\n'; exit 2
+  verdict_of "$f" reread
+  exit $?
+fi
+# refute.sh --counts-of <review file>: one JSON line — high, medium and low among the findings that are real (in
+# scope and observed or plausible, or an observed HIGH), and how many were set aside — for promote's decision block,
+# so the counts the operator reads and the verdict come from the same reading.
+if [ "${1:-}" = "--counts-of" ]; then
+  f="${2:-}"
+  [ -f "$f" ] || { printf 'refute.sh --counts-of: no review file at %s\n' "$f" >&2; exit 2; }
+  verdict_of "$f" counts
+  exit $?
 fi
 # refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]
 # --mode promote (spec §6.1, used by promote's prepare): the diff is the merge
@@ -254,7 +360,10 @@ rm -f "$pinned"
 prompt="$(mktemp)"
 {
   printf 'Adversarial review. Find what is wrong with this change. Do NOT validate. Do NOT summarize.\n'
-  printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n\n'
+  printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n'
+  # The bar (verdict_of, top of this file): the labels decide the verdict, so the prompt asks for them by name.
+  printf 'Label every finding heading, as your charter'"'"'s output format shows, with its severity (HIGH, MEDIUM or LOW), its input'"'"'s standing — observed (the input is in the evidence, fixtures, criteria or the target'"'"'s own code paths), plausible (you state a specific reason it could occur) or hypothetical (possible, nothing points to it) — and whether it is in scope or out of scope of the criteria'"'"'s Scope section (no Scope section: judge against the change'"'"'s evident intent, and report the missing section as an observed, in-scope LOW finding).\n'
+  printf 'The verdict is computed from those labels: an in-scope observed or plausible HIGH or MEDIUM finding, or any observed HIGH, refutes; hypothetical, out-of-scope and LOW findings are listed for the operator and do not. Report them all.\n\n'
   printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n' "$target"
   if [ "$mode" = promote ]; then
     printf 'Review mode: promote — the merge that will be pushed to %s, exactly; nothing uncommitted.\n\n' "$base"
@@ -323,8 +432,22 @@ python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
   printf 'cannot append the review file to the evidence manifest — cannot certify the run; the review file was removed rather than left unmanifested (%s)\n' "$verdict_file" >&2
   exit 2
 }
-# Verdict grammar: V and E, defined at the top of this file.
-if grep -qE "${V}REFUTED${E}" "$verdict_file"; then printf 'REFUTED\n'; exit 1; fi
-if grep -qE "${V}STANDS${E}" "$verdict_file"; then printf 'STANDS\n'; exit 0; fi
-printf 'refuter wrote no VERDICT line — cannot certify the run (%s)\n' "$verdict_file" >&2
-exit 2
+# The verdict: verdict_of, defined at the top of this file. Its notes (what it counted, what it listed and did not
+# count) go to stderr with the review file named, for gates.sh to show the operator.
+notes="$(mktemp)"
+word="$(verdict_of "$verdict_file" run 2>"$notes")"
+rc=$?
+if [ "$rc" -eq 2 ]; then
+  if [ -s "$notes" ]; then
+    printf '%s (%s)\n' "$(tr '\n' ' ' < "$notes" | sed 's/ *$//')" "$verdict_file" >&2
+  else
+    printf 'refuter wrote no VERDICT line — cannot certify the run (%s)\n' "$verdict_file" >&2
+  fi
+  rm -f "$notes"
+  exit 2
+fi
+# Each note marked, so gates.sh shows these lines and nothing else this script happened to say on stderr.
+[ ! -s "$notes" ] || sed "s|^|verdict-note: |; s|\$| — see $verdict_file|" "$notes" >&2
+rm -f "$notes"
+printf '%s\n' "$word"
+exit "$rc"

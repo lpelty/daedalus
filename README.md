@@ -969,6 +969,39 @@ told the checkout's absolute path so it can read the touched files. A
 pitfall selector that crashes or is missing makes the run uncertifiable
 (FAIL), never a silent "(none)".
 
+**The bar between a finding and a refutation.** Every finding heading
+carries three labels: a severity (HIGH, MEDIUM, LOW); its input's standing —
+*observed* (the input is in the evidence, fixtures, criteria or the target's
+own code paths), *plausible* (the reviewer states a specific reason it could
+occur) or *hypothetical* (possible, nothing points to it); and whether it is
+*in scope* or *out of scope* of the criteria. The verdict is computed from
+the labels by `refute.sh`, not taken from the reviewer's last line: an
+in-scope observed or plausible HIGH or MEDIUM finding refutes, and so does
+any observed HIGH; hypothetical, out-of-scope and LOW findings are listed
+for the operator ("N findings not counted … — see <review file>") and do not.
+A labelled heading missing a label, or a review with no verdict line, is
+uncertifiable (FAIL), never STANDS; a new run never falls back to the
+reviewer's word over an unlabelled finding. A review with no labelled
+findings that promote re-reads from before this release keeps its own verdict
+line. The rubric is the audit trail, not a second verdict: a dimension scored
+FAIL with nothing counted behind it is named as set aside. Promote's decision
+block reads its counts from the same labels (`refute.sh --counts-of`), so it
+says how many findings were set aside rather than "2 high findings" over two
+hypothetical ones.
+
+**Criteria carry a Scope section** — what the change covers, the evidence
+it rests on, and what is out of scope — and the reviewer judges against it.
+Daedalus writes it when it writes the criteria; a missing one is reported
+as an observed, in-scope LOW finding (listed, not refuting), and the
+reviewer then judges against the change's evident intent.
+
+**After the second refutation of a window's branch**, `gates.sh` prints the
+operator's three choices — another round; promote with the remaining
+findings filed as backlog rows; or skip the review with the operator's
+reason — instead of leaving the loop to the builder. The count lives in
+`state/refutations/<NN>.json` and starts again after a promote or when the
+window is released and its number taken again.
+
 The diff is assembled per repository: the target checkout against
 `origin/<target.branch>`, then each `target.nested` checkout against its
 origin's default branch, every path prefixed with the nested relpath so the
