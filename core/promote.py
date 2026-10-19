@@ -519,17 +519,15 @@ def first_line(p: dict, ready: bool, root: Path) -> str:
 
 
 def block_opening(p: dict) -> str:
-    """The words the assistant turn that showed the block must carry (Decision 30):
-    the ready first line without its ending, so the release clause (Task 8) may follow."""
+    """The block's ready first line without its ending, so the release clause (Task 8) may follow."""
     alias = " (%s)" % p["alias"] if p.get("alias") else ""
     return "Ready to promote window %s's work%s onto %s" % (p["lease"], alias, p["trunk"])
 
 
 def invitation(p: dict) -> str:
-    """The one line a reply must END with for the operator's next yes to count (2026-10-14: the operator
-    may ask first). The block prints it; the prime repeats it, never the block, after answering a question.
-    Window and trunk are in it so a yes to another window's line is not this one's."""
-    return "Say yes to push window %s's work to %s" % (p["lease"], p["trunk"])
+    """The block's closing question. v0.12.2: a plain question — nothing checks its wording or where the
+    operator's answer stands; any words of his after the prepare that agree are the yes (transcribed_yes)."""
+    return "Push window %s's work to %s?" % (p["lease"], p["trunk"])
 
 
 def earlier_line(p: dict) -> List[str]:
@@ -557,7 +555,7 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
                                                        "1 second" if g["seconds"] == 1 else "%d seconds" % g["seconds"]),
         reviewer_line(rv, p.get("review_skipped_reason")),
     ] + earlier_line(p) + [
-        "Nothing has been pushed. %s." % invitation(p) if ready else
+        "Nothing has been pushed. %s" % invitation(p) if ready else
         "Nothing has been pushed. Ask me to ask the reviewer why, or give a written reason to promote without the review.",
     ])
     if rv is not None:
@@ -677,10 +675,11 @@ def marker_started(root: Path, sid: Optional[str], nn: str) -> float:
 
 def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str], mode: str) -> dict:
     """§7.1 step 8, before any git work: the operator's written reason for
-    skipping the review — in transcribed mode the operator's WHOLE turn, at least
-    three words, typed after an assistant turn that showed the REFUTED verdict
-    (or asked SKIP_QUESTION when no REFUTED prepare exists), recorded as the
-    operator typed it; in tty mode typed at a terminal — and the REFUTED review it
+    skipping the review — in transcribed mode a turn of the operator's, at least
+    three words, typed after the latest prepare of this window (or since this
+    session started when there is none), in his own words, recorded as he typed
+    it (transcribed_yes, v0.12.2: no closing line, nothing about where the turn
+    stands); in tty mode typed at a terminal — and the REFUTED review it
     sets aside (Decision 31): the latest REFUTED review of this window's current
     occupant that no promotion has settled, however many prepares came after it
     (Decision 51)."""
@@ -708,16 +707,13 @@ def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str
                 "typed": {"text": text.strip(), "tty": name, "pid": os.getpid()}, "overrode": overrode}
     if not (reason or "").strip():
         raise Stop("--skip-review needs --reason with the operator's words; a reason is the price of skipping the review.")
-    if len(tl.normalize(reason).split()) < 3:
-        raise Stop(TOO_SHORT)
     if earlier:
         er = read_json(root / "state" / "evidence" / str(earlier.get("run_id")) / "run.json") or {}
         after = max(float(earlier.get("prepared_ts") or 0),
                     tl.parse_ts((er.get("promotion") or {}).get("prepared_at")) or 0.0)
     else:
         after = marker_started(root, me.get("session_id"), nn)
-    shown = "Reviewer on the merged change: REFUTED" if refuted else SKIP_QUESTION % nn
-    yes = transcribed_yes(root, me, str(reason), after, "the review", shown_text=shown)
+    yes = transcribed_yes(root, me, str(reason), after, "the review", reason=True)
     return {"reason": yes["text"].strip(), "transcript_ref": yes["transcript_ref"], "session_id": me["session_id"],
             "typed": None, "overrode": overrode}
 
@@ -914,27 +910,21 @@ def confirm_mode(root: Path) -> str:
         raise Stop(str(e) + ".")
 
 
-def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, shown_text: Optional[str] = None,
-                    must_be_yes: bool = False, shown_end: Optional[str] = None) -> dict:
-    """The operator's words, found in the confirming session's own transcript
-    (§7.2 step 2): the operator's WHOLE turn (Decision 30), typed after `after`,
-    after an assistant turn that showed `what` — carrying `shown_text` when it is
-    given, or ending with `shown_end` when that is given (the operator asked first;
-    the prime answered and asked again). With must_be_yes the words must be an acknowledgement (is_assent). Every failure is a
-    refusal; an unreadable transcript, or one outside the denied directories
-    (Decision 36), is never a pass (A12)."""
+def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, reason: bool = False) -> dict:
+    """The operator's words, found in the confirming session's own transcript (§7.2 step 2; v0.12.2): a turn the
+    operator typed after `after` (the prepare that asked; a new prepare moves it), in any words — for the confirm,
+    any that agree or ask for the push and are not taken back by a later no or wait; for a skipped review
+    (reason=True), a reason of at least three words. Nothing about where the turn stands matters: replies,
+    questions and notifications between the block and the words do not reset it, and no closing line is looked
+    for. `said` is the agent's citation: it picks among his words when it matches loosely and is never itself the
+    refusal (transcriptlib.find_consent). A turn the model wrote, or a line added to the file, never counts; an
+    unreadable transcript, or one outside the denied directories (Decision 36), is never a pass (A12)."""
     if me["kind"] != "prime-session":
         raise Stop("In transcribed mode the prime window records the operator's yes; from a shell, set "
                    "`promote.confirm: tty` and run the confirm there.")
-    if not (said or "").strip():
-        raise Stop("Record what the operator said. The yes is evidence; an empty one is not a yes.")
-    if must_be_yes and not tl.is_assent(said):
-        raise Stop("The operator's words are not an acknowledgement (got: \"%s\"). Record the operator's whole reply; "
-                   "a reply in their own words that agrees, with no no, wait or question in it, is one." % said.strip())
     try:
         path = tl.transcript_for(root, me["session_id"])
-        found = tl.find_operator_words(path, said, after, require_shown=True, shown_text=shown_text,
-                                       shown_end=shown_end)
+        found = tl.find_consent(path, after, quote=said or None, reason=reason)
     except tl.Unprotected as e:
         raise Stop("This session's transcript (%s) is outside every directory nothing may write, so it is not evidence "
                    "of the operator's words. Set memory.transcript_dir in config.yaml, or set `promote.confirm: tty` "
@@ -949,17 +939,8 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
         cut = d.index(";")
         raise Stop("%s (%s)%s. Until then, set `promote.confirm: tty` and paste the confirm line in your own shell."
                    % (d[:cut], e, d[cut:]))
-    except tl.NotShown:
-        what_ = what[:1].upper() + what[1:]
-        words = "that yes" if must_be_yes else "those words"
-        if shown_end:
-            raise Stop("%s was not shown to the operator before %s: prepare and confirm ran in one turn, the "
-                       "operator's reply to the block came before %s, or your last words before it were not the "
-                       "line. Show the block once; after that, end every reply of yours with the line \"%s.\" and "
-                       "nothing after it, then ask again." % (what_, words, words, shown_end))
-        raise Stop("%s was not shown to the operator before %s (prepare and confirm ran in one turn, no reply "
-                   "since the prepare repeated the block, or the operator's reply to it came before %s). Show the "
-                   "block, then ask." % (what_, words, words))
+    except tl.Declined as e:
+        raise Stop("The operator has not agreed: %s. Nothing was recorded; ask him again." % e)
     except tl.NotSubmitted as e:
         raise Stop("Those words are in this session's transcript, but %s. Nothing was recorded; show %s to the "
                    "operator and ask again." % (str(e).replace("the words are", "they are", 1), what))
@@ -967,8 +948,12 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, sh
         raise Stop("Those words are in this session's transcript, but not as a turn Claude Code wrote there: nothing "
                    "in the conversation follows from them, so they were added to the file afterwards. Nothing was "
                    "recorded; show %s to the operator and ask again." % what)
-    except tl.NotFound:
-        raise Stop("I could not find those words as something the operator typed after %s was shown." % what)
+    except tl.NotFound as e:
+        if reason:
+            raise Stop("I could not find the operator's reason since %s was shown (%s): a reason in his own words, "
+                       "at least three of them, is the price of skipping the review." % (what, e))
+        raise Stop("The operator has not agreed to %s yet (%s since it was shown); any words that agree are enough."
+                   % (what, e))
     return {"transcript_session_id": me["session_id"], "transcript_ref": found["transcript_ref"],
             "shown_ref": found["shown_ref"], "text": found["text"]}
 
@@ -1375,8 +1360,7 @@ def confirm(root: Path, a: dict) -> int:
         if p.get("repo") in tr:                # before the yes: no confirmed_at for a push that will not happen
             guarded(root, p["repo"])           # (a repo the window does not have is refused by rederive)
         if mode == "transcribed":
-            yes = transcribed_yes(root, me, a.get("said") or "", cutoff(root, p, pdir), "the promote block",
-                                  shown_text=block_opening(p), must_be_yes=True, shown_end=invitation(p))
+            yes = transcribed_yes(root, me, a.get("said") or "", cutoff(root, p, pdir), "the promote block")
         else:
             if a.get("said") is not None:
                 raise Stop("In tty mode the operator types the yes in a terminal; --operator-said is not accepted. "

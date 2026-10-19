@@ -297,8 +297,6 @@ DELETE_FROM_STDIN = ("A delete takes its arguments on the command line, never fr
                      "core/lease.sh release NN --remove … directly.")
 DELETE_NO_SESSION = "The delete runs from a window: this command carries no session."
 DELETE_NUMBER = "Name the window by its number (core/lease.sh release 02 --remove …), not an alias or a variable."
-DELETE_ONE_WORD = ("Ask the operator for a one-line reply and record that; a reply with several lines or shell "
-                   "characters cannot be carried on the command.")
 # git options that take their value as the next word (git.c handle_options).
 GIT_VALUE_OPTS = {"-C", "-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
 # bash/sh options that take their value as the next word: `bash -o errexit -c '…'`.
@@ -2809,9 +2807,9 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
     lease.sh, by basename, behind any wrapper (exec_index) — the home's, a worktree checkout's, a copy. Behind
     xargs or parallel it is refused outright (bare xargs is a wrapper Claude Code strips for the allow rule; the
     guard reads no stdin). Then: a session must be present (fail closed), every number literal, the operator's
-    words readable, and leaselib.deletion_confirmed decides — a window with nothing to lose needs nothing more
-    (v0.12.2); for the rest, the one report shown, the yes after its one line in this session's transcript, the
-    work unchanged. Plain `release NN` and every other verb are untouched."""
+    words readable or not (a citation only), and leaselib.deletion_confirmed decides — a window with nothing to
+    lose needs nothing more (v0.12.2); for the rest, their report in this session, the operator's consent after it
+    in any words, the work unchanged. Plain `release NN` and every other verb are untouched."""
     j = exec_index(seg, LEASE_HEADS)
     if os.path.basename(seg[j]) != "lease.sh":
         return None
@@ -2834,7 +2832,8 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
         i = args.index("--operator-said")
         said = args[i + 1] if i + 1 < len(args) else ""
         if unresolved(said):
-            return DELETE_ONE_WORD                 # a $ or a backtick the guard cannot read
+            said = ""                              # v0.12.2: a citation the guard cannot read is no reason to refuse;
+                                                   # the consent is found in the transcript, not in the words carried
     import leaselib as ll
     return ll.deletion_confirmed(g.root, g.sid, nns, said)
 

@@ -1095,9 +1095,9 @@ PY
   export W TX M
 }
 asked_by_sA() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02; }
-LINE02="Say yes to delete window 02's work."
+LINE02="Delete window 02's work?"
 DEL='core/lease.sh release 02 --remove --force'
-ASK_FIRST="Run core/lease.sh unpromoted 02 first, repeat its report to the operator word for word, and ask; the delete runs only after their yes."
+ASK_FIRST="Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once he agrees, in any words."
 # shown_then_yes <words> [shown text] — the report's tool result, the assistant turn that showed it (the whole
 # report by default), then the operator's words, all after the ask; sets P. The entries are stamped a few seconds
 # ahead of the clock (tx), and each ask moves the cut-off to the clock: a SECOND ask in one test must wait until
@@ -1110,28 +1110,26 @@ shown_then_yes() {
   tx "$TX" operator "$1" "$(plus "$P" 3)" >/dev/null
 }
 
-@test "delete gate: core/lease.sh release 02 --remove is denied without the report, without --operator-said, with words that are not an acknowledgement, with a reply of two lines or carrying a \$ (the one-line-reply sentence), and when only a tool result or the report's first sentence carried the line; nothing else about lease.sh is gated" {
+@test "delete gate (v0.12.2): core/lease.sh release 02 --remove is denied without the report, while the operator has not agreed since it (nothing typed, only a question, the model's own yes, a no), and allowed once he has — with or without --operator-said, whatever it carries; nothing else about lease.sh is gated" {
   delete_guard
   run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA 'core/lease.sh release 02 --remove --operator-said yes'; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac   # without --force too
   run guard_as sA 'core/lease.sh release 02'; allowed
   run guard_as sA 'core/lease.sh unpromoted 02'; allowed
   run guard_as sA 'core/lease.sh list'; allowed
-  R="$(asked_by_sA)"
-  run guard_as sA "$DEL"; denied; case "$output" in *"Record what the operator said: add --operator-said"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sA "$DEL --operator-said 'not yet'"; denied; case "$output" in *"are not an acknowledgement"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sA "$DEL --operator-said \"yes \$HOME\""; denied; case "$output" in *"Ask the operator for a one-line reply and record that"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sA "$DEL --operator-said \"yes
-please\""; denied; case "$output" in *"Ask the operator for a one-line reply and record that"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sA "$DEL --operator-said 'yes \`date\`'"; denied
-  # the line only in a tool result (never said to the operator), then only the first sentence in a reply
-  P="$(now)"
+  R="$(asked_by_sA)"; P="$(now)"
+  run guard_as sA "$DEL"; denied; case "$output" in *"has not agreed to delete window 02's work yet"*) : ;; *) echo "$output"; return 1 ;; esac
   tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
-  tx "$TX" operator "yes" "$(plus "$P" 2)" >/dev/null
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
-  tx "$TX" assistant "${R%%$'\n'*}" "$(plus "$P" 3)" >/dev/null
-  tx "$TX" operator "yes" "$(plus "$P" 4)" >/dev/null
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"The delete line was not shown to the operator before that yes"*"$LINE02"*) : ;; *) echo "$output"; return 1 ;; esac
+  tx "$TX" assistant "yes" "$(plus "$P" 2)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"has not agreed"*) : ;; *) echo "model yes: $output"; return 1 ;; esac
+  tx "$TX" operator "What is in it?" "$(plus "$P" 3)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"only asked questions"*) : ;; *) echo "question: $output"; return 1 ;; esac
+  tx "$TX" operator "no, not that one" "$(plus "$P" 4)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"last word on it was"*"no, not that one"*) : ;; *) echo "no: $output"; return 1 ;; esac
+  tx "$TX" operator "Actually fine — delete it." "$(plus "$P" 5)" >/dev/null
+  run guard_as sA "$DEL"; allowed
+  run guard_as sA "$DEL --operator-said \"yes \$HOME\""; allowed                    # a citation the guard cannot read
+  run guard_as sA "$DEL --operator-said 'something he never said'"; allowed
   [ -d "$W" ]
 }
 
@@ -1147,15 +1145,10 @@ please\""; denied; case "$output" in *"Ask the operator for a one-line reply and
   run guard_as sA "$DEL --operator-said 'Yes, go ahead.'"; allowed
 }
 
-@test "delete gate: denied when a later question cleared the line; denied for another session's marker, for a marker older than the window, and for a yes typed before the window existed with the marker's time forged to 0 (the lease file's own times hold the cut-off)" {
+@test "delete gate: denied for another session's marker, for a marker older than the window, and for a yes typed before the window existed with the marker's time forged to 0 (the lease file's own times hold the cut-off)" {
   delete_guard
   R="$(asked_by_sA)"; P="$(now)"
-  tx "$TX" assistant "$R" "$(plus "$P" 1)" >/dev/null
-  tx "$TX" operator "And the nested repo?" "$(plus "$P" 2)" >/dev/null
-  tx "$TX" assistant "Nothing in it — did you mean window 03?" "$(plus "$P" 3)" >/dev/null
-  tx "$TX" operator "yes" "$(plus "$P" 4)" >/dev/null
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
-  # another session's marker is no witness for sA, even with the line shown and a yes after it
+  # another session's marker is no witness for sA, even with a yes after it
   python3 - "$M" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1])); d["session_id"] = "sB"; json.dump(d, open(sys.argv[1], "w"))
@@ -1186,7 +1179,7 @@ PY
   delete_guard
   shown_then_yes "yes"
   printf 'x\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "another"
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"Window 02's work changed since the report"*"run core/lease.sh unpromoted 02 again and ask again"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"Window 02's work changed since the report"*"Run core/lease.sh unpromoted 02 again"*) : ;; *) echo "$output"; return 1 ;; esac
   printf 'd\n' >> "$W/a.txt"
   shown_then_yes "yes"
   run guard_as sA "$DEL --operator-said yes"; allowed
@@ -1252,22 +1245,21 @@ PY
   [ -d "$DAEDALUS_HOME/worktrees/03/thing" ]
 }
 
-@test "delete gate (v0.12.2): release 02 03 --remove is allowed after one yes to the one line naming both; denied when only one window's line was shown" {
+@test "delete gate (v0.12.2): release 02 03 --remove is allowed after one consent to one report naming both — whatever line the reply ended with; denied while either window's work changed since" {
   delete_guard
   bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 03 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sZ"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/03.json")"
   W3="$DAEDALUS_HOME/worktrees/03/thing"
   printf 'w\n' >> "$W3/a.txt"; git -C "$W3" -c user.email=t@x -c user.name=t commit -q -am "more work"
   R="$(DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02 03)"; P="$(now)"
-  [ "${R##*$'\n'}" = "Say yes to delete the work of windows 02 and 03." ] || { echo "$R"; return 1; }
+  [ "${R##*$'\n'}" = "Delete the work of windows 02 and 03?" ] || { echo "$R"; return 1; }
   tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
-  tx "$TX" assistant "Window 02 has a commit. $LINE02" "$(plus "$P" 2)" >/dev/null
+  tx "$TX" assistant "Window 02 has a commit. Say yes to delete window 02's work." "$(plus "$P" 2)" >/dev/null
   tx "$TX" operator "yes" "$(plus "$P" 3)" >/dev/null
+  run guard_as sA 'core/lease.sh release 02 03 --remove --force --operator-said yes'; allowed
+  printf 'x\n' >> "$W3/a.txt"
   run guard_as sA 'core/lease.sh release 02 03 --remove --force --operator-said yes'; denied
-  case "$output" in *"The delete line was not shown to the operator before that yes"*) : ;; *) echo "$output"; return 1 ;; esac
-  tx "$TX" assistant "$R" "$(plus "$P" 4)" >/dev/null
-  tx "$TX" operator "Yes, both." "$(plus "$P" 5)" >/dev/null
-  run guard_as sA "core/lease.sh release 02 03 --remove --force --operator-said 'Yes, both.'"; allowed
+  case "$output" in *"Window 03's work changed since the report"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]; [ -d "$W3" ]
 }
 

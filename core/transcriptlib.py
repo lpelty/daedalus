@@ -10,12 +10,12 @@ promotion's primaries, Decision 35; for --skip-review the earlier REFUTED
 prepare; for `prime take --reason` the moment the holder took the pen, its
 bound_epoch — always an absolute instant, never a local stamp the reading
 process's TZ would move) and — for
-promote — as the operator's first reply to an assistant entry with text that
-follows the cut-off and carries the block's opening words (the turn in which
-the prime showed it) or ENDS with the block's one-line invitation (the prime's
-answer to a question of theirs, asking again — the operator may ask first,
-2026-10-14; a turn between them answered that turn instead). A
-transcript this build cannot read fails CLOSED, never a pass.
+v0.12.2 (find_consent, for release --remove and promote) — in any words that
+agree or ask for the action, anywhere after the cut-off: replies, questions and
+notifications between do not reset it, no closing line is looked for, and a
+later no or wait takes it back. (`prime take --reason` still reads the whole
+turn with find_operator_words.) A transcript this build cannot read fails
+CLOSED, never a pass.
 
 One parser (A12): capture.scan_entries reads the lines; this module decides who
 typed an entry. The rule, measured on Claude Code 2.1.251–2.1.282 (plan 4
@@ -221,28 +221,73 @@ def normalize(text: str) -> str:
     return " ".join(text.translate(_CURLY).split()).casefold().strip(EDGES)
 
 
-# Decision 30, as revised 2026-10-17 (v0.10.0): the operator's own words are an acknowledgement when
-# they carry an affirmative word or phrase and no negation or hold word, each at word boundaries, and
-# do not end in a question mark. One rule for the transcribed reply, the tty line and release --remove.
+# Decision 30, as revised 2026-10-17 (v0.10.0) and again in v0.12.2: the operator's consent is whatever way he says
+# it. A message consents when one of its sentences that is not a question agrees (yes, ok, sure, go ahead, sounds
+# good …) or asks for the action (delete, push the work, promote it, ship it, do it …), and none of its sentences that
+# is not a question says no, wait, stop or don't. A message that is only questions is neither. One rule for the
+# transcribed reply, the tty line, release --remove and promote.
 _WORD = r"(?<![\w'])(?:%s)(?![\w'])"
 ASSENT_RE = re.compile(_WORD % "|".join((
-    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go ahead", "go", "proceed", "approved?", "confirm(?:ed)?",
-    "do it", "ship it", "push it", "sounds good", "lgtm")) + "|\U0001f44d")
+    "yes", "yeah", "yep", "yup", "ya", "y", "ok", "okay", "k", "sure", "go ahead", "go for it", "go on", "go",
+    "proceed", "continue", "carry on", "approved?", "approve", "agreed?", "confirm(?:ed)?", "do it", "do that",
+    "do so", "please do", "make it so", "ship it", "push it", "sounds good", "lgtm", "alright", "all right",
+    "absolutely", "definitely", "of course", "affirmative", "works for me", "good to go")) + "|\U0001f44d")
+# the action asked for in so many words: "delete them", "just push the work", "promote it", "merge it"
+ACTION_RE = re.compile(_WORD % "|".join((
+    "delete", "remove", "clear", "clean up", "promote", "push", "merge", "ship", "release", "deploy", "land")))
+# A refusal is a sentence that opens with a no or a hold ("No, wait — what about F2?", "Not yet.", "Wait, why?") —
+# a question too — or a sentence, not a question, that holds anywhere ("yes, but wait", "please don't push it").
+# A bare "not" or "no" inside a sentence is not one: "F1 is not about real code, promote it" consents.
+LEAD_DISSENT_RE = re.compile(r"^(?:%s)(?![\w'])" % "|".join((
+    "no", "nope", "nah", "wait", "stop", "hold", "hang on", "cancel", "abort", "don't", "dont", "do not", "not yet",
+    "not now", "never mind", "nevermind", "later")))
 DISSENT_RE = re.compile(_WORD % "|".join((
-    "no", "nope", "nah", "not", "cannot", "can't", "don't", "dont", "never", "wait", "stop", "hold", "cancel",
-    "abort", "later")))
+    "don't", "dont", "do not", "not yet", "not now", "hold off", "hold on", "wait", "stop", "cancel", "abort",
+    "never mind", "nevermind")))
+# phrases that open with a no and mean yes
+BENIGN_RE = re.compile(r"^(?:%s)(?![\w'])" % "|".join(("no problem", "no worries", "no doubt", "not a problem")))
+
+
+def _sentences(text: str) -> List[str]:
+    """The message cut into sentences after . ! ? ; and at line breaks, each keeping its own end mark."""
+    parts = re.split(r"(?<=[.!?;])\s+|\n+", (text or "").translate(_CURLY).strip())
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _is_question(sentence: str) -> bool:
+    return sentence.rstrip(" \"')]}»\u2019\u201d*_`").endswith("?")
+
+
+def _statements(text: str) -> List[str]:
+    """The normalized sentences of the message that are not questions."""
+    return [n for n in (normalize(x) for x in _sentences(text) if not _is_question(x)) if n]
+
+
+def is_refusal(text: str) -> bool:
+    """A sentence of the message opens with a no or a hold, or a sentence that is not a question holds anywhere."""
+    for x in _sentences(text):
+        n = normalize(x)
+        if n and not BENIGN_RE.search(n) and LEAD_DISSENT_RE.search(n):
+            return True
+        if n and not _is_question(x) and DISSENT_RE.search(n):
+            return True
+    return False
 
 
 def is_assent(text: str) -> bool:
-    """The operator's reply is an acknowledgement (Decision 30, revised in v0.10.0): an affirmative word
-    or phrase (yes, ok, okay, go ahead, proceed, sounds good, ship it, ...) and none of the negation or
-    hold words (no, not, don't, wait, stop, hold, later, ...), at word boundaries, and not a question.
-    'Okay, yes, proceed.' is; 'yesterday was fine', 'okay but why?', 'no, wait', '' are not."""
-    raw = " ".join((text or "").translate(_CURLY).split()).casefold()
-    if raw.rstrip(" \"')]}»\u2019\u201d").endswith("?"):
+    """The operator's message consents (Decision 30, revised in v0.10.0 and v0.12.2): a sentence that is not a
+    question agrees or asks for the action, and no sentence that is not a question refuses. 'Okay, yes, proceed.',
+    'delete', 'Same reason: just push the work.' and 'Why the timing test? Anyway, ship it.' are; 'no, wait',
+    'okay but why?', 'yesterday was fine' and '' are not."""
+    st = _statements(text)
+    if not st or is_refusal(text):
         return False
-    t = normalize(text or "")
-    return bool(t) and DISSENT_RE.search(t) is None and ASSENT_RE.search(t) is not None
+    return any(ASSENT_RE.search(n) or ACTION_RE.search(n) for n in st)
+
+
+def only_questions(text: str) -> bool:
+    sents = _sentences(text)
+    return bool(sents) and all(_is_question(x) for x in sents)
 
 
 is_yes = is_assent      # the name every caller used before v0.10.0
@@ -290,7 +335,7 @@ def _chain(entries: list) -> dict:
     return seen
 
 
-def harness_wrote(seen: dict, e: dict) -> bool:
+def harness_wrote(seen: dict, e: dict, allow_tip: bool = False) -> bool:
     """Whether Claude Code wrote entry e into the conversation it went on with (critic finding 2): e lies on
     the chain from the file's last entry back through each parentUuid (logicalParentUuid across a compaction),
     and an assistant entry — the harness's reply — lies on that chain after it. A line appended to the file by
@@ -300,7 +345,9 @@ def harness_wrote(seen: dict, e: dict) -> bool:
     session had an assistant entry after it there. It stops an appended line; it does not stop a whole-file rewrite,
     which can insert a yes and a reply after the block and re-parent the entry after them in any earlier turn — every
     invariant then holds through later harness writes (critic-fix review, finding 3). `submitted` is what stops
-    that; neither is proof of who wrote the file."""
+    that; neither is proof of who wrote the file. allow_tip (v0.12.2, find_consent after its bounded re-read): the
+    turn may be the chain's own last entry with no reply after it yet — Claude Code had not written the reply when
+    the check read the file — and `submitted` is then what vouches for it."""
     if not seen:
         return False
     cur: Optional[dict] = list(seen.values())[-1]
@@ -309,7 +356,7 @@ def harness_wrote(seen: dict, e: dict) -> bool:
         if cur is None:
             return False
         if cur is e:
-            return replied
+            return replied or allow_tip
         replied = replied or cur["type"] == "assistant"
         d = cur["data"]
         cur = seen.get(d.get("parentUuid") or d.get("logicalParentUuid") or "")
@@ -611,6 +658,121 @@ def find_operator_words(path: Path, quote: str, after: float, require_shown: boo
         raise NotShown("the words are not the operator's first reply to an assistant turn showing the block, "
                        "or ending with its invitation line, after the cut-off")
     raise NotFound("not an operator-typed entry after the cut-off")
+
+
+class Declined(NotFound):
+    """The operator's last word on it, after the cut-off, was a no, a wait or a stop."""
+
+
+CONSENT_TRIES = 6           # find_consent's bounded re-read: the reply to a just-typed turn may not be written yet
+CONSENT_PAUSE = 0.4
+
+
+def find_consent(path: Path, after: float, quote: Optional[str] = None, reason: bool = False) -> dict:
+    """v0.12.2 — the operator's consent, in whatever words he gave it: {"transcript_ref", "shown_ref": None, "text"}
+    for an operator-typed turn of this session after `after` (the report or prepare that asked; a new ask moves it)
+    that Claude Code wrote into the conversation (harness_wrote) and reported as a prompt (submitted) — so a yes the
+    model wrote, or a line added to the file, never counts — and that consents (is_assent). Nothing about the
+    turn's place matters: the agent's replies, the operator's questions and notifications between the ask and the
+    turn do not reset it, and no closing line is looked for. The operator's turns are read in order: a consent
+    holds until a later turn refuses (is_refusal); a turn that is only questions changes nothing. Of the consents
+    still standing, the one that loosely matches `quote` (the agent's citation: either normalized text inside the
+    other) is returned, else the latest — a citation that does not match is never the refusal.
+    reason=True (promote --skip-review): the turn is a reason — at least three words, not a refusal, not only
+    questions — matching `quote` loosely, else the latest such turn that also consents.
+    The read is retried CONSENT_TRIES times, CONSENT_PAUSE apart, while the only turn that would count fails because
+    nothing Claude Code wrote follows it yet; the last read accepts it as the chain's last entry, vouched for by
+    `submitted`. Raises Missing, Unreadable (fail closed), NotWritten, NotSubmitted, Declined or NotFound."""
+    for attempt in range(CONSENT_TRIES):
+        try:
+            return _find_consent_once(path, after, quote, reason, allow_tip=attempt == CONSENT_TRIES - 1)
+        except NotWritten:
+            if attempt == CONSENT_TRIES - 1:
+                raise
+            time.sleep(CONSENT_PAUSE)
+    raise NotFound("not found")     # unreachable
+
+
+def _find_consent_once(path: Path, after: float, quote: Optional[str], reason: bool, allow_tip: bool) -> dict:
+    entries = _entries(path)
+    last_before = -1                # as find_operator_words: an unreadable timestamp lands in the tail (A12)
+    for i, e in enumerate(entries):
+        ts = parse_ts((e["data"] or {}).get("timestamp")) if e["type"] in ("user", "assistant") else None
+        if ts is not None and ts <= after:
+            last_before = i
+    tail = entries[last_before + 1:]
+    bad = [e for e in tail if not e["readable"] or (e["type"] in ("user", "assistant") and (
+        not isinstance(e["data"].get("uuid"), str) or parse_ts(e["data"].get("timestamp")) is None))]
+    if bad:
+        raise Unreadable("%d of the %d entries after the cut-off have a shape this build does not read"
+                         % (len(bad), len(tail)))
+    seen = _chain(entries)
+    drift = shape_problem(entries, strict=False)
+    if drift:
+        raise Unreadable(drift)
+
+    def qualifies(t: str) -> bool:
+        if reason:
+            return len(normalize(t).split()) >= 3 and not is_refusal(t) and not only_questions(t)
+        return is_assent(t)
+
+    standing: list = []             # verified consents since the last refusal
+    declined: Optional[dict] = None
+    not_written = False
+    not_submitted: Optional[str] = None
+    unknown_hit = asked = False
+    for e in tail:
+        kind = classify(e)
+        if kind == "unknown_provenance":
+            unknown_hit = unknown_hit or qualifies(e["text"])
+            continue
+        if kind not in ("operator", "queued"):
+            continue
+        t = e["text"]
+        if is_refusal(t):
+            # a hold counts as typed, whoever wrote it — it can only stop the action, never start it — and so does
+            # one typed while the session was still working (queued)
+            standing, declined = [], e
+            continue
+        if kind == "queued":
+            continue        # a consent typed before what it answers was on screen does not count
+        ok = qualifies(t)
+        if not ok:
+            asked = asked or only_questions(t)
+            continue
+        if not harness_wrote(seen, e, allow_tip):
+            not_written = not_written or ok
+            continue
+        why = submitted(path, entries, e, None, after)
+        if why:
+            not_submitted = not_submitted or (why if ok else None)
+            continue
+        standing.append(e)
+    if standing:
+        want = normalize(quote or "")
+        pick = None
+        if want:
+            pick = next((e for e in reversed(standing)
+                         if want in normalize(e["text"]) or normalize(e["text"]) in want), None)
+        if pick is None and reason:
+            pick = next((e for e in reversed(standing) if is_assent(e["text"])), None)
+        if pick is None and not reason:
+            pick = standing[-1]
+        if pick is not None:
+            return {"transcript_ref": _ref(pick), "shown_ref": None, "text": pick["text"]}
+    if declined is not None:
+        raise Declined("the operator's last word on it was \"%s\"" % " ".join(declined["text"].split()))
+    if not_written:
+        raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
+                         "chain, so it was added to the file afterwards")
+    if not_submitted:
+        raise NotSubmitted(not_submitted)
+    if unknown_hit:
+        raise Unreadable("the words are only in a user entry that carries no origin field, so who typed it "
+                         "cannot be told")
+    if asked:
+        raise NotFound("the operator has only asked questions")
+    raise NotFound("nothing the operator typed agrees or asks for it")
 
 
 def operator_entry(path: Path, uuid: str) -> Optional[str]:

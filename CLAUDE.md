@@ -102,7 +102,7 @@ it.
 | "What did the reviewer find?" | the prime, or the reviewed window | Repeat the review's body (`vault/evidence/<run-id>-review.md`, everything below its frontmatter) word for word, signed "— the reviewer"; a summary may follow. |
 | "Ask the reviewer why …" | the prime, or the reviewed window | `core/call-agent.sh --resume-review 02 "<their question>"`; repeat the answer word for word, signed "— the reviewer". It is advice, not a new verdict. |
 | "Promote it anyway, because …" | the prime | The skip-review procedure (below), with the reason in the operator's own words — and only with one. |
-| "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh unpromoted 02` first; it only reports what would be lost — the unpromoted commits and any uncommitted files — and deletes nothing. For several windows, name them all in one report: `core/lease.sh unpromoted 02 03 04`. A window it says needs no yes has nothing to lose: run `core/lease.sh release 02 --remove` for it at once, no question asked (several: `core/lease.sh release 03 04 --remove`). For the rest, repeat that report word for word; it ends with the line `Say yes to delete window 02's work.` (for several, one line: `Say yes to delete the work of windows 02 and 03.`). End your turn. If they ask something, answer it and end your reply with that one line and nothing after it. When they answer yes, run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` exactly so, from the home, with nothing in front of it (the permission rule matches that command and nothing else); for several windows, every number the report named, in one command: `core/lease.sh release 02 03 04 --remove --force --operator-said "<their whole reply>"`. If their reply is more than one plain line, or has a `$`, a backtick or a double quote in it, do not quote it: ask for a one-line reply and carry that. It refuses unless the report was shown and the yes followed it, and it refuses if the window's work changed since the report — then run `unpromoted` again. Never run `release` with `--remove` on a window with work before that report is repeated and answered; never write a yes the operator did not give. |
+| "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh unpromoted 02` first (several windows: `core/lease.sh unpromoted 02 03 04`, one report); it only reports what would be lost — the unpromoted commits and any uncommitted files — and deletes nothing. A window it says needs no yes has nothing to lose: run `core/lease.sh release 02 --remove` for it at once, no question asked. For the rest, tell the operator what would be lost, in your own words, and ask. End your turn. When they agree — in any words: yes, ok, delete them, do it, go ahead — run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` from the home, with nothing in front of it (the permission rule matches that command and nothing else); for several windows, every number in one command: `core/lease.sh release 02 03 04 --remove --force --operator-said "<their whole reply>"`. Their questions and your answers in between are fine; one agreement covers every window the report named. The quote is a citation, not a password: if their reply is long or awkward to quote, carry a few of their words. It refuses if they have not agreed since the report, if they said no or wait after agreeing, or if a window's work changed since the report — then run `unpromoted` again and tell them what changed. Never run `release` with `--remove` on a window with work before the operator has agreed; never write a yes the operator did not give. |
 | "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested>` for a nested repo's branch); repeat what it printed — the number, the repo, the commits. |
 | "Pick it up" (after the upgrade said it found unfinished work) | the prime, or a shell | `core/lease.sh adopt --all-unfinished`; repeat each window it made and anything it could not move, with what to do; then say the next session start finishes the upgrade. |
 | "/frame-jack on" / "frame-jack off" | any window | `python3 core/frame-jack.py on` (or `python3 core/frame-jack.py off`); repeat the output word for word. The guard runs it only after the operator's own message said `frame-jack on` (or `off`) in this session; in other words ("turn the AMI on"), ask them to type `/frame-jack on`. `on` takes about half a minute before the AMI answers; the band says when. |
@@ -560,18 +560,15 @@ the pen. When the operator says a window's work is ready ("ship window 2"):
    pushed.
 2. End your turn. When the operator answers, run, in a later turn,
    `core/promote.sh 02 --confirm --operator-said "<their whole reply>"`. The
-   confirm looks for that reply in this session's own transcript: the whole
-   message the operator typed, an acknowledgement in their own words (yes,
-   okay, go ahead, proceed; not a question, and nothing with no, not or wait
-   in it), as their first message
-   after a reply of yours that showed the block or — once the block has been
-   shown — ended with the last line of the block's first paragraph, `Say yes
-   to push window 02's work to main.` If they ask something instead, answer it and end that
-   reply with that one line and nothing after it (quotes or backticks around
-   it are fine; nothing may follow it, not even after a tool call); their
-   next yes then counts. Never print the block again unless they ask for it. A part of a longer message is not their answer, and
-   a prepare and a confirm in one turn is refused. If they said anything but an
-   acknowledgement, ask again — never write a yes the operator did not give.
+   confirm looks in this session's own transcript for a message the operator
+   typed after the prepare that agrees in their own words — yes, ok, go
+   ahead, push it, ship it, "same reason: just push the work" — and that a
+   later no or wait has not taken back. Their questions, your answers and
+   notifications in between do not matter, nor what your last reply ended
+   with. The quote is a citation of their words, not a password. If they
+   only asked questions, answer and let them answer; if they said no or
+   wait, do not push. A prepare and a confirm in one turn is refused, and
+   never write a yes the operator did not give.
 3. Repeat the "Promoted …" line it prints.
 
 When the deployment sets `promote.confirm: tty`, give the operator the one
@@ -584,8 +581,8 @@ ask it about a finding, run `core/call-agent.sh --resume-review 02 "<their
 question>"` and repeat the answer. To promote without the review the operator
 must give a written reason of at least three words:
 `core/promote.sh 02 --skip-review --reason "<their whole reply>"` — checked
-the same way (their whole message, after the refuted block), and recorded in
-their words beside the verdict it sets aside. When no review has refuted the
+the same way (a message of theirs since the last prepare, in any words), and
+recorded in their words beside the verdict it sets aside. When no review has refuted the
 change, first ask "Promote window 02's work without the review? Tell me why
 in your own words." and pass their answer. The gates always run.
 

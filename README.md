@@ -540,21 +540,19 @@ windows, swept numbers with work still waiting, and the session registry
 Claude Code keeps under `~/.claude/sessions/` (liveness reads it).
 
 Deleting a window's work is report, yes, delete. `core/lease.sh unpromoted 02`
-reports what would be lost and ends with the line `Say yes to delete window
-02's work.`; the agent repeats the report and asks. A window with nothing to
-lose — no unpromoted commit, no uncommitted file, its worktree on its own
-branch — needs no yes: the report says so and `release 02 --remove` deletes it
-at once. Several windows go in one report and one yes:
-`core/lease.sh unpromoted 02 03 04` ends with one line, `Say yes to delete the
-work of windows 02 and 03.`, naming every window with work, and
+reports what would be lost and asks; the agent tells you. A window with
+nothing to lose — no unpromoted commit, no uncommitted file, its worktree on
+its own branch — needs no yes: the report says so and `release 02 --remove`
+deletes it at once. Several windows go in one report and one yes:
+`core/lease.sh unpromoted 02 03 04`, then
 `core/lease.sh release 02 03 04 --remove --force --operator-said "<your reply>"`
-deletes them all; a change in any one refuses the whole delete. The yes is found in the
-window's own transcript the way promote's is — your first reply to a turn
-carrying that line, and a reply of the agent's that ends with the line re-arms
-it, so you may ask first — and `core/lease.sh release 02 --remove --force
---operator-said "<your reply>"` runs only after it: refused when the report was
-not shown, when the yes did not follow it, and when the window's work changed
-since the report. The tracked `.claude/settings.json` allows that one command
+deletes them all; a change in any one refuses the whole delete. Your yes is
+any message of yours in the window's own transcript after the report that
+agrees or asks for it, in your own words — yes, ok, delete them, do it — and
+that a later no or wait has not taken back; questions and answers in between
+do not matter, and nothing has to be said word for word. It is refused when
+no report ran in this session, when you have not agreed since, and when the
+window's work changed since the report. The tracked `.claude/settings.json` allows that one command
 (`Bash(core/lease.sh release:*)`) ahead of auto mode's classifier, because
 `core/guard-bash.py` and `core/leaselib.py` check the yes first, in every
 permission mode (the guard behind any wrapper, leaselib for every form); what
@@ -639,14 +637,14 @@ until it is released.
 **The operator's yes** (`promote:` in `config.yaml`):
 
 - `confirm: transcribed` (the default) — the prime types the operator's reply
-  with `--operator-said "…"`, and promote requires it in the prime's own
-  session transcript as a whole message the operator typed that is an
-  acknowledgement in their own words — "Okay, yes, proceed." and "go ahead"
-  are; "okay but why?", "no, wait" and "not yet" are not — as their first message after a reply of the prime's that showed the
-  block or, once the block has been shown, ended with the last line of the
-  block's first paragraph (`Say yes to push window 02's work to main.` — the operator may ask
-  questions first; each answer ends with that line and nothing after it), in
-  a later turn.
+  with `--operator-said "…"`, and promote requires, in the prime's own
+  session transcript, a message the operator typed after the prepare that
+  is an acknowledgement in their own words — "Okay, yes, proceed.", "go
+  ahead", "push the work" and "Why the timing test? Anyway, ship it." are;
+  "okay but why?", "no, wait" and "not yet" are not — and that a later no or
+  wait has not taken back. Questions, answers and notifications in between
+  do not matter, nothing has to end with a set line, and the quote is a
+  citation, not a password; it must come in a later turn than the prepare.
   A transcript this Claude Code build writes in a shape the parser cannot read
   is refused, never passed — switch to `promote.confirm: tty` until the parser
   is updated. The transcript directory is closed to writes by both the Bash

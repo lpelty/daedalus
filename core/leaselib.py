@@ -2093,11 +2093,12 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
     from anywhere, and an operator shell (sid None) may release anything.
     --remove deletes worktree and branch, refusing unpromoted commits and
     uncommitted changes without --force and naming them (subjects, file
-    paths) before deleting them (§4.2, §4.5). From a session (sid), --remove
-    runs only after the window's unpromoted report was shown and the
-    operator's yes followed the delete line in this session's transcript
-    (deletion_confirmed_locked; `said` is --operator-said), and what
-    authorised it is recorded first (record_deletion). An operator shell
+    paths) before deleting them (§4.2, §4.5). From a session (sid), a window
+    with nothing to lose is deleted at once (delete_risks, v0.12.2); one with
+    work only after its unpromoted report ran in this session and the operator
+    agreed after it, in any words (deletion_confirmed_locked; `said`, the
+    --operator-said citation, is optional), and what authorised it is recorded
+    first (record_deletion). An operator shell
     (sid None) is unchanged — whatever form ran it, this is the backstop
     behind the guard's early refusal (design 2026-10-15, decision 13)."""
     with lock(root):
@@ -2173,8 +2174,8 @@ def _delete_window_locked(root: Path, nn: str, lease: dict, sid: Optional[str], 
 def release_many(root: Path, tokens: list, sid: Optional[str], force: bool = False, said: Optional[str] = None) -> str:
     """`release 02 03 04 --remove [--force] [--operator-said "…"]` (v0.12.2): several windows' work deleted under
     ONE gate. Every window is checked as `release NN --remove` checks one — it exists, no other live session holds
-    it — and, from a session, the windows with something to lose (delete_risks) need one yes to one ask that named
-    exactly them (group_confirmed_locked); a window with nothing to lose needs none. Any refusal — a held window,
+    it — and, from a session, the windows with something to lose (delete_risks) need the operator's one consent
+    after their reports (group_confirmed_locked); a window with nothing to lose needs none. Any refusal — a held window,
     a missing ask, a changed window, unpromoted work without --force — refuses the whole delete before anything is
     deleted. Several numbers go only with --remove: a window releases itself (`release NN`)."""
     with lock(root):
@@ -2232,14 +2233,10 @@ def unpromoted_work(root: Path, nn: str, lease: dict) -> Tuple[list, list, list]
 
 
 # --- Deleting a window's work: report, yes, delete (agent-runnable design 2026-10-15, §4.2) -------------------
-# The one line the report ends with and the operator's yes answers. It is the shown text AND the re-arming line
-# the transcript check looks for (the operator may ask first; a reply that ends with it re-arms the yes, as
-# promote's invitation does): the gate computes it from the number, nothing read from disk supplies it.
-DELETE_INVITATION = "Say yes to delete window %s's work"
-# v0.12.2: one report for several windows ends with ONE line naming every window with work, so one yes answers it
-# (a reply can end with only one line: one line per window made the operator's single yes clear one window at most,
-# and the agent asked again, and again).
-DELETE_INVITATION_MANY = "Say yes to delete the work of windows %s"
+# The question the report ends with. v0.12.2: a plain question — nothing checks its wording or where the operator's
+# answer stands; one report names every window, and one consent covers them all.
+DELETE_INVITATION = "Delete window %s's work"
+DELETE_INVITATION_MANY = "Delete the work of windows %s"
 
 
 def and_list(nns: list) -> str:
@@ -2248,13 +2245,13 @@ def and_list(nns: list) -> str:
 
 
 def delete_invitation(nns: list) -> str:
-    """The line the operator's yes answers: one window's line, unchanged, or the one line for several."""
+    """The report's closing question, for one window or several."""
     return DELETE_INVITATION % nns[0] if len(nns) == 1 else DELETE_INVITATION_MANY % and_list(nns)
 
 
 def release_asked_path(root: Path, nn: str) -> Path:
     """The witness that `unpromoted <NN>` ran for a session: state/release-asked/<NN>.json. A witness, not a trust
-    root — a script the session runs could write it, so the yes is matched against DELETE_INVITATION (a constant)
+    root — a script the session runs could write it, so the consent must be a turn the operator typed (find_consent)
     and the cut-off is never this file's time alone (lease_epochs)."""
     return root / "state" / "release-asked" / (nn + ".json")
 
@@ -2323,8 +2320,8 @@ def _read_json(p: Path) -> Optional[dict]:
         return None
 
 
-ASK_FIRST = ("Run core/lease.sh unpromoted %s first, repeat its report to the operator word for word, and ask; the "
-             "delete runs only after their yes.")
+ASK_FIRST = ("Run core/lease.sh unpromoted %s first, tell the operator what would be lost, and ask; the delete runs "
+             "once he agrees, in any words.")
 NOTHING_TO_LOSE = ("Window %s has no unpromoted commits and no uncommitted changes; deleting its work removes only its "
                    "worktree and branch and needs no yes.")
 
@@ -2366,39 +2363,36 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
 
 def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Dict[str, dict],
                            said: Optional[str]) -> dict:
-    """Whether a session may delete the work of windows nns now (agent-runnable design 2026-10-15, §4.2; several
-    windows under one yes since v0.12.2). Caller holds the lock, shared or exclusive; this never calls lock().
-    Returns what authorised it — transcript_ref, shown_ref, cutoff, text, and each window's witness under
-    "markers" — or raises Refused with one sentence:
-      1. the witness: ONE `unpromoted` ask in THIS session named exactly these windows (state/release-asked/<NN>.json
-         for each names sid, its number and the same group), and not before any of them existed (lease_epochs) —
-         a witness, not a trust root;
+    """Whether a session may delete the work of windows nns now (agent-runnable design 2026-10-15, §4.2; v0.12.2:
+    the operator's consent in his own words, one consent for every window a report named). Caller holds the lock,
+    shared or exclusive; this never calls lock(). Returns what authorised it — transcript_ref, shown_ref (None),
+    cutoff, text, and each window's witness under "markers" — or raises Refused with one sentence:
+      1. the witness: `unpromoted` ran for each window in THIS session (state/release-asked/<NN>.json names sid and
+         its number), and not before the window existed (lease_epochs) — a witness, not a trust root;
       2. tty mode: the deployment confirms at a terminal, so the delete is pasted there;
-      3. the words: --operator-said carries one plain line that is an acknowledgement (transcriptlib.is_assent;
-         a reply of several lines, or with a $ or a backtick, cannot ride on the command — ask for a one-line reply);
-      4. the work is what the report named, in every window (work_fingerprint unchanged since the ask): one changed
-         window refuses the whole delete by name — nothing is deleted, and the ask is made again for all of them;
-      5. the yes is in this session's transcript as the operator's first reply to an assistant turn carrying the
-         ask's one line (delete_invitation — one window's line, or one line naming every window), after a cut-off
-         that is the latest of the ask and the leases' own times — the recorded-yes machinery promote uses
-         (transcriptlib.find_operator_words; the line re-arms)."""
+      3. the work is what the report named, in every window (work_fingerprint unchanged since its ask): a changed
+         window refuses the whole delete by name — nothing is deleted, and the report is made again;
+      4. the consent: a turn the operator typed in this session after the latest of those asks and the windows' own
+         times, in any words that agree or ask for the delete, not taken back by a later no or wait
+         (transcriptlib.find_consent: a model-written yes, or a line added to the file, never counts). `said` (the
+         agent's --operator-said) is a citation: it picks among his consents when it matches one loosely, and is
+         never itself a reason to refuse."""
     import transcriptlib as tl
     nns = sorted(set(nns))
     nums = " ".join(nns)
     markers, asked_at, epochs = {}, 0.0, 0.0
     for nn in nns:
         m = _read_json(release_asked_path(root, nn))
-        group = (m or {}).get("group") or [(m or {}).get("lease")]
-        if m is None or m.get("session_id") != sid or m.get("lease") != nn or sorted(group) != nns:
+        if m is None or m.get("session_id") != sid or m.get("lease") != nn:
             raise Refused(ASK_FIRST % nums)
         try:
-            asked_at = max(asked_at, float(m.get("at")))      # type: ignore[arg-type]
+            at = float(m.get("at"))      # type: ignore[arg-type]
         except (TypeError, ValueError):
             raise Refused(ASK_FIRST % nums)
         e = lease_epochs(leases[nn])
-        if float(m.get("at")) < e:                          # type: ignore[arg-type]
+        if at < e:
             raise Refused(ASK_FIRST % nums)                  # the report predates this window: stale, or not its own
-        epochs = max(epochs, e)
+        asked_at, epochs = max(asked_at, at), max(epochs, e)
         markers[nn] = m
     try:
         mode = tl.confirm_mode(root)
@@ -2407,53 +2401,40 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
     if mode == "tty":
         raise Refused("This deployment confirms at the terminal (promote.confirm: tty). Paste this line in your "
                       "own shell: cd %s && core/lease.sh release %s --remove --force" % (root, nums))
-    if not (said or "").strip():
-        raise Refused("Record what the operator said: add --operator-said \"<their whole reply>\". The yes is "
-                      "evidence; an empty one is not a yes.")
-    said = str(said)
-    if not tl.is_assent(said):
-        raise Refused("The operator's words are not an acknowledgement (got: \"%s\"). Record the operator's whole reply; "
-                      "a reply in their own words that agrees, with no no, wait or question in it, is one." % said.strip())
-    if "\n" in said or "$" in said or "`" in said:
-        raise Refused("Ask the operator for a one-line reply and record that; a reply with several lines or shell "
-                      "characters cannot be carried on the command.")
     changed = [nn for nn in nns if work_fingerprint(root, nn, leases[nn]) != markers[nn].get("fingerprint")]
     if changed:
         raise Refused("Window%s %s's work changed since the report (a commit, an amended commit, or a changed or added "
-                      "file); run core/lease.sh unpromoted %s again and ask again."
-                      % ("s" if len(changed) > 1 else "", and_list(changed), nums))
+                      "file); nothing was deleted. Run core/lease.sh unpromoted %s again, tell the operator what "
+                      "changed, and ask again." % ("s" if len(changed) > 1 else "", and_list(changed), nums))
     cutoff = max(asked_at, epochs)
-    line = delete_invitation(nns)
     shell = "set `promote.confirm: tty` and run the delete in your own shell"
     try:
-        found = tl.find_operator_words(tl.transcript_for(root, str(sid)), said, cutoff, require_shown=True,
-                                       shown_text=line, shown_end=line)
+        found = tl.find_consent(tl.transcript_for(root, str(sid)), cutoff, quote=said)
     except tl.Unprotected as e:
         raise Refused("This session's transcript (%s) is outside every directory nothing may write, so it is not "
                       "evidence of the operator's words. Nothing was deleted. Set memory.transcript_dir in "
                       "config.yaml, or %s." % (e, shell))
     except tl.Missing as e:
-        raise Refused("I cannot find this session's transcript (%s), so the operator's yes cannot be checked. Nothing "
-                      "was deleted. If it lives elsewhere, set memory.transcript_dir in config.yaml; or %s." % (e, shell))
+        raise Refused("I cannot find this session's transcript (%s), so the operator's consent cannot be checked. "
+                      "Nothing was deleted. If it lives elsewhere, set memory.transcript_dir in config.yaml; or %s."
+                      % (e, shell))
     except tl.Unreadable as e:
         d = tl.DRIFT[:1].upper() + tl.DRIFT[1:]
         cut = d.index(";")
         raise Refused("%s (%s)%s. Nothing was deleted. Until then, %s." % (d[:cut], e, d[cut:], shell))
-    except tl.NotShown:
-        raise Refused("The delete line was not shown to the operator before that yes: the report was not repeated, "
-                      "the operator's reply to it came before that yes, or your last words before it were not the "
-                      "line. Nothing was deleted. Show the report once (core/lease.sh unpromoted %s); after that, end "
-                      "every reply of yours with the line \"%s.\" and nothing after it, then ask again." % (nums, line))
+    except tl.Declined as e:
+        raise Refused("The operator has not agreed: %s. Nothing was deleted; ask him again." % e)
     except tl.NotSubmitted as e:
-        raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; show the report to "
-                      "the operator and ask again." % str(e).replace("the words are", "they are", 1))
+        raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; ask the operator."
+                      % str(e).replace("the words are", "they are", 1))
     except tl.NotWritten:
         raise Refused("Those words are in this session's transcript, but not as a turn Claude Code wrote there: "
                       "nothing in the conversation follows from them, so they were added to the file afterwards. "
-                      "Nothing was deleted; show the report to the operator and ask again.")
-    except tl.NotFound:
-        raise Refused("I could not find those words as something the operator typed after the delete line was "
-                      "shown. Nothing was deleted.")
+                      "Nothing was deleted; ask the operator.")
+    except tl.NotFound as e:
+        raise Refused("The operator has not agreed to delete window%s %s's work yet (%s since the report). Nothing "
+                      "was deleted; tell him what would be lost and ask — any words that agree are enough."
+                      % ("s" if len(nns) > 1 else "", and_list(nns), e))
     return {"transcript_ref": found["transcript_ref"], "shown_ref": found["shown_ref"], "cutoff": cutoff,
             "text": found["text"], "markers": markers}
 
@@ -2462,7 +2443,7 @@ def deletion_confirmed(root: Path, sid: str, nns: "list | str", said: Optional[s
     """The guard's entry (core/guard-bash.py): the refusal sentence for `core/lease.sh release NN [NN …] --remove …`
     from session sid, or None when the delete may run. A shared lock, one read of the leases; transcriptlib is
     imported only inside the check. A window with nothing to lose (delete_risks) needs no yes (v0.12.2); the rest
-    need one yes to one ask that named exactly them."""
+    need the operator's consent, in any words, after their reports."""
     nns = [nns] if isinstance(nns, str) else list(nns)
     try:
         with lock(root, shared=True):
@@ -2495,12 +2476,12 @@ def unpromoted_report(root: Path, tokens: "list | str", sid: Optional[str] = Non
     what `release NN --remove` would delete, deleting nothing. A verb of its own because `release --remove` was denied
     by Claude Code's auto-mode classifier before it ran (another deployment, 2026-10-13). Read-only on the leases: a
     shared lock, any session, a visitor too. One sentence per window, then — when any window has something to lose —
-    ONE line the operator's yes answers (delete_invitation: one window's line, or one line naming every window with
-    something to lose; v0.12.2). A window with nothing to lose (delete_risks is []) is said to need no yes, and
-    gets no witness. From a session (sid), each window with something to lose is witnessed under
-    state/release-asked/<NN>.json — the session id, its report, problems and fingerprint, the time and the group
-    of numbers the one line named, the latest ask for a number overwriting an earlier one; a visitor's ask is
-    witnessed too (a visitor cannot release). An operator shell leaves no marker: it needs none."""
+    one plain question naming them (delete_invitation; nothing checks its wording, v0.12.2). A window with nothing
+    to lose (delete_risks is []) is said to need no yes, and gets no witness. From a session (sid), each window with
+    something to lose is witnessed under state/release-asked/<NN>.json — the session id, its report, problems and
+    fingerprint, the time, and the numbers this report named; the latest ask for a number overwrites an earlier one,
+    and moves the cut-off the operator's consent must follow. A visitor's ask is witnessed too (a visitor cannot
+    release). An operator shell leaves no marker: it needs none."""
     tokens = [tokens] if isinstance(tokens, str) else list(tokens)
     with lock(root, shared=True):
         leases = read_all(root)
@@ -2528,7 +2509,7 @@ def unpromoted_report(root: Path, tokens: "list | str", sid: Optional[str] = Non
             os.replace(str(tmp), str(marker))
     lines = [reports[nn] for nn in nns]
     if need:
-        lines.append(delete_invitation(need) + ".")
+        lines.append(delete_invitation(need) + "?")
     return "\n".join(lines)
 
 

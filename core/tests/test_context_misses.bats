@@ -150,7 +150,7 @@ PY
   run env DAEDALUS_CONTEXT_TEST_DIE=misses CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sP bash "$PROMOTE" 02
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(record_of | tail -1)" = "Code context: misses not computed (test knob); promote is unaffected." ]
-  case "$output" in *"Say yes to push window 02's work to main."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Push window 02's work to main?"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 # --- the classifier and the budgets, on a scratch tree built by hand -----------------------------------

@@ -433,9 +433,9 @@ _run_scan_in_fixture() {
            'CLAUDE.local.md' 'boundary.edit_brief: true' 'never edit CLAUDE.md' 'core/promote.sh 02 --clean' \
            'a session holding no window, or a shell: pushed promotions only' \
            'run `core/lease.sh unpromoted 02` first' 'the unpromoted commits and any uncommitted files' \
-           'it ends with the line `Say yes to delete window 02'"'"'s work.`' 'Never run `release` with `--remove`' \
-           'run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` exactly so' \
-           'ask for a one-line reply and carry that' 'never write a yes the operator did not give'; do
+           'When they agree — in any words' 'Never run `release` with `--remove`' \
+           'run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` from the home' \
+           'The quote is a citation, not a password' 'never write a yes the operator did not give'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
   # 2026-10-15: the agent runs the delete after the yes; the "give the operator the line to run" fallback is gone
