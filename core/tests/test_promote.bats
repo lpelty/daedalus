@@ -411,6 +411,18 @@ PY
   [ "$(origin_main)" = "$before" ]; [ ! -f "$(dirname "$(prepared)")/pushed" ]
 }
 
+@test "--skip-review (v0.12.2, review finding 5): a statement that neither asks to go on nor is cited in three words is no reason — 'Let me think about F1 for a bit' with --reason F1 is refused" {
+  work_on_02
+  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  P="$(pj prepared_ts)"
+  tx "$TXP" assistant "Reviewer on the merged change: REFUTED — one high finding." "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" operator "Let me think about F1 for a bit" "$(plus "$P" 2)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "F1"
+  refused "I could not find the operator's reason since the review was shown"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "think about F1 for a bit"
+  [ "$status" -eq 0 ] || { echo "a cited reason: $output"; return 1; }
+}
+
 @test "PROP-030 replayed — promote (v0.12.2): a skip reason after a reply that ended with a recommendation; 'Same reason: just push the work.' after questions, answers and a background notification; and the confirm's 'push the work' after the same — each goes through" {
   work_on_02
   FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
@@ -783,7 +795,7 @@ VERDICT: REFUTED"
   refused "at least three of them, is the price of skipping the review"
   tx "$TXP" operator "Wait, what did F1 say?" "$(plus "$P" 2)" >/dev/null
   shown_then_said "$typed" "$RL"
-  # v0.12.2: the citation need not be his whole turn — a fragment of it finds it, and his own words are recorded
+  # v0.12.2: the citation need not be their whole turn — a fragment of it finds it, and their own words are recorded
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "F1 is about a test file"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "${lines[3]}" = "Reviewer: skipped by the operator because: $typed" ]
   case "$output" in *"review skipped by the operator (it sets aside review $refuted of run $rrun);"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -952,7 +964,7 @@ PY
 }
 
 
-@test "confirm (transcribed, v0.12.2): the operator asks first; whatever the prime's answers end with, his next words that agree are the yes and are pushed; the quote recorded is his own turn" {
+@test "confirm (transcribed, v0.12.2): the operator asks first; whatever the prime's answers end with, their next words that agree are the yes and are pushed; the quote recorded is their own turn" {
   work_on_02
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"Nothing has been pushed. Push window 02's work to main?"*) : ;; *) echo "block lacks the question: $output"; return 1 ;; esac

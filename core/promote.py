@@ -526,7 +526,7 @@ def block_opening(p: dict) -> str:
 
 def invitation(p: dict) -> str:
     """The block's closing question. v0.12.2: a plain question — nothing checks its wording or where the
-    operator's answer stands; any words of his after the prepare that agree are the yes (transcribed_yes)."""
+    operator's answer stands; any words of theirs after the prepare that agree are the yes (transcribed_yes)."""
     return "Push window %s's work to %s?" % (p["lease"], p["trunk"])
 
 
@@ -677,7 +677,7 @@ def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str
     """§7.1 step 8, before any git work: the operator's written reason for
     skipping the review — in transcribed mode a turn of the operator's, at least
     three words, typed after the latest prepare of this window (or since this
-    session started when there is none), in his own words, recorded as he typed
+    session started when there is none), in their own words, recorded as they typed
     it (transcribed_yes, v0.12.2: no closing line, nothing about where the turn
     stands); in tty mode typed at a terminal — and the REFUTED review it
     sets aside (Decision 31): the latest REFUTED review of this window's current
@@ -916,7 +916,7 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, re
     any that agree or ask for the push and are not taken back by a later no or wait; for a skipped review
     (reason=True), a reason of at least three words. Nothing about where the turn stands matters: replies,
     questions and notifications between the block and the words do not reset it, and no closing line is looked
-    for. `said` is the agent's citation: it picks among his words when it matches loosely and is never itself the
+    for. `said` is the agent's citation: it picks among their words when it matches loosely and is never itself the
     refusal (transcriptlib.find_consent). A turn the model wrote, or a line added to the file, never counts; an
     unreadable transcript, or one outside the denied directories (Decision 36), is never a pass (A12)."""
     if me["kind"] != "prime-session":
@@ -940,7 +940,7 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, re
         raise Stop("%s (%s)%s. Until then, set `promote.confirm: tty` and paste the confirm line in your own shell."
                    % (d[:cut], e, d[cut:]))
     except tl.Declined as e:
-        raise Stop("The operator has not agreed: %s. Nothing was recorded; ask him again." % e)
+        raise Stop("The operator has not agreed: %s. Nothing was recorded; ask them again." % e)
     except tl.NotSubmitted as e:
         raise Stop("Those words are in this session's transcript, but %s. Nothing was recorded; show %s to the "
                    "operator and ask again." % (str(e).replace("the words are", "they are", 1), what))
@@ -950,7 +950,7 @@ def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, re
                    "recorded; show %s to the operator and ask again." % what)
     except tl.NotFound as e:
         if reason:
-            raise Stop("I could not find the operator's reason since %s was shown (%s): a reason in his own words, "
+            raise Stop("I could not find the operator's reason since %s was shown (%s): a reason in their own words, "
                        "at least three of them, is the price of skipping the review." % (what, e))
         raise Stop("The operator has not agreed to %s yet (%s since it was shown); any words that agree are enough."
                    % (what, e))

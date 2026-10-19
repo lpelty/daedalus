@@ -581,8 +581,11 @@ ask it about a finding, run `core/call-agent.sh --resume-review 02 "<their
 question>"` and repeat the answer. To promote without the review the operator
 must give a written reason of at least three words:
 `core/promote.sh 02 --skip-review --reason "<their whole reply>"` — checked
-the same way (a message of theirs since the last prepare, in any words), and
-recorded in their words beside the verdict it sets aside. When no review has refuted the
+the same way — a message of theirs since the refuted review's prepare (or
+since this session started, when nothing was refuted) that gives the reason
+and asks to go on ("same reason: just push the work"), or that you cite in
+three words or more — and recorded in their words beside the verdict it sets
+aside. When no review has refuted the
 change, first ask "Promote window 02's work without the review? Tell me why
 in your own words." and pass their answer. The gates always run.
 

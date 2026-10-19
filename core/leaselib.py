@@ -2177,7 +2177,8 @@ def release_many(root: Path, tokens: list, sid: Optional[str], force: bool = Fal
     it — and, from a session, the windows with something to lose (delete_risks) need the operator's one consent
     after their reports (group_confirmed_locked); a window with nothing to lose needs none. Any refusal — a held window,
     a missing ask, a changed window, unpromoted work without --force — refuses the whole delete before anything is
-    deleted. Several numbers go only with --remove: a window releases itself (`release NN`)."""
+    deleted; a git failure part-way (a worktree git cannot remove) stops there and names what was already deleted.
+    Several numbers go only with --remove: a window releases itself (`release NN`)."""
     with lock(root):
         leases = read_all(root)
         nns = sorted(set(number_of(leases, t, "release") for t in tokens))
@@ -2321,7 +2322,7 @@ def _read_json(p: Path) -> Optional[dict]:
 
 
 ASK_FIRST = ("Run core/lease.sh unpromoted %s first, tell the operator what would be lost, and ask; the delete runs "
-             "once he agrees, in any words.")
+             "once they agree, in any words.")
 NOTHING_TO_LOSE = ("Window %s has no unpromoted commits and no uncommitted changes; deleting its work removes only its "
                    "worktree and branch and needs no yes.")
 
@@ -2364,26 +2365,27 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
 def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Dict[str, dict],
                            said: Optional[str]) -> dict:
     """Whether a session may delete the work of windows nns now (agent-runnable design 2026-10-15, §4.2; v0.12.2:
-    the operator's consent in his own words, one consent for every window a report named). Caller holds the lock,
+    the operator's consent in their own words, one consent for every window a report named). Caller holds the lock,
     shared or exclusive; this never calls lock(). Returns what authorised it — transcript_ref, shown_ref (None),
     cutoff, text, and each window's witness under "markers" — or raises Refused with one sentence:
-      1. the witness: `unpromoted` ran for each window in THIS session (state/release-asked/<NN>.json names sid and
-         its number), and not before the window existed (lease_epochs) — a witness, not a trust root;
+      1. the witness: ONE `unpromoted` report in THIS session named every one of these windows
+         (state/release-asked/<NN>.json names sid, its number, the report's numbers and its time — one time for
+         all), and not before any of them existed (lease_epochs) — a witness, not a trust root;
       2. tty mode: the deployment confirms at a terminal, so the delete is pasted there;
       3. the work is what the report named, in every window (work_fingerprint unchanged since its ask): a changed
          window refuses the whole delete by name — nothing is deleted, and the report is made again;
       4. the consent: a turn the operator typed in this session after the latest of those asks and the windows' own
          times, in any words that agree or ask for the delete, not taken back by a later no or wait
          (transcriptlib.find_consent: a model-written yes, or a line added to the file, never counts). `said` (the
-         agent's --operator-said) is a citation: it picks among his consents when it matches one loosely, and is
+         agent's --operator-said) is a citation: it picks among their consents when it matches one loosely, and is
          never itself a reason to refuse."""
     import transcriptlib as tl
     nns = sorted(set(nns))
     nums = " ".join(nns)
-    markers, asked_at, epochs = {}, 0.0, 0.0
+    markers, asks, epochs = {}, set(), 0.0
     for nn in nns:
         m = _read_json(release_asked_path(root, nn))
-        if m is None or m.get("session_id") != sid or m.get("lease") != nn:
+        if m is None or m.get("session_id") != sid or m.get("lease") != nn or nn not in (m.get("group") or [nn]):
             raise Refused(ASK_FIRST % nums)
         try:
             at = float(m.get("at"))      # type: ignore[arg-type]
@@ -2392,8 +2394,14 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
         e = lease_epochs(leases[nn])
         if at < e:
             raise Refused(ASK_FIRST % nums)                  # the report predates this window: stale, or not its own
-        asked_at, epochs = max(asked_at, at), max(epochs, e)
+        asks.add(at)
+        epochs = max(epochs, e)
         markers[nn] = m
+    if len(asks) > 1:
+        # one consent answers one report: windows reported apart were asked apart, and a no to the earlier one would
+        # fall before the later one's cut-off (review 2026-10-19, finding 2) — so they are reported together, once
+        raise Refused(ASK_FIRST % nums)
+    asked_at = asks.pop()
     try:
         mode = tl.confirm_mode(root)
     except ValueError as e:
@@ -2423,7 +2431,7 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
         cut = d.index(";")
         raise Refused("%s (%s)%s. Nothing was deleted. Until then, %s." % (d[:cut], e, d[cut:], shell))
     except tl.Declined as e:
-        raise Refused("The operator has not agreed: %s. Nothing was deleted; ask him again." % e)
+        raise Refused("The operator has not agreed: %s. Nothing was deleted; ask them again." % e)
     except tl.NotSubmitted as e:
         raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; ask the operator."
                       % str(e).replace("the words are", "they are", 1))
@@ -2433,7 +2441,7 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
                       "Nothing was deleted; ask the operator.")
     except tl.NotFound as e:
         raise Refused("The operator has not agreed to delete window%s %s's work yet (%s since the report). Nothing "
-                      "was deleted; tell him what would be lost and ask — any words that agree are enough."
+                      "was deleted; tell them what would be lost and ask — any words that agree are enough."
                       % ("s" if len(nns) > 1 else "", and_list(nns), e))
     return {"transcript_ref": found["transcript_ref"], "shown_ref": found["shown_ref"], "cutoff": cutoff,
             "text": found["text"], "markers": markers}

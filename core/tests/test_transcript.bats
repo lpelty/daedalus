@@ -195,7 +195,12 @@ ok = ["Okay, yes, proceed.", "ok", "Go ahead", "Sounds good, push it", "Yes, pus
       "delete", "Yes, delete them.", "Same reason: just push the work.", "Why the timing test? Anyway, ship it.",
       "F1 is not about real code, promote it", "No problem, go ahead.", "Why not? Go ahead."]
 bad = ["no, wait", "yesterday was fine", "okay but why?", "hold on", "not yet", "", "   ", "Don\u2019t push it", "yes, but wait", "good",
-       "What is in that commit?", "No, wait \u2014 what did the reviewer say about F2?", "Wait, why?", "do not delete", "stop"]
+       "What is in that commit?", "No, wait \u2014 what did the reviewer say about F2?", "Wait, why?", "do not delete", "stop",
+       # the review of 2026-10-19: a no in other words, an exception, a later, listening, an action on something else
+       "Absolutely not.", "Of course not.", "I am not ok with that.", "Yes, but not 03.", "I want to merge this later.",
+       "Never.", "Keep it.", "Leave window 03 alone.", "Not 03, just 02.", "Ok. Which commit is that?",
+       "Remove the debug print in a.txt", "Plot x against y."]
+ok += ["Go ahead, no need to wait.", "Stop asking and push it.", "Delete them, they are not needed.", "skip the review, it is a docs change"]
 wrong = [t for t in ok if not tl.is_assent(t)] + [t for t in bad if tl.is_assent(t)]
 assert not wrong, wrong
 assert tl.is_yes is tl.is_assent

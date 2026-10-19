@@ -1097,7 +1097,7 @@ PY
 asked_by_sA() { DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02; }
 LINE02="Delete window 02's work?"
 DEL='core/lease.sh release 02 --remove --force'
-ASK_FIRST="Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once he agrees, in any words."
+ASK_FIRST="Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once they agree, in any words."
 # shown_then_yes <words> [shown text] — the report's tool result, the assistant turn that showed it (the whole
 # report by default), then the operator's words, all after the ask; sets P. The entries are stamped a few seconds
 # ahead of the clock (tx), and each ask moves the cut-off to the clock: a SECOND ask in one test must wait until
@@ -1110,7 +1110,7 @@ shown_then_yes() {
   tx "$TX" operator "$1" "$(plus "$P" 3)" >/dev/null
 }
 
-@test "delete gate (v0.12.2): core/lease.sh release 02 --remove is denied without the report, while the operator has not agreed since it (nothing typed, only a question, the model's own yes, a no), and allowed once he has — with or without --operator-said, whatever it carries; nothing else about lease.sh is gated" {
+@test "delete gate (v0.12.2): core/lease.sh release 02 --remove is denied without the report, while the operator has not agreed since it (nothing typed, only a question, the model's own yes, a no), and allowed once they have — with or without --operator-said, whatever it carries; nothing else about lease.sh is gated" {
   delete_guard
   run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA 'core/lease.sh release 02 --remove --operator-said yes'; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac   # without --force too
@@ -1129,7 +1129,7 @@ shown_then_yes() {
   tx "$TX" operator "Actually fine — delete it." "$(plus "$P" 5)" >/dev/null
   run guard_as sA "$DEL"; allowed
   run guard_as sA "$DEL --operator-said \"yes \$HOME\""; allowed                    # a citation the guard cannot read
-  run guard_as sA "$DEL --operator-said 'something he never said'"; allowed
+  run guard_as sA "$DEL --operator-said 'something they never said'"; allowed
   [ -d "$W" ]
 }
 

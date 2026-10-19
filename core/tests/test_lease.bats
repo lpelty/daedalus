@@ -516,7 +516,7 @@ PY
   # yes in sB's transcript it is refused before any other check, and nothing is deleted. The --force rule below is
   # proved from an operator shell, which is not gated (it needs no transcript).
   CLAUDE_CODE_SESSION_ID=sB run LS release 02 --remove --force
-  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once he agrees, in any words."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once they agree, in any words."*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
   run LS release 02 --remove
   [ "$status" -ne 0 ]; case "$output" in *"unmerged work"*"--force"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -1808,7 +1808,7 @@ LINE02="Delete window 02's work?"
 @test "release --remove from a session (v0.12.2): refused without the report (nothing deleted); refused while the operator has not agreed since it — nothing typed, only a question, a no, a yes taken back by a wait, and a yes the model wrote; refused when the work changed since the report; in tty mode with the paste line — and an operator shell is not gated" {
   delete_fixture
   run delete_as_sA --operator-said yes
-  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once he agrees, in any words."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 first, tell the operator what would be lost, and ask; the delete runs once they agree, in any words."*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]; [ -f "$DAEDALUS_HOME/state/leases/02.json" ]
   R="$(asked)"; [ -f "$M" ]
   [ "${R##*$'\n'}" = "$LINE02" ]
@@ -1860,7 +1860,7 @@ LINE02="Delete window 02's work?"
   [ ! -d "$W" ]
 }
 
-@test "release --remove from a session after the operator agreed (v0.12.2): any later message of his that agrees counts — after questions, answers and a notification, with no closing line, in a message that also asks something, and with a citation that does not match; it deletes the window and records what authorised it under state/evidence/deletions/" {
+@test "release --remove from a session after the operator agreed (v0.12.2): any later message of theirs that agrees counts — after questions, answers and a notification, with no closing line, in a message that also asks something, and with a citation that does not match; it deletes the window and records what authorised it under state/evidence/deletions/" {
   delete_fixture
   R="$(asked)"; P="$(now)"
   tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
@@ -2083,6 +2083,21 @@ LINE0203="Delete the work of windows 02 and 03?"
   ls "$DAEDALUS_HOME"/state/evidence/deletions/02-*.json >/dev/null; ls "$DAEDALUS_HOME"/state/evidence/deletions/03-*.json >/dev/null
   ! ls "$DAEDALUS_HOME"/state/evidence/deletions/04-*.json 2>/dev/null
   [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+}
+
+@test "one consent answers one report (v0.12.2, review finding 2): windows reported apart are refused together until one report names them all — a no to the earlier report is never skipped over" {
+  group_fixture
+  DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 02 >/dev/null; P="$(now)"
+  tx "$TX" operator "no, keep 02" "$(plus "$P" 1)" >/dev/null
+  python3 -c 'import sys,time; time.sleep(max(0.0, float(sys.argv[1]) - time.time()))' "$(plus "$P" 2)"
+  DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" unpromoted 03 >/dev/null; P="$(now)"
+  tx "$TX" operator "yes, delete it" "$(plus "$P" 1)" >/dev/null
+  DAEDALUS_SESSION_ID=sA run LS release 02 03 --remove --force --operator-said yes
+  [ "$status" -ne 0 ]; case "$output" in *"Run core/lease.sh unpromoted 02 03 first"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; [ -d "$W3" ]
+  DAEDALUS_SESSION_ID=sA run --separate-stderr LS release 03 --remove --force --operator-said yes
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ -d "$W" ]; [ ! -d "$W3" ]
 }
 
 @test "release with several numbers but no --remove is refused (one window releases itself; several numbers go with deleting their work)" {
