@@ -827,7 +827,7 @@ PY
     run --separate-stderr bash "$CALL" --resume-review 02 "Finding F2 says the lock leaks. Show me the line."
   [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
   [ "$output" = "Line 12: the lock is released only on success." ]
-  [ "${stderr_lines[0]}" = "Refuter call $id2 (branch review of run r2, window 02; resumed from an operator shell); receipt state/direct-calls/$id2" ]
+  [ "${stderr_lines[0]}" = "Refuter call $id2 (branch review of run r2, window 02; resumed from an operator shell); receipt state/direct-calls/$id2" ] || { echo "${stderr_lines[0]}"; return 1; }
   python3 - "$FAKE_CLAUDE_DIR/3.argv" "$id2" "$T" <<'PY'
 import json, sys
 argv = open(sys.argv[1]).read().split("\n"); pairs = list(zip(argv, argv[1:]))

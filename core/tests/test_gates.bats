@@ -1303,7 +1303,7 @@ STUB
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   id="$(printf '%s\n' "$output" | tail -1)"
   [ "$(grep -c '"result": "PASS"' "$DAEDALUS_HOME/state/evidence/$id/run.json")" -eq 1 ]
-  printf '%s\n' "$output" | grep -q "1 finding not counted.*$id-review.md" || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q "1 backlog candidate, not counted.*$id-review.md" || { echo "$output"; return 1; }
 }
 
 # --- gates_setup: commands that prepare the tree under test before the gates (2026-10-14) ---------

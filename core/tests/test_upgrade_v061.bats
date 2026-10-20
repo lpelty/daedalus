@@ -94,13 +94,15 @@ TAIL="Nothing was changed. Say 'pick it up' to move it into windows, then start 
   # the old session's Stop after the upgrade blocks (exit 2, reasons on stderr) with only the reasons the spec gives
   # a session left open through an upgrade: config.yaml changed under it (the memory: block; Decision 11 — the
   # sentence tells the operator to restart it), and the promotion backstop, which cannot tell an unnumbered
-  # session's tree now that several sessions are live. Never a traceback.
+  # session's tree now that several sessions are live — and, since v0.12.4, the line every block ends with: the way
+  # back when the agent cannot resolve it alone. Never a traceback.
   run --separate-stderr stop_s0
   case "$status" in 0|2) : ;; *) echo "status $status: $output $stderr"; return 1 ;; esac
   case "$stderr" in *Traceback*) echo "$stderr"; return 1 ;; esac
   case "$stderr" in *"config.yaml changed under this session, by the upgrade to $CUR — not by this session. Do not restore it"*"tell the operator to close it and start a new session."*) : ;; *) echo "$stderr"; return 1 ;; esac
   case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac
-  [ -z "$(printf '%s\n' "$stderr" | grep -v -e '^$' -e '^config.yaml changed under this session, by the upgrade' -e '^Promotion check')" ] \
+  [ -z "$(printf '%s\n' "$stderr" | grep -v -e '^$' -e '^config.yaml changed under this session, by the upgrade' -e '^Promotion check' \
+                -e '^If you cannot resolve this yourself')" ] \
     || { echo "an unexpected Stop reason for the old session: $stderr"; return 1; }
   run --separate-stderr stop_s0
   case "$stderr" in *"changed this session; restore it"*) echo "$stderr"; return 1 ;; esac

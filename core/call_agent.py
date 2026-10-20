@@ -1170,7 +1170,9 @@ def attempt(root: Path, call_dir: Path, rec: dict, launch: dict, request: bytes,
         where = "; receipt state/direct-calls/%s" % rec["call_id"]
         what = []
         if mode == "refuter":
-            what.append("%s review of run %s, window %s" % (rec.get("review_mode"), rec.get("tag") or "(none)",
+            # A later review's one reviewer runs as lens "all" (v0.12.4): it is that run's review.
+            what.append("%s review of run %s, window %s" % (rec.get("review_mode"),
+                                                           re.sub(r"-lens-all$", "", rec.get("tag") or "") or "(none)",
                                                            rec.get("window") or "(none)"))
         if resumed_by is not None:
             what.append(phrase)
@@ -1546,6 +1548,10 @@ def latest_review(root: Path, token: str, view: dict) -> str:
             m = LENS_TAG.fullmatch(str(rec.get("tag") or ""))
             if rec.get("mode") == "refuter" and rec.get("window") == token and m and m.group(1) == lens.group(1):
                 calls.append((m.group(2), str(rec["call_id"])))
+        # One reviewer with no lens of its own (lens "all": a later review the merge reads for new ground, v0.12.4)
+        # is the review itself: resume it.
+        if [c[0] for c in calls] == ["all"]:
+            return str(best["call_id"])
         raise Refusal("Window %s's latest review (run %s) was %d reviewers at once, one per lens: %s. The merged "
                       "review names the lens that found each finding; ask that one with `core/call-agent.sh --resume "
                       "<call-id> \"<the operator's question>\"`." % (

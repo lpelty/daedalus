@@ -64,7 +64,7 @@ pre_upgrade_session_after_pick_up() {
   case "$output" in *"This session holds no lease"*|*"lease.sh create"*|*"claim <NN>"*) echo "$output"; return 1 ;; esac
 }
 
-@test "once the upgrade has finished (a later session stamped it), the old session's Stop goes back to the ordinary no-window refusal — the remedy it names is then possible, so a re-fired Stop still blocks" {
+@test "once the upgrade has finished (a later session stamped it), the old session's Stop goes back to the ordinary no-window refusal — once a turn: a re-fired Stop notes it (v0.12.4), the next turn's Stop blocks again" {
   pre_upgrade_session_after_pick_up
   P2="$(live_pid)"; registry_entry "$P2" s2 interactive cli daedalus-xx
   run start s2; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -73,9 +73,12 @@ pre_upgrade_session_after_pick_up() {
   [ "$status" -eq 2 ] || { echo "status $status: $output $stderr"; return 1; }
   case "$stderr" in *"This session holds no window"*"core/lease.sh create"*) : ;; *) echo "$stderr"; return 1 ;; esac
   case "$stderr" in *"started before the upgrade"*) echo "$stderr"; return 1 ;; esac
+  # No Stop hook may lock a session (v0.12.4): re-fired, the same reason is a note and the turn ends.
   run --separate-stderr stop s1 true
-  [ "$status" -eq 2 ] || { echo "a repairable refusal must block the re-fired Stop too — status $status: $output $stderr"; return 1; }
-  case "$stderr" in *"core/lease.sh create"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  [ "$status" -eq 0 ] || { echo "a re-fired Stop must not block twice for one reason — status $status: $output $stderr"; return 1; }
+  case "$output" in *"core/lease.sh create"*) : ;; *) echo "$output"; return 1 ;; esac
+  run --separate-stderr stop s1
+  [ "$status" -eq 2 ] || { echo "the next turn's Stop must block once more — status $status: $output $stderr"; return 1; }
 }
 
 @test "lease.sh in a home whose upgrade stamp is absent prints no shell error about the missing stamp" {
