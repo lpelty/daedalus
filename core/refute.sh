@@ -350,6 +350,8 @@ repo_diff() {
 # <sha> in one diff, so every hunk's new-side line numbers are the working tree's — the lines the reviewer reads.
 # repo_diff's two parts (committed since <sha>, then uncommitted against HEAD) number their hunks against two different
 # trees, and a file changed in both would put the committed ranges in the wrong place (review 2026-10-20, F4).
+# The committed part is then appended against HEAD as well: the reviewer reads those hunks numbered from HEAD, and
+# hunks reads both diffs into one set of ranges per file (review 2026-10-20, round 4, F1).
 ground_diff() {
   local repo="$1" prefix="$2" sha="$3" out="$4" idx real n; shift 4
   local ex=()
@@ -366,6 +368,8 @@ ground_diff() {
       ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
   fi
   rm -f "$idx" "$idx.lock"
+  git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" "$sha" HEAD -- . \
+    ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
 }
 nested_rel=()   # bash 3.2: no mapfile
 if cfg target.nested >/dev/null 2>&1; then

@@ -449,6 +449,19 @@ assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled 
   [ -f "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" ]; ! grep -q '^### .*missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" || { echo "$output"; cat "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"; return 1; }
 }
 
+@test "review 2026-10-20 round 4: a committed change cited by its HEAD number, as the reviewer is shown it, is new ground though uncommitted lines above shift the working tree" {
+  lease_for 03; write_config; small_change; seq 1 30 > "$T/f.txt"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -qm first
+  refute_l1; gates; [ "$status" -ne 0 ]
+  { seq 201 210; sed 's/^20$/twenty/' "$T/f.txt"; } > "$T/f.new"; mv "$T/f.new" "$T/f.txt"   # committed: HEAD line 30, last review's line 20
+  git -C "$T" -c user.email=t@x -c user.name=t commit -qam second
+  { seq 101 110; cat "$T/f.txt"; } > "$T/f.new"; mv "$T/f.new" "$T/f.txt"                    # uncommitted: working-tree line 40
+  printf 'Resolved: L1\n\n### F1 — f.txt:30 — plausible — in scope — MEDIUM — reach: user\nWhat is wrong: twenty.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ -f "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" ]; ! grep -q '^### .*missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" || { echo "$output"; cat "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"; return 1; }
+}
+
 @test "review 2026-10-20 F5: a live check reported again in other words at the same place stays one live check" {
   lease_for 03; write_config; small_change
   printf '### F1 — marker.txt:2 — plausible — in scope — HIGH — reach: routine — live-only\nWhat is wrong: the job may not reach the service.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
@@ -461,7 +474,7 @@ assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled 
 }
 
 @test "review 2026-10-20 round 3: new ground counts the context lines the reviewer is shown, a deleted line by its old number, and all of a deleted file" {
-  printf 'diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n@@ -50 +52,0 @@\n-if not ok: return\ndiff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1,9 +0,0 @@\n-x\n' > "$BATS_TEST_TMPDIR/delta"
+  printf 'diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1,10 @@\n+a\n+b\n+c\n+d\n+e\n+f\n+g\n+h\n+i\n+j\n@@ -50 +59,0 @@\n-if not ok: return\ndiff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1,9 +0,0 @@\n-x\n' > "$BATS_TEST_TMPDIR/delta"
   run python3 - "$SRC/review-lenses.py" "$BATS_TEST_TMPDIR" <<'PY'
 import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("rl", sys.argv[1]); rl = importlib.util.module_from_spec(spec); spec.loader.exec_module(rl)
@@ -469,7 +482,7 @@ d = sys.argv[2]
 rl.cmd_hunks(d + "/delta", "/t", d + "/h.json"); h = json.load(open(d + "/h.json"))
 missed = lambda f, n: rl.missed_earlier({"file": f, "line": n, "end": n}, h)
 assert not missed("x.py", 50), "the removed guard, cited by its old line"
-assert not missed("x.py", 55), "a context line below the deletion"
+assert not missed("x.py", 62), "a context line below the deletion"
 assert not missed("gone.py", 5), "a deleted file is all new ground"
 assert missed("x.py", 30), "positive control: a line no hunk is near"
 print("ok")
