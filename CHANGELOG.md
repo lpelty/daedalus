@@ -4,6 +4,40 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.5 — your instruction is your yes
+
+**In short.** Say "promote window 2" in any words, and a clean result is
+pushed in the same turn. Promote and delete no longer read your words for a
+yes. They check one thing: that you typed something since the last promote,
+or since the report for a delete.
+
+**What went wrong.**
+- Promote still stopped you after you told it to promote. It wanted a second
+  answer in a later turn, after the result was shown.
+- Skipping a refuted review needed a reason of at least three words.
+- A later "wait", a message typed while the window was busy, or words that
+  named only some windows could each refuse a plain instruction.
+
+**What changed.**
+- A clean result (gates pass, the review stands, nothing new) is pushed right
+  after your instruction, in the same turn.
+- A result with something new in it is shown once. Your answer, in any words,
+  is the yes.
+- `--skip-review` takes any words, one word included. `--reason` is optional.
+- The tools check only that the words came from you: typed in this session,
+  written by Claude Code, and reported as you sent them.
+- Whether your words mean yes, and to which windows, is the agent's to read.
+- Deleting a window with work still reports what would be lost and asks once.
+
+**What you will see.** Fewer questions. A refusal now says only "The operator
+has typed nothing in this session since …".
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.5`. CLAUDE.md's
+Promote section says the confirm checks one thing.
+
 ## v0.12.4 — review settles instead of growing, and a session never locks up on a blocked stop
 
 **In short.** A review now judges a finding by who meets it, not only by how
