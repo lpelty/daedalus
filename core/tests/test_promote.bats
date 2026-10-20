@@ -151,7 +151,7 @@ How to confirm: d.
 VERDICT: REFUTED"
   run as_prime bash "$PROMOTE" 02
   refused "The reviewer REFUTED the merged change (2 HIGH or MEDIUM findings; the review is at vault/evidence/$(pj run_id)-review.md)." 1
-  case "$output" in *"Reviewer on the merged change: REFUTED — 2 high findings."*"Nothing has been pushed. Ask me to ask the reviewer why, or give a written reason to promote without the review."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Reviewer on the merged change: REFUTED — 2 high findings."*"Nothing has been pushed. Ask me to ask the reviewer why, or tell me to promote it without the review."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"core/call-agent.sh --resume-review 02"*"promote 02 --skip-review --reason"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(pj review.verdict)" = "REFUTED" ]
   export FAKE_ANSWER="F1 — nothing found.
@@ -345,18 +345,15 @@ PY
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
 
-@test "an acknowledgement in the operator's own words confirms (Decision 30, v0.10.0): \"Okay, yes, proceed.\" after the block pushes; \"okay but why?\" before it is refused and pushes nothing" {
+@test "v0.12.5: the tool reads no yes in the words — after \"okay but why?\" and \"Okay, yes, proceed.\", the confirm cites the second and records it" {
   work_on_02
-  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"; P="$(pj prepared_ts)"
-  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" 1)" >/dev/null
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; P="$(pj prepared_ts)"
   tx "$TXP" operator "okay but why?" "$(plus "$P" 2)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "okay but why?"
-  refused "The operator has not agreed to the promote block yet (the operator has only asked questions since it was shown)"
-  [ "$(origin_main)" = "$before" ]
-  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" 3)" >/dev/null
+  tx "$TXP" assistant "Because the gates passed on the merge." "$(plus "$P" 3)" >/dev/null
   tx "$TXP" operator "Okay, yes, proceed." "$(plus "$P" 4)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "Okay, yes, proceed."; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, proceed"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(origin_main)" = "$(pj merge_sha)" ]
+  grep -qF 'after the operator said: "Okay, yes, proceed."' "$DAEDALUS_HOME/vault/evidence/$(pj run_id).md"
 }
 
 @test "a yes rewritten into the session transcript is refused and nothing is pushed — the whole-file rewrite that keeps the chain: a yes and a reply inserted after the block, the next entry re-parented, the harness writing on after it; the genuine yes after it is accepted (critic-fix review, finding 3)" {
@@ -413,23 +410,15 @@ PY
   [ "$(git -C "$T" rev-parse origin/main)" = "$m" ]; [ "$(git -C "$T" rev-parse HEAD)" != "$m" ]
 }
 
-@test "the transcribed yes, refused (v0.12.2): nothing typed since the prepare; a no; a yes the model wrote; only in a tool result; only before the prepare; only questions; an unreadable transcript (naming tty); no transcript at all; from an operator shell — and nothing is pushed" {
+@test "the transcribed yes, refused (v0.12.5): nothing typed; only the model's words or a tool result; an unreadable transcript (naming tty); no transcript at all; from an operator shell — and nothing is pushed" {
   work_on_02
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; before="$(origin_main)"; P="$(pj prepared_ts)"
   B="Ready to promote window 02's work onto main."
   c() { run as_prime bash "$PROMOTE" 02 --confirm --operator-said "$1"; }
-  c ""; refused "The operator has not agreed to the promote block yet (nothing the operator typed agrees or asks for it since it was shown); any words that agree are enough."
-  tx "$TXP" assistant "$B" "$(plus "$P" 1)" >/dev/null
-  tx "$TXP" operator "No, wait — what did the reviewer say about F2?" "$(plus "$P" 2)" >/dev/null
-  c "yes ship it"; refused "The operator has not agreed: the operator's last word on it was \"No, wait — what did the reviewer say about F2?\"."
-  tx "$TXP" assistant "yes, ship it" "$(plus "$P" 3)" >/dev/null
-  c "yes ship it"; refused "The operator has not agreed: the operator's last word on it was"
-  : > "$TXP"; tx "$TXP" tool-result "yes ship it" "$(plus "$P" 1)" >/dev/null; tx "$TXP" assistant "$B" "$(plus "$P" 2)" >/dev/null
-  c "yes ship it"; refused "The operator has not agreed to the promote block yet"
-  : > "$TXP"; tx "$TXP" operator "yes ship it" "$(plus "$P" -30)" >/dev/null; tx "$TXP" assistant "$B" "$(plus "$P" 2)" >/dev/null
-  c "yes ship it"; refused "The operator has not agreed to the promote block yet"
-  tx "$TXP" operator "What did the reviewer find? And F2?" "$(plus "$P" 3)" >/dev/null
-  c "yes"; refused "The operator has not agreed to the promote block yet (the operator has only asked questions since it was shown)"
+  c ""; refused "The operator has typed nothing in this session since window 02's last promote (or since this session started); ask them."
+  tx "$TXP" assistant "yes, ship it" "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" tool-result "yes ship it" "$(plus "$P" 2)" >/dev/null
+  c "yes ship it"; refused "The operator has typed nothing in this session"
   tx "$TXP" assistant "$B" "$(plus "$P" 4)" >/dev/null; tx "$TXP" malformed "x" "$(plus "$P" 5)" >/dev/null; tx "$TXP" operator "yes ship it" "$(plus "$P" 6)" >/dev/null
   c "yes ship it"; refused "This Claude Code build's transcript shape is not the one Daedalus was tested against ("
   case "$output" in *"promote confirm will refuse until the fixture is refreshed — see core/tests/fixtures/transcripts/PROVENANCE.md."*) : ;; *) echo "$output"; return 1 ;; esac
@@ -439,26 +428,6 @@ PY
   run bash "$PROMOTE" 02 --confirm --operator-said "yes ship it"
   refused "In transcribed mode the prime window records the operator's yes; from a shell, set \`promote.confirm: tty\` and run the confirm there."
   [ "$(origin_main)" = "$before" ]; [ ! -f "$(dirname "$(prepared)")/pushed" ]
-}
-
-@test "--skip-review (v0.12.2, review findings 5, 6, 10): a deferral is no reason, whatever the agent cites; a bare go-ahead after it is a consent with no reason; a reason of three words or more just before the go-ahead is one" {
-  work_on_02
-  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
-  P="$(pj prepared_ts)"
-  tx "$TXP" assistant "Reviewer on the merged change: REFUTED — one high finding." "$(plus "$P" 1)" >/dev/null
-  tx "$TXP" operator "Let me think about F1 for a bit" "$(plus "$P" 2)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "F1"
-  refused "The operator has not agreed: the operator's last word on it was \"Let me think about F1 for a bit\"."
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "think about F1 for a bit"
-  refused "The operator has not agreed"
-  tx "$TXP" operator "Yes go ahead" "$(plus "$P" 3)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "go ahead"
-  refused "the operator agreed but gave no reason of three words or more"
-  tx "$TXP" operator "F1 only touches test fixtures." "$(plus "$P" 4)" >/dev/null
-  tx "$TXP" operator "push it" "$(plus "$P" 5)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "push it"
-  [ "$status" -eq 0 ] || { echo "reason before the go-ahead: $output"; return 1; }
-  [ "${lines[3]}" = "Reviewer: skipped by the operator because: F1 only touches test fixtures." ]
 }
 
 @test "PROP-030 replayed — promote (v0.12.2): a skip reason after a reply that ended with a recommendation; 'Same reason: just push the work.' after questions, answers and a background notification; and the confirm's 'push the work' after the same — each goes through" {
@@ -544,18 +513,19 @@ VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   [ "$(git -C "$O" log -1 --format=%s main)" = "race" ]
 }
 
-@test "the cut-off is the latest of the primaries: prepared.json's time lowered below an earlier yes does not let that yes count (Decision 35)" {
+@test "Decision 35's evidence check still runs at confirm: a prepared time lowered below the merge commit is refused; words typed before this session started are not the operator's yes" {
   work_on_02
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; P="$(pj prepared_ts)"; m="$(pj merge_sha)"
-  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$P" -120)" >/dev/null
-  tx "$TXP" operator "yes" "$(plus "$P" -110)" >/dev/null
+  S="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["started_epoch"])' "$DAEDALUS_HOME/state/session-sP.json")"
+  tx "$TXP" assistant "Ready to promote window 02's work onto main." "$(plus "$S" -20)" >/dev/null
+  tx "$TXP" operator "yes" "$(plus "$S" -10)" >/dev/null
   setp() { python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); p["prepared_ts"]=float(sys.argv[2]); json.dump(p, open(sys.argv[1],"w"))' "$(prepared)" "$1"; }
   setp "$(plus "$P" -200)"
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
   refused "Evidence disagrees with the prepared promotion (the prepared time is earlier than the merge commit)."
   setp "$(git -C "$T" show -s --format=%ct "$m")"   # the scratch is a worktree of target/thing: one object store
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
-  refused "The operator has not agreed to the promote block yet"
+  refused "The operator has typed nothing in this session since window 02's last promote"
 }
 
 @test "the scratch must still be the merge commit at confirm: a commit made in it, which leaves the fingerprint unchanged, is refused (Decision 37)" {
@@ -810,27 +780,21 @@ What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED"
 
-@test "--skip-review needs --reason with the operator's words, refused before any git work" {
+@test "--skip-review with nothing the operator typed since the session started is refused before any git work (v0.12.5: --reason is a citation and optional)" {
   work_on_02
-  run as_prime bash "$PROMOTE" 02 --skip-review; refused "--skip-review needs --reason with the operator's words; a reason is the price of skipping the review."
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "  "; refused "--skip-review needs --reason"
+  run as_prime bash "$PROMOTE" 02 --skip-review; refused "The operator has typed nothing in this session"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "  "; refused "The operator has typed nothing in this session"
   [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
 }
 
-@test "--skip-review over a REFUTED review: the reason typed only before that prepare, not at all, or in too few words is refused; typed after it, in any place and cited by a fragment, the operator's own words are recorded beside the verdict they set aside, no reviewer runs, gates still run, and the confirm's ledger line names the overridden call" {
+@test "--skip-review over a REFUTED review: nothing typed since the session started is refused; the operator's turn, cited by a fragment, is recorded in their own words beside the verdict it sets aside, no reviewer runs, gates still run, and the confirm's ledger line names the overridden call" {
   work_on_02
   FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   refuted="$(pj review.call_id)"; rrun="$(pj run_id)"; P="$(pj prepared_ts)"; n0="$(calls)"
   why="promote it anyway, F1 is about a test file"; typed="Promote it anyway, F1 is about a test file."
   RL="Reviewer on the merged change: REFUTED — one high finding."
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"
-  refused "I could not find the operator's reason since the review was shown"
-  tx "$TXP" operator "$why" "$(plus "$P" -30)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "$why"
-  refused "I could not find the operator's reason since the review was shown"
-  tx "$TXP" operator "skip it" "$(plus "$P" 1)" >/dev/null                 # too few words to be a reason
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip it"
-  refused "at least three of them, is the price of skipping the review"
+  refused "The operator has typed nothing in this session"
   tx "$TXP" operator "Wait, what did F1 say?" "$(plus "$P" 2)" >/dev/null
   shown_then_said "$typed" "$RL"
   # v0.12.2: the citation need not be their whole turn — a fragment of it finds it, and their own words are recorded
@@ -924,22 +888,22 @@ PY
   [ "$(pj overrode_review)" = "None" ]
 }
 
-@test "--skip-review with no earlier prepare: words typed before this session's marker started do not count, under any TZ, a marker from an older build counts from its file's time, and no readable marker is refused" {
+@test "--skip-review and confirm (v0.12.5): words typed before this session's marker started do not count, under any TZ, a marker from an older build counts from its file's time, and no readable marker is refused" {
   work_on_02; M="$DAEDALUS_HOME/state/session-sP.json"
   S="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["started_epoch"])' "$M")"
   tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$S" -20)" >/dev/null
   tx "$TXP" operator "skip the review, it is a docs change" "$(plus "$S" -10)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
-  refused "I could not find the operator's reason since the review was shown"
+  refused "The operator has typed nothing in this session"
   TZ=Etc/GMT-14 run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
-  refused "I could not find the operator's reason since the review was shown"
+  refused "The operator has typed nothing in this session"
   # an older build's marker (no started_epoch) counts from the file's modification time
   python3 - "$M" "$S" <<'PY'
 import json, os, sys
 m = json.load(open(sys.argv[1])); m.pop("started_epoch"); json.dump(m, open(sys.argv[1], "w")); os.utime(sys.argv[1], (float(sys.argv[2]),) * 2)
 PY
   TZ=Etc/GMT-14 run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
-  refused "I could not find the operator's reason since the review was shown"
+  refused "The operator has typed nothing in this session"
   rm "$M"
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "skip the review, it is a docs change"
   refused "This session has no start record"
@@ -991,10 +955,10 @@ PY
   # both files wrap their lines: read each with its line breaks folded to spaces
   flat() { tr '\n' ' ' < "$1" | tr -s ' '; }
   RM="$(flat "$R/README.md")"; CM="$(flat "$R/CLAUDE.md")"
-  for s in 'core/promote.sh 02' '--operator-said' 'promote.confirm: tty' 'pre-push hook' 'core/lease.sh rebase 02' 'core/lease.sh split 02 --repo' '--skip-review --reason' 'Nothing was pushed.' 'an acknowledgement in their own words' 'not a proof' 'server-side branch protection'; do
+  for s in 'core/promote.sh 02' '--operator-said' 'promote.confirm: tty' 'pre-push hook' 'core/lease.sh rebase 02' 'core/lease.sh split 02 --repo' '--skip-review --reason' 'Nothing was pushed.' 'one word or fifty' 'not a proof' 'server-side branch protection'; do
     case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
   done
-  for s in '## Promote' 'core/promote.sh 02 --confirm --operator-said' 'in a later turn' 'their whole reply' 'Promote window 02'"'"'s work without the review?' 'core/lease.sh rebase 02' "the operator's own write"; do
+  for s in '## Promote' 'core/promote.sh 02 --confirm --operator-said' 'in the same turn' 'a few of their words' 'checks one thing' 'core/lease.sh rebase 02' "the operator's own write"; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
   grep -q '^## v0.7.0 — ' "$R/CHANGELOG.md"; grep -qF 'core/promote.sh' "$R/CHANGELOG.md"
@@ -1178,4 +1142,83 @@ A=02-20261015-120000-aaa; B=02-20261015-120100-bbb
   [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
   printf '9.9.9\n' > "$DAEDALUS_HOME/state/upgraded-to"
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "v0.12.5: the instruction is the yes — 'Promote window 2' typed before the prepare, then a clean prepare and its confirm in the same turn, pushes; the words recorded are that turn" {
+  work_on_02
+  said="$(tx "$TXP" operator "Promote window 2" "$(plus "$(now)" 1)")"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "promote window 2"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+  python3 - "$DAEDALUS_HOME/state/evidence/$(pj run_id)/run.json" "$said" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))["promotion"]
+assert r["operator_said"] == "Promote window 2" and r["transcript_ref"]["uuid"] == sys.argv[2], r
+PY
+}
+
+@test "v0.12.5: any words, one word, or no citation at all are enough, and a later word is the agent's to weigh, not the tool's — the latest operator turn is recorded when the citation matches none" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; P="$(pj prepared_ts)"
+  tx "$TXP" operator "ship" "$(plus "$P" 1)" >/dev/null
+  last="$(tx "$TXP" operator "wait, one thing" "$(plus "$P" 2)")"
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+  python3 - "$DAEDALUS_HOME/state/evidence/$(pj run_id)/run.json" "$last" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))["promotion"]
+assert r["operator_said"] == "wait, one thing" and r["transcript_ref"]["uuid"] == sys.argv[2], r
+PY
+}
+
+@test "v0.12.5: refused only when the operator typed nothing since the window's last promote — nothing typed, only the model's words, only a tool result, words from before the last push — or the cited words are only in a line another writer appended" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]; P="$(pj prepared_ts)"; before="$(origin_main)"
+  c() { run as_prime bash "$PROMOTE" 02 --confirm --operator-said "$1"; }
+  c "yes"; refused "The operator has typed nothing in this session since window 02's last promote"
+  tx "$TXP" assistant "yes, ship it" "$(plus "$P" 1)" >/dev/null
+  tx "$TXP" tool-result "yes ship it" "$(plus "$P" 2)" >/dev/null
+  c "yes ship it"; refused "The operator has typed nothing in this session since window 02's last promote"
+  tx "$TXP" operator "Promote it" "$(plus "$P" 3)" >/dev/null
+  forge "$TXP" "push it now" "$(plus "$P" 4)" >/dev/null
+  c "push it now"; refused "Nothing was recorded; cite what the operator typed."
+  [ "$(origin_main)" = "$before" ]
+  c "promote it"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # a second promote of the same window: the words before the first push no longer count
+  printf 'more\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "more work"
+  sleep 1
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  c "promote it"; refused "The operator has typed nothing in this session since window 02's last promote"
+}
+
+@test "v0.12.5: --skip-review over a REFUTED review takes the operator's words in any length, recorded as the reason — one word, or no --reason at all — and the confirm may follow in the same turn" {
+  work_on_02
+  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  P="$(pj prepared_ts)"
+  tx "$TXP" operator "ship" "$(plus "$P" 1)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "ship"
+  [ "$status" -eq 0 ] || { echo "one word: $output"; return 1; }
+  [ "${lines[3]}" = "Reviewer: skipped by the operator because: ship" ]
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "ship"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+}
+
+@test "v0.12.5: --skip-review with no --reason records the operator's latest turn; with nothing typed since the window's last promote it is refused" {
+  work_on_02
+  FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
+  run as_prime bash "$PROMOTE" 02 --skip-review
+  refused "The operator has typed nothing in this session since window 02's last promote"
+  tx "$TXP" operator "Backlog it and push" "$(plus "$(pj prepared_ts)" 1)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[3]}" = "Reviewer: skipped by the operator because: Backlog it and push" ]
+}
+
+@test "v0.12.5: CLAUDE.md's promote section asks for no reason of a length, no second turn, and no own words" {
+  for t in "three words" "Tell me why" "in your own words" "in one turn is refused"; do
+    ! grep -qF "$t" "$BATS_TEST_DIRNAME/../../CLAUDE.md" || { echo "CLAUDE.md still says: $t"; return 1; }
+  done
 }

@@ -198,13 +198,14 @@ PY
   [ -s "$F.daedalus-prompts" ]
   grep -q '"session_id": "sP"' "$F.daedalus-prompts"
   said="$(TX_RECORD=none tx "$F" operator "Yes, push it." "$(plus "$T0" 5)")"
-  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl; print(tl.find_operator_words(sys.argv[2], "yes, push it", float(sys.argv[3]), True, "Ready to promote")["transcript_ref"]["uuid"])' \
+  run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl; print(tl.find_consent(sys.argv[2], float(sys.argv[3]), quote="yes, push it")["transcript_ref"]["uuid"])' \
     "$DAEDALUS_HOME/core" "$F" "$T0"
   [ "$output" = "$said" ] || { echo "$output"; return 1; }
   TX_RECORD=none tx "$F" assistant "Ready to promote window 02's work onto main." "$(plus "$T0" 6)" >/dev/null
-  TX_RECORD=none tx "$F" operator "yes" "$(plus "$T0" 7)" >/dev/null
+  TX_RECORD=none tx "$F" operator "ship it now" "$(plus "$T0" 7)" >/dev/null
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcriptlib as tl
-try: tl.find_operator_words(sys.argv[2], "yes", float(sys.argv[3]), True, "Ready to promote"); print("accepted")
+tl.CONSENT_PAUSE = 0.01
+try: tl.find_consent(sys.argv[2], float(sys.argv[3]), quote="ship it now"); print("accepted")
 except tl.NotSubmitted as e: print("refused:", e)' "$DAEDALUS_HOME/core" "$F" "$T0"
   case "$output" in "refused: "*"never reported"*) : ;; *) echo "$output"; return 1 ;; esac
 }

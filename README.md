@@ -556,11 +556,10 @@ deletes it at once. Several windows go in one report and one yes:
 `core/lease.sh unpromoted 02 03 04`, then
 `core/lease.sh release 02 03 04 --remove --force --operator-said "<your reply>"`
 deletes them all; a change in any one refuses the whole delete. Your yes is
-any message of yours in the window's own transcript after the report that
-agrees or asks for it, in your own words — yes, ok, delete them, do it — and
-that a later no or wait has not taken back; questions and answers in between
-do not matter, and nothing has to be said word for word. It is refused when
-no report ran in this session, when you have not agreed since, and when the
+whatever you say, in any words; the agent reads it. The tool checks only that
+you typed something in the window's own transcript after the report — a turn
+the agent wrote, or a line added to the file, never counts. It is refused when
+no report ran in this session, when you have typed nothing since, and when the
 window's work changed since the report. The tracked `.claude/settings.json` allows that one command
 (`Bash(core/lease.sh release:*)`) ahead of auto mode's classifier, because
 `core/guard-bash.py` and `core/leaselib.py` check the yes first, in every
@@ -645,22 +644,22 @@ until it is released.
 
 **The operator's yes** (`promote:` in `config.yaml`):
 
-- `confirm: transcribed` (the default) — the prime types the operator's reply
-  with `--operator-said "…"`, and promote requires, in the prime's own
-  session transcript, a message the operator typed after the prepare that
-  is an acknowledgement in their own words — "Okay, yes, proceed.", "go
-  ahead", "push the work" and "Why the timing test? Anyway, ship it." are;
-  "okay but why?", "no, wait" and "not yet" are not — and that a later no or
-  wait has not taken back. Questions, answers and notifications in between
-  do not matter, nothing has to end with a set line, and the quote is a
-  citation, not a password; it must come in a later turn than the prepare.
+- `confirm: transcribed` (the default) — your instruction is the yes. "Promote
+  window 2", in any words, followed by a clean result (gates PASS, the review
+  STANDS, nothing you have not seen) is pushed in the same turn; a result with
+  something new in it is shown once and your reply, in any words, is the yes.
+  Whether your words agree is the agent's judgment. promote checks one thing:
+  that you typed something in the prime's own session transcript since the
+  window's last promote — one word or fifty. The agent cites a few of your
+  words with `--operator-said "…"`; that is a citation, not a password, and is
+  refused only when the words it cites are in no turn you typed.
   A transcript this Claude Code build writes in a shape the parser cannot read
   is refused, never passed — switch to `promote.confirm: tty` until the parser
   is updated. The transcript directory is closed to writes by both the Bash
-  guard and the Edit check, and the yes must also be a prompt Claude Code
+  guard and the Edit check, and your turn must also be a prompt Claude Code
   reported to Daedalus as it was submitted (the UserPromptSubmit hook records
   each one beside the transcript), with the transcript before it unchanged
-  since — a yes rewritten into the file is refused.
+  since — words rewritten into the file never count.
 - `confirm: tty` — the operator pastes one line into their own shell and
   types `yes` (or any acknowledgement) at the terminal; that shell pushes and finishes the rest, and
   the prime's next prompt says it happened. The confirm refuses a process
@@ -686,9 +685,9 @@ changed on origin." after a rejected push). A merge conflict: the window runs
 `core/lease.sh rebase 02` and resolves it in its own worktree. Commits in two
 repos: `core/lease.sh split 02 --repo <nested>` moves the nested repo's
 commits to a new window, promoted separately. A refuted review: ask it about
-a finding with `core/call-agent.sh --resume-review 02 "…"`, or promote with
-the operator's written reason, `--skip-review --reason "…"`, which is checked
-like a yes and recorded beside the verdict it sets aside
+a finding with `core/call-agent.sh --resume-review 02 "…"`, or, when the
+operator says to in any words, promote with `--skip-review --reason "…"`: their
+words are checked like a yes and recorded beside the verdict it sets aside
 (`vault/evidence/promotions.log` names the overridden review). Gates are
 never skipped. `core/promote.sh 02 --clean` removes a window's scratch trees.
 

@@ -2402,7 +2402,7 @@ def deletion_confirmed_locked(root: Path, sid: Optional[str], nn: str, lease: di
 def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Dict[str, dict],
                            said: Optional[str]) -> dict:
     """Whether a session may delete the work of windows nns now (agent-runnable design 2026-10-15, §4.2; v0.12.2:
-    the operator's consent in their own words, one consent for every window a report named). Caller holds the lock,
+    v0.12.5: anything the operator typed since the report, one answer for every window it named). Caller holds the lock,
     shared or exclusive; this never calls lock(). Returns what authorised it — transcript_ref, shown_ref (None),
     cutoff, text, and each window's witness under "markers" — or raises Refused with one sentence:
       1. the witness: ONE `unpromoted` report in THIS session named every one of these windows
@@ -2411,12 +2411,10 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
       2. tty mode: the deployment confirms at a terminal, so the delete is pasted there;
       3. the work is what the report named, in every window (work_fingerprint unchanged since its ask): a changed
          window refuses the whole delete by name — nothing is deleted, and the report is made again;
-      4. the consent: a turn the operator typed in this session after the latest of those asks and the windows' own
-         times, in any words that agree or ask for the delete, not taken back by a later no or wait
-         (transcriptlib.find_consent: a model-written yes, or a line added to the file, never counts; their latest
-         statement since the report decides). `said` (the agent's --operator-said) is a citation only, never itself
-         a reason to refuse;
-      5. a consent that names windows must name every one being deleted, and take none out ("Yes, but only 02")."""
+      4. the operator's words: a turn they typed in this session after the latest of those asks and the windows' own
+         times, in any words (v0.12.5, transcriptlib.find_consent: a model-written turn, or a line added to the file,
+         never counts). Whether the words agree is the agent's judgment; `said` (the agent's --operator-said) is a
+         citation, refused only when the words it cites are in no turn the operator typed."""
     import transcriptlib as tl
     nns = sorted(set(nns))
     nums = " ".join(nns)
@@ -2468,8 +2466,6 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
         d = tl.DRIFT[:1].upper() + tl.DRIFT[1:]
         cut = d.index(";")
         raise Refused("%s (%s)%s. Nothing was deleted. Until then, %s." % (d[:cut], e, d[cut:], shell))
-    except tl.Declined as e:
-        raise Refused("The operator has not agreed: %s. Nothing was deleted; ask them again." % e)
     except tl.NotSubmitted as e:
         raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; ask the operator."
                       % str(e).replace("the words are", "they are", 1))
@@ -2477,32 +2473,12 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
         raise Refused("Those words are in this session's transcript, but not as a turn Claude Code wrote there: "
                       "nothing in the conversation follows from them, so they were added to the file afterwards. "
                       "Nothing was deleted; ask the operator.")
-    except tl.NotFound as e:
-        raise Refused("The operator has not agreed to delete window%s %s's work yet (%s since the report). Nothing "
-                      "was deleted; tell them what would be lost and ask — any words that agree are enough."
-                      % ("s" if len(nns) > 1 else "", and_list(nns), e))
-    named = windows_named(found["text"])
-    if named and (not set(nns) <= named or PARTIAL_RE.search(tl.normalize(found["text"]))):
-        # "Yes, but only 02", "Delete 02; 03 stays": a consent that names some of the windows is not a consent to all
-        raise Refused("The operator's words name only some of window%s %s (\"%s\"). Nothing was deleted; ask which "
-                      "to delete, then run release with just those." % ("s" if len(nns) > 1 else "", and_list(nns),
-                                                                          " ".join(found["text"].split())))
+    except tl.NotFound:
+        raise Refused("The operator has typed nothing in this session since the report on window%s %s. Nothing was "
+                      "deleted; tell them what would be lost and ask — any words are enough."
+                      % ("s" if len(nns) > 1 else "", and_list(nns)))
     return {"transcript_ref": found["transcript_ref"], "shown_ref": found["shown_ref"], "cutoff": cutoff,
             "text": found["text"], "markers": markers}
-
-
-# The window numbers a consent names: zero-padded ("02", "03") anywhere, or after "window"/"windows" ("window 2 and
-# 3"). A bare small number elsewhere ("3 commits") is not a window.
-_WINDOW_LIST_RE = re.compile(r"(?<![\w'])windows?\s+((?:[0-9]{1,2}(?:\s*(?:,|and|&)\s*)?)+)", re.I)
-_PADDED_RE = re.compile(r"(?<![\w.])0[1-9](?!\w|\.[0-9])")
-PARTIAL_RE = re.compile(r"(?<![\w'])(?:keep|keeps|stay|stays|leave|except|but|not|spare|save)(?![\w'])")
-
-
-def windows_named(text: str) -> set:
-    out = set(_PADDED_RE.findall(text or ""))
-    for grp in _WINDOW_LIST_RE.findall(text or ""):
-        out.update("%02d" % int(d) for d in re.findall(r"[0-9]{1,2}", grp) if 0 < int(d) < 100)
-    return out
 
 
 def deletion_confirmed(root: Path, sid: str, nns: "list | str", said: Optional[str]) -> Optional[str]:
@@ -4749,8 +4725,7 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
                           "Taking it needs --reason \"<the operator's words>\"." % (names[0] if names else "unknown"))
         elif live:
             try:
-                found = tl.find_operator_words(tl.transcript_for(root, sid), str(reason),
-                                               pen_cutoff(root, prime), require_shown=False)
+                found = tl.find_consent(tl.transcript_for(root, sid), pen_cutoff(root, prime), quote=str(reason))
             except tl.Missing as e:
                 raise Refused("I cannot find this window's transcript (%s), so the operator's words cannot be checked. "
                               "The pen did not move. If the transcript lives elsewhere, set memory.transcript_dir in "
@@ -4763,9 +4738,9 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
                 raise Refused("I cannot read this build's transcript format (%s), so the operator's words cannot be "
                               "checked. The pen did not move. Until the parser is updated, set `promote.confirm: tty` "
                               "and take the pen by typing the reason." % e)
-            except (tl.NotFound, tl.NotShown):
-                raise Refused("I could not find those words as something the operator typed in this window since "
-                              "the pen was last taken. The pen did not move.")
+            except tl.NotFound:
+                raise Refused("I could not find anything the operator typed in this window since the pen was last "
+                              "taken. The pen did not move.")
             record["transcript_ref"] = found["transcript_ref"]
     with lock(root):
         fresh = read_lease(root, "prime") or {}

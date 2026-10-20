@@ -2808,8 +2808,8 @@ def check_lease_release(seg: List[str], g: G) -> Optional[str]:
     xargs or parallel it is refused outright (bare xargs is a wrapper Claude Code strips for the allow rule; the
     guard reads no stdin). Then: a session must be present (fail closed), every number literal, the operator's
     words readable or not (a citation only), and leaselib.deletion_confirmed decides — a window with nothing to
-    lose needs nothing more (v0.12.2); for the rest, their report in this session, the operator's consent after it
-    in any words, the work unchanged. Plain `release NN` and every other verb are untouched."""
+    lose needs nothing more (v0.12.2); for the rest, their report in this session, something the operator typed
+    after it (v0.12.5: any words), the work unchanged. Plain `release NN` and every other verb are untouched."""
     j = exec_index(seg, LEASE_HEADS)
     if os.path.basename(seg[j]) != "lease.sh":
         return None

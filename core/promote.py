@@ -2,8 +2,9 @@
 """promote (spec §7): the one way a window's work reaches trunk.
 
     core/promote.sh <NN>                     prepare (§7.1)
-    core/promote.sh <NN> --skip-review --reason "..."   prepare without the review, the operator's written reason
-                                             recorded (§7.1 step 8; in tty mode the reason is typed at the terminal)
+    core/promote.sh <NN> --skip-review [--reason "..."]   prepare without the review; the operator's words since
+                                             the window's last promote recorded as the reason (§7.1 step 8; v0.12.5;
+                                             in tty mode the reason is typed at the terminal)
     core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept): the
                                              prime, any promotion; a session holding no window, or a shell,
                                              pushed promotions only; never one a confirm holds
@@ -573,8 +574,9 @@ def block_opening(p: dict) -> str:
 
 
 def invitation(p: dict) -> str:
-    """The block's closing question. v0.12.2: a plain question — nothing checks its wording or where the
-    operator's answer stands; any words of theirs after the prepare that agree are the yes (transcribed_yes)."""
+    """The block's closing question, asked only when the result holds something the operator has not seen. v0.12.5:
+    nothing checks its wording or the answer's; the tool checks only that the operator typed something since the
+    window's last promote (transcribed_yes)."""
     return "Push window %s's work to %s?" % (p["lease"], p["trunk"])
 
 
@@ -604,7 +606,7 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
         reviewer_line(rv, p.get("review_skipped_reason")),
     ] + earlier_line(p) + live_line(p) + [
         "Nothing has been pushed. %s" % invitation(p) if ready else
-        "Nothing has been pushed. Ask me to ask the reviewer why, or give a written reason to promote without the review.",
+        "Nothing has been pushed. Ask me to ask the reviewer why, or tell me to promote it without the review.",
     ])
     if rv is not None:
         review_part = "review %s;" % rv["file"]
@@ -639,8 +641,8 @@ def refuted_sentence(p: dict) -> str:
     high = f.get("high", 0) + f.get("medium", 0)
     return ("The reviewer REFUTED the merged change (%d HIGH or MEDIUM finding%s; the review is at %s). If the operator wants to "
             "ask the reviewer about a finding, run `core/call-agent.sh --resume-review %s \"<the operator's question>\"` "
-            "and repeat the answer. To promote anyway, the operator must give a written reason: `promote %s "
-            "--skip-review --reason \"...\"`." % (high, "" if high == 1 else "s", rv["file"], p["lease"], p["lease"]))
+            "and repeat the answer. To promote anyway, show the operator the findings once; when they say to go ahead, "
+            "in any words: `promote %s --skip-review --reason \"<their words>\"`." % (high, "" if high == 1 else "s", rv["file"], p["lease"], p["lease"]))
 
 
 # --- prepare (§7.1) ---------------------------------------------------------------------------------
@@ -698,8 +700,6 @@ def occupant_prepares(root: Path, nn: str, lease: dict) -> List[dict]:
 
 
 SKIP_QUESTION = "Promote window %s's work without the review?"
-TOO_SHORT = ("--skip-review needs the operator's reason in their own words — at least three words; a reason is the "
-             "price of skipping the review.")
 
 
 def marker_started(root: Path, sid: Optional[str], nn: str) -> float:
@@ -723,18 +723,12 @@ def marker_started(root: Path, sid: Optional[str], nn: str) -> float:
 
 
 def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str], mode: str) -> dict:
-    """§7.1 step 8, before any git work: the operator's written reason for
-    skipping the review — in transcribed mode the operator's consent with a
-    reason of three words or more (beside the instruction, or the statement
-    just before it), their latest statement since the prepare of the review it
-    sets aside (or since this session started when there is none), recorded as
-    they typed it (transcribed_yes, v0.12.2); in tty mode typed at a terminal
-    — and the REFUTED review it
-    sets aside (Decision 31): the latest REFUTED review of this window's current
-    occupant that no promotion has settled, however many prepares came after it
-    (Decision 51)."""
+    """§7.1 step 8, before any git work: the operator's words for skipping the review — in transcribed mode a turn
+    they typed since the window's last promote, in any words and any length (v0.12.5), recorded as they typed it
+    (transcribed_yes; --reason is the agent's citation, and optional); in tty mode typed at a terminal — and the
+    REFUTED review it sets aside (Decision 31): the latest REFUTED review of this window's current occupant that no
+    promotion has settled, however many prepares came after it (Decision 51)."""
     mine = occupant_prepares(root, nn, lease)
-    earlier = mine[-1] if mine else None
     refuted = next((q for q in reversed(mine) if (q.get("review") or {}).get("verdict") == "REFUTED"), None)
     overrode = {"call_id": refuted["review"]["call_id"], "run_id": refuted["run_id"]} if refuted else None
     paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --skip-review`" % (root, nn)
@@ -751,21 +745,30 @@ def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str
         except tl.NoTerminal:
             raise Stop("The reason to skip the review must be typed by a person in a terminal. This session has none. "
                        + paste)
-        if len(tl.normalize(text).split()) < 3:
-            raise Stop(TOO_SHORT)
+        if not text.strip():
+            raise Stop("Nothing was typed; promote did nothing.")
         return {"reason": text.strip(), "transcript_ref": None, "session_id": None,
                 "typed": {"text": text.strip(), "tty": name, "pid": os.getpid()}, "overrode": overrode}
-    if not (reason or "").strip():
-        raise Stop("--skip-review needs --reason with the operator's words; a reason is the price of skipping the review.")
-    if earlier:
-        er = read_json(root / "state" / "evidence" / str(earlier.get("run_id")) / "run.json") or {}
-        after = max(float(earlier.get("prepared_ts") or 0),
-                    tl.parse_ts((er.get("promotion") or {}).get("prepared_at")) or 0.0)
-    else:
-        after = marker_started(root, me.get("session_id"), nn)
-    yes = transcribed_yes(root, me, str(reason), after, "the review", reason=True)
+    yes = transcribed_yes(root, me, reason or "", nn, lease)
     return {"reason": yes["text"].strip(), "transcript_ref": yes["transcript_ref"], "session_id": me["session_id"],
             "typed": None, "overrode": overrode}
+
+
+def since_last_promote(root: Path, me: dict, nn: str, lease: dict) -> float:
+    """v0.12.5, the one boundary the operator's words must come after: the later of this session's start
+    (marker_started, an absolute instant — a lease stamp is local time, and a reader in another TZ would move it) and
+    the time of this occupant's last pushed promotion of window NN. So "promote window 2" said before the prepare is
+    the yes, and words from before the last push are not a yes for the next one."""
+    t = marker_started(root, me.get("session_id"), nn)
+    base = root / "state" / "promote"
+    for f in (base.glob("%s-*/prepared.json" % nn) if base.is_dir() else []):
+        q = read_json(f) or {}
+        if q.get("lease") != nn or q.get("lease_created") != lease.get("created"):
+            continue
+        for name in ("pushed", "announced"):
+            stamp = read_json(f.parent / name) or {}
+            t = max(t, tl.parse_ts(stamp.get("at")) or 0.0)
+    return t
 
 
 def prepare(root: Path, a: dict) -> int:
@@ -961,50 +964,44 @@ def confirm_mode(root: Path) -> str:
         raise Stop(str(e) + ".")
 
 
-def transcribed_yes(root: Path, me: dict, said: str, after: float, what: str, reason: bool = False) -> dict:
-    """The operator's words, found in the confirming session's own transcript (§7.2 step 2; v0.12.2): their latest
-    statement since `after` (the prepare that asked; a new prepare moves it), typed by them, in any words that agree
-    or ask for the push — any later statement that does not agree takes its place. For a skipped review
-    (reason=True) the consent must come with a reason: three words or more beside the instruction, or a statement of
-    three words or more just before it. Replies, questions and notifications between do not matter, and no closing
-    line is looked for. `said` is the agent's citation and is never itself the refusal (transcriptlib.find_consent).
-    A turn the model wrote, or a line added to the file, never counts; an unreadable transcript, or one outside the
-    denied directories (Decision 36), is never a pass (A12)."""
+def transcribed_yes(root: Path, me: dict, said: str, nn: str, lease: dict) -> dict:
+    """The operator's words, found in the confirming session's own transcript (§7.2 step 2; v0.12.5): a turn they
+    typed since since_last_promote, in any words and any length. Whether they consent is the agent's
+    judgment; the tool checks only that they are the operator's (transcriptlib.find_consent). `said` is the agent's
+    citation: the turn holding it is recorded, else the operator's latest. A turn the model wrote, or a line added to
+    the file, never counts; an unreadable transcript, or one outside the denied directories (Decision 36), is never
+    a pass (A12)."""
     if me["kind"] != "prime-session":
         raise Stop("In transcribed mode the prime window records the operator's yes; from a shell, set "
                    "`promote.confirm: tty` and run the confirm there.")
+    after = since_last_promote(root, me, nn, lease)
     try:
         path = tl.transcript_for(root, me["session_id"])
-        found = tl.find_consent(path, after, quote=said or None, reason=reason)
+        found = tl.find_consent(path, after, quote=said or None)
     except tl.Unprotected as e:
         raise Stop("This session's transcript (%s) is outside every directory nothing may write, so it is not evidence "
                    "of the operator's words. Set memory.transcript_dir in config.yaml, or set `promote.confirm: tty` "
                    "and paste the confirm line in your own shell." % e)
     except tl.Missing as e:
-        raise Stop("I cannot find this session's transcript (%s), so the operator's yes cannot be checked. If it lives "
-                   "elsewhere, set memory.transcript_dir in config.yaml; or set `promote.confirm: tty` and paste the "
-                   "confirm line in your own shell." % e)
+        raise Stop("I cannot find this session's transcript (%s), so the operator's words cannot be checked. If it "
+                   "lives elsewhere, set memory.transcript_dir in config.yaml; or set `promote.confirm: tty` and paste "
+                   "the confirm line in your own shell." % e)
     except tl.Unreadable as e:
         # critic finding 4 (A12): the doctor's sentence, so the refusal and the doctor line read alike
         d = tl.DRIFT[:1].upper() + tl.DRIFT[1:]
         cut = d.index(";")
         raise Stop("%s (%s)%s. Until then, set `promote.confirm: tty` and paste the confirm line in your own shell."
                    % (d[:cut], e, d[cut:]))
-    except tl.Declined as e:
-        raise Stop("The operator has not agreed: %s. Nothing was recorded; ask them again." % e)
     except tl.NotSubmitted as e:
-        raise Stop("Those words are in this session's transcript, but %s. Nothing was recorded; show %s to the "
-                   "operator and ask again." % (str(e).replace("the words are", "they are", 1), what))
+        raise Stop("Those words are in this session's transcript, but %s. Nothing was recorded; cite what the operator "
+                   "typed." % str(e).replace("the words are", "they are", 1))
     except tl.NotWritten:
         raise Stop("Those words are in this session's transcript, but not as a turn Claude Code wrote there: nothing "
                    "in the conversation follows from them, so they were added to the file afterwards. Nothing was "
-                   "recorded; show %s to the operator and ask again." % what)
-    except tl.NotFound as e:
-        if reason:
-            raise Stop("I could not find the operator's reason since %s was shown (%s): a reason in their own words, "
-                       "at least three of them, is the price of skipping the review." % (what, e))
-        raise Stop("The operator has not agreed to %s yet (%s since it was shown); any words that agree are enough."
-                   % (what, e))
+                   "recorded; cite what the operator typed.")
+    except tl.NotFound:
+        raise Stop("The operator has typed nothing in this session since window %s's last promote (or since this "
+                   "session started); ask them." % nn)
     return {"transcript_session_id": me["session_id"], "transcript_ref": found["transcript_ref"],
             "shown_ref": found["shown_ref"], "text": found["text"]}
 
@@ -1411,7 +1408,8 @@ def confirm(root: Path, a: dict) -> int:
         if p.get("repo") in tr:                # before the yes: no confirmed_at for a push that will not happen
             guarded(root, p["repo"])           # (a repo the window does not have is refused by rederive)
         if mode == "transcribed":
-            yes = transcribed_yes(root, me, a.get("said") or "", cutoff(root, p, pdir), "the promote block")
+            cutoff(root, p, pdir)              # Decision 35's evidence check; the words' boundary is the last promote
+            yes = transcribed_yes(root, me, a.get("said") or "", nn, lease)
         else:
             if a.get("said") is not None:
                 raise Stop("In tty mode the operator types the yes in a terminal; --operator-said is not accepted. "
@@ -1540,8 +1538,8 @@ def doctor(root: Path) -> int:
         at = time.strftime("%H:%M", time.localtime(float(p.get("prepared_ts") or 0)))
         if (p.get("review") or {}).get("verdict") == "REFUTED":
             print("NOTE     promote: window %s's last prepare (%s) was refuted by the review, so it cannot be confirmed "
-                  "— fix the work and run promote %s again, or promote it without the review with a written reason "
-                  "(promote %s --skip-review --reason \"...\")" % (nn, at, nn, nn))
+                  "— fix the work and run promote %s again, or, when the operator says to, promote it without the review "
+                  "(promote %s --skip-review --reason \"<their words>\")" % (nn, at, nn, nn))
         else:
             print("NOTE     promote: window %s prepared at %s, not confirmed — say yes to the prime or run promote again"
                   % (nn, at))

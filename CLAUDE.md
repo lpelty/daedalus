@@ -114,8 +114,8 @@ it.
 | "Pivot: this window now works on X" | that window | Nothing to run. Say "Fine — window 02 keeps its number and its branch; the board will show the new files as you change them," and offer a note. If the earlier work must ship before the new work is ready, propose `split`. |
 | "What did the reviewer find?" | the prime, or the reviewed window | Repeat the review's body (`vault/evidence/<run-id>-review.md`, everything below its frontmatter) word for word, signed "— the reviewer"; a summary may follow. |
 | "Ask the reviewer why …" | the prime, or the reviewed window | `core/call-agent.sh --resume-review 02 "<their question>"`; repeat the answer word for word, signed "— the reviewer". It is advice, not a new verdict. |
-| "Promote it anyway, because …" | the prime | The skip-review procedure (below), with the reason in the operator's own words — and only with one. |
-| "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh unpromoted 02` first (several windows: `core/lease.sh unpromoted 02 03 04`, one report); it only reports what would be lost — the unpromoted commits and any uncommitted files — and deletes nothing. A window it says needs no yes has nothing to lose: run `core/lease.sh release 02 --remove` for it at once, no question asked. For the rest, tell the operator what would be lost, in your own words, and ask. End your turn. When they agree — in any words: yes, ok, delete them, do it, go ahead — run `core/lease.sh release 02 --remove --force --operator-said "<their whole reply>"` from the home, with nothing in front of it (the permission rule matches that command and nothing else); for several windows, every number in one command: `core/lease.sh release 02 03 04 --remove --force --operator-said "<their whole reply>"`. Their questions and your answers in between are fine; one agreement covers every window the report named. The quote is a citation, not a password: if their reply is long or awkward to quote, carry a few of their words. It refuses if they have not agreed since the report, if they said no or wait after agreeing, or if a window's work changed since the report — then run `unpromoted` again and tell them what changed. Never run `release` with `--remove` on a window with work before the operator has agreed; never write a yes the operator did not give. |
+| "Promote it anyway" | the prime | The skip-review procedure (below), citing a few of their words; whatever they said is recorded as the reason. |
+| "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh unpromoted 02` first (several windows: `core/lease.sh unpromoted 02 03 04`, one report); it only reports what would be lost — the unpromoted commits and any uncommitted files — and deletes nothing. A window it says needs no yes has nothing to lose: run `core/lease.sh release 02 --remove` for it at once, no question asked. For the rest, tell the operator what would be lost, plainly, and ask once. End your turn. When they agree — in any words: yes, ok, delete them, do it, go ahead — run `core/lease.sh release 02 --remove --force --operator-said "<a few of their words>"` from the home, with nothing in front of it (the permission rule matches that command and nothing else); for several windows, every number in one command: `core/lease.sh release 02 03 04 --remove --force --operator-said "<a few of their words>"`. Their questions and your answers in between are fine; one agreement covers every window the report named. The quote is a citation, not a password. The tool checks only that they typed something since the report, and refuses if a window's work changed since it — then run `unpromoted` again and tell them what changed. Whether their words agree, and to which windows, is yours to read: if they said wait, or named only some windows, delete only what they asked for. Never run `release` with `--remove` on a window with work before the operator has agreed; never write a yes the operator did not give. |
 | "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested>` for a nested repo's branch); repeat what it printed — the number, the repo, the commits. |
 | "Pick it up" (after the upgrade said it found unfinished work) | the prime, or a shell | `core/lease.sh adopt --all-unfinished`; repeat each window it made and anything it could not move, with what to do; then say the next session start finishes the upgrade. |
 | "/frame-jack on" / "frame-jack off" | any window | `python3 core/frame-jack.py on` (or `python3 core/frame-jack.py off`); repeat the output word for word. The guard runs it only after the operator's own message said `frame-jack on` (or `off`) in this session; in other words ("turn the AMI on"), ask them to type `/frame-jack on`. `on` takes about half a minute before the AMI answers; the band says when. |
@@ -623,22 +623,22 @@ the pen. When the operator says a window's work is ready ("ship window 2"):
 
 1. Run `core/promote.sh 02` (a window number, never an alias). It merges
    window 02's branch onto current trunk in a scratch copy, runs the gates
-   and a fresh reviewer on exactly that merge, and prints two paragraphs.
-   Repeat both to the operator exactly as printed — the first is the decision
-   in plain words, the second is the record — and ask. Nothing has been
-   pushed.
-2. End your turn. When the operator answers, run, in a later turn,
-   `core/promote.sh 02 --confirm --operator-said "<their whole reply>"`. The
-   confirm looks in this session's own transcript for a message the operator
-   typed after the prepare that agrees in their own words — yes, ok, go
-   ahead, push it, ship it, "same reason: just push the work" — and that a
-   later no or wait has not taken back. Their questions, your answers and
-   notifications in between do not matter, nor what your last reply ended
-   with. The quote is a citation of their words, not a password. If they
-   only asked questions, answer and let them answer; if they said no or
-   wait, do not push. A prepare and a confirm in one turn is refused, and
-   never write a yes the operator did not give.
-3. Repeat the "Promoted …" line it prints.
+   and a fresh reviewer on exactly that merge, and prints two paragraphs —
+   the decision in plain words, then the record. Nothing has been pushed.
+2. The operator's instruction is their yes. When the result is clean — gates
+   PASS, the review STANDS, no live checks, nothing they have not seen — run
+   `core/promote.sh 02 --confirm --operator-said "<a few of their words>"`
+   right away, in the same turn, and repeat both paragraphs with the
+   "Promoted …" line. When the result holds something new (a refuted review,
+   live checks, anything they would want to weigh), repeat both paragraphs,
+   ask once, and end your turn; whatever they answer in any words — yes, ok,
+   ship it, do it — is the yes, and you confirm then. If they said wait or
+   no, do not push.
+3. The confirm checks one thing: that the operator typed something in this
+   session since the window's last promote. Any words, any length. The quote
+   is a citation of their words, not a password; it is refused only when the
+   words it cites are in no turn they typed. Never write a yes the operator
+   did not give.
 
 The decision block may list live checks still open: findings the window's
 reviews flagged live-only, which no review can settle. They are not a gate;
@@ -651,16 +651,11 @@ confirm through a program that makes a terminal: the guard refuses it.
 
 If the reviewer refutes the merge, say so plainly, repeating the block. To
 ask it about a finding, run `core/call-agent.sh --resume-review 02 "<their
-question>"` and repeat the answer. To promote without the review the operator
-must give a written reason of at least three words:
-`core/promote.sh 02 --skip-review --reason "<their whole reply>"` — checked
-the same way — a message of theirs since the refuted review's prepare (or
-since this session started, when nothing was refuted) that gives the reason
-and asks to go on ("same reason: just push the work"), or that you cite in
-three words or more — and recorded in their words beside the verdict it sets
-aside. When no review has refuted the
-change, first ask "Promote window 02's work without the review? Tell me why
-in your own words." and pass their answer. The gates always run.
+question>"` and repeat the answer. When the operator says to promote it
+anyway, in any words, run `core/promote.sh 02 --skip-review --reason "<a few
+of their words>"` and then the confirm, in the same turn: their words are
+recorded as the reason beside the verdict it sets aside, checked the same
+way as the confirm. The gates always run.
 
 If promote says a gate could not run (exit 127, "command not found"), that
 is not a merge problem: the scratch holds tracked files only. Say so: the

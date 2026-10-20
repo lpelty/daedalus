@@ -1110,7 +1110,7 @@ shown_then_yes() {
   tx "$TX" operator "$1" "$(plus "$P" 3)" >/dev/null
 }
 
-@test "delete gate (v0.12.2): core/lease.sh release 02 --remove is denied without the report, while the operator has not agreed since it (nothing typed, only a question, the model's own yes, a no), and allowed once they have — with or without --operator-said, whatever it carries; nothing else about lease.sh is gated" {
+@test "delete gate (v0.12.5): core/lease.sh release 02 --remove is denied without the report, while the operator has typed nothing since it (nothing, or only the model's own yes), and allowed once they have typed anything — with or without --operator-said, whatever it carries; nothing else about lease.sh is gated" {
   delete_guard
   run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA 'core/lease.sh release 02 --remove --operator-said yes'; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac   # without --force too
@@ -1118,15 +1118,11 @@ shown_then_yes() {
   run guard_as sA 'core/lease.sh unpromoted 02'; allowed
   run guard_as sA 'core/lease.sh list'; allowed
   R="$(asked_by_sA)"; P="$(now)"
-  run guard_as sA "$DEL"; denied; case "$output" in *"has not agreed to delete window 02's work yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  run guard_as sA "$DEL"; denied; case "$output" in *"has typed nothing in this session since the report on window 02"*) : ;; *) echo "$output"; return 1 ;; esac
   tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
   tx "$TX" assistant "yes" "$(plus "$P" 2)" >/dev/null
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"has not agreed"*) : ;; *) echo "model yes: $output"; return 1 ;; esac
-  tx "$TX" operator "What is in it?" "$(plus "$P" 3)" >/dev/null
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"only asked questions"*) : ;; *) echo "question: $output"; return 1 ;; esac
-  tx "$TX" operator "no, not that one" "$(plus "$P" 4)" >/dev/null
-  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"last word on it was"*"no, not that one"*) : ;; *) echo "no: $output"; return 1 ;; esac
-  tx "$TX" operator "Actually fine — delete it." "$(plus "$P" 5)" >/dev/null
+  run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"has typed nothing"*) : ;; *) echo "model yes: $output"; return 1 ;; esac
+  tx "$TX" operator "Fine — delete it." "$(plus "$P" 5)" >/dev/null
   run guard_as sA "$DEL"; allowed
   run guard_as sA "$DEL --operator-said \"yes \$HOME\""; allowed                    # a citation the guard cannot read
   run guard_as sA "$DEL --operator-said 'something they never said'"; allowed

@@ -4,25 +4,20 @@
 
 `promote.confirm: transcribed` — the default, by the operator's decision of
 2026-09-25 — records the prime's transcription of what the operator said; this
-module checks it. The words must be an entry the operator TYPED — the whole
-turn, not a fragment of one (plan 4 Decision 30) — after a cut-off (the
-promotion's primaries, Decision 35; for --skip-review the earlier REFUTED
-prepare; for `prime take --reason` the moment the holder took the pen, its
-bound_epoch — always an absolute instant, never a local stamp the reading
-process's TZ would move) and — for
-v0.12.2 (find_consent, for release --remove and promote) — in any words that
-agree or ask for the action, anywhere after the cut-off: replies, questions and
-notifications between do not reset it, no closing line is looked for, and a
-later no or wait takes it back. (`prime take --reason` still reads the whole
-turn with find_operator_words.) A transcript this build cannot read fails
-CLOSED, never a pass.
+module checks the one thing the tools still check (v0.12.5, find_consent, for
+promote, --skip-review, release --remove and `prime take --reason`): that the
+operator TYPED something in this session after a cut-off (the window's last
+promote, the delete's report, the moment the holder took the pen — always an
+absolute instant, never a local stamp the reading process's TZ would move).
+Whether those words consent is the agent's judgment; nothing here reads them
+for a yes. A transcript this build cannot read fails CLOSED, never a pass.
 
 One parser (A12): capture.scan_entries reads the lines; this module decides who
 typed an entry. The rule, measured on Claude Code 2.1.251–2.1.282 (plan 4
 Decisions 2 and 43): type user, not a sidechain, no tool_result block /
-toolUseResult / sourceToolUseID, not isMeta, origin.kind == "human" and
-promptSource not "queued" (a queued prompt was typed while the prime was still
-working — before the block was on screen). A user text entry with no origin
+toolUseResult / sourceToolUseID, not isMeta, origin.kind == "human" (with
+promptSource "queued" when it was typed while the prime was still working —
+still the operator's words, v0.12.5). A user text entry with no origin
 that starts with a harness tag is a harness record; one with no origin and no
 tag is of unknown provenance, and words found only there fail closed.
 
@@ -100,11 +95,6 @@ class NotWritten(NotFound):
 class NotSubmitted(NotFound):
     """The words are in an operator-typed entry, but not as a prompt Claude Code reported to Daedalus when it was
     submitted, with the transcript before it unchanged since (critic-fix review, finding 3 — a whole-file rewrite)."""
-
-
-class NotShown(Exception):
-    """The words were typed after the cut-off, but not as the operator's first reply to a turn showing the block
-    or ending with its invitation line."""
 
 
 class NoTerminal(Exception):
@@ -226,9 +216,9 @@ def normalize(text: str) -> str:
 # it. A message consents when one of its sentences that is not a question agrees (yes, sure, go ahead, sounds good …)
 # or asks for the action on a thing (delete them, push the work, promote it, ship it, skip the review …), and no
 # sentence of it refuses, holds, defers or makes it conditional. A message that is only questions is neither, and so
-# is a bare "ok" beside a question (the operator listening, not agreeing). One rule for the transcribed reply, the tty
-# line, release --remove and promote. The lists below are a filter, never the whole guard: find_consent also asks
-# that the operator's LATEST statement since the ask be the consent, so a no in words no list knows still stops it.
+# is a bare "ok" beside a question (the operator listening, not agreeing). v0.12.5: read only for tty mode's direct
+# question ("Push window 02's work to main?"), where the tool itself asked and must read the answer; a transcribed
+# turn is never read for a yes (find_consent).
 _WORD = r"(?<![\w'])(?:%s)(?![\w'])"
 ASSENT_RE = re.compile(_WORD % "|".join((
     "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go ahead", "go for it",
@@ -334,18 +324,6 @@ def is_assent(text: str) -> bool:
     if len(st) < len(_sentences(text)) and all(BARE_ACK_RE.match(n) for n in agreeing):
         return False                 # "Ok. Which commit is that?" — listening
     return True
-
-
-def substance(text: str) -> int:
-    """How many words the message has beyond its yes and its instruction: a reason to skip a review must have three."""
-    n = " ".join(_statements(text))
-    n = ACTION_RE.sub(" ", ASSENT_RE.sub(" ", n))
-    return len([w for w in re.split(r"[^\w'-]+", n) if w])
-
-
-def only_questions(text: str) -> bool:
-    sents = _sentences(text)
-    return bool(sents) and all(_is_question(x) for x in sents)
 
 
 is_yes = is_assent      # the name every caller used before v0.10.0
@@ -622,129 +600,25 @@ def ends_with_line(n: str, end: str) -> bool:
     return re.search(r"(?:^|[^0-9a-z])%s[^0-9a-z]*$" % re.escape(end), n) is not None
 
 
-def find_operator_words(path: Path, quote: str, after: float, require_shown: bool,
-                        shown_text: Optional[str] = None, shown_end: Optional[str] = None) -> dict:
-    """{"transcript_ref": {uuid, timestamp}, "shown_ref": {uuid, timestamp} | None,
-    "text": the entry's own text} for the first operator-typed entry after `after` that Claude Code wrote
-    into the conversation it went on with (harness_wrote — critic finding 2),
-    (epoch seconds) whose WHOLE normalized text equals the normalized quote
-    (Decision 30: a fragment of a longer turn is not what the operator said) —
-    with require_shown, one that is the operator's FIRST turn after an assistant
-    entry with text that follows the cut-off (when shown_text is given, one whose
-    normalized text contains normalize(shown_text): the block, not any reply;
-    when shown_end is given, also — once the block was in a reply after the cut-off — one whose
-    normalized text ends with normalize(shown_end) as a whole phrase (`ends_with_line`): a reply that
-    asks again; with shown_end, the prime's LAST text entry before the words must be one of those two,
-    so a further question after a tool call clears the line);
-    that entry is shown_ref. The yes answers the block itself: any user turn
-    between the block and the words (operator-typed, queued, or of unknown
-    provenance) was the reply to it, and words after it answer something else
-    unless the block is shown again. Raises Missing, Unreadable (A12, fail closed; also a
-    file whose entries do not link the way the harness writes them), NotWritten (the words
-    only in entries the harness did not write), NotShown or NotFound."""
-    entries = _entries(path)
-    # The tail starts after the last user/assistant entry PROVABLY before the cut-off,
-    # so an entry whose timestamp this build writes in a form parse_ts does not read
-    # (an offset, epoch milliseconds) lands in it and fails closed as Unreadable —
-    # never silently outside it, which would read as "the words are not there" (A12).
-    last_before = -1
-    for i, e in enumerate(entries):
-        ts = parse_ts((e["data"] or {}).get("timestamp")) if e["type"] in ("user", "assistant") else None
-        if ts is not None and ts <= after:
-            last_before = i
-    tail = entries[last_before + 1:]
-    bad = [e for e in tail if not e["readable"] or (e["type"] in ("user", "assistant") and (
-        not isinstance(e["data"].get("uuid"), str) or parse_ts(e["data"].get("timestamp")) is None))]
-    if bad:
-        raise Unreadable("%d of the %d entries after the cut-off have a shape this build does not read"
-                         % (len(bad), len(tail)))
-    want = normalize(quote)
-    if not want:
-        raise NotFound("nothing to look for")
-    seen = _chain(entries)
-    drift = shape_problem(entries, strict=False)
-    if drift:
-        raise Unreadable(drift)     # critic finding 4: this build's typed turns are not the tested shape
-    not_written = False
-    not_submitted: Optional[str] = None
-    mark = normalize(shown_text) if shown_text else None
-    end = normalize(shown_end) if shown_end else None
-    shown: Optional[dict] = None
-    block_seen = mark is None     # with shown_end, the line arms only once the block itself was in a reply
-    not_shown = unknown_hit = False
-    for e in tail:
-        kind = classify(e)
-        if kind == "assistant_text":
-            n = normalize(e["text"])
-            if mark is not None and mark in n:
-                block_seen, shown = True, e
-            elif end is not None:
-                # The yes answers the last thing the prime said: an entry that neither shows the block nor
-                # ends with its line (a further question after a tool call, say) clears an earlier one.
-                shown = e if block_seen and ends_with_line(n, end) else None
-            elif mark is None:
-                shown = e
-            continue
-        if kind not in ("operator", "queued", "unknown_provenance"):
-            continue
-        answers, shown = shown, None   # this turn is the reply to the block; a later one answers something else
-        if normalize(e["text"]) != want:
-            continue
-        if kind == "operator":
-            if require_shown and answers is None:
-                not_shown = True
-                continue
-            if not harness_wrote(seen, e):
-                not_written = True      # critic finding 2: appended to the file, not written by Claude Code
-                continue
-            why = submitted(path, entries, e, answers, after)
-            if why:
-                not_submitted = why     # critic-fix review, finding 3: not a prompt Claude Code reported
-                continue
-            return {"transcript_ref": _ref(e), "shown_ref": _ref(answers) if answers else None, "text": e["text"]}
-        if kind == "unknown_provenance":
-            unknown_hit = True
-    if unknown_hit:
-        raise Unreadable("the words are only in a user entry that carries no origin field, so who typed it "
-                         "cannot be told")
-    if not_written:
-        raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
-                         "chain, so it was added to the file afterwards")
-    if not_submitted:
-        raise NotSubmitted(not_submitted)
-    if not_shown:
-        raise NotShown("the words are not the operator's first reply to an assistant turn showing the block, "
-                       "or ending with its invitation line, after the cut-off")
-    raise NotFound("not an operator-typed entry after the cut-off")
-
-
-class Declined(NotFound):
-    """The operator's last word on it, after the cut-off, was a no, a wait or a stop."""
-
-
 CONSENT_TRIES = 6           # find_consent's bounded re-read: the reply to a just-typed turn may not be written yet
 CONSENT_PAUSE = 0.4
 
 
-def find_consent(path: Path, after: float, quote: Optional[str] = None, reason: bool = False) -> dict:
-    """v0.12.2 — the operator's consent, in whatever words they gave it: {"transcript_ref", "shown_ref": None, "text"}
-    for an operator-typed turn of this session after `after` (the report or prepare that asked; a new ask moves it)
-    that Claude Code wrote into the conversation (harness_wrote) and reported as a prompt (submitted) — so a yes the
-    model wrote, or a line added to the file, never counts — and that consents (is_assent). Where the turn stands
-    does not matter: the agent's replies, the operator's questions and notifications between the ask and the turn do
-    not reset it, and no closing line is looked for. But it must be the operator's LATEST statement since the ask:
-    any later turn of theirs that is not only questions and does not consent — a no in any words, a hold, a change
-    of subject — takes its place, so a refusal the word lists miss still stops the action. `quote` (the agent's
-    citation) is never needed and never the refusal; the transcript is read for the operator's own words.
-    reason=True (promote --skip-review): the consent must come with a reason — three words or more beside the
-    instruction ("Same reason: just push the work."), or a statement of three words or more just before it ("F1
-    is test-only." then "push it") — and the reason's turn is returned.
+def find_consent(path: Path, after: float, quote: Optional[str] = None) -> dict:
+    """v0.12.5 — that the operator typed something in this session after `after`, which is all the tool checks:
+    the operator's instruction, in whatever words, is their permission. Whether those words consent is the agent's
+    judgment of the conversation; no word list, no reason length, no turn order and no later word is read here. Returns {"transcript_ref", "shown_ref": None,
+    "text"} for the latest turn that holds `quote` (the agent's citation, normalized, as part of the turn), or the
+    latest turn when none does or there is no citation. A turn counts when it is operator-typed (a queued one
+    included), Claude Code wrote it into the conversation (harness_wrote) and reported it as a prompt (submitted):
+    words the model wrote, a tool result, or a line added to the file never count. A citation found ONLY in a turn
+    that fails those checks is refused (NotWritten, NotSubmitted): the agent cited words nobody typed.
     The read is retried CONSENT_TRIES times, CONSENT_PAUSE apart, while the only turn that would count fails because
     nothing Claude Code wrote follows it yet; the last read accepts it as the chain's last entry, vouched for by
-    `submitted`. Raises Missing, Unreadable (fail closed), NotWritten, NotSubmitted, Declined or NotFound."""
+    `submitted`. Raises Missing, Unreadable (fail closed), NotWritten, NotSubmitted or NotFound."""
     for attempt in range(CONSENT_TRIES):
         try:
-            return _find_consent_once(path, after, quote, reason, allow_tip=attempt == CONSENT_TRIES - 1)
+            return _find_consent_once(path, after, quote, allow_tip=attempt == CONSENT_TRIES - 1)
         except NotWritten:
             if attempt == CONSENT_TRIES - 1:
                 raise
@@ -752,9 +626,11 @@ def find_consent(path: Path, after: float, quote: Optional[str] = None, reason: 
     raise NotFound("not found")     # unreachable
 
 
-def _find_consent_once(path: Path, after: float, quote: Optional[str], reason: bool, allow_tip: bool) -> dict:
+def _find_consent_once(path: Path, after: float, quote: Optional[str], allow_tip: bool) -> dict:
     entries = _entries(path)
-    last_before = -1                # as find_operator_words: an unreadable timestamp lands in the tail (A12)
+    # The tail starts after the last user/assistant entry PROVABLY before the cut-off, so an entry whose timestamp
+    # this build writes in a form parse_ts does not read lands in it and fails closed as Unreadable (A12).
+    last_before = -1
     for i, e in enumerate(entries):
         ts = parse_ts((e["data"] or {}).get("timestamp")) if e["type"] in ("user", "assistant") else None
         if ts is not None and ts <= after:
@@ -769,64 +645,46 @@ def _find_consent_once(path: Path, after: float, quote: Optional[str], reason: b
     drift = shape_problem(entries, strict=False)
     if drift:
         raise Unreadable(drift)
-
-    # The operator's turns are read in order, and only their LATEST statement since the ask decides: a consent stands
-    # only while nothing they said after it, other than questions, takes its place. So a no in words the lists do
-    # not know ("Hell no", "leave it be") still stops the action — it is a statement, and not a consent — and a
-    # consent is never kept alive under a later change of mind (review 2026-10-19, second pass, finding 1).
-    consent: Optional[dict] = None          # the latest statement, when it consents and is verified
-    statement: Optional[dict] = None        # the latest statement of any kind
-    candidate: Optional[dict] = None        # reason=True: a reason given as its own statement, just before the consent
-    reason_e: Optional[dict] = None         # reason=True: the turn that holds the reason for the standing consent
+    want = normalize(quote or "")
+    typed: List[dict] = []                  # the operator's verified turns since the cut-off, in order
     not_written = False
     not_submitted: Optional[str] = None
-    unknown_hit = asked = False
+    unknown_hit = cited_unverified = False
     for e in tail:
         kind = classify(e)
-        if kind not in ("operator", "queued", "unknown_provenance"):
+        if kind == "unknown_provenance":
+            unknown_hit = True
             continue
-        t = e["text"]
-        if only_questions(t) and not is_refusal(t):
-            asked = asked or consent is None
-            continue                         # a question changes nothing
-        agrees = is_assent(t)
-        if kind == "queued" and agrees:
-            continue                         # typed before what it answers was on screen: neither counts nor cancels
-        if kind != "operator" or not agrees:
-            # a statement that does not consent — a no, a hold, something else — takes the place of any earlier
-            # consent, whoever wrote it: it can only stop the action
-            unknown_hit = unknown_hit or (kind == "unknown_provenance" and agrees)
-            consent, reason_e, statement = None, None, e
-            candidate = e if (reason and not is_refusal(t) and len(normalize(t).split()) >= 3) else None
+        if kind not in ("operator", "queued"):
             continue
+        holds = bool(want) and want in normalize(e["text"])
         if not harness_wrote(seen, e, allow_tip):
-            not_written = True
+            not_written, cited_unverified = True, cited_unverified or holds
             continue
         why = submitted(path, entries, e, None, after)
         if why:
-            not_submitted = not_submitted or why
+            not_submitted, cited_unverified = not_submitted or why, cited_unverified or holds
             continue
-        if reason:
-            reason_e = e if substance(t) >= 3 else (candidate if statement is candidate else None)
-        consent, statement, candidate = e, e, None
-    if consent is not None and (not reason or reason_e is not None):
-        e = reason_e if reason else consent
+        typed.append(e)
+    cited = [e for e in typed if want and want in normalize(e["text"])]
+    if cited_unverified and not cited:
+        # the agent cited words that are only in a turn nobody typed: refuse, whatever else the operator said
+        if not_written:
+            raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
+                             "chain, so it was added to the file afterwards")
+        raise NotSubmitted(not_submitted or NEVER_REPORTED)
+    if typed:
+        e = (cited or typed)[-1]
         return {"transcript_ref": _ref(e), "shown_ref": None, "text": e["text"]}
-    if consent is None and statement is not None and not unknown_hit:
-        raise Declined("the operator's last word on it was \"%s\"" % " ".join(statement["text"].split()))
     if not_written:
         raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
                          "chain, so it was added to the file afterwards")
     if not_submitted:
         raise NotSubmitted(not_submitted)
     if unknown_hit:
-        raise Unreadable("the words are only in a user entry that carries no origin field, so who typed it "
+        raise Unreadable("the operator's turns are only user entries that carry no origin field, so who typed them "
                          "cannot be told")
-    if reason and consent is not None:
-        raise NotFound("the operator agreed but gave no reason of three words or more")
-    if asked:
-        raise NotFound("the operator has only asked questions")
-    raise NotFound("nothing the operator typed agrees or asks for it")
+    raise NotFound("nothing typed by the operator")
 
 
 def operator_entry(path: Path, uuid: str) -> Optional[str]:
