@@ -350,8 +350,9 @@ repo_diff() {
 # <sha> in one diff, so every hunk's new-side line numbers are the working tree's — the lines the reviewer reads.
 # repo_diff's two parts (committed since <sha>, then uncommitted against HEAD) number their hunks against two different
 # trees, and a file changed in both would put the committed ranges in the wrong place (review 2026-10-20, F4).
-# The committed part is then appended against HEAD as well: the reviewer reads those hunks numbered from HEAD, and
-# hunks reads both diffs into one set of ranges per file (review 2026-10-20, round 4, F1).
+# The delta the reviewer reads is repo_diff's two parts, so both are appended too, numbered as shown: the committed
+# part (<sha>...HEAD, new side from HEAD) and the uncommitted part (against HEAD, old side from HEAD). hunks reads all
+# three into one set of ranges per file; a line counts in any numbering the reviewer saw (review 2026-10-20, rounds 4-5).
 ground_diff() {
   local repo="$1" prefix="$2" sha="$3" out="$4" idx real n; shift 4
   local ex=()
@@ -363,12 +364,16 @@ ground_diff() {
   if GIT_INDEX_FILE="$idx" git -C "$repo" -c advice.addEmbeddedRepo=false add -A -- . ${ex[@]+"${ex[@]}"} >/dev/null 2>&1; then
     GIT_INDEX_FILE="$idx" git -C "$repo" -c core.quotePath=false diff --cached -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" \
       "$sha" -- . ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+    GIT_INDEX_FILE="$idx" git -C "$repo" -c core.quotePath=false diff --cached -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" \
+      HEAD -- . ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
   else
     git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" "$sha" -- . \
       ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+    git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" HEAD -- . \
+      ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
   fi
   rm -f "$idx" "$idx.lock"
-  git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" "$sha" HEAD -- . \
+  git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" "$sha"...HEAD -- . \
     ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
 }
 nested_rel=()   # bash 3.2: no mapfile

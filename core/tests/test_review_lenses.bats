@@ -462,6 +462,19 @@ assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled 
   [ -f "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" ]; ! grep -q '^### .*missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" || { echo "$output"; cat "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"; return 1; }
 }
 
+@test "review 2026-10-20 round 5: a line uncommitted work deleted, cited by its HEAD number as the reviewer is shown it, is new ground" {
+  lease_for 03; write_config; small_change; seq 1 70 > "$T/f.txt"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -qm first
+  refute_l1; gates; [ "$status" -ne 0 ]
+  { seq 201 210; cat "$T/f.txt"; } > "$T/f.new"; mv "$T/f.new" "$T/f.txt"     # committed: line 50 is now HEAD line 60
+  git -C "$T" -c user.email=t@x -c user.name=t commit -qam second
+  { seq 101 110; grep -vx 50 "$T/f.txt"; } > "$T/f.new"; mv "$T/f.new" "$T/f.txt"   # uncommitted: deletes it
+  printf 'Resolved: L1\n\n### F1 — f.txt:60 — plausible — in scope — MEDIUM — reach: user\nWhat is wrong: the guard is gone.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ -f "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" ]; ! grep -q '^### .*missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" || { echo "$output"; cat "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"; return 1; }
+}
+
 @test "review 2026-10-20 F5: a live check reported again in other words at the same place stays one live check" {
   lease_for 03; write_config; small_change
   printf '### F1 — marker.txt:2 — plausible — in scope — HIGH — reach: routine — live-only\nWhat is wrong: the job may not reach the service.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
