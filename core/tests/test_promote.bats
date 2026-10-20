@@ -437,7 +437,7 @@ PY
   tx "$TXP" assistant "Reviewer on the merged change: REFUTED — one high finding." "$(plus "$P" 1)" >/dev/null
   tx "$TXP" assistant "F1 is hypothetical. I recommend the backlog and promoting on a written reason." "$(plus "$P" 2)" >/dev/null
   tx "$TXP" operator "Hypothetical findings go to the backlog; promote it." "$(plus "$P" 3)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "hypothetical findings to backlog"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "findings go to the backlog"
   [ "$status" -eq 0 ] || { echo "reason 1: $output"; return 1; }
   [ "${lines[3]}" = "Reviewer: skipped by the operator because: Hypothetical findings go to the backlog; promote it." ]
   trunk_moves b.txt "elsewhere"
@@ -448,7 +448,7 @@ PY
   tx "$TXP" task-notification "<task-notification>background gates done</task-notification>" "$(plus "$P" 4)" >/dev/null
   tx "$TXP" assistant "The background gates finished." "$(plus "$P" 5)" >/dev/null
   tx "$TXP" operator "Same reason: just push the work." "$(plus "$P" 6)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --skip-review --reason "same reason"
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "Same reason"
   [ "$status" -eq 0 ] || { echo "reason 2: $output"; return 1; }
   [ "${lines[3]}" = "Reviewer: skipped by the operator because: Same reason: just push the work." ]
   P="$(pj prepared_ts)"
@@ -457,7 +457,7 @@ PY
   tx "$TXP" assistant "Yes, one gate, PASS." "$(plus "$P" 3)" >/dev/null
   tx "$TXP" task-notification "<task-notification>board refreshed</task-notification>" "$(plus "$P" 4)" >/dev/null
   tx "$TXP" operator "Good. Push the work." "$(plus "$P" 5)" >/dev/null
-  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "push the work"
   [ "$status" -eq 0 ] || { echo "confirm: $output"; return 1; }
   [ "$(origin_main)" = "$(pj merge_sha)" ]
 }
@@ -1221,4 +1221,21 @@ PY
   for t in "three words" "Tell me why" "in your own words" "in one turn is refused"; do
     ! grep -qF "$t" "$BATS_TEST_DIRNAME/../../CLAUDE.md" || { echo "CLAUDE.md still says: $t"; return 1; }
   done
+}
+
+@test "v0.12.5 review: a window re-created under the same number does not inherit the words before its predecessor's push; a citation the operator never typed is refused naming it" {
+  work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]
+  tx "$TXP" operator "push 02" "$(plus "$(pj prepared_ts)" 1)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "push 02"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  sleep 1
+  python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])); d["created"]=time.strftime("%Y-%m-%dT%H:%M:%S"); json.dump(d, open(sys.argv[1],"w"))' \
+    "$DAEDALUS_HOME/state/leases/02.json"
+  printf 'next\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "next occupant's work"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "push 02"
+  refused "The operator has typed nothing in this session since window 02's last promote"
+  tx "$TXP" operator "go on" "$(plus "$(pj prepared_ts)" 1)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "ship it now"
+  refused "The words cited (\"ship it now\") are in nothing the operator typed since window 02's last promote"
 }

@@ -1022,9 +1022,12 @@ two_windows_prime_01() {
   [ "$(lease_json prime session_id)" = "sA" ]
   said="$(tx "$X" operator "Hand the pen to window 02.")"
   tx "$X" operator "and tell me when it is done" >/dev/null
+  CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "the operator wants window 02 to own it"
+  [ "$status" -ne 0 ]; case "$output" in *"The words cited are in nothing the operator typed in this window since the pen was last taken. The pen did not move"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(lease_json prime session_id)" = "sA" ]
   CLAUDE_CODE_SESSION_ID=sB run LS prime take --reason "hand the pen to window 02"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }; [ "$(lease_json prime session_id)" = "sB" ]
-  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"][-1]; assert h["transcript_ref"]["uuid"]==sys.argv[2] and h["reason"]=="hand the pen to window 02", h' "$DAEDALUS_HOME/state/leases/prime.json" "$said"
+  python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"][-1]; assert h["transcript_ref"]["uuid"]==sys.argv[2] and h["reason"]=="hand the pen to window 02" and h["operator_said"]=="Hand the pen to window 02.", h' "$DAEDALUS_HOME/state/leases/prime.json" "$said"
 }
 
 @test "prime take --reason (transcribed): an unreadable transcript is refused naming promote.confirm: tty; a missing one names memory.transcript_dir; one outside every protected directory is not evidence; a stale holder needs no reason and no transcript" {
@@ -1890,7 +1893,7 @@ LINE02="Delete window 02's work?"
   [ ! -d "$W" ]
 }
 
-@test "release --remove from a session after the operator agreed (v0.12.2): any later message of theirs that agrees counts — after questions, answers and a notification, with no closing line, in a message that also asks something, and with a citation that does not match; it deletes the window and records what authorised it under state/evidence/deletions/" {
+@test "release --remove from a session after the operator agreed (v0.12.2): any later message of theirs that agrees counts — after questions, answers and a notification, with no closing line, in a message that also asks something, cited by a fragment; it deletes the window and records what authorised it under state/evidence/deletions/" {
   delete_fixture
   R="$(asked)"; P="$(now)"
   tx "$TX" tool-result "$R" "$(plus "$P" 1)" >/dev/null
@@ -1900,7 +1903,7 @@ LINE02="Delete window 02's work?"
   tx "$TX" task-notification "<task-notification>background build done</task-notification>" "$(plus "$P" 5)" >/dev/null
   tx "$TX" assistant "The background build finished." "$(plus "$P" 6)" >/dev/null
   said="$(tx "$TX" operator "Why does it matter? Anyway, delete it." "$(plus "$P" 7)")"
-  run --separate-stderr delete_as_sA --operator-said "go ahead"
+  run --separate-stderr delete_as_sA --operator-said "delete it"
   [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
   case "$output" in *"Deleting window 02's unpromoted commits: \"unmerged work\""*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"Window 02 released; its worktree and branch are deleted (after the operator said: \"Why does it matter? Anyway, delete it.\")."*) : ;; *) echo "$output"; return 1 ;; esac
@@ -1910,7 +1913,7 @@ LINE02="Delete window 02's work?"
   python3 - "$rec" "$said" <<'PY'
 import json, re, sys
 r = json.load(open(sys.argv[1]))
-assert r["lease"] == "02" and r["session_id"] == "sA" and r["said"] == "go ahead", r
+assert r["lease"] == "02" and r["session_id"] == "sA" and r["said"] == "delete it", r
 assert r["transcript_ref"]["uuid"] == sys.argv[2] and r["shown_ref"] is None, r
 assert re.fullmatch(r"[0-9a-f]{64}", r["fingerprint"]) and isinstance(r["cutoff"], float), r
 assert r["problems"] == ['has 1 unpromoted commit: "unmerged work"'], r

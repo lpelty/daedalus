@@ -92,6 +92,10 @@ class NotWritten(NotFound):
     (plan 4 completeness critic, finding 2 — a line appended to the file by another writer)."""
 
 
+class NotCited(NotFound):
+    """v0.12.5: the operator typed something since the cut-off, but the words the agent cited are in none of it."""
+
+
 class NotSubmitted(NotFound):
     """The words are in an operator-typed entry, but not as a prompt Claude Code reported to Daedalus when it was
     submitted, with the transcript before it unchanged since (critic-fix review, finding 3 — a whole-file rewrite)."""
@@ -609,10 +613,11 @@ def find_consent(path: Path, after: float, quote: Optional[str] = None) -> dict:
     the operator's instruction, in whatever words, is their permission. Whether those words consent is the agent's
     judgment of the conversation; no word list, no reason length, no turn order and no later word is read here. Returns {"transcript_ref", "shown_ref": None,
     "text"} for the latest turn that holds `quote` (the agent's citation, normalized, as part of the turn), or the
-    latest turn when none does or there is no citation. A turn counts when it is operator-typed (a queued one
-    included), Claude Code wrote it into the conversation (harness_wrote) and reported it as a prompt (submitted):
-    words the model wrote, a tool result, or a line added to the file never count. A citation found ONLY in a turn
-    that fails those checks is refused (NotWritten, NotSubmitted): the agent cited words nobody typed.
+    latest turn when there is no citation. A turn counts when it is operator-typed (a queued one too, when Claude
+    Code reported it), Claude Code wrote it into the conversation (harness_wrote) and reported it as a prompt
+    (submitted): words the model wrote, a tool result, or a line added to the file never count. A citation in no
+    turn that counts is refused — NotWritten or NotSubmitted when it is in an operator-shaped entry that fails those
+    checks, else NotCited: the agent cited words the operator did not type.
     The read is retried CONSENT_TRIES times, CONSENT_PAUSE apart, while the only turn that would count fails because
     nothing Claude Code wrote follows it yet; the last read accepts it as the chain's last entry, vouched for by
     `submitted`. Raises Missing, Unreadable (fail closed), NotWritten, NotSubmitted or NotFound."""
@@ -667,12 +672,14 @@ def _find_consent_once(path: Path, after: float, quote: Optional[str], allow_tip
             continue
         typed.append(e)
     cited = [e for e in typed if want and want in normalize(e["text"])]
-    if cited_unverified and not cited:
-        # the agent cited words that are only in a turn nobody typed: refuse, whatever else the operator said
-        if not_written:
+    if typed and want and not cited:
+        # the agent cited words that are in no turn the operator typed: refuse, whatever else the operator said
+        if cited_unverified and not_written:
             raise NotWritten("the words are in an entry nothing Claude Code wrote follows it on the conversation's "
                              "chain, so it was added to the file afterwards")
-        raise NotSubmitted(not_submitted or NEVER_REPORTED)
+        if cited_unverified:
+            raise NotSubmitted(not_submitted or NEVER_REPORTED)
+        raise NotCited("the cited words are in nothing the operator typed")
     if typed:
         e = (cited or typed)[-1]
         return {"transcript_ref": _ref(e), "shown_ref": None, "text": e["text"]}

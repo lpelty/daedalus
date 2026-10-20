@@ -2466,6 +2466,10 @@ def group_confirmed_locked(root: Path, sid: Optional[str], nns: list, leases: Di
         d = tl.DRIFT[:1].upper() + tl.DRIFT[1:]
         cut = d.index(";")
         raise Refused("%s (%s)%s. Nothing was deleted. Until then, %s." % (d[:cut], e, d[cut:], shell))
+    except tl.NotCited:
+        raise Refused("The words cited are in nothing the operator typed since the report on window%s %s. Nothing "
+                      "was deleted; cite a few of their words exactly, or leave --operator-said out."
+                      % ("s" if len(nns) > 1 else "", and_list(nns)))
     except tl.NotSubmitted as e:
         raise Refused("Those words are in this session's transcript, but %s. Nothing was deleted; ask the operator."
                       % str(e).replace("the words are", "they are", 1))
@@ -4738,10 +4742,17 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
                 raise Refused("I cannot read this build's transcript format (%s), so the operator's words cannot be "
                               "checked. The pen did not move. Until the parser is updated, set `promote.confirm: tty` "
                               "and take the pen by typing the reason." % e)
+            except tl.NotCited:
+                raise Refused("The words cited are in nothing the operator typed in this window since the pen was "
+                              "last taken. The pen did not move; cite a few of their words exactly.")
+            except (tl.NotWritten, tl.NotSubmitted):
+                raise Refused("The words cited are in this window's transcript, but not as a turn the operator typed "
+                              "and Claude Code reported. The pen did not move.")
             except tl.NotFound:
                 raise Refused("I could not find anything the operator typed in this window since the pen was last "
                               "taken. The pen did not move.")
             record["transcript_ref"] = found["transcript_ref"]
+            record["operator_said"] = found["text"]
     with lock(root):
         fresh = read_lease(root, "prime") or {}
         if fresh.get("session_id") != expect:

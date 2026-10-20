@@ -757,13 +757,14 @@ def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str
 def since_last_promote(root: Path, me: dict, nn: str, lease: dict) -> float:
     """v0.12.5, the one boundary the operator's words must come after: the later of this session's start
     (marker_started, an absolute instant — a lease stamp is local time, and a reader in another TZ would move it) and
-    the time of this occupant's last pushed promotion of window NN. So "promote window 2" said before the prepare is
-    the yes, and words from before the last push are not a yes for the next one."""
+    the time of window NN's last pushed promotion, whoever occupied it (a window re-created under the same number
+    does not inherit the words before its predecessor's push). So "promote window 2" said before the prepare is the
+    yes, and words from before the last push are not a yes for the next one."""
     t = marker_started(root, me.get("session_id"), nn)
     base = root / "state" / "promote"
     for f in (base.glob("%s-*/prepared.json" % nn) if base.is_dir() else []):
         q = read_json(f) or {}
-        if q.get("lease") != nn or q.get("lease_created") != lease.get("created"):
+        if q.get("lease") != nn:
             continue
         for name in ("pushed", "announced"):
             stamp = read_json(f.parent / name) or {}
@@ -999,6 +1000,9 @@ def transcribed_yes(root: Path, me: dict, said: str, nn: str, lease: dict) -> di
         raise Stop("Those words are in this session's transcript, but not as a turn Claude Code wrote there: nothing "
                    "in the conversation follows from them, so they were added to the file afterwards. Nothing was "
                    "recorded; cite what the operator typed.")
+    except tl.NotCited:
+        raise Stop("The words cited (\"%s\") are in nothing the operator typed since window %s's last promote. Cite a "
+                   "few of their words exactly, or leave the citation out." % (" ".join(said.split()), nn))
     except tl.NotFound:
         raise Stop("The operator has typed nothing in this session since window %s's last promote (or since this "
                    "session started); ask them." % nn)

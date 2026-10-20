@@ -1110,7 +1110,7 @@ shown_then_yes() {
   tx "$TX" operator "$1" "$(plus "$P" 3)" >/dev/null
 }
 
-@test "delete gate (v0.12.5): core/lease.sh release 02 --remove is denied without the report, while the operator has typed nothing since it (nothing, or only the model's own yes), and allowed once they have typed anything — with or without --operator-said, whatever it carries; nothing else about lease.sh is gated" {
+@test "delete gate (v0.12.5): core/lease.sh release 02 --remove is denied without the report, while the operator has typed nothing since it (nothing, or only the model's own yes), and allowed once they have typed anything — with no --operator-said, an unreadable one, or one citing their words; a citation they never typed is denied; nothing else about lease.sh is gated" {
   delete_guard
   run guard_as sA "$DEL --operator-said yes"; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA 'core/lease.sh release 02 --remove --operator-said yes'; denied; case "$output" in *"$ASK_FIRST"*) : ;; *) echo "$output"; return 1 ;; esac   # without --force too
@@ -1125,7 +1125,9 @@ shown_then_yes() {
   tx "$TX" operator "Fine — delete it." "$(plus "$P" 5)" >/dev/null
   run guard_as sA "$DEL"; allowed
   run guard_as sA "$DEL --operator-said \"yes \$HOME\""; allowed                    # a citation the guard cannot read
-  run guard_as sA "$DEL --operator-said 'something they never said'"; allowed
+  run guard_as sA "$DEL --operator-said 'delete it'"; allowed
+  run guard_as sA "$DEL --operator-said 'something they never said'"; denied
+  case "$output" in *"The words cited are in nothing the operator typed since the report on window 02"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -d "$W" ]
 }
 
