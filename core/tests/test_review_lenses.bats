@@ -459,3 +459,20 @@ assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled 
   run python3 "$DAEDALUS_HOME/core/review-lenses.py" live "$DAEDALUS_HOME" 03 lease/03
   [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 1 ] || { echo "$output"; return 1; }
 }
+
+@test "review 2026-10-20 round 3: new ground counts the context lines the reviewer is shown, a deleted line by its old number, and all of a deleted file" {
+  printf 'diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n@@ -50 +52,0 @@\n-if not ok: return\ndiff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1,9 +0,0 @@\n-x\n' > "$BATS_TEST_TMPDIR/delta"
+  run python3 - "$SRC/review-lenses.py" "$BATS_TEST_TMPDIR" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("rl", sys.argv[1]); rl = importlib.util.module_from_spec(spec); spec.loader.exec_module(rl)
+d = sys.argv[2]
+rl.cmd_hunks(d + "/delta", "/t", d + "/h.json"); h = json.load(open(d + "/h.json"))
+missed = lambda f, n: rl.missed_earlier({"file": f, "line": n, "end": n}, h)
+assert not missed("x.py", 50), "the removed guard, cited by its old line"
+assert not missed("x.py", 55), "a context line below the deletion"
+assert not missed("gone.py", 5), "a deleted file is all new ground"
+assert missed("x.py", 30), "positive control: a line no hunk is near"
+print("ok")
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}

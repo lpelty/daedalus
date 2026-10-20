@@ -289,34 +289,51 @@ def cmd_open(home, nn, branch, section_out, heads_out):
         json.dump(openf, fh)
 
 
+CONTEXT = 3     # the lines of context git shows around a hunk: the reviewer reads them as part of the change
+
+
 def cmd_hunks(delta, target, out):
-    """The new-side line ranges of the change since the last review (refute.sh's ground_diff: the working tree against
-    that review's commit, in one diff), per file."""
-    files, cur = {}, None
+    """The line ranges of the change since the last review (refute.sh's ground_diff: the working tree against that
+    review's commit, in one diff), per file: new-side ranges, numbered as the working tree the reviewer reads, and
+    old-side ranges, numbered as that commit — a deleted line has only an old number, and a reviewer who cites the
+    line a fix removed cites that one (review 2026-10-20, round 3, F1)."""
+    files, old, cur = {}, {}, None
+    whole = set()
     for ln in open(delta, encoding="utf-8", errors="replace"):
         ln = ln.rstrip("\n")
         m = re.match(r"^diff --git a/(.*) b/(.*)$", ln)
         if m:
             cur = m.group(2)
             files.setdefault(cur, [])
+            old.setdefault(cur, [])
+            continue
+        if ln == "+++ /dev/null" and cur is not None:
+            whole.add(cur)              # a deleted file: all of it is the change
             continue
         if ln.startswith("+++ b/"):
             cur = ln[6:]
             files.setdefault(cur, [])
+            old.setdefault(cur, [])
             continue
-        m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", ln)
+        m = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", ln)
         if m and cur is not None and files.get(cur) is not None:
-            start, n = int(m.group(1)), int(m.group(2)) if m.group(2) is not None else 1
+            o, on = int(m.group(1)), int(m.group(2)) if m.group(2) is not None else 1
+            start, n = int(m.group(3)), int(m.group(4)) if m.group(4) is not None else 1
             # A pure deletion (+c,0) sits between line c and c+1 of the new side.
             files[cur].append([start, start + 1] if n == 0 else [start, start + n - 1])
+            if on:
+                old[cur].append([o, o + on - 1])
     # No hunk at all — a deleted file, a binary, a mode change: the whole file is new ground.
     with open(out, "w") as fh:
-        json.dump({"target": target, "files": {f: (r or None) for f, r in files.items()}}, fh)
+        json.dump({"target": target, "context": CONTEXT,
+                   "files": {f: (None if f in whole or not r else r) for f, r in files.items()},
+                   "old": {f: r for f, r in old.items() if r}}, fh)
 
 
 def missed_earlier(d, hunks):
-    """True when the finding's place is readable and lies outside every hunk of the delta. An unreadable place
-    (no line, no file) is not missed: it counts as it would have before."""
+    """True when the finding's place is readable and lies outside every hunk of the delta, by its new-side or its
+    old-side numbers, with the context lines git shows around each hunk counted as the hunk's. An unreadable place
+    (no line, no file) is not missed: it counts as it would have before. Every doubt falls toward reviewing."""
     if not hunks or not d.get("line") or d.get("file") in (None, "?"):
         return False
     f = d["file"].strip("`")
@@ -329,9 +346,11 @@ def missed_earlier(d, hunks):
     keys = [k for k in files if k == f] or [k for k in files if k.endswith("/" + f) or f.endswith("/" + k)]
     if not keys:
         return True
+    ctx = hunks.get("context", CONTEXT)
     lo, hi = d["line"], max(d.get("end") or d["line"], d["line"])
     for k in keys:
-        if files[k] is None or any(a <= hi and lo <= b for a, b in files[k]):
+        ranges = (files[k] or []) + ((hunks.get("old") or {}).get(k) or [])
+        if files[k] is None or any(a - ctx <= hi and lo <= b + ctx for a, b in ranges):
             return False
     return True
 
