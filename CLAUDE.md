@@ -527,9 +527,14 @@ Criteria you write for a review (`GATES_CRITERIA=<file>`, a window's
 `core/lease.sh update <NN> --criteria <file>`) end with a **Scope** section:
 what the change covers, the evidence it rests on (the inputs actually seen),
 and what is out of scope. The reviewer labels each finding observed,
-plausible or hypothetical and in or out of that scope, and only in-scope
-observed or plausible HIGH or MEDIUM findings (or an observed HIGH) refute;
-the rest are listed and set aside. So promise only what the evidence covers:
+plausible or hypothetical, in or out of that scope, and by its reach: user
+(an ordinary action meets it), routine (a path the system runs on its own,
+such as a schedule, a hook or startup) or none, with the flags data and trust
+where they apply. An observed HIGH refutes; so does an in-scope observed or
+plausible HIGH or MEDIUM with reach user or routine, or a data or trust flag.
+The rest are listed as backlog candidates; a finding flagged live-only (only
+a live run can settle it) is kept as a live check, and promote lists the open
+ones for the operator. So promise only what the evidence covers:
 widening the criteria each round ("no input shape crashes it") hands every
 review an unmeetable claim. After the second refutation of your branch,
 `gates.sh` prints the operator's three choices; stop and ask which, and take
@@ -541,10 +546,13 @@ installs, failure handling — at once, their findings merged; the run says
 `review: 4 lenses …` and why. Plan for it: each lens is a full review under
 `verify.refute_timeout`. Your branch also keeps a findings ledger: the next
 review checks the findings earlier ones counted (`review: 3 earlier findings:
-2 resolved, 1 open`), then hunts in what changed since. So fix the counted
-findings and run the gates again — do not widen the change to answer
-findings that were set aside. Promote's review is one fresh reviewer that is
-told none of this.
+2 resolved, 1 open`), then hunts in what changed since. A new finding outside
+that part is labelled `missed earlier` and does not refute (an observed HIGH
+with a data or trust flag still does); it is kept in the ledger as a backlog
+candidate. So fix the counted findings and run the gates again — do not widen
+the change to answer findings that were set aside; offer the backlog
+candidates to the operator as rows to file. Promote's review is one fresh
+reviewer that is told none of this.
 
 The AMI (the small local decision model behind `/frame-jack`) may be on.
 In this release it is a logged opinion and changes nothing you do: before a
@@ -631,6 +639,10 @@ the pen. When the operator says a window's work is ready ("ship window 2"):
    wait, do not push. A prepare and a confirm in one turn is refused, and
    never write a yes the operator did not give.
 3. Repeat the "Promoted …" line it prints.
+
+The decision block may list live checks still open: findings the window's
+reviews flagged live-only, which no review can settle. They are not a gate;
+the operator's yes covers them, in any words. Repeat them with the block.
 
 When the deployment sets `promote.confirm: tty`, give the operator the one
 line the confirm prints and let them type yes in their own shell; that shell

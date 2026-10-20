@@ -41,19 +41,33 @@ E='[*[:space:].!]*$'
 # The bar (2026-10-19). A reviewer told only "find what is wrong" always finds something in code that reads an
 # outside service's replies — a field that is a list, a number where text goes — and every such finding refuted as
 # hard as a real one, so a 40-line fix was refuted five runs running and grew to 250 lines answering inputs no
-# account had sent. So each finding carries three labels in its heading (charter, "Output format"): a severity
-# (HIGH, MEDIUM, LOW), its input's standing (observed — in the evidence, fixtures, criteria or the target's own
-# code paths; plausible — a stated, specific reason it could occur; hypothetical — possible, nothing points to it)
-# and its scope (in scope or out of scope of the criteria). What refutes: an in-scope observed or plausible HIGH or
-# MEDIUM finding, or an observed HIGH whatever its scope label (a real defect in the change is not waved off by
-# calling it out of scope). Everything else is listed on stderr as not counted, each with its labels, and the review
+# account had sent. So each finding carries labels in its heading (charter, "Output format"): a severity (HIGH,
+# MEDIUM, LOW), its input's standing (observed — in the evidence, fixtures, criteria or the target's own code paths;
+# plausible — a stated, specific reason it could occur; hypothetical — possible, nothing points to it), its scope (in
+# scope or out of scope of the criteria) and, since v0.12.4, its reach.
+#
+# Reach (v0.12.4). The 2026-10-19 bar judged the mechanism, not who meets it: a 3,000-line change was refuted three
+# times on about 30 findings, half of them edge cases no ordinary use reaches, and the third refutation was one of
+# them. So a heading names its reach — `reach: user` (an ordinary action of the person using the feature meets it),
+# `reach: routine` (a path the system runs on its own in ordinary operation: a schedule, a hook, startup, an update)
+# or `reach: none` (only an unusual input, timing or configuration) — and may carry the flags `data` (loses or
+# corrupts the person's data) and `trust` (crosses a trust boundary or weakens a guard), which stand in for reach.
+# What refutes: an observed HIGH at any reach; a finding marked `regressed L<n>` or carried unchecked from the
+# ledger; an in-scope observed or plausible HIGH or MEDIUM that has reach user or routine, or a flag. A finding
+# flagged `live-only` (only a live run can settle it) never counts and never passes: the ledger keeps it as a
+# required live check and promote lists it. On a later review of a branch, a new finding outside the part changed
+# since the last review is labelled `missed earlier` by core/review-lenses.py's merge — never by the reviewer: it
+# is honoured only in a file whose frontmatter carries the merge's `new-ground:` line — and counts only as an
+# observed HIGH with a flag. Everything else is a backlog candidate, listed on stderr with its labels; the review
 # file keeps the reasoning. The reviewer's own VERDICT line is still required — it is how a truncated review is
 # told from a finished one — but in a labelled review the labels decide, in both directions.
 #
 # Fail closed: a labelled review in which any finding heading lacks a label, carries an unknown one or two of one
-# kind, or that has no verdict line, is NONE (exit 2) — never STANDS. A review with no labelled finding headings
-# (an older review re-read by promote, or a reviewer that did not label) keeps the grammar it was written for: the
-# reviewer's own VERDICT line, REFUTED first.
+# kind, or that has no verdict line, is NONE (exit 2) — never STANDS. A heading without its reach is unlabelled too,
+# except one the merge wrote for the reviewer (carried, unlabelled refutation), which counts on its own. Re-read (by
+# promote or --verdict-of), a review written before a label keeps the bar it was written for: no labelled finding
+# heading at all, the reviewer's own VERDICT line, REFUTED first; labelled headings and no reach on any of them, the
+# 2026-10-19 bar.
 verdict_of() {   # verdict_of <review file> run|reread|counts
   python3 - "$1" "$2" <<'PY'
 import json, re, sys
@@ -68,15 +82,34 @@ said = ("REFUTED" if re.search(V + "REFUTED" + E, text, re.M) else
 # A heading is marked as one (#s or bold); a plain "F1 — nothing found." is prose.
 HEAD = re.compile(r"^[ \t>]*(?:#{1,6}[ \t]*(?:\*\*|__)?|\*\*|__)[ \t]*F(\d+)\b(?:\*\*|__)?[ \t]*([\u2014\u2013:|-].*)$", re.M)
 SEV, STAND = ("HIGH", "MEDIUM", "LOW"), ("observed", "plausible", "hypothetical")
+FLAGS = ("data", "trust", "live-only")
+found = list(HEAD.finditer(text))
 heads = [(m.group(1), [p.strip(" *`_:").lower() for p in re.split(r"\s*[\u2014\u2013|]+\s*|\s+-+\s+|^-+\s*|^:\s*", m.group(2))])
-         for m in HEAD.finditer(text)]
+         for m in found]
 def labels(parts):
     sev = [p.upper() for p in parts if p.upper() in SEV]
     st = [p for p in parts if p in STAND]
     sc = ["in" if p in ("in scope", "in-scope") else "out" for p in parts
           if p in ("in scope", "in-scope", "out of scope", "out-of-scope")]
     return sev, st, sc
+def reach_of(parts):
+    return [m.group(1) for m in (re.match(r"^reach\s*[:=]?\s*(user|routine|none)$", p) for p in parts) if m]
+def flags_of(parts):
+    out = set()
+    for p in parts:
+        toks = [("live-only" if t == "live only" else t) for t in re.split(r"\s*[,+]\s*|\s+and\s+", p) if t]
+        if toks and all(t in FLAGS for t in toks):
+            out.update(toks)
+    return out
+def what_of(i):
+    end = found[i + 1].start() if i + 1 < len(found) else len(text)
+    m = re.search(r"^\s*What is wrong:\s*(.*)$", text[found[i].end():end], re.M)
+    return m.group(1).strip() if m else ""
+# The merge's own frontmatter — the launcher writes the frontmatter of a reviewer's file, so a reviewer cannot.
+fm = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+new_ground = bool(fm and re.search(r"^new-ground:", fm.group(1), re.M))
 labelled = [h for h in heads if labels(h[1])[1] or labels(h[1])[2]]
+v123 = mode != "run" and not any(reach_of(parts) for _, parts in heads)   # re-read: a review from before reach
 def done(word, code, counts=None):
     if mode == "counts":
         print(json.dumps(counts or {"high": 0, "medium": 0, "low": 0, "set_aside": 0}))
@@ -94,25 +127,57 @@ def legacy():
     done("NONE", 2, c)
 if not labelled and mode != "run":
     legacy()                       # a review written before the labels (promote re-reads it): its own verdict line
-bad, counted, listed = [], [], []
+bad, counted, listed, live, live_checks = [], [], [], [], []
 real = {"high": 0, "medium": 0, "low": 0}
-for n, parts in heads:
+for i, (n, parts) in enumerate(heads):
     sev, st, sc = labels(parts)
     if len(sev) != 1 or len(st) != 1 or len(sc) != 1:
         bad.append("F%s (needs one severity, one of observed/plausible/hypothetical, and in or out of scope)" % n)
         continue
-    tag = "F%s %s, %s, %s" % (n, sev[0], st[0], "in scope" if sc[0] == "in" else "out of scope")
     # A finding the reviewer marks `regressed L<n>` — an earlier finding's fix broke something (the findings ledger,
-    # core/review-lenses.py) — refutes whatever its labels: a fix that breaks what it fixed is not set aside.
+    # core/review-lenses.py) — refutes whatever its labels: a fix that breaks what it fixed is not set aside. One the
+    # merge carried unchecked from the ledger was counted when it was found, and still is.
     regressed = any(re.match(r"regressed l\d+\b", p) for p in parts)
-    refutes = (sc[0] == "in" and st[0] in ("observed", "plausible") and sev[0] in ("HIGH", "MEDIUM")) \
-        or (st[0] == "observed" and sev[0] == "HIGH") or regressed
+    carried = any(re.match(r"carried l\d+\b", p) for p in parts)
+    merged = carried or any(p.startswith("unlabelled refutation") for p in parts)
+    rc, fl = reach_of(parts), flags_of(parts)
+    if not v123 and not merged and len(rc) != 1:
+        bad.append("F%s (needs one reach: user, routine or none)" % n)
+        continue
+    tag = "F%s %s, %s, %s" % (n, sev[0], st[0], "in scope" if sc[0] == "in" else "out of scope")
+    tag += "".join(", " + x for x in (["reach: " + rc[0]] if rc else []) + sorted(fl))
+    observed_high = st[0] == "observed" and sev[0] == "HIGH"
+    real_bar = sc[0] == "in" and st[0] in ("observed", "plausible") and sev[0] in ("HIGH", "MEDIUM")
+    missed = new_ground and any(p.startswith("missed earlier") for p in parts)
+    if v123:
+        refutes = real_bar or observed_high or regressed
+    elif regressed or merged:
+        refutes = True
+    elif "live-only" in fl:
+        refutes = False
+    elif missed:
+        refutes = observed_high and bool(fl & {"data", "trust"})
+    else:
+        refutes = observed_high or (real_bar and (rc[0] in ("user", "routine") or bool(fl & {"data", "trust"})))
     if regressed:
         tag += ", regressed"
-    if refutes or (sc[0] == "in" and st[0] != "hypothetical"):
+    if missed:
+        tag += ", missed earlier"
+    if v123:
+        if refutes or (sc[0] == "in" and st[0] != "hypothetical"):
+            real[sev[0].lower()] += 1
+    elif refutes:
         real[sev[0].lower()] += 1
+    if not refutes and "live-only" in fl and not v123:
+        live.append(tag)
+        loc = next((p for p in parts if re.match(r"^\S+:\d+", p)), parts[0] if parts else "?")
+        live_checks.append("%s — %s" % (loc, what_of(i) or "(see the review)"))
+        continue
     (counted if refutes else listed).append(tag)
-counts = dict(real, set_aside=len(heads) - len(bad) - sum(real.values()))
+if v123:
+    counts = dict(real, set_aside=len(heads) - len(bad) - sum(real.values()))
+else:
+    counts = dict(real, backlog=len(listed), live=len(live), live_checks=live_checks)
 if bad:
     sys.stderr.write("review findings without their labels: %s — cannot certify the run\n" % "; ".join(bad))
     done("NONE", 2, counts)
@@ -123,9 +188,15 @@ if not heads and said == "REFUTED":
     done("REFUTED", 1, counts)     # names no finding: a fail either way, and the reviewer's word is the safe one
 if counted:
     sys.stderr.write("counted: %s\n" % "; ".join(counted))
-if listed:
+if listed and v123:
     sys.stderr.write("%d finding%s not counted (hypothetical, out of scope or LOW): %s\n"
                      % (len(listed), "" if len(listed) == 1 else "s", "; ".join(listed)))
+elif listed:
+    sys.stderr.write("%d backlog candidate%s, not counted (reach none, hypothetical, out of scope, LOW or missed "
+                     "earlier): %s\n" % (len(listed), "" if len(listed) == 1 else "s", "; ".join(listed)))
+if live:
+    sys.stderr.write("%d live check%s, not counted — only a live run can settle %s: %s\n"
+                     % (len(live), "" if len(live) == 1 else "s", "it" if len(live) == 1 else "them", "; ".join(live)))
 if not counted:
     # The rubric is the audit trail, not a second verdict (2026-10-19): a dimension scored FAIL with no finding
     # that counts behind it is set aside like its findings, and said so.
@@ -369,7 +440,7 @@ rm -f "$pinned"
 # the findings its reviews counted (state/review-ledger/<NN>.json, started again on a new lease or a promote, as the
 # refutation count is): the next review is told them to check first, and the part of the change since the last
 # review to hunt in. Promote's review is the last gate and takes neither: one fresh reviewer, no earlier findings.
-lenses=(); section=""; delta_file=""; heads_now=""; earlier_json="-"; earlier_n=0; last_run="-"
+lenses=(); section=""; delta_file=""; heads_now=""; earlier_json="-"; earlier_n=0; last_run="-"; hunks_json="-"
 RL="$DAEDALUS_HOME/core/review-lenses.py"
 plural() { if [ "$1" -eq 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %ss' "$1" "$2"; fi; }
 if [ "$mode" = branch ]; then
@@ -420,6 +491,13 @@ if [ "$mode" = branch ]; then
     done < "$heads_prev"
     rm -f "$delta_names"
     [ "$rewritten" -eq 0 ] || : > "$delta_file.rewritten"
+    # New ground (v0.12.4): the delta's line ranges, so the merge labels a new finding outside them `missed earlier`.
+    # A rewritten branch has no delta to narrow to, and a delta that cannot be read leaves the rule off: both fail
+    # safe toward reviewing the whole change.
+    if [ "$rewritten" -eq 0 ]; then
+      hunks_json="$(mktemp)"
+      python3 "$RL" hunks "$delta_file" "$target" "$hunks_json" 2>/dev/null || { rm -f "$hunks_json"; hunks_json="-"; }
+    fi
   fi
   rm -f "$heads_prev"
   # The heads this review sees, for the next one's narrowing.
@@ -436,12 +514,19 @@ prompt="$(mktemp)"
   printf 'Assume the author is overconfident. End with a line VERDICT: REFUTED or VERDICT: STANDS.\n'
   # The bar (verdict_of, top of this file): the labels decide the verdict, so the prompt asks for them by name.
   printf 'Label every finding heading, as your charter'"'"'s output format shows, with its severity (HIGH, MEDIUM or LOW), its input'"'"'s standing — observed (the input is in the evidence, fixtures, criteria or the target'"'"'s own code paths), plausible (you state a specific reason it could occur) or hypothetical (possible, nothing points to it) — and whether it is in scope or out of scope of the criteria'"'"'s Scope section (no Scope section: judge against the change'"'"'s evident intent, and report the missing section as an observed, in-scope LOW finding).\n'
-  printf 'The verdict is computed from those labels: an in-scope observed or plausible HIGH or MEDIUM finding, or any observed HIGH, refutes; hypothetical, out-of-scope and LOW findings are listed for the operator and do not. Report them all.\n\n'
+  printf 'Label its reach too: reach: user (an ordinary action of the person using the feature meets it — name the action on an Action: line), reach: routine (a path the system runs on its own in ordinary operation: a schedule, a hook, startup, an update) or reach: none (only an unusual input, timing or configuration meets it). Add the flag data when it loses or corrupts the person'"'"'s data, trust when it crosses a trust boundary or weakens a guard, and live-only when only a live run can settle it.\n'
+  printf 'The verdict is computed from those labels: an observed HIGH refutes at any reach; an in-scope observed or plausible HIGH or MEDIUM finding refutes when its reach is user or routine or it carries the data or trust flag. Everything else — reach none, hypothetical, out of scope, LOW — is listed for the operator as a backlog candidate, and a live-only finding is recorded as a live check; neither refutes. Report them all.\n\n'
   printf 'The change lives in the git checkout at %s. Paths in the diff and in the pitfalls are relative to that directory; read them there, by absolute path, with Read, Grep and Glob.\n' "$target"
   if [ "$mode" = promote ]; then
     printf 'Review mode: promote — the merge that will be pushed to %s, exactly; nothing uncommitted.\n\n' "$base"
   else
-    printf 'Review mode: branch — one window'"'"'s branch: its commits since the base, then its uncommitted and untracked work.\n\n'
+    printf 'Review mode: branch — one window'"'"'s branch: its commits since the base, then its uncommitted and untracked work.\n'
+    # A broad first pass (v0.12.4): the first review of a branch is the one that may look everywhere, so it reports
+    # everything at once; later reviews narrow to what changed since.
+    if [ "$last_run" = "-" ]; then
+      printf 'This is the branch'"'"'s first full review: report every defect you find, across all of your charter'"'"'s dimensions, rather than stopping once something refutes. Later reviews narrow to new ground.\n'
+    fi
+    printf '\n'
   fi
   printf '## Acceptance criteria\n'; [ -f "$criteria" ] && cat "$criteria" || printf '(none supplied)\n'
   printf '\n## Evidence\n'; cat "$evidence_file"
@@ -453,10 +538,10 @@ prompt="$(mktemp)"
     if [ -f "$delta_file.rewritten" ]; then
       printf 'The branch was rewritten since that review (the commit it saw is no longer under HEAD): hunt the whole diff below.\n'
     elif grep -q '^diff --git ' "$delta_file"; then
-      printf 'Hunt for new findings in this part of the change; the whole diff below is there to read around it.\n'
+      printf 'Hunt for new findings in this part of the change; the whole diff below is there to read around it. A new finding outside this part is labelled missed earlier and does not refute, unless it is an observed HIGH with the data or trust flag; report it all the same, as a backlog candidate.\n'
       cat "$delta_file"
     else
-      printf 'Nothing changed since that review: check the earlier findings, then hunt the whole diff below.\n'
+      printf 'Nothing changed since that review: check the earlier findings. A new finding is labelled missed earlier and does not refute, unless it is an observed HIGH with the data or trust flag; report it all the same, as a backlog candidate.\n'
     fi
   fi
   printf '\n## Diff against %s\n' "$base"
@@ -504,9 +589,11 @@ cleanup_branch() {
       "$(plural "$earlier_n" "earlier finding")" >&2
   fi
   rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}
+  [ "$hunks_json" = "-" ] || rm -f "$hunks_json"
 }
-if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ]; then
-  # One reviewer and no earlier findings to check: the launcher writes the review file itself, as it always has.
+if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ] && [ "$hunks_json" = "-" ]; then
+  # One reviewer, no earlier findings to check and no new ground to mark: the launcher writes the review file
+  # itself, as it always has. A later review goes through the merge, which labels findings outside the new ground.
   launch_err="$(mktemp)"
   bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
     --tag "$run_id" --verdict-file "$verdict_file" --mode "$mode" >/dev/null 2>"$launch_err"
@@ -522,6 +609,12 @@ else
   # verify.lens_concurrency at a time (default 4), each under its own verify.refute_timeout. Every lens must
   # finish with a review that can be certified; one that times out, fails or writes an unlabelled finding fails the
   # whole run closed — a review with a lens missing is a smaller review than the one asked for, never a STANDS.
+  # Write-once, as the launcher keeps it for the review it writes itself: the merge must never replace a verdict.
+  if [ -e "$verdict_file" ]; then
+    printf 'A review for this run already exists; a new verdict needs a new run.\n' >&2
+    cleanup_branch
+    exit 2
+  fi
   conc="$(cfg verify.lens_concurrency 2>/dev/null || printf 4)"
   case "$conc" in
     ''|*[!0-9]*) conc=0 ;;
@@ -578,7 +671,7 @@ else
     exit 2
   fi
   # The merged review — what the run's verdict is read from — written beside the lenses' own.
-  python3 "$RL" merge "$verdict_file" "$run_id" "$earlier_json" "${sources[@]}" \
+  python3 "$RL" merge "$verdict_file" "$run_id" "$earlier_json" "$hunks_json" "${sources[@]}" \
     || { rm -f "$verdict_file"; cleanup_branch; exit 2; }
 fi
 # Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
@@ -624,6 +717,11 @@ if [ "$mode" = branch ]; then
         "$([ "${4:-0}" -gt 0 ] && printf '; %s new' "$4")" >&2
     elif [ "${4:-0}" -gt 0 ]; then
       printf 'review-plan: %s recorded for the next review to check\n' "$(plural "$4" "counted finding")" >&2
+    fi
+    if [ "${5:-0}" -gt 0 ] || [ "${6:-0}" -gt 0 ]; then
+      printf 'review-plan: kept in the ledger, not counted: %s\n' "$( { [ "${5:-0}" -eq 0 ] || plural "$5" "backlog candidate"
+        [ "${5:-0}" -eq 0 ] || [ "${6:-0}" -eq 0 ] || printf ' and '
+        [ "${6:-0}" -eq 0 ] || plural "$6" "live check"; } )" >&2
     fi
   else
     printf 'review-plan: the findings ledger could not be written (state/review-ledger/) — the next review starts cold\n' >&2

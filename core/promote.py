@@ -475,22 +475,40 @@ def review(root: Path, run_id: str, tree: Path) -> dict:
         raise Stop("The review could not be completed (%s). A missing review is not a pass." % last_line(err), code=1)
     text = vf.read_text()
     fm = v.parse_frontmatter(text)
+    counts, live = review_counts(root, vf, text)
     return {"call_id": fm.get("call-id"), "verdict": "STANDS" if code == 0 else "REFUTED", "file": rel(root, vf),
             "fingerprint": fm.get("fingerprint"), "request_sha": fm.get("request-sha"),
-            "findings": review_counts(root, vf, text)}
+            "findings": counts, "live_checks": live}
 
 
-def review_counts(root: Path, vf: Path, text: str) -> dict:
+def review_counts(root: Path, vf: Path, text: str) -> Tuple[dict, List[str]]:
     """high/medium/low among the findings that are real, and set_aside: refute.sh --counts-of, the same reading of
     the labels the verdict came from, so the decision block never says "STANDS — 2 high findings" over two
-    hypothetical ones (2026-10-19). A review that cannot be read that way is counted as before, by severity."""
+    hypothetical ones (2026-10-19). A review labelled with reach (v0.12.4) gives the counted findings by severity,
+    the backlog candidates and the live checks instead of set_aside, and the live checks' places and words. A
+    review that cannot be read that way is counted as before, by severity."""
     _code, out, _err = run(["bash", str(root / "core" / "refute.sh"), "--counts-of", str(vf)])
     try:
         c = json.loads(out.strip().splitlines()[-1])
-        return {k: int(c.get(k) or 0) for k in ("high", "medium", "low", "set_aside")}
+        keys = ("high", "medium", "low") + (("backlog", "live") if "backlog" in c else ("set_aside",))
+        return ({k: int(c.get(k) or 0) for k in keys},
+                [str(x) for x in (c.get("live_checks") or []) if isinstance(x, str)])
     except (ValueError, IndexError, AttributeError, TypeError):
         sev = FINDING.findall(text)
-        return {s.lower(): sev.count(s) for s in ("HIGH", "MEDIUM", "LOW")}
+        return {s.lower(): sev.count(s) for s in ("HIGH", "MEDIUM", "LOW")}, []
+
+
+def ledger_live_checks(root: Path, nn: str) -> List[str]:
+    """The window's open live checks — findings its branch reviews flagged live-only, kept in the findings ledger
+    (core/review-lenses.py live) — as "<file>:<line> — <what>". Nothing readable is an empty list: the block then
+    shows only the merged review's own."""
+    code, out, _err = run(["python3", str(root / "core" / "review-lenses.py"), "live", str(root), nn, "lease/%s" % nn])
+    try:
+        rows = json.loads(out) if code == 0 else []
+    except ValueError:
+        return []
+    return ["%s%s — %s" % (r.get("file"), ":%s" % r["line"] if r.get("line") else "", r.get("what") or "(see the review)")
+            for r in rows if isinstance(r, dict)]
 
 
 # --- the decision block (§7.1 step 10) --------------------------------------------------------------
@@ -507,7 +525,20 @@ def reviewer_line(rv: Optional[dict], skipped: Optional[str]) -> str:
     counted = n_words(f.get("high", 0), "high finding") + (", " + " and ".join(rest) if rest else "")
     if f.get("set_aside"):
         counted += "; %d set aside (hypothetical or out of scope)" % f["set_aside"]
+    if f.get("backlog"):
+        counted += "; %s (not counted: reach none, hypothetical, out of scope or LOW)" % (
+            "one backlog candidate" if f["backlog"] == 1 else "%d backlog candidates" % f["backlog"])
     return "Reviewer on the merged change: %s — %s." % (rv["verdict"], counted)
+
+
+def live_line(p: dict) -> List[str]:
+    """v0.12.4: the open live checks for the window — what review cannot settle — named, never a gate: the
+    operator's yes covers them."""
+    lc = p.get("live_checks") or []
+    if not lc:
+        return []
+    return ["Live checks still open (only a live run can settle these; a yes covers them): %s."
+            % "; ".join(c.rstrip(" .") for c in lc)]
 
 
 def release_words(root: Path) -> Optional[str]:
@@ -568,7 +599,7 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
         "Tests on the merged result: PASS (%s, %s)." % ("1 gate" if g["count"] == 1 else "%d gates" % g["count"],
                                                        "1 second" if g["seconds"] == 1 else "%d seconds" % g["seconds"]),
         reviewer_line(rv, p.get("review_skipped_reason")),
-    ] + earlier_line(p) + [
+    ] + earlier_line(p) + live_line(p) + [
         "Nothing has been pushed. %s" % invitation(p) if ready else
         "Nothing has been pushed. Ask me to ask the reviewer why, or give a written reason to promote without the review.",
     ])
@@ -807,6 +838,7 @@ def prepare(root: Path, a: dict) -> int:
          "skip_transcript_session_id": skip["session_id"] if skip else None,
          "skip_typed": skip["typed"] if skip else None,
          "overrode_review": skip["overrode"] if skip else None, "earlier_refuted": er,
+         "live_checks": ledger_live_checks(root, nn) + [c for c in ((rv or {}).get("live_checks") or [])],
          "core_tree": dist.get("core_tree"), "charter_sha": dist.get("charter_sha"), "commits": commits,
          "gates": {"count": len(run_rec.get("gates") or []), "seconds": secs}, "fetched_at": fetched_at,
          "prepared_at": at, "prepared_ts": ts,

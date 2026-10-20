@@ -142,10 +142,10 @@ PY
 
 @test "the reviewer: REFUTED writes prepared.json with the verdict, shows the block that says so, names the resume and the written-reason routes, exit 1; a review that cannot complete is not a pass" {
   work_on_02
-  export FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
+  export FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH — reach: user
 What is wrong: a.
 How to confirm: b.
-### F2 — c.txt:2 — observed — in scope — HIGH
+### F2 — c.txt:2 — observed — in scope — HIGH — reach: user
 What is wrong: c.
 How to confirm: d.
 VERDICT: REFUTED"
@@ -160,9 +160,39 @@ VERDICT: STANDS" FAKE_EXIT=1
   case "$output" in *"A missing review is not a pass."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+@test "live checks (v0.12.4): the decision block lists the window's open live checks — its ledger's and the merged review's own — and a backlog candidate is named as one; neither stops the promote" {
+  work_on_02
+  python3 - "$DAEDALUS_HOME" <<'PY'
+import json, os, sys
+home = sys.argv[1]
+lease = json.load(open(os.path.join(home, "state", "leases", "02.json")))
+key = {"lease": "02", "branch": "lease/02", "created": lease.get("created"), "promoted": len(lease.get("promoted") or [])}
+os.makedirs(os.path.join(home, "state", "review-ledger"), exist_ok=True)
+json.dump({"key": key, "runs": [{"run_id": "r1", "heads": {}}], "findings": [
+    {"id": "L1", "file": "c.txt", "line": 2, "severity": "HIGH", "standing": "plausible", "scope": "in scope",
+     "reach": "routine", "flags": ["live-only"], "what": "the nightly job may not reach the service.", "status": "live check"},
+    {"id": "L2", "file": "c.txt", "line": 1, "severity": "MEDIUM", "standing": "plausible", "scope": "in scope",
+     "reach": "none", "flags": [], "what": "an odd input.", "status": "backlog"}]},
+    open(os.path.join(home, "state", "review-ledger", "02.json"), "w"))
+PY
+  export FAKE_ANSWER="### F1 — c.txt:1 — plausible — in scope — HIGH — reach: routine — live-only
+What is wrong: the merged hook may not fire on startup.
+How to confirm: start a session.
+### F2 — c.txt:2 — plausible — in scope — MEDIUM — reach: none
+What is wrong: an edge.
+How to confirm: read it.
+VERDICT: STANDS"
+  run --separate-stderr as_prime bash "$PROMOTE" 02
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "${lines[3]}" = "Reviewer on the merged change: STANDS — no high findings; one backlog candidate (not counted: reach none, hypothetical, out of scope or LOW)." ] || { echo "$output"; return 1; }
+  [ "${lines[4]}" = "Live checks still open (only a live run can settle these; a yes covers them): c.txt:2 — the nightly job may not reach the service; c.txt:1 — the merged hook may not fire on startup." ] || { echo "$output"; return 1; }
+  [ "${lines[5]}" = "Nothing has been pushed. Push window 02's work to main?" ]
+  [ "$(pj live_checks.0)" = "c.txt:2 — the nightly job may not reach the service." ]
+}
+
 @test "a second prepare of the same change after a REFUTED review says so: the block names the earlier verdict, prepared.json records it (Decision 39)" {
   work_on_02
-  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
+  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH — reach: user
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
@@ -471,7 +501,7 @@ PY
 
 @test "evidence, re-derived: a REFUTED prepare is refused even with prepared.json edited to STANDS; a review whose request-sha is not the re-render's; a review of other distribution code; modified distribution code" {
   work_on_02
-  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
+  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH — reach: user
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
@@ -629,7 +659,7 @@ PY
 
 @test "the ledger names an earlier REFUTED review of the same change even when prepared.json's list was emptied, and the review's call id from its own frontmatter" {
   work_on_02
-  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH
+  FAKE_ANSWER="### F1 — c.txt:1 — observed — in scope — HIGH — reach: user
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]; refuted_call="$(pj review.call_id)"
@@ -775,7 +805,7 @@ PY
   [ -f "$(dirname "$(prepared)")/pushed" ]
 }
 
-REFUTE_ONE="### F1 — c.txt:1 — observed — in scope — HIGH
+REFUTE_ONE="### F1 — c.txt:1 — observed — in scope — HIGH — reach: user
 What is wrong: a.
 How to confirm: b.
 VERDICT: REFUTED"

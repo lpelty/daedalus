@@ -94,8 +94,8 @@ PY
 @test "a large change gets one reviewer per lens, run in parallel, each told its lens; their findings are merged with duplicates made one, strongest labels kept" {
   write_config; large_change
   # Two lenses find the same defect at the same place with different labels; one finds something else.
-  printf '### F1 — big.txt:7 — hypothetical — in scope — LOW\nWhat is wrong: the trust view.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-trust"
-  printf '### F1 — big.txt:7 — observed — in scope — HIGH\nWhat is wrong: the failure view.\nInput: x.\nHow to confirm: y.\n\n### F2 — big.txt:9 — hypothetical — out of scope — LOW\nWhat is wrong: other.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-failure"
+  printf '### F1 — big.txt:7 — hypothetical — in scope — LOW — reach: user\nWhat is wrong: the trust view.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-trust"
+  printf '### F1 — big.txt:7 — observed — in scope — HIGH — reach: user\nWhat is wrong: the failure view.\nInput: x.\nHow to confirm: y.\n\n### F2 — big.txt:9 — hypothetical — out of scope — LOW — reach: user\nWhat is wrong: other.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-failure"
   gates
   [ "$status" -ne 0 ]
   for l in criteria trust upgrade failure; do
@@ -107,7 +107,7 @@ PY
   [ -f "$m" ]
   # One finding at big.txt:7, with the strongest labels, naming both lenses; the other kept.
   [ "$(grep -c '^### F[0-9]* — big.txt:7 ' "$m")" -eq 1 ] || { cat "$m"; return 1; }
-  grep -q '^### F[0-9]* — big.txt:7 — observed — in scope — HIGH — found by: trust, failure' "$m" || { cat "$m"; return 1; }
+  grep -q '^### F[0-9]* — big.txt:7 — observed — in scope — HIGH — reach: user — found by: trust, failure' "$m" || { cat "$m"; return 1; }
   grep -q 'the trust view' "$m"; grep -q 'the failure view' "$m"
   grep -q '^### F[0-9]* — big.txt:9 — hypothetical — out of scope — LOW' "$m"
   # Each lens's own review is kept and manifested beside the merged one.
@@ -173,7 +173,7 @@ PY
 @test "ledger: a second run is told the findings the first counted, checks them first, and hunts fresh only in what changed since" {
   lease_for 03; write_config; small_change
   git -C "$T" -c user.email=t@x -c user.name=t commit -qam first
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: the second line is wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user\nWhat is wrong: the second line is wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
   gates
   [ "$status" -ne 0 ]
   first="$(run_id)"
@@ -187,7 +187,7 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   p="$STUB/prompt-all-2"
   grep -q '^## Earlier findings on this branch' "$p"
-  grep -q 'L1 — marker.txt:2 — observed — in scope — HIGH — the second line is wrong' "$p"
+  grep -q 'L1 — marker.txt:2 — observed — in scope — HIGH — reach: user — the second line is wrong' "$p"
   grep -q "^## Changed since the last review (run $first)" "$p"
   # The fresh-hunt section holds the new file and not the first run's change.
   sec="$(awk '/^## Changed since the last review/{f=1; next} /^## /{f=0} f' "$p")"
@@ -199,24 +199,24 @@ PY
 
 @test "ledger: an earlier finding the review neither resolves nor reports again is carried into the verdict" {
   lease_for 03; write_config; small_change
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
   gates; [ "$status" -ne 0 ]
   printf 'Nothing.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
   printf 'two\n' >> "$T/marker.txt"
   gates
   [ "$status" -ne 0 ]
   id="$(run_id)"
-  grep -q '^### F[0-9]* — marker.txt:2 — observed — in scope — HIGH — carried L1' "$DAEDALUS_HOME/vault/evidence/$id-review.md" \
+  grep -q '^### F[0-9]* — marker.txt:2 — observed — in scope — HIGH — reach: user — carried L1' "$DAEDALUS_HOME/vault/evidence/$id-review.md" \
     || { cat "$DAEDALUS_HOME/vault/evidence/$id-review.md"; return 1; }
   printf '%s\n' "$output" | grep -q 'review: 1 earlier finding: 0 resolved, 1 open' || { echo "$output"; return 1; }
 }
 
 @test "ledger: a finding its fix broke (regressed) refutes whatever its labels; one reported again keeps its id" {
   lease_for 03; write_config; small_change
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
   gates; [ "$status" -ne 0 ]
   printf 'two\n' >> "$T/marker.txt"
-  printf '### F1 — marker.txt:3 — hypothetical — in scope — LOW — regressed L1\nWhat is wrong: the fix broke the third line.\nInput: x.\nHow to confirm: y.\n\nResolved: L1\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:3 — hypothetical — in scope — LOW — reach: user — regressed L1\nWhat is wrong: the fix broke the third line.\nInput: x.\nHow to confirm: y.\n\nResolved: L1\n\nVERDICT: STANDS\n' > "$STUB/out-all"
   gates
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   led="$DAEDALUS_HOME/state/review-ledger/03.json"
@@ -227,7 +227,7 @@ assert f['L1']['status']=='open', d" "$led"
 
 @test "ledger and refutation count start again when the window promotes or its lease is new" {
   lease_for 03; write_config; small_change
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
   gates; [ "$status" -ne 0 ]
   lease_for 03 1          # promoted since
   printf 'Nothing.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
@@ -239,12 +239,12 @@ assert f['L1']['status']=='open', d" "$led"
 
 @test "lenses and ledger together: each lens gets the earlier findings; a re-report by any lens keeps it open over another's Resolved" {
   lease_for 03; write_config; small_change
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
   gates; [ "$status" -ne 0 ]
   rm -f "$STUB/out-all"
   large_change
   printf 'Resolved: L1\n\nVERDICT: STANDS\n' > "$STUB/out-criteria"
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — earlier L1\nWhat is wrong: still wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-trust"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user — earlier L1\nWhat is wrong: still wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-trust"
   printf 'Resolved: L1\n\nVERDICT: STANDS\n' > "$STUB/out-upgrade"
   printf 'Resolved: L1\n\nVERDICT: STANDS\n' > "$STUB/out-failure"
   gates
@@ -275,14 +275,14 @@ PY
 # --- review 2026-10-19 (fresh-context, under the labelled bar) ------------------------------------------------------
 
 refute_l1() {
-  printf '### F1 — marker.txt:2 — observed — in scope — HIGH\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:2 — observed — in scope — HIGH — reach: user\nWhat is wrong: wrong.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-all"
 }
 
 @test "review F1: a regression carried unchecked into a later review still refutes" {
   lease_for 03; write_config; small_change; refute_l1
   gates; [ "$status" -ne 0 ]
   printf 'two\n' >> "$T/marker.txt"
-  printf '### F1 — marker.txt:3 — hypothetical — in scope — LOW — regressed L1\nWhat is wrong: broke.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  printf '### F1 — marker.txt:3 — hypothetical — in scope — LOW — reach: user — regressed L1\nWhat is wrong: broke.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
   gates; [ "$status" -ne 0 ]
   printf 'three\n' >> "$T/marker.txt"
   printf 'Nothing.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
@@ -305,9 +305,9 @@ refute_l1() {
   lease_for 03; write_config; small_change; refute_l1
   gates; [ "$status" -ne 0 ]
   rm -f "$STUB/out-all"; large_change
-  printf '### F1 — big.txt:7 — observed — in scope — HIGH — earlier L1\nWhat is wrong: still.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-trust"
-  printf '### F1 — big.txt:8 — hypothetical — in scope — LOW — earlier L1\nWhat is wrong: maybe.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-upgrade"
-  printf '### F1 — big.txt:7 — observed — in scope — HIGH\nWhat is wrong: a new defect.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-failure"
+  printf '### F1 — big.txt:7 — observed — in scope — HIGH — reach: user — earlier L1\nWhat is wrong: still.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-trust"
+  printf '### F1 — big.txt:8 — hypothetical — in scope — LOW — reach: user — earlier L1\nWhat is wrong: maybe.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-upgrade"
+  printf '### F1 — big.txt:7 — observed — in scope — HIGH — reach: user\nWhat is wrong: a new defect.\nInput: x.\nHow to confirm: y.\n\nVERDICT: REFUTED\n' > "$STUB/out-failure"
   gates; [ "$status" -ne 0 ]
   python3 -c "
 import json,sys; d=json.load(open(sys.argv[1])); f={x['id']: x for x in d['findings']}
@@ -347,4 +347,89 @@ assert 'L2' in f and f['L2']['what']=='a new defect.', d" "$DAEDALUS_HOME/state/
   case "$output" in *"Window 03's latest review (run "*") was 4 reviewers at once, one per lens: criteria "*", failure "*", trust "*", upgrade "*"core/call-agent.sh --resume <call-id>"*) : ;; *) echo "$output"; return 1 ;; esac
   # nothing was resumed: no reviewer ran past the four lenses
   [ "$(ls "$STUB" | grep -c '^prompt-')" -eq 4 ]
+}
+
+# --- v0.12.4: a later review refutes only on new ground; a broad first pass; live checks ---------------------------
+
+# second_round <reviewer output> — run 1 refutes L1 at marker.txt:2 on a committed change; then a new file, committed,
+# is the only change since; the reviewer of run 2 resolves L1 and prints <reviewer output> after it.
+second_round() {
+  lease_for 03; write_config; small_change
+  git -C "$T" -c user.email=t@x -c user.name=t commit -qam first
+  refute_l1; gates; [ "$status" -ne 0 ]
+  seq 1 5 > "$T/new.txt"; git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -qm second
+  printf 'Resolved: L1\n\n%b\nVERDICT: STANDS\n' "$1" > "$STUB/out-all"
+  gates
+}
+finding() {   # finding <file:line> <labels> — one finding block for second_round
+  printf '### F1 — %s — %s\\nWhat is wrong: %s is wrong.\\nInput: x.\\nHow to confirm: y.\\n' "$1" "$2" "$1"
+}
+
+@test "new ground: a later run's new finding outside the change since the last review is labelled missed earlier, does not refute, and is kept as a backlog candidate" {
+  second_round "$(finding marker.txt:1 'plausible — in scope — MEDIUM — reach: user')"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"; m="$DAEDALUS_HOME/vault/evidence/$id-review.md"     # a PASS ends with its run-id
+  grep -q '^new-ground: ' "$m" || { cat "$m"; return 1; }
+  grep -q '^### F1 — marker.txt:1 — plausible — in scope — MEDIUM — reach: user — missed earlier' "$m" || { cat "$m"; return 1; }
+  printf '%s\n' "$output" | grep -q 'backlog candidate.*missed earlier' || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'review: kept in the ledger, not counted: 1 backlog candidate' || { echo "$output"; return 1; }
+  python3 -c "
+import json,sys; d=json.load(open(sys.argv[1])); f=[x for x in d['findings'] if x['status']=='backlog']
+assert len(f)==1 and f[0]['file']=='marker.txt' and f[0]['line']==1 and f[0].get('missed_earlier'), d" "$DAEDALUS_HOME/state/review-ledger/03.json"
+  # A re-read gives the run's verdict.
+  run bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$m"; [ "$status" -eq 0 ]
+}
+
+@test "new ground: the same finding inside the change since the last review refutes; so does an observed HIGH with the data or trust flag outside it; an observed HIGH without a flag outside it does not" {
+  second_round "$(finding new.txt:3 'plausible — in scope — MEDIUM — reach: user')"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  ! grep -q 'missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/worktrees"; rm -f "$STUB"/prompt-*
+  second_round "$(finding marker.txt:1 'observed — in scope — HIGH — reach: none — data')"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  grep -q 'reach: none — data — missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/worktrees"; rm -f "$STUB"/prompt-*
+  second_round "$(finding marker.txt:1 'observed — in scope — HIGH — reach: user')"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "new ground: a finding whose place cannot be read counts as before; a reviewer's own 'missed earlier' label is not honoured" {
+  second_round "### F1 — the whole design — plausible — in scope — MEDIUM — reach: user\nWhat is wrong: x.\nInput: x.\nHow to confirm: y.\n"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/worktrees"; rm -f "$STUB"/prompt-*
+  second_round "$(finding new.txt:2 'plausible — in scope — MEDIUM — reach: user — missed earlier')"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  # And on a first review, which the launcher writes itself, the label is the reviewer's and counts for nothing.
+  rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/worktrees"; rm -f "$STUB"/prompt-*
+  lease_for 03; write_config; small_change
+  printf '### F1 — marker.txt:2 — plausible — in scope — MEDIUM — reach: user — missed earlier\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
+@test "a broad first pass: the first review of a branch is told to report every defect at once; a later review is not, and is told findings outside the new ground are missed earlier" {
+  second_round "$(finding new.txt:1 'hypothetical — in scope — LOW — reach: none')"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q "^This is the branch's first full review: report every defect you find" "$STUB/prompt-all-1"
+  ! grep -q "first full review" "$STUB/prompt-all-2"
+  grep -q 'labelled missed earlier and does not refute' "$STUB/prompt-all-2"
+}
+
+@test "live checks: a live-only finding does not refute, is recorded in the ledger as a required live check, and the live verb lists it for promote" {
+  lease_for 03; write_config; small_change
+  printf '### F1 — marker.txt:2 — plausible — in scope — HIGH — reach: routine — live-only\nWhat is wrong: the scheduled job may not reach the service.\nInput: x.\nHow to confirm: run it.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'review: kept in the ledger, not counted: 1 live check' || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q '1 live check, not counted' || { echo "$output"; return 1; }
+  run python3 "$DAEDALUS_HOME/core/review-lenses.py" live "$DAEDALUS_HOME" 03 lease/03
+  [ "$status" -eq 0 ]
+  python3 -c "
+import json,sys; r=json.loads(sys.argv[1])
+assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled job may not reach the service.'}], r" "$output"
+  # A second run that reports it again keeps one live check, not two.
+  printf 'two\n' >> "$T/marker.txt"
+  gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run python3 "$DAEDALUS_HOME/core/review-lenses.py" live "$DAEDALUS_HOME" 03 lease/03
+  [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 1 ] || { echo "$output"; return 1; }
 }

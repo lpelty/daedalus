@@ -1110,7 +1110,9 @@ labelled() {
   write_config "  - true" "  refute: true"
   PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  for needle in observed plausible hypothetical 'in scope' 'out of scope' 'VERDICT: REFUTED or VERDICT: STANDS'; do
+  for needle in observed plausible hypothetical 'in scope' 'out of scope' 'VERDICT: REFUTED or VERDICT: STANDS' \
+                'reach: user' 'reach: routine' 'reach: none' 'Action: line' live-only 'backlog candidate' \
+                "This is the branch's first full review: report every defect you find, across all of your charter's dimensions, rather than stopping once something refutes."; do
     grep -qF -- "$needle" "$bin/stdin" || { echo "prompt lacks: $needle"; return 1; }
   done
 }
@@ -1130,6 +1132,92 @@ labelled() {
   run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --counts-of "$f"
   [ "$status" -eq 0 ]
   [ "$output" = '{"high": 1, "medium": 1, "low": 0, "set_aside": 1}' ] || { echo "$output"; return 1; }
+}
+
+# --- reach (v0.12.4): who meets a finding decides whether it refutes ----------------------------------------------
+
+@test "reach: an in-scope observed or plausible HIGH or MEDIUM refutes only with reach user or routine, or a data or trust flag; an observed HIGH refutes at any reach; the rest are backlog candidates" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$f"; }
+  # An edge case nothing ordinary meets: STANDS, listed as a backlog candidate with its labels.
+  labelled "$f" REFUTED "plausible — in scope — MEDIUM — reach: none"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  printf '%s\n' "$stderr" | grep -q '1 backlog candidate, not counted' || { echo "stderr: $stderr"; return 1; }
+  printf '%s\n' "$stderr" | grep -q 'F1 MEDIUM, plausible, in scope, reach: none'
+  # The same finding with an ordinary action or a routine path behind it refutes.
+  labelled "$f" STANDS "plausible — in scope — MEDIUM — reach: user"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  labelled "$f" STANDS "observed — in scope — HIGH — reach: routine"
+  vo; [ "$status" -eq 1 ]
+  labelled "$f" STANDS "plausible — in scope — MEDIUM — reach: routine"
+  vo; [ "$status" -eq 1 ]
+  # A data or trust flag stands in for reach.
+  labelled "$f" STANDS "plausible — in scope — MEDIUM — reach: none — data"
+  vo; [ "$status" -eq 1 ]
+  labelled "$f" STANDS "plausible — in scope — HIGH — reach: none — trust"
+  vo; [ "$status" -eq 1 ]
+  # An observed HIGH refutes at any reach, in scope or not.
+  labelled "$f" STANDS "observed — out of scope — HIGH — reach: none"
+  vo; [ "$status" -eq 1 ]
+  # Reach never lifts what the 2026-10-19 bar set aside: hypothetical, out of scope or LOW.
+  labelled "$f" REFUTED "hypothetical — in scope — HIGH — reach: user" "plausible — out of scope — MEDIUM — reach: user" "observed — in scope — LOW — reach: user"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  printf '%s\n' "$stderr" | grep -q '3 backlog candidates, not counted'
+  # A regression refutes at reach none.
+  labelled "$f" STANDS "hypothetical — in scope — LOW — reach: none — regressed L1"
+  vo; [ "$status" -eq 1 ]
+  # Dressing: reach without the colon, bold, any position; flags joined by a comma.
+  printf '### **F1** — x:1 — Reach user — MEDIUM — plausible — in scope\nW.\n\nVERDICT: STANDS\n' > "$f"
+  vo; [ "$status" -eq 1 ] || { echo "$output $stderr"; return 1; }
+  printf '### F1 — x:1 — plausible — in scope — MEDIUM — reach: none — data, trust\nW.\n\nVERDICT: STANDS\n' > "$f"
+  vo; [ "$status" -eq 1 ]
+}
+
+@test "reach: live-only never counts and never passes — it is named as a live check; --counts-of gives counted findings, backlog candidates and live checks" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$f"; }
+  labelled "$f" REFUTED "plausible — in scope — HIGH — reach: routine — live-only"
+  vo; [ "$status" -eq 0 ]; [ "$output" = STANDS ]
+  printf '%s\n' "$stderr" | grep -q '1 live check, not counted — only a live run can settle it: F1 HIGH, plausible, in scope, reach: routine, live-only' \
+    || { echo "stderr: $stderr"; return 1; }
+  printf '### F1 — job.sh:4 — plausible — in scope — HIGH — reach: routine — live-only\nWhat is wrong: the scheduled job may not reach the service.\n\n### F2 — x:2 — plausible — in scope — MEDIUM — reach: user\n\n### F3 — x:3 — plausible — in scope — MEDIUM — reach: none\n\nVERDICT: REFUTED\n' > "$f"
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --counts-of "$f"
+  [ "$status" -eq 0 ]
+  python3 -c 'import json, sys; c = json.loads(sys.argv[1]); assert c == {"high": 0, "medium": 1, "low": 0, "backlog": 1, "live": 1,
+    "live_checks": ["job.sh:4 \u2014 the scheduled job may not reach the service."]}, c' "$output"
+}
+
+@test "reach: a labelled heading without its reach is a labelling failure (NONE); a re-read review with no reach on any heading keeps the 2026-10-19 bar" {
+  cp "$SRC/refute.sh" "$DAEDALUS_HOME/core/"; f="$BATS_TEST_TMPDIR/r.md"
+  vo() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --verdict-of "$f"; }
+  # One heading with reach, one without: the review cannot be certified.
+  labelled "$f" STANDS "plausible — in scope — MEDIUM — reach: none" "hypothetical — in scope — LOW"
+  vo; [ "$status" -eq 2 ]; [ "$output" = NONE ]
+  printf '%s\n' "$stderr" | grep -q 'F2 (needs one reach: user, routine or none)' || { echo "stderr: $stderr"; return 1; }
+  # Two reaches on one heading.
+  labelled "$f" STANDS "plausible — in scope — MEDIUM — reach: none — reach: user"
+  vo; [ "$status" -eq 2 ]
+  # No reach anywhere, re-read: the bar it was written under — an in-scope plausible MEDIUM refutes.
+  labelled "$f" STANDS "plausible — in scope — MEDIUM"
+  vo; [ "$status" -eq 1 ]; [ "$output" = REFUTED ]
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" --counts-of "$f"
+  [ "$output" = '{"high": 0, "medium": 1, "low": 0, "set_aside": 0}' ] || { echo "$output"; return 1; }
+}
+
+@test "reach: a new run's review whose headings carry no reach is uncertifiable, even with every other label" {
+  install_refuter
+  bin="$BATS_TEST_TMPDIR/binreach"; mkdir -p "$bin"
+  cat > "$bin/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '### F1 — core/x.py:1 — plausible — in scope — MEDIUM\nWhat is wrong: x.\n\nVERDICT: STANDS\n'
+STUB
+  chmod +x "$bin/claude"
+  git_target
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$output" | grep -q 'needs one reach: user, routine or none' || { echo "$output"; return 1; }
 }
 
 @test "a new run's review with an unlabelled finding heading is uncertifiable even when the reviewer says STANDS" {
@@ -1165,7 +1253,7 @@ PY
   cat > "$bin/claude" <<'STUB'
 #!/usr/bin/env bash
 cat > /dev/null
-printf '### F1 — core/x.py:1 — observed — in scope — HIGH\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
+printf '### F1 — core/x.py:1 — observed — in scope — HIGH — reach: user\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
 STUB
   chmod +x "$bin/claude"
   git_target
@@ -1206,7 +1294,7 @@ PY
   cat > "$bin/claude" <<'STUB'
 #!/usr/bin/env bash
 cat > /dev/null
-printf '### F1 — core/x.py:1 — hypothetical — in scope — HIGH\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
+printf '### F1 — core/x.py:1 — hypothetical — in scope — HIGH — reach: user\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
 STUB
   chmod +x "$bin/claude"
   git_target
