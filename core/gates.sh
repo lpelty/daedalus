@@ -238,7 +238,7 @@ while IFS= read -r gate; do
     failed=1
     fail_log="$log_file"
     if [ "$code" -eq 127 ] || [ "$code" -eq 126 ]; then
-      log "gate $gate_count could not start (exit $code: command not found or not executable) — the tree under test may lack build output; a gates_setup: step in config.yaml can build it before the gates"
+      log "gate $gate_count could not start (exit $code: command not found or not executable) — the tree under test may lack build output; a gates_setup: step in config.yaml can build it before the gates (a change that needs a restart: CLAUDE.md, \"Changes that need a restart\")"
     fi
   fi
   rows="$rows

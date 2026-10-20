@@ -452,7 +452,10 @@ def run_gates(root: Path, pid: str, tree: Path, trunk: str) -> dict:
             # operator looking for a merge problem that did not exist.
             raise Stop("Gates could not run on the merged tree (gate %s: `%s` exit %s — %s; log at %s). The scratch "
                        "holds only tracked files; build output such as a virtual environment is not there. Add a "
-                       "`gates_setup:` step to config.yaml that builds it, or change the gate."
+                       "`gates_setup:` step to config.yaml that builds it, or change the gate. config.yaml is read when a "
+                       "session starts, so that is a change that needs a restart (CLAUDE.md, \"Changes that need a "
+                       "restart\"): give the operator one command to run after exiting, never one to run in this "
+                       "session."
                        % (g["n"], g["command"], g["exit"],
                           "command not found" if g["exit"] == 127 else "not executable", rel(root, g["log"])), code=1)
         where = ("gate %s: `%s` exit %s; log at %s" % (g["n"], g["command"], g["exit"], rel(root, g["log"]))
@@ -838,7 +841,7 @@ def prepare(root: Path, a: dict) -> int:
          "skip_transcript_session_id": skip["session_id"] if skip else None,
          "skip_typed": skip["typed"] if skip else None,
          "overrode_review": skip["overrode"] if skip else None, "earlier_refuted": er,
-         "live_checks": ledger_live_checks(root, nn) + [c for c in ((rv or {}).get("live_checks") or [])],
+         "live_checks": list(dict.fromkeys(ledger_live_checks(root, nn) + list((rv or {}).get("live_checks") or []))),
          "core_tree": dist.get("core_tree"), "charter_sha": dist.get("charter_sha"), "commits": commits,
          "gates": {"count": len(run_rec.get("gates") or []), "seconds": secs}, "fetched_at": fetched_at,
          "prepared_at": at, "prepared_ts": ts,

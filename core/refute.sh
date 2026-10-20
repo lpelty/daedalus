@@ -562,7 +562,7 @@ prompt="$(mktemp)"
     if [ -f "$delta_file.rewritten" ]; then
       printf 'The branch was rewritten since that review (the commit it saw is no longer under HEAD): hunt the whole diff below.\n'
     elif grep -q '^diff --git ' "$delta_file"; then
-      printf 'Hunt for new findings in this part of the change; the whole diff below is there to read around it. A new finding outside this part is labelled missed earlier and does not refute, unless it is an observed HIGH with the data or trust flag; report it all the same, as a backlog candidate.\n'
+      printf 'Hunt for new findings in this part of the change; the whole diff below is there to read around it. A new finding outside this part is labelled missed earlier and does not refute, unless it is an observed HIGH with the data or trust flag; report it all the same, as a backlog candidate. A defect this part causes elsewhere (a changed signature that breaks an unchanged caller) is new: cite it at the line in this part that causes it.\n'
       cat "$delta_file"
     else
       printf 'Nothing changed since that review: check the earlier findings. A new finding is labelled missed earlier and does not refute, unless it is an observed HIGH with the data or trust flag; report it all the same, as a backlog candidate.\n'

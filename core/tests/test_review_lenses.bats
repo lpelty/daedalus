@@ -430,6 +430,9 @@ assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled 
   # A second run that reports it again keeps one live check, not two.
   printf 'two\n' >> "$T/marker.txt"
   gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # The second reviewer is told the check is already kept (review 2026-10-20, round 2, F3).
+  grep -q '^## Live checks already recorded on this branch' "$STUB/prompt-all-2" || { cat "$STUB/prompt-all-2"; return 1; }
+  grep -q '^- L1 — marker.txt:2 — the scheduled job may not reach the service.' "$STUB/prompt-all-2"
   run python3 "$DAEDALUS_HOME/core/review-lenses.py" live "$DAEDALUS_HOME" 03 lease/03
   [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 1 ] || { echo "$output"; return 1; }
 }

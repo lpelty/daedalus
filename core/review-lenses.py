@@ -270,6 +270,17 @@ def cmd_open(home, nn, branch, section_out, heads_out):
                      "fix broke something, report that as a finding with `regressed L1` as the last part of its "
                      "heading — a regression refutes. An earlier finding you neither resolve nor report again is "
                      "carried into this verdict as it was.\n\n")
+    live = [f for f in d["findings"] if f.get("status") == "live check"]
+    if live:
+        # Already kept for a live run to settle (review 2026-10-20, round 2, F3): said once, so a later review does not
+        # file the same check again at a shifted line or in other words.
+        with open(section_out, "a") as fh:
+            fh.write("## Live checks already recorded on this branch\n"
+                     "Only a live run can settle these, and they are kept for the operator. Do not report them again:\n")
+            for f in live:
+                loc = "%s:%s" % (f["file"], f["line"]) if f.get("line") else f["file"]
+                fh.write("- %s — %s — %s\n" % (f["id"], loc, f.get("what") or "(no description)"))
+            fh.write("\n")
     with open(heads_out, "w") as fh:
         for rel, sha in sorted(((last or {}).get("heads") or {}).items()):
             fh.write("%s\t%s\n" % (rel, sha))
