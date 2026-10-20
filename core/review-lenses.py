@@ -279,7 +279,8 @@ def cmd_open(home, nn, branch, section_out, heads_out):
 
 
 def cmd_hunks(delta, target, out):
-    """The new-side line ranges of the delta (refute.sh's "Changed since the last review" diff), per file."""
+    """The new-side line ranges of the change since the last review (refute.sh's ground_diff: the working tree against
+    that review's commit, in one diff), per file."""
     files, cur = {}, None
     for ln in open(delta, encoding="utf-8", errors="replace"):
         ln = ln.rstrip("\n")
@@ -465,8 +466,10 @@ def cmd_record(home, nn, branch, run_id, review, heads_file):
         # ones), the rest as backlog candidates for the operator. One already kept, at the same place with the same
         # words, is not kept twice.
         status = "open" if counted(desc) else "live check" if "live-only" in desc["flags"] else "backlog"
+        # A live check is one per place, however a later review words it (review 2026-10-20, F5).
         if status != "open" and any(f.get("status") == status and f.get("file") == desc["file"]
-                                    and f.get("line") == desc["line"] and f.get("what") == desc["what"]
+                                    and f.get("line") == desc["line"]
+                                    and (status == "live check" or f.get("what") == desc["what"])
                                     for f in d["findings"]):
             continue
         f = {"id": "L%d" % nxt, "file": desc["file"], "line": desc["line"], "severity": desc["severity"],

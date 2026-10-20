@@ -899,3 +899,14 @@ once_a_turn() {
   done
   [ "$blocks" -eq 1 ] || { echo "$blocks blocks"; return 1; }
 }
+
+@test "review 2026-10-20 F3: a clean Stop ends the turn — last turn's re-fire block never turns a new reason into a note" {
+  printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  run stop_as s1 false; [ "$status" -eq 2 ]
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/stray.md"
+  run stop_as s1 true; [ "$status" -eq 2 ]                 # a new reason on the re-fire: the turn's one re-fire block
+  git -C "$DAEDALUS_HOME" checkout -q -- CLAUDE.md; rm "$DAEDALUS_HOME/vault/evidence/stray.md"
+  run stop_as s1 false; [ "$status" -eq 0 ] || { echo "$output"; return 1; }    # a clean Stop: a new turn
+  printf 'more\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  run stop_as s1 true; [ "$status" -eq 2 ] || { echo "a new reason after a clean Stop must block: $output"; return 1; }
+}

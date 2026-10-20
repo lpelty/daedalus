@@ -18,8 +18,9 @@ blocks once a turn. When Claude Code fires Stop again after a block
 claim the agent cannot settle alone hands the operator the turn instead of
 re-prompting until Claude Code overrides the hook. The next turn's Stop
 blocks on it once more, so an unsupported claim is never let through
-silently; vault-commit.sh refuses to commit a vault whose claims fail the
-same check (verifylib --vault-claims). `--doctor` runs the same check
+silently. vault-commit.sh refuses a claim with no evidence-run, one citing a
+run that does not exist, or one whose run did not PASS (verifylib
+--vault-claims); the config and fingerprint matches are judged here only. `--doctor` runs the same check
 over the whole vault and prints one line per problem.
 
 Since v0.7.0 a session answers only for claims carrying its own `lease:`
@@ -153,12 +154,11 @@ def main(argv: List[str]) -> int:
             reason = str(e2)
         except Exception:
             pass
-    if reason is None:
-        return 0
-    blocks, notes = v.stop_once(root, sid, "verify", [reason], bool(payload.get("stop_hook_active")))
+    blocks, notes = v.stop_once(root, sid, "verify", [reason] if reason else [], bool(payload.get("stop_hook_active")))
     if blocks:
         v.block("\n".join(blocks + [v.WAY_BACK]))
-    print("\n".join(notes))
+    if notes:
+        print("\n".join(notes))
     return 0
 
 

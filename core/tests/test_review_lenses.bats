@@ -383,7 +383,7 @@ assert len(f)==1 and f[0]['file']=='marker.txt' and f[0]['line']==1 and f[0].get
 @test "new ground: the same finding inside the change since the last review refutes; so does an observed HIGH with the data or trust flag outside it; an observed HIGH without a flag outside it does not" {
   second_round "$(finding new.txt:3 'plausible — in scope — MEDIUM — reach: user')"
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-  ! grep -q 'missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"
+  [ -f "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" ]; ! grep -q '^### .*missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" || { echo "$output"; cat "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"; return 1; }
   rm -rf "$DAEDALUS_HOME/state" "$DAEDALUS_HOME/vault" "$DAEDALUS_HOME/worktrees"; rm -f "$STUB"/prompt-*
   second_round "$(finding marker.txt:1 'observed — in scope — HIGH — reach: none — data')"
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
@@ -429,6 +429,29 @@ import json,sys; r=json.loads(sys.argv[1])
 assert r==[{'id': 'L1', 'file': 'marker.txt', 'line': 2, 'what': 'the scheduled job may not reach the service.'}], r" "$output"
   # A second run that reports it again keeps one live check, not two.
   printf 'two\n' >> "$T/marker.txt"
+  gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run python3 "$DAEDALUS_HOME/core/review-lenses.py" live "$DAEDALUS_HOME" 03 lease/03
+  [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 1 ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-20 F4: new ground is numbered as the working tree the reviewer reads — a committed change below uncommitted lines added above it is still new ground" {
+  lease_for 03; write_config; small_change; seq 1 30 > "$T/f.txt"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -qm first
+  refute_l1; gates; [ "$status" -ne 0 ]
+  sed -i '' 's/^20$/twenty/' "$T/f.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -qam second
+  { seq 101 110; cat "$T/f.txt"; } > "$T/f.new"; mv "$T/f.new" "$T/f.txt"      # uncommitted, above the commit's line
+  printf 'Resolved: L1\n\n### F1 — f.txt:30 — plausible — in scope — MEDIUM — reach: user\nWhat is wrong: twenty.\nInput: x.\nHow to confirm: y.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ -f "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" ]; ! grep -q '^### .*missed earlier' "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md" || { echo "$output"; cat "$DAEDALUS_HOME/vault/evidence/$(run_id)-review.md"; return 1; }
+}
+
+@test "review 2026-10-20 F5: a live check reported again in other words at the same place stays one live check" {
+  lease_for 03; write_config; small_change
+  printf '### F1 — marker.txt:2 — plausible — in scope — HIGH — reach: routine — live-only\nWhat is wrong: the job may not reach the service.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
+  gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'two\n' >> "$T/marker.txt"
+  printf '### F1 — marker.txt:2 — plausible — in scope — HIGH — reach: routine — live-only\nWhat is wrong: whether the scheduled job reaches the service is unknown.\n\nVERDICT: STANDS\n' > "$STUB/out-all"
   gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run python3 "$DAEDALUS_HOME/core/review-lenses.py" live "$DAEDALUS_HOME" 03 lease/03
   [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 1 ] || { echo "$output"; return 1; }

@@ -346,6 +346,27 @@ repo_diff() {
   fi
   rm -f "$idx" "$idx.lock"
 }
+# ground_diff <repo> <prefix> <sha> <out> [exclude-relpath...] — the working tree, untracked files included, against
+# <sha> in one diff, so every hunk's new-side line numbers are the working tree's — the lines the reviewer reads.
+# repo_diff's two parts (committed since <sha>, then uncommitted against HEAD) number their hunks against two different
+# trees, and a file changed in both would put the committed ranges in the wrong place (review 2026-10-20, F4).
+ground_diff() {
+  local repo="$1" prefix="$2" sha="$3" out="$4" idx real n; shift 4
+  local ex=()
+  for n in "$@"; do ex+=(":(exclude)$n"); done
+  idx="$(mktemp -u)" || return 1
+  real="$(git -C "$repo" rev-parse --git-path index 2>/dev/null)"
+  case "$real" in /*) : ;; *) real="$repo/$real" ;; esac
+  [ -f "$real" ] && cp "$real" "$idx"
+  if GIT_INDEX_FILE="$idx" git -C "$repo" -c advice.addEmbeddedRepo=false add -A -- . ${ex[@]+"${ex[@]}"} >/dev/null 2>&1; then
+    GIT_INDEX_FILE="$idx" git -C "$repo" -c core.quotePath=false diff --cached -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" \
+      "$sha" -- . ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+  else
+    git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" "$sha" -- . \
+      ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
+  fi
+  rm -f "$idx" "$idx.lock"
+}
 nested_rel=()   # bash 3.2: no mapfile
 if cfg target.nested >/dev/null 2>&1; then
   while IFS="$(printf '\t')" read -r rel _url; do
@@ -473,7 +494,7 @@ if [ "$mode" = branch ]; then
   # The part of the change since the last review: each repository from the commit that review saw. A commit no
   # longer under HEAD (a rebase rewrote the branch) leaves nothing to narrow to — the whole diff is the hunt.
   if [ "$last_run" != "-" ] && [ -s "$heads_prev" ]; then
-    delta_file="$(mktemp)"; delta_names="$(mktemp)"; rewritten=0
+    delta_file="$(mktemp)"; delta_names="$(mktemp)"; ground="$(mktemp)"; rewritten=0
     while IFS="$(printf '\t')" read -r rel sha; do
       [ -n "$rel" ] || continue
       if [ "$rel" = . ]; then repo="$target"; pfx=""; else repo="$target/$rel"; pfx="${rel%/}/"; fi
@@ -482,8 +503,10 @@ if [ "$mode" = branch ]; then
         printf '### %s (since %s)\n' "$rel" "$(printf '%s' "$sha" | cut -c1-12)" >> "$delta_file"
         if [ "$rel" = . ]; then
           repo_diff "$repo" "" "$delta_names" "$delta_file" "$sha" ${outer_excl[@]+"${outer_excl[@]}"}
+          ground_diff "$repo" "" "$sha" "$ground" ${outer_excl[@]+"${outer_excl[@]}"}
         else
           repo_diff "$repo" "$pfx" "$delta_names" "$delta_file" "$sha"
+          ground_diff "$repo" "$pfx" "$sha" "$ground"
         fi
       else
         rewritten=1
@@ -496,8 +519,9 @@ if [ "$mode" = branch ]; then
     # safe toward reviewing the whole change.
     if [ "$rewritten" -eq 0 ]; then
       hunks_json="$(mktemp)"
-      python3 "$RL" hunks "$delta_file" "$target" "$hunks_json" 2>/dev/null || { rm -f "$hunks_json"; hunks_json="-"; }
+      python3 "$RL" hunks "$ground" "$target" "$hunks_json" 2>/dev/null || { rm -f "$hunks_json"; hunks_json="-"; }
     fi
+    rm -f "$ground"
   fi
   rm -f "$heads_prev"
   # The heads this review sees, for the next one's narrowing.

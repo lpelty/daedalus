@@ -889,7 +889,7 @@ def main() -> int:
         # ran, and notes are not printed there — a downgrade would drop the reason entirely.
         notes.extend("(visitor, not blocking) " + r for r in reasons)
         reasons = []
-    if event == "Stop" and reasons:
+    if event == "Stop":
         # No Stop hook may lock a session (verifylib.stop_once): a reason blocks once a turn — once a session for a
         # file read at session start — and is a note after that, so a reason only the operator can resolve hands
         # them the turn instead of re-prompting the agent until Claude Code gives up.

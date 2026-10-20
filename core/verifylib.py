@@ -681,6 +681,18 @@ def stop_once(root: Path, session_id: object, hook: str, reasons: List[str], act
         st = st if isinstance(st, dict) else {}
     except (OSError, ValueError):
         st = {}
+    if not reasons:
+        # A clean Stop still ends a turn: a new turn's state starts empty, so last turn's re-fire block can never
+        # turn a reason this turn into a note (review 2026-10-20, F3). Nothing to write when there is nothing to clear.
+        if not active and (st.get("turn") or st.get("refire_blocks")):
+            st.update(turn=[], refire_blocks=0)
+            try:
+                tmp = p.with_name(p.name + ".tmp")
+                tmp.write_text(json.dumps(st))
+                tmp.replace(p)
+            except OSError:
+                pass
+        return [], []
     told_turn = [k for k in st.get("turn") or [] if isinstance(k, str)]
     told_session = [k for k in st.get("session") or [] if isinstance(k, str)]
     refires = st.get("refire_blocks") if isinstance(st.get("refire_blocks"), int) else 0
