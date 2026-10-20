@@ -4,6 +4,58 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.4 — review settles instead of growing, and a session never locks up on a blocked stop
+
+**In short.** A review now judges a finding by who meets it, not only by how
+it fails. A later review refutes only on what changed since the last one. The
+first review reports everything it finds at once. A change to a file the
+session read at its start is made after a restart, never with a `!` command.
+No stop check blocks the same turn twice, so you always get the turn back.
+
+**What went wrong.**
+- A large change was refuted round after round. Each fix drew new findings,
+  most of them edge cases nobody meets, on code that had not changed.
+- A finding only a live run could settle had nowhere to go but the verdict.
+- Changing `config.yaml` with a `!` command looked like the session's own
+  change. Every stop after it was blocked until the session locked up.
+- A stop check that needed your answer blocked again and again in one turn,
+  and you had no turn to answer it.
+
+**What changed.**
+- Each finding names its reach: `user` (an ordinary action meets it),
+  `routine` (something the system runs on its own meets it) or `none`. It may
+  carry the flags `data`, `trust` and `live-only`.
+- An observed HIGH still refutes. Other HIGH and MEDIUM findings refute only
+  with reach user or routine, or with the data or trust flag.
+- Everything else is a backlog candidate. It is listed, kept in the window's
+  ledger, and never refutes.
+- On a later review, a new finding outside the change since the last review
+  is marked `missed earlier` and does not refute. An observed HIGH with the
+  data or trust flag still does.
+- The first review of a branch is told to report every defect it finds.
+- A `live-only` finding is kept as a live check. Promote lists the open ones
+  in its decision block, and your yes covers them.
+- The brief has a new section, "Changes that need a restart". A change to
+  `config.yaml`, `.claude/settings.local.json` or `CLAUDE.local.md` is given
+  to you as one command to run after exiting, in a plain terminal.
+- A change to one of those files blocks one stop, then is only noted.
+- Every stop check blocks at most once a turn for the same reason. The block
+  says what to do, and to ask you once and end the turn when it needs you.
+
+**What you will see.**
+- The gates list backlog candidates and live checks by name, for example
+  `review: kept in the ledger, not counted: 2 backlog candidates`.
+- Promote's decision block may say
+  `Live checks still open (only a live run can settle these; a yes covers them)`.
+- When a restart is needed, the window says so, closes the session, and gives
+  you one command for after you exit.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.4`. CLAUDE.md has the
+section "Changes that need a restart".
+
 ## v0.12.3 — a large change is reviewed through several lenses at once, and each window says what it is working on
 
 **In short.** A large change is no longer reviewed one slice at a time.
