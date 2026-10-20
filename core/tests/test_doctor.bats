@@ -981,7 +981,7 @@ promote_prepared() {
   promote_prepared 02-20260928-113100-abc "{\"lease\":\"02\",\"lease_created\":\"c1\",\"prepared_ts\":$ts,\"prepared_at\":\"x\",\"review\":{\"verdict\":\"REFUTED\"}}"
   run D
   case "$output" in *"say yes to the prime"*) echo "offered a yes confirm refuses: $output"; return 1 ;; esac
-  case "$output" in *"NOTE     promote: window 02's last prepare (11:31) was refuted by the review, so it cannot be confirmed — fix the work and run promote 02 again, or promote it without the review with a written reason (promote 02 --skip-review --reason \"...\")"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     promote: window 02's last prepare (11:31) was refuted by the review, so it cannot be confirmed — fix the work and run promote 02 again, or, when the operator says to, promote it without the review (promote 02 --skip-review --reason \"<their words>\")"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "doctor: prepares from an earlier occupant of the window, or of a window no longer live, are not reported" {

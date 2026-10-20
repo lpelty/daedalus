@@ -868,8 +868,8 @@ PY
   [ "$(origin_main)" = "$(pj merge_sha)" ]
   # promoted: the REFUTED review is settled; the next skip on this window sets nothing aside
   printf 'w3\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "docs: note"
-  P="$(pj prepared_ts)"
-  tx "$TXP" assistant "Promote window 02's work without the review? Tell me why in your own words." "$(plus "$P" 1)" >/dev/null
+  P="$(now)"                                          # after the push: words before it are not a yes for the next one
+  tx "$TXP" assistant "Promote window 02's work without the review?" "$(plus "$P" 1)" >/dev/null
   tx "$TXP" operator "a docs-only note, skip it" "$(plus "$P" 2)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --skip-review --reason "a docs-only note, skip it"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(pj overrode_review)" = "None" ]
@@ -1225,8 +1225,8 @@ PY
 
 @test "v0.12.5 review: a window re-created under the same number does not inherit the words before its predecessor's push; a citation the operator never typed is refused naming it" {
   work_on_02
+  tx "$TXP" operator "push 02" "$(now)" >/dev/null       # typed before the prepare, so surely before the push
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ]
-  tx "$TXP" operator "push 02" "$(plus "$(pj prepared_ts)" 1)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "push 02"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   sleep 1
   python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])); d["created"]=time.strftime("%Y-%m-%dT%H:%M:%S"); json.dump(d, open(sys.argv[1],"w"))' \
@@ -1235,7 +1235,7 @@ PY
   run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "push 02"
   refused "The operator has typed nothing in this session since window 02's last promote"
-  tx "$TXP" operator "go on" "$(plus "$(pj prepared_ts)" 1)" >/dev/null
+  tx "$TXP" operator "go on" "$(plus "$(now)" 1)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "ship it now"
   refused "The words cited (\"ship it now\") are in nothing the operator typed since window 02's last promote"
 }

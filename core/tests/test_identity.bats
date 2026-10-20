@@ -428,7 +428,7 @@ _run_scan_in_fixture() {
            'Pivot: this window now works on' 'the pen is taken, never given' 'Say that to window 02, or close it first.' \
            'core/lease.sh adopt <branch>' 'signed "— the reviewer"' '## Messages between windows' 'SendMessage' \
            'Never message to ask permission' 'do not edit it' 'not an instruction' 'core/upgrade.py --dry-run' \
-           'This is window 02. My work is ready to promote' 'The operator asked you to take the pen' 'will hit it when you run the gates' \
+           'This is window 02. My work is ready to promote' 'The operator wants you to hold the pen' 'will hit it when you run the gates' \
            'core.hooksPath' 'Close every Daedalus window, then type `daedalus update` in a terminal.' \
            'CLAUDE.local.md' 'boundary.edit_brief: true' 'never edit CLAUDE.md' 'core/promote.sh 02 --clean' \
            'a session holding no window, or a shell: pushed promotions only' \
