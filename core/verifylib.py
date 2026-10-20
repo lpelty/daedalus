@@ -652,6 +652,89 @@ def block(reason: str) -> None:
     sys.exit(2)
 
 
+# --- No Stop hook may lock a session (v0.12.4) ---------------------------------------------------------------------
+# A Stop hook's block re-prompts the agent, and Claude Code fires Stop again (stop_hook_active true). A reason the agent
+# cannot resolve alone — it needs the operator's answer, or a restart — blocked every re-fire: 9 in a row until Claude
+# Code overrode the hook (2026-10-19), and on another deployment every turn after a `!` command until the session
+# locked up. The operator has no turn while that happens. So every blocking Stop hook passes its reasons through
+# stop_once: a reason blocks at most once a turn — re-fired, a reason already said is a note, and the turn ends — and
+# a new reason may block once on a re-fire, never twice. A reason keyed to the session (session_keys: a file read at
+# session start, at one hash) blocks once a session. Nothing else changes: the next turn's Stop says a turn-scoped
+# reason again, once, so what blocked still blocks.
+WAY_BACK = ("If you cannot resolve this yourself — it needs the operator's answer, or a restart — ask the operator "
+            "once, in one message, and end your turn: this Stop does not block twice for the same reason.")
+
+
+def stop_state_path(root: Path, session_id: object, hook: str) -> Path:
+    """state/session-<sid>-stop-<hook>.json, under session-start.py's prune of session-<sid>-* (§4.10)."""
+    return root / "state" / ("session-%s-stop-%s.json" % (_safe(session_id), _safe(hook)))
+
+
+def stop_once(root: Path, session_id: object, hook: str, reasons: List[str], active: bool,
+              session_keys: Optional[dict] = None) -> "tuple":
+    """(the reasons that block this Stop, the ones that become notes). `active` is the payload's stop_hook_active:
+    true on a Stop Claude Code fired again after a blocked one. session_keys maps a reason to its once-a-session key."""
+    keys = session_keys or {}
+    p = stop_state_path(root, session_id, hook)
+    try:
+        st = json.loads(p.read_text())
+        st = st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        st = {}
+    told_turn = [k for k in st.get("turn") or [] if isinstance(k, str)]
+    told_session = [k for k in st.get("session") or [] if isinstance(k, str)]
+    refires = st.get("refire_blocks") if isinstance(st.get("refire_blocks"), int) else 0
+    if not active:
+        told_turn, refires = [], 0              # a new turn: the operator has had control since
+    blocks: List[str] = []
+    notes: List[str] = []
+    for r in reasons:
+        k = keys.get(r) or hashlib.sha256(r.encode("utf-8", "replace")).hexdigest()
+        if k in told_session or k in told_turn or (active and refires >= 1):
+            notes.append(r)
+            continue
+        blocks.append(r)
+        (told_session if r in keys else told_turn).append(k)
+    if blocks and active:
+        refires += 1
+    st.update(turn=told_turn, session=told_session, refire_blocks=refires)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(st))
+        tmp.replace(p)
+    except OSError:
+        if active:                              # unrecorded, a re-fire could block again: hand the turn back instead
+            notes, blocks = blocks + notes, []
+    return blocks, notes
+
+
+def stop_untell(root: Path, session_id: object, hook: str, prefix: str) -> None:
+    """Forget the once-a-session keys starting with <prefix> (a file put back to the session's snapshot)."""
+    p = stop_state_path(root, session_id, hook)
+    try:
+        st = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(st, dict) or not any(isinstance(k, str) and k.startswith(prefix) for k in st.get("session") or []):
+        return
+    st["session"] = [k for k in st.get("session") or [] if not (isinstance(k, str) and k.startswith(prefix))]
+    try:
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(st))
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def stop_told(root: Path, session_id: object, hook: str, key: str) -> bool:
+    try:
+        st = json.loads(stop_state_path(root, session_id, hook).read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(st, dict) and key in (st.get("session") or [])
+
+
 # --- Trees and the per-hook lease read (§4.4, §4.6) --------------------------
 
 def repo_relative(root: Path, path: Path):

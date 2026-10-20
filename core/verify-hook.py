@@ -9,8 +9,17 @@ target now. A promotion's gate run (tree promote-scratch) is promote's
 evidence; it stands behind a window's claim only once that promotion was
 confirmed and pushed for the claim's own window, while lease/NN is still at the
 promoted tip and worktrees/NN is clean (no fingerprint compare; the config
-check stays). Never exits early on `stop_hook_active`. Fails closed only when a
-claim exists and the evidence cannot be read. `--doctor` runs the same check
+check stays). Fails closed only when a claim exists and the evidence cannot
+be read.
+
+No Stop hook may lock a session (v0.12.4, verifylib.stop_once): a reason
+blocks once a turn. When Claude Code fires Stop again after a block
+(`stop_hook_active` true), the same reason is a note and the turn ends — a
+claim the agent cannot settle alone hands the operator the turn instead of
+re-prompting until Claude Code overrides the hook. The next turn's Stop
+blocks on it once more, so an unsupported claim is never let through
+silently; vault-commit.sh refuses to commit a vault whose claims fail the
+same check (verifylib --vault-claims). `--doctor` runs the same check
 over the whole vault and prints one line per problem.
 
 Since v0.7.0 a session answers only for claims carrying its own `lease:`
@@ -120,29 +129,36 @@ def main(argv: List[str]) -> int:
     # (the leaselib sentence names the file and the fix).
     ctx = v.lease_context(root, sid)
     held = [nn for nn in ctx["leases"] if nn != "prime" and ctx["liveness"].get(nn) != "stale"]
+    reason = None
     try:
         if ctx["unreadable"]:
             if v.claims(root, since_sha, since_time, lease="*"):
-                v.block(UNREADABLE_CLAIMS + ctx["unreadable"])
+                reason = UNREADABLE_CLAIMS + ctx["unreadable"]
         elif held and ctx["mine"] is None:
             if v.claims(root, since_sha, since_time, lease="*"):
-                v.block(UNLEASED_CLAIMS)
-        bad = problems(root, since_sha, since_time, marker, live=True, lease=ctx["mine"])
+                reason = UNLEASED_CLAIMS
+        if reason is None:
+            bad = problems(root, since_sha, since_time, marker, live=True, lease=ctx["mine"])
+            if bad:
+                note = "" if marker else "\n(the session-start hook did not run; the claim window is approximate)"
+                reason = "\n".join(bad) + note
     except v.VaultLocked as e:
-        v.block(str(e))
+        reason = str(e)
     except Exception as e:
         # Fail closed only if a claim exists at all; otherwise stay out of the way.
         try:
             if v.claims(root, since_sha, since_time, lease=ctx["mine"]):
-                v.block("verify-hook could not read the evidence: %s" % e)
+                reason = "verify-hook could not read the evidence: %s" % e
         except v.VaultLocked as e2:
-            v.block(str(e2))
+            reason = str(e2)
         except Exception:
             pass
+    if reason is None:
         return 0
-    if bad:
-        note = "" if marker else "\n(the session-start hook did not run; the claim window is approximate)"
-        v.block("\n".join(bad) + note)
+    blocks, notes = v.stop_once(root, sid, "verify", [reason], bool(payload.get("stop_hook_active")))
+    if blocks:
+        v.block("\n".join(blocks + [v.WAY_BACK]))
+    print("\n".join(notes))
     return 0
 
 

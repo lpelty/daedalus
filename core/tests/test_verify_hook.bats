@@ -111,6 +111,26 @@ claim() {  # claim <file> <status> <updated-by> <created> [evidence-run]
   run stop s1 true; [ "$status" -eq 2 ]
 }
 
+@test "no Stop hook may lock a session: an unsupported claim blocks once a turn — re-fired, a note naming it; a new claim blocks once; the next turn and a fresh session block again; ten Stops in a row block once" {
+  id="$(gate)"
+  claim PROP-1.md IMPLEMENTED daedalus 2026-12-01
+  run stop s1 false; [ "$status" -eq 2 ]
+  case "$output" in *"PROP-1.md"*"ask the operator once, in one message, and end your turn"*) : ;; *) echo "$output"; return 1 ;; esac
+  run stop s1 true; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"PROP-1.md"*) : ;; *) echo "the claim must ride along as a note: $output"; return 1 ;; esac
+  claim PROP-2.md IMPLEMENTED daedalus 2026-12-01
+  run stop s1 true; [ "$status" -eq 2 ] || { echo "a new reason must block once: $output"; return 1; }
+  run stop s1 true; [ "$status" -eq 0 ]
+  run stop s1 false; [ "$status" -eq 2 ] || { echo "the next turn must block once more: $output"; return 1; }
+  printf '{"hook_event_name":"SessionStart","session_id":"s9","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  claim PROP-3.md IMPLEMENTED daedalus 2026-12-01
+  run stop s9 false; [ "$status" -eq 2 ] || { echo "a fresh session must block: $output"; return 1; }
+  blocks=0
+  run stop s9 true; [ "$status" -eq 2 ] && blocks=$((blocks + 1))
+  for i in 1 2 3 4 5 6 7 8 9; do run stop s9 true; [ "$status" -eq 2 ] && blocks=$((blocks + 1)); done
+  [ "$blocks" -eq 0 ] || { echo "$blocks more blocks after the first"; return 1; }
+}
+
 @test "one-turn assignment: claim committed before any Stop is still inside the window" {
   id="$(gate)"
   claim PROP-1.md IMPLEMENTED daedalus 2026-12-01

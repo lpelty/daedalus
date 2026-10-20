@@ -125,6 +125,27 @@ it.
 | "Message window 2 that …" | any window | Send it (below) and repeat the reply word for word when it comes. |
 | "What does this change touch?" / "use the code graph on X" | that window | `python3 core/context.py reach <X>`; repeat its lines word for word, then say which ones you will read. It runs during planning too. |
 
+## Changes that need a restart
+
+`config.yaml`, `.claude/settings.local.json` and `CLAUDE.local.md` are read
+once, when a session starts: the hooks take their snapshot then, and a change
+made under a live session looks like the session's own. When one of them has
+to change — a `gates_setup:` step, a deny rule, a line of the operator's
+brief:
+
+1. Say so plainly: this change needs a restart.
+2. Close this session properly: the session log, the vault commit and the
+   capture (the close order under Memory, ending in `core/close.sh`).
+3. Give the operator the change as one short command, or one sentence, to run
+   after exiting, in a plain terminal.
+4. The next session starts from the changed file.
+
+Never offer a `!` command for such a change. It runs inside this session, so
+the operator's change looks like the session's, and every Stop after it was
+blocked until the session locked up. If the Stop hook says one of these files
+changed and the operator made the change, do not restore it: close the
+session as above. The hook says it once; later Stops only note it.
+
 ## Messages between windows
 
 Windows talk with the `ListAgents` and `SendMessage` tools; the board gives
@@ -487,8 +508,9 @@ tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
 path — the honest state. A gate that exits 127 never ran: the tree under
 test lacks something it needs (promote's scratch holds tracked files only,
 so a virtual environment is not there). The remedy is a `gates_setup:` step
-in `config.yaml` that builds it before the gates — the operator's file, so
-ask them for it; a run whose setup step fails is INVALID, not FAIL. A fresh-context refuter reviews every PASS — the
+in `config.yaml` that builds it before the gates — the operator's file, and a
+change that needs a restart (see "Changes that need a restart"); a run whose
+setup step fails is INVALID, not FAIL. A fresh-context refuter reviews every PASS — the
 diff of the target and of every nested checkout, untracked files included;
 a `REFUTED` verdict is a FAIL with the review as the log, and a green run the
 refuter could not certify (including one with nothing to review) is a FAIL
@@ -629,10 +651,11 @@ change, first ask "Promote window 02's work without the review? Tell me why
 in your own words." and pass their answer. The gates always run.
 
 If promote says a gate could not run (exit 127, "command not found"), that
-is not a merge problem: the scratch holds tracked files only. Say so, and
-ask the operator to add a `gates_setup:` step to `config.yaml` that builds
-what the gate needs (for a Python harness, `cd engine && uv sync --frozen`);
-then run promote again.
+is not a merge problem: the scratch holds tracked files only. Say so: the
+remedy is a `gates_setup:` step in `config.yaml` that builds what the gate
+needs (for a Python harness, `cd engine && uv sync --frozen`), and that is a
+change that needs a restart — follow "Changes that need a restart", then run
+promote again in the fresh session.
 
 If the merge conflicts, tell window 02 to bring its work up to date: it runs
 `core/lease.sh rebase 02`, resolves any conflict in its own worktree, re-runs

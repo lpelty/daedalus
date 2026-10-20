@@ -585,7 +585,7 @@ PY
   printf '  - echo x\n' >> "$DAEDALUS_HOME/config.yaml"
   run hook Stop
   [ "$status" -eq 2 ]
-  case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"The gate definition (config.yaml) changed this session; restore it if this session changed it."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "a tracked config.yaml changed by the release pull's own commits is the release's change, not the session's (critic finding 7)" {
@@ -617,7 +617,7 @@ before = sha(); p.write_text(p.read_text() + "  - echo forged\n")
 PY
   run hook Stop
   [ "$status" -eq 2 ]
-  case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*"state/config-changes.json was written during this session"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"The gate definition (config.yaml) changed this session; restore it if this session changed it."*"state/config-changes.json was written during this session"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"Do not restore it"*) echo "$output"; return 1 ;; esac
   # a release did come in under s7, and the upgrade recorded its one write; a second record on top is the session's
   release_under_session s7
@@ -636,7 +636,7 @@ d["changes"].append({"from": mid, "to": v.sha256_file(p), "by": "the upgrade to 
 PY
   run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"s7\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py'"
   [ "$status" -eq 2 ]
-  case "$output" in *"The gate definition (config.yaml) changed this session; restore it."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"The gate definition (config.yaml) changed this session; restore it if this session changed it."*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "the deny list's path anchors: Edit(/core/**) (the project-anchored form the docs give), Edit(./core/**) and an absolute Edit(//<home>/core/**) all protect core/; an absolute rule outside the home protects nothing here" {
@@ -764,4 +764,138 @@ edit_brief_true() { printf 'boundary:\n  edit_brief: true\n' >> "$DAEDALUS_HOME/
   case "$output" in *"Protected files changed this session: "*"notes/a.md. Revert these"*) : ;; *) echo "$output"; return 1 ;; esac
   rm -r "$DAEDALUS_HOME/notes"
   run hook_as Stop s7; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+# --- v0.12.4: changes that need a restart --------------------------------------------------------------------------
+# A `!` command runs inside the session, so the operator's own change to a file the session read at its start looked
+# like the session's, and every Stop after it blocked until Claude Code locked up. The brief says to restart instead;
+# the hook blocks once per change and notes it after that.
+
+@test "CLAUDE.md has the section 'Changes that need a restart'; the gates_setup passages point to it; no line pairs ! with a file read at session start" {
+  R="$SRC/.."
+  grep -q '^## Changes that need a restart$' "$R/CLAUDE.md"
+  sec="$(awk '/^## Changes that need a restart$/{f=1; next} /^## /{f=0} f' "$R/CLAUDE.md")"
+  for s in 'config.yaml' '.claude/settings.local.json' 'CLAUDE.local.md' 'read' 'once, when a session starts' \
+           '1. Say so plainly: this change needs a restart.' 'core/close.sh' 'one short command, or one sentence' \
+           'after exiting, in a plain terminal' 'The next session starts from the changed file.' 'Never offer a `!` command'; do
+    printf '%s\n' "$sec" | tr '\n' ' ' | grep -qF -- "$s" || { echo "section lacks: $s"; return 1; }
+  done
+  # Both gates_setup remedies (gates, promote) send the operator through the restart, not "ask them for it".
+  [ "$(grep -c 'gates_setup' "$R/CLAUDE.md")" -ge 2 ]
+  [ "$(tr '\n' ' ' < "$R/CLAUDE.md" | grep -o 'change that needs a restart' | wc -l | tr -d ' ')" -ge 2 ]
+  ! grep -q 'the operator.s file, so ask them for it' "$R/CLAUDE.md"
+  # No line of the distribution's own words offers a ! command next to one of the three files.
+  for f in "$R/CLAUDE.md" "$R/README.md"; do
+    ! grep -nE '!' "$f" | grep -E 'config\.yaml|settings\.local\.json|CLAUDE\.local\.md' || { echo "$f pairs ! with a session-start file"; return 1; }
+  done
+}
+
+# changed_three_times <file-change command> — Stop blocks, then notes, then notes; the agent is told each time.
+told_once_holds() {
+  run --separate-stderr hook Stop
+  [ "$status" -eq 2 ] || { echo "first Stop: $status $output $stderr"; return 1; }
+  case "$stderr" in *"$1"*"If the operator made this change, do not restore it: this session started before it"*"core/close.sh"*"Changes that need a restart"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run --separate-stderr hook Stop
+  [ "$status" -eq 0 ] || { echo "second Stop blocked: $output $stderr"; return 1; }
+  case "$output" in *"$1"*) : ;; *) echo "the reason must ride along as a note: $output"; return 1 ;; esac
+  run --separate-stderr hook Stop
+  [ "$status" -eq 0 ] || { echo "third Stop blocked: $output $stderr"; return 1; }
+}
+
+@test "told once: config.yaml changed under a live session blocks the first Stop, then only notes; a further change blocks once more; put back and changed again, it blocks again" {
+  cp "$DAEDALUS_HOME/config.yaml" "$BATS_TEST_TMPDIR/cfg"
+  printf '  - echo x\n' >> "$DAEDALUS_HOME/config.yaml"
+  told_once_holds "The gate definition (config.yaml) changed this session"
+  printf '  - echo y\n' >> "$DAEDALUS_HOME/config.yaml"
+  told_once_holds "The gate definition (config.yaml) changed this session"
+  cp "$BATS_TEST_TMPDIR/cfg" "$DAEDALUS_HOME/config.yaml"
+  run hook Stop; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '  - echo x\n' >> "$DAEDALUS_HOME/config.yaml"
+  run hook Stop; [ "$status" -eq 2 ] || { echo "the same change again after a put-back must block: $output"; return 1; }
+}
+
+@test "told once: a PostToolUse after the change feeds the reason back and records nothing — the first Stop still blocks; after it, PostToolUse is quiet" {
+  printf '  - echo x\n' >> "$DAEDALUS_HOME/config.yaml"
+  run hook PostToolUse; [ "$status" -eq 2 ]
+  run hook PostToolUse; [ "$status" -eq 2 ]
+  run hook Stop; [ "$status" -eq 2 ]
+  run hook PostToolUse; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run hook Stop; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "told once: .claude/settings.local.json's deny rules changed under a live session — block, note, note; a new change blocks once more" {
+  printf '{"permissions":{"deny":[],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  told_once_holds "The deny rules or hooks in .claude/settings.local.json changed this session"
+  printf '{"permissions":{"deny":["Edit(//other/**)"],"allow":[]}}' > "$DAEDALUS_HOME/.claude/settings.local.json"
+  told_once_holds "The deny rules or hooks in .claude/settings.local.json changed this session"
+}
+
+@test "told once: CLAUDE.local.md changed under a live session — block, note, note; a new change blocks once more" {
+  printf 'CLAUDE.local.md\n' >> "$DAEDALUS_HOME/.gitignore"
+  printf 'operator line\n' > "$DAEDALUS_HOME/CLAUDE.local.md"
+  printf '{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  printf 'their new line\n' >> "$DAEDALUS_HOME/CLAUDE.local.md"
+  told_once_holds "CLAUDE.local.md changed this session"
+  printf 'and another\n' >> "$DAEDALUS_HOME/CLAUDE.local.md"
+  told_once_holds "CLAUDE.local.md changed this session"
+}
+
+# --- v0.12.4: no Stop hook may lock a session (verifylib.stop_once) --------------------------------------------------
+# A reason the agent cannot resolve alone blocked every re-fired Stop (9 in a row, 2026-10-19) and the operator had no
+# turn. Now a reason blocks once a turn: re-fired (stop_hook_active true) it is a note; a new reason may block once.
+
+stop_as() {   # stop_as <sid> <active true|false>
+  printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":%s}' "$1" "$2" | python3 "$DAEDALUS_HOME/core/boundary-hook.py"
+}
+
+# once_a_turn <sid> <needle> — blocks with the way back; re-fired, a note; a new turn, blocks again once.
+once_a_turn() {
+  run --separate-stderr stop_as "$1" false
+  [ "$status" -eq 2 ] || { echo "first Stop: $status $output $stderr"; return 1; }
+  case "$stderr" in *"$2"*"ask the operator once, in one message, and end your turn"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  run --separate-stderr stop_as "$1" true
+  [ "$status" -eq 0 ] || { echo "re-fired Stop blocked again: $stderr"; return 1; }
+  case "$output" in *"$2"*) : ;; *) echo "the reason must ride along as a note: $output"; return 1 ;; esac
+  run --separate-stderr stop_as "$1" false
+  [ "$status" -eq 2 ] || { echo "a new turn's Stop must say it once more: $output"; return 1; }
+}
+
+@test "once a turn, each blocking reason class: protected files, stray evidence, modified distribution code, a trunk that moved" {
+  printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  once_a_turn s1 "Protected files changed this session"
+  git -C "$DAEDALUS_HOME" checkout -q -- CLAUDE.md
+  printf -- '---\ntype: evidence\nresult: PASS\n---\n' > "$DAEDALUS_HOME/vault/evidence/20261231-000000-ffffff.md"
+  once_a_turn s1 "Evidence files exist that no gate run produced"
+  rm "$DAEDALUS_HOME/vault/evidence/20261231-000000-ffffff.md"
+  printf '# local\n' >> "$DAEDALUS_HOME/core/fingerprint.sh"
+  printf '{"hook_event_name":"SessionStart","session_id":"s2","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  once_a_turn s2 "Distribution code is modified"
+  git -C "$DAEDALUS_HOME" checkout -q -- core/fingerprint.sh
+  printf 'b\n' >> "$T/a.txt"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am b
+  once_a_turn s2 "main moved"
+}
+
+@test "once a turn: a new reason on a re-fired Stop blocks once, never twice; a fresh session blocks again" {
+  printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  run stop_as s1 false; [ "$status" -eq 2 ]
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/stray.md"
+  run --separate-stderr stop_as s1 true
+  [ "$status" -eq 2 ] || { echo "a new reason must block once: $output"; return 1; }
+  case "$stderr" in *"stray.md"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  printf 'y\n' > "$DAEDALUS_HOME/vault/evidence/stray2.md"
+  run stop_as s1 true
+  [ "$status" -eq 0 ] || { echo "a second re-fire block: $output"; return 1; }
+  printf '{"hook_event_name":"SessionStart","session_id":"s3","source":"startup"}' | python3 "$DAEDALUS_HOME/core/session-start.py" >/dev/null
+  printf 'more\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  run stop_as s3 false; [ "$status" -eq 2 ] || { echo "a fresh session must block: $output"; return 1; }
+}
+
+@test "ten consecutive Stops on a reason the agent cannot resolve block at most once (2026-10-19: nine blocks in a row)" {
+  printf 'op\n' >> "$DAEDALUS_HOME/CLAUDE.md"
+  blocks=0
+  run stop_as s1 false; [ "$status" -eq 2 ] && blocks=$((blocks + 1))
+  for i in 1 2 3 4 5 6 7 8 9; do
+    run stop_as s1 true; [ "$status" -eq 2 ] && blocks=$((blocks + 1))
+  done
+  [ "$blocks" -eq 1 ] || { echo "$blocks blocks"; return 1; }
 }

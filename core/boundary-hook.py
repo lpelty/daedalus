@@ -131,6 +131,42 @@ def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
                        % (", ".join(sorted(bad)), RESTART))
 
 
+# The three files a session reads once, at its start (CLAUDE.md, "Changes that need a restart"). A change to one under
+# a live session blocked EVERY Stop after it until the file was put back — and a `!` command, the operator's own,
+# runs inside the session, so their change looked like the session's: every turn blocked until Claude Code locked up
+# (2026-10-19). So the first Stop after a change says its reason as a block, and every later one only notes it for
+# as long as the file keeps that hash; a further change (a new hash) blocks once more, and a file put back starts
+# again. Keyed per session and per file hash (verifylib.stop_once's once-a-session keys, the mechanism every
+# blocking Stop reason goes through). PostToolUse(Bash) feeds the reason back after a command until a Stop has said
+# it, and records nothing: the Stop is the one that counts.
+STARTED_BEFORE = (" If the operator made this change, do not restore it: this session started before it and read the "
+                  "file then. Close this session now (core/close.sh: the session log, the vault commit, the capture) "
+                  "and have the operator start a fresh one — not a resume, which keeps this session's snapshot. "
+                  "CLAUDE.md, \"Changes that need a restart\", says how to give the operator such a change: one "
+                  "command or sentence to run after exiting, never a `!` command in this session. This reason blocks "
+                  "once; later Stops note it until the file changes again.")
+
+
+# reason -> its once-a-session key ("<file>:<hash>"), for verifylib.stop_once; filled by the checks below.
+SESSION_KEYS: dict = {}
+
+
+def told_once(root: Path, marker: dict, key: str, now: str, reason: str, reasons: List[str],
+              notes: Optional[List[str]], stop: bool) -> None:
+    """A changed-file reason keyed to the session and the file's hash: verifylib.stop_once blocks it at one Stop
+    and notes it after that. PostToolUse(Bash) feeds it back until a Stop has said it, and records nothing."""
+    k = "%s:%s" % (key, now)
+    if not stop and v.stop_told(root, marker.get("session_id"), "boundary", k):
+        return
+    SESSION_KEYS[reason] = k
+    reasons.append(reason)
+
+
+def untold(root: Path, marker: dict, key: str) -> None:
+    """The file is back to the session's snapshot: a later change to any hash blocks once again."""
+    v.stop_untell(root, marker.get("session_id"), "boundary", key + ":")
+
+
 RELEASE_CONFIG = ("config.yaml changed under this session, by %s — not by this session. Do not restore it: this "
                   "session started before the release and still runs its old hooks; tell the operator to close it and "
                   "start a new session.")
@@ -230,7 +266,8 @@ def release_change(root: Path, marker: dict, now: str) -> Optional[str]:
     return " and ".join(bys) or None
 
 
-def check_config(root: Path, marker: dict, reasons: List[str], notes: Optional[List[str]] = None) -> None:
+def check_config(root: Path, marker: dict, reasons: List[str], notes: Optional[List[str]] = None,
+                 stop: bool = True) -> None:
     now = v.sha256_file(root / "config.yaml")
     if marker.get("config_sha") != now:
         try:
@@ -259,20 +296,34 @@ def check_config(root: Path, marker: dict, reasons: List[str], notes: Optional[L
                 # no release came in, yet the upgrade's record changed: only this session can have written it
                 told = (" state/config-changes.json was written during this session too, but only the upgrade "
                         "writes it, and no release came in under this session.")
-            reasons.append("The gate definition (config.yaml) changed this session; restore it.%s%s" % (told, RESTART))
-    if marker.get("local_settings_sha") != v.local_settings_sha(root):
-        reasons.append("The deny rules or hooks in .claude/settings.local.json changed this session; restore them.%s" % RESTART)
+            told_once(root, marker, "config.yaml", now,
+                      "The gate definition (config.yaml) changed this session; restore it if this session changed "
+                      "it.%s%s" % (told, STARTED_BEFORE), reasons, notes, stop)
+    else:
+        untold(root, marker, "config.yaml")
+    ls = v.local_settings_sha(root)
+    if marker.get("local_settings_sha") != ls:
+        told_once(root, marker, ".claude/settings.local.json", ls,
+                  "The deny rules or hooks in .claude/settings.local.json changed this session; restore them if this "
+                  "session changed them.%s" % STARTED_BEFORE, reasons, notes, stop)
+    else:
+        untold(root, marker, ".claude/settings.local.json")
 
 
-def check_local_brief(root: Path, marker: dict, reasons: List[str]) -> None:
+def check_local_brief(root: Path, marker: dict, reasons: List[str], notes: Optional[List[str]] = None,
+                      stop: bool = True) -> None:
     """CLAUDE.local.md is gitignored, so check_protected cannot see it: while boundary.edit_brief
     is false, its hash must still be the one the session started with. A marker from before
-    this check has no hash and is not judged."""
+    this check has no hash and is not judged. Told once per hash, like config.yaml (told_once)."""
     if "local_brief_sha" not in marker or v.edit_brief(root):
         return
-    if marker.get("local_brief_sha") != v.local_brief_sha(root):
-        reasons.append("CLAUDE.local.md changed this session; it is the operator's brief and boundary.edit_brief is "
-                       "false in config.yaml, so restore it.%s" % RESTART)
+    now = v.local_brief_sha(root)
+    if marker.get("local_brief_sha") != now:
+        told_once(root, marker, "CLAUDE.local.md", str(now),
+                  "CLAUDE.local.md changed this session; it is the operator's brief and boundary.edit_brief is false "
+                  "in config.yaml, so restore it if this session changed it.%s" % STARTED_BEFORE, reasons, notes, stop)
+    else:
+        untold(root, marker, "CLAUDE.local.md")
 
 
 def check_distribution(root: Path, reasons: List[str]) -> None:
@@ -812,8 +863,8 @@ def main() -> int:
             notes.append("The session-start hook did not run; boundary checks compare against the current state.%s" % RESTART)
             # With no snapshot, any protected dirt counts.
         check_protected(root, marker, reasons)
-        check_config(root, marker, reasons, notes)
-        check_local_brief(root, marker, reasons)
+        check_config(root, marker, reasons, notes, event == "Stop")
+        check_local_brief(root, marker, reasons, notes, event == "Stop")
         check_evidence(root, marker, reasons)
         if event == "Stop":
             if not visitor:
@@ -822,7 +873,8 @@ def main() -> int:
             check_promotion(root, marker, reasons, notes, restart_only)
     except Exception:
         return 0
-    if event == "Stop" and payload.get("stop_hook_active") and restart_only:
+    active = bool(payload.get("stop_hook_active"))
+    if event == "Stop" and active and restart_only:
         # Claude Code re-fires Stop after a blocked one with stop_hook_active true. A promotion check that could
         # not evaluate for a reason only a restart repairs (a missing base, a tree not known, a marker from
         # before the gate) blocked that Stop again and re-prompted the agent without end (another deployment,
@@ -837,6 +889,14 @@ def main() -> int:
         # ran, and notes are not printed there — a downgrade would drop the reason entirely.
         notes.extend("(visitor, not blocking) " + r for r in reasons)
         reasons = []
+    if event == "Stop" and reasons:
+        # No Stop hook may lock a session (verifylib.stop_once): a reason blocks once a turn — once a session for a
+        # file read at session start — and is a note after that, so a reason only the operator can resolve hands
+        # them the turn instead of re-prompting the agent until Claude Code gives up.
+        reasons, later = v.stop_once(root, sid, "boundary", reasons, active, SESSION_KEYS)
+        notes = later + notes
+        if reasons:
+            reasons.append(v.WAY_BACK)
     if reasons:
         v.block("\n".join(reasons + notes))
     if notes and event == "Stop":
