@@ -288,3 +288,27 @@ EOF
     case "$CM" in *"$s"*) echo "CLAUDE.md still says: $s"; return 1 ;; esac
   done
 }
+
+@test "review 2026-10-20: release --remove carries the window's entries; a spawned clone is shown hot.md but not asked; a topic ending in # is found; a ~~~ line inside a \`\`\` fence hides no entry" {
+  two_windows
+  cp "$SRC/templates/hot.md" "$HOT"
+  hot_as sB add "b" --next n --done-when d
+  run env -u DAEDALUS_SESSION_ID bash "$DAEDALUS_HOME/core/lease.sh" release 02 --remove --force; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -qx -- "- owner: carried from window 02, $(today)" "$HOT" || { cat "$HOT"; return 1; }
+  # a spawned clone: no ask recorded, the listing still shown
+  hot_as sA add "old" --next n --done-when d
+  sed -i '' "/^### old/,/^- since/ s/^- since: .*/- since: $(days_ago 20)/" "$HOT"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["spawned"]=True; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
+  run start sA; c="$(ctx)"
+  case "$c" in *"has sat for"*) echo "a clone was asked: $c"; return 1 ;; esac
+  case "$c" in *"- old — owner: window 01 — 20 days"*) : ;; *) echo "$c"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/hot-due.json" ] || ! grep -q '"old"' "$DAEDALUS_HOME/state/hot-due.json"
+  # a topic ending in #
+  hot_as sA add "Port to C#" --next n --done-when d
+  run hot_as sA update "Port to C#" --next m; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run hot_as sA add "Port to C#" --next n --done-when d; [ "$status" -ne 0 ]
+  # fences close only on their own kind
+  printf -- '---\ntype: rolling-state\n---\n\n## In flight\n\n```\n~~~\n```\n\n### after the fence\n- owner: window 01\n- since: %s\n- next: n\n- done when: d\n' "$(today)" > "$HOT"
+  run python3 "$DAEDALUS_HOME/core/hot.py" show
+  case "$output" in *"- after the fence — owner: window 01"*) : ;; *) echo "$output"; return 1 ;; esac
+}

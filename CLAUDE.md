@@ -265,7 +265,8 @@ session has no window and `core/lease.sh` makes none (create, claim, spawn
 and adopt of a branch are refused, naming the stop); do not try to get one.
 It still closes: `core/lease.sh log` prints its session log, and when no
 live session holds the pen, `core/lease.sh prime take` gives it the pen for
-`hot.md` and `core/vault-commit.sh` (see "Session logs").
+`core/vault-commit.sh` (see "Session logs"); its `hot.md` entries go through
+`core/hot.py`.
 When the operator then says
 "pick it up", run `core/lease.sh adopt --all-unfinished` and report what it
 printed: each window it made (number, repo, commits), and anything it could

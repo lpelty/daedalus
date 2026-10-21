@@ -246,6 +246,17 @@ def _windowless_pen(ll, root: Path, sid: object) -> bool:
         return False
 
 
+def _spawned(ll, root: Path, nn: Optional[str]) -> bool:
+    """A background clone (core/lease.sh spawn) has nobody to ask: its first reply goes to its task, not to the
+    operator, so it must not use up the day's 14-day question (review 2026-10-20, finding 2)."""
+    if ll is None or not nn:
+        return False
+    try:
+        return bool((ll.read_lease(root, nn) or {}).get("spawned"))
+    except Exception:
+        return False
+
+
 def main() -> int:
     # A SIGTERM (a cancelled hook, a shutdown) becomes SystemExit, so
     # leaselib._run_bounded kills the running git's process group on its way
@@ -537,7 +548,8 @@ def main() -> int:
         try:
             import hot
             hot_top, hot_tail = hot.at_start(root, str(sid), holds_pen or _windowless_pen(ll, root, sid),
-                                             deadline=max(started_at + ADD_BUDGET_SECS, time.time() + 1))
+                                             deadline=max(started_at + ADD_BUDGET_SECS, time.time() + 1),
+                                             ask=not _spawned(ll, root, lease_nn))
         except Exception as e:
             if type(e).__name__ == "Refused":
                 hot_tail = ["hot.md was not read at this start: %s `python3 core/hot.py show` shows it." % e]

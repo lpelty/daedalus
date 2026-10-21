@@ -1971,6 +1971,7 @@ def claim(root: Path, token: str, sid: str) -> str:
             return line
         logs = _reservations(held_lease)
         _remove_lease_files(root, drop)     # as reclaim: worktree and branch kept for the next allocation to re-use
+        carry_hot_locked(root, drop, read_all(root))
         if logs:
             claimed = read_lease(root, nn) or {}
             if not _reservations(claimed):
@@ -2216,6 +2217,7 @@ def _delete_window_locked(root: Path, nn: str, lease: dict, sid: Optional[str], 
         for ref in split_refs.split():
             _git(src, "update-ref", "-d", ref)
     _remove_lease_files(root, nn)
+    carry_hot_locked(root, nn, read_all(root))
     # the branch is gone, so is its work: drop its unpromoted-work answers, or the band (which reads the cache and
     # never git) shows a swept number with work until some prompt's board rewrites it (review 2026-10-19, finding 4)
     write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)

@@ -53,7 +53,7 @@ DUE = Path("state") / "hot-due.json"           # {topic: {"asked": date, "sessio
 LISTED = Path("state") / "hot-unshaped.json"  # ids of text not in entry form already listed to the pen's holder
 LOCK_WAIT = 10.0                               # a command's wait for state/hot.lock; a hook passes its own deadline
 
-_HEADER = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+_HEADER = re.compile(r"^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")   # a closing # run needs a blank before it
 _FIELD = re.compile(r"^- ([a-z][a-z ]*?):[ \t]*(.*?)[ \t]*$", re.IGNORECASE)
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _WINDOW = re.compile(r"^window ([0-9]{2})$", re.IGNORECASE)
@@ -124,14 +124,22 @@ class Doc:
         self.sections: Dict[str, Tuple[int, int]] = {}
         self.entries: List[Entry] = []
         self.loose: List[Loose] = []
-        heads = []                      # (index, level, title) of every heading outside a code fence
-        fence = False
+        heads = []                      # (index, level, title) of every heading outside a code fence or comment
+        fence, comment = "", False
         for i in range(self.fm_end, len(self.lines)):
             ln = self.lines[i].rstrip("\r\n")
-            if ln.lstrip().startswith("```") or ln.lstrip().startswith("~~~"):
-                fence = not fence
+            s = ln.lstrip()
+            if fence:
+                if s.startswith(fence):
+                    fence = ""
                 continue
-            m = None if fence else _HEADER.match(ln)
+            if s.startswith("```") or s.startswith("~~~"):
+                fence = s[:3]           # closed only by the same kind (review 2026-10-20, finding 6)
+                continue
+            if comment or s.startswith("<!--"):
+                comment = "-->" not in s
+                continue
+            m = _HEADER.match(ln)
             if m:
                 heads.append((i, len(m.group(1)), m.group(2)))
         for k, (i, level, title) in enumerate(heads):
@@ -249,7 +257,7 @@ class Doc:
                 self.fm_end += 1
                 continue
             stop = idx + 1
-            while stop < self.fm_end - 1 and self.lines[stop][:1] in (" ", "\t"):
+            while stop < self.fm_end - 1 and (self.lines[stop][:1] in (" ", "\t") or self.lines[stop].startswith("- ")):
                 stop += 1
             self.lines[idx:stop] = [line]
             self.fm_end -= stop - idx - 1
@@ -693,11 +701,13 @@ ASK = ("Ask the operator this in your first reply. Their answer, in any words, i
        "`--owner <NN>` if they put it in this window.")
 
 
-def at_start(root: Path, sid: str, holds_pen: bool, deadline: Optional[float] = None) -> Tuple[List[str], List[str]]:
+def at_start(root: Path, sid: str, holds_pen: bool, deadline: Optional[float] = None,
+             ask: bool = True) -> Tuple[List[str], List[str]]:
     """The session start (B, C, D): stamps since: on an entry that has none (the first start after the update, so
     it sets off no alerts), asks about each entry due today that no session has asked about today, lists text not in
     entry form once to the pen's holder, and shows In flight and Blocked. Returns (lines for the top of the context,
-    lines for the end). A busy lock or an unreadable file is a line, never a broken start."""
+    lines for the end). `ask` False (a background clone, which has nobody to ask) neither asks nor records an ask.
+    A busy lock or an unreadable file is a line, never a broken start."""
     try:
         leases = leases_snapshot(root, deadline=deadline)
     except Exception:
@@ -722,7 +732,7 @@ def at_start(root: Path, sid: str, holds_pen: bool, deadline: Optional[float] = 
         for k in [k for k in asked if k not in present]:
             del asked[k]
             changed = True
-        for e, n in due_entries(doc):
+        for e, n in (due_entries(doc) if ask else []):
             key = norm(e.topic)
             if (asked.get(key) or {}).get("asked") == today():
                 continue

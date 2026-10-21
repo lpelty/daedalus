@@ -914,3 +914,9 @@ once_a_turn() {
   printf 'more\n' >> "$DAEDALUS_HOME/CLAUDE.md"
   run stop_as s1 true; [ "$status" -eq 2 ] || { echo "a new reason after a clean Stop must block: $output"; return 1; }
 }
+
+@test "vault/hot.md in another case (vault/HOT.md) is refused too: the default macOS file system opens either spelling" {
+  two_leases; live_holder 01
+  run edit_as sA "$DAEDALUS_HOME/vault/HOT.md"
+  case "$output" in *'"permissionDecision": "deny"'*"hot.md changes only through core/hot.py"*) : ;; *) echo "$output"; return 1 ;; esac
+}

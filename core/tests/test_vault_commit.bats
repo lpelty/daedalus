@@ -362,3 +362,16 @@ PY
   git -C "$DAEDALUS_HOME/vault" show --name-only --format= HEAD | grep -qx hot.md
   case "$output$stderr" in *"hot.md"*|*[Bb]udget*|*"too long"*|*"lines"*) echo "a line about hot.md: $output $stderr"; return 1 ;; *) : ;; esac
 }
+
+@test "--pending carries hot.md with the closed windows' logs (their closes marked their entries carried there); nothing else" {
+  printf 'h\n' > "$DAEDALUS_HOME/vault/hot.md"; git -C "$DAEDALUS_HOME/vault" add hot.md; git -C "$DAEDALUS_HOME/vault" -c user.email=t@x -c user.name=t commit -q -m hot
+  L=vault/sessions/2026/10/2026-10-20-007.md; mkdir -p "$DAEDALUS_HOME/vault/sessions/2026/10"; printf 'log\n' > "$DAEDALUS_HOME/$L"
+  mkdir -p "$DAEDALUS_HOME/state/vault-pending"
+  python3 -c 'import json,os,sys; print(json.dumps({"path": sys.argv[2], "mtime_ns": os.stat(os.path.join(sys.argv[1], sys.argv[2])).st_mtime_ns}))' "$DAEDALUS_HOME" "$L" > "$DAEDALUS_HOME/state/vault-pending/sB.json"
+  [ -n "$(python3 "$DAEDALUS_HOME/core/leaselib.py" pending-logs)" ] || { echo "the marker is not read"; return 1; }
+  printf 'h2\n' > "$DAEDALUS_HOME/vault/hot.md"; printf 'x\n' > "$DAEDALUS_HOME/vault/proposals/other.md"
+  run env DAEDALUS_SESSION_ID=sA bash "$VC" --pending; [ "$status" -eq 0 ]
+  files="$(git -C "$DAEDALUS_HOME/vault" show --name-only --format= HEAD)"
+  case "$files" in *"hot.md"*"2026-10-20-007.md"*|*"2026-10-20-007.md"*"hot.md"*) : ;; *) echo "$files"; return 1 ;; esac
+  case "$files" in *other.md*) echo "$files"; return 1 ;; esac
+}

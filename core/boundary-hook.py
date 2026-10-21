@@ -769,7 +769,11 @@ def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[s
     if reason:
         return reason, None
     rroot = root.resolve()
-    if p.resolve() == rroot / "vault" / "hot.md":
+    try:
+        rel_lower = p.resolve().relative_to(rroot).as_posix().lower()
+    except ValueError:
+        rel_lower = ""
+    if rel_lower == "vault/hot.md":     # without case, as brief_deny: the default macOS file system opens either spelling
         # every session, the pen's holder too, leases or none: core/hot.py is the one write path
         return HOT_DENY, None
     if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees")):
