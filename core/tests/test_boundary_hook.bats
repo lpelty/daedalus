@@ -338,12 +338,16 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   run edit_as sB "$DAEDALUS_HOME/worktrees/02/thing/a.txt"; case "$output" in *'"permissionDecision": "deny"'*"this window is released; its worktree is closed"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "vault/hot.md: denied for a non-prime window naming the prime's window number; allowed for the prime; other vault files allowed" {
+@test "vault/hot.md: an Edit or Write is denied for every session, the prime included, naming the core/hot.py command to use; other vault files allowed" {
+  # v0.12.6 (spec 2026-10-20, C): core/hot.py is the only way hot.md changes, for every window
   two_leases; live_holder 01; live_holder 02
-  run edit_as sB "$DAEDALUS_HOME/vault/hot.md"
-  case "$output" in *'"permissionDecision": "deny"'*"Only the prime window commits the vault and writes hot.md. You are window 02; the pen is held by window 01"*"core/lease.sh prime take"*) : ;; *) echo "$output"; return 1 ;; esac
-  case "$output" in *"daedalus-0"*) echo "never a peer name: $output"; return 1 ;; *) : ;; esac
-  run edit_as sA "$DAEDALUS_HOME/vault/hot.md"; [ -z "$output" ]
+  for s in sA sB sZ; do
+    for f in edit_as write_as; do
+      run $f "$s" "$DAEDALUS_HOME/vault/hot.md"
+      case "$output" in *'"permissionDecision": "deny"'*"hot.md changes only through core/hot.py"*'python3 core/hot.py add'*'update'*'remove'*'keep'*) : ;; *) echo "$s $f: $output"; return 1 ;; esac
+      case "$output" in *"daedalus-0"*|*"Only the prime"*) echo "$s $f: $output"; return 1 ;; *) : ;; esac
+    done
+  done
   run edit_as sB "$DAEDALUS_HOME/vault/proposals/PROP-9.md"; [ -z "$output" ]
 }
 
@@ -357,13 +361,13 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert any(g.get("matcher")=="Edit|Write|NotebookEdit" and any("boundary-hook.py" in h["command"] and h["timeout"]==5 for h in g["hooks"]) for g in d["hooks"]["PreToolUse"]), d' "$SRC/../.claude/settings.json"
 }
 
-@test "a lease file that cannot be read fails CLOSED for Edit/Write under target/, worktrees/ and vault/hot.md — the lease.sh sentence, not silence; a path outside every tree is untouched" {
+@test "a lease file that cannot be read fails CLOSED for Edit/Write under target/ and worktrees/ — the lease.sh sentence, not silence; a path outside every tree is untouched" {
   # Review of Task 10: lease_context returns refused with an EMPTY leases dict when a
   # lease file is unreadable, and the hook returned None at `if not ctx["leases"]`
   # before it looked at the refusal — every write under the guarded trees went through.
   two_leases; live_holder 01; live_holder 02
   printf 'not json' > "$DAEDALUS_HOME/state/leases/02.json"
-  for c in "sA $T/a.txt" "sB $DAEDALUS_HOME/worktrees/01/thing/a.txt" "sB $DAEDALUS_HOME/vault/hot.md" "sZ $T/a.txt"; do set -- $c
+  for c in "sA $T/a.txt" "sB $DAEDALUS_HOME/worktrees/01/thing/a.txt" "sZ $T/a.txt"; do set -- $c
     run edit_as "$1" "$2"
     case "$output" in *'"permissionDecision": "deny"'*"The lease file for window 02 cannot be read"*"core/lease.sh sweep"*) : ;; *) echo "$1 $2 must fail closed: $output"; return 1 ;; esac
   done

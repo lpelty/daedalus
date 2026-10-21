@@ -91,14 +91,14 @@ promotion() {   # promotion <id> [pushed] — a promotion of window 01 with its 
   [ -z "${2:-}" ] || printf '{"lease": "01"}\n' > "$d/pushed"
 }
 
-@test "while the upgrade is pending the pen gives a session holding no window the vault, not a tree: target_path and sync-target refuse, a write in target/ is denied and hot.md allowed, worktree surgery in target/ is denied, promote waits, --clean removes only pushed scratch" {
+@test "while the upgrade is pending the pen gives a session holding no window the vault, not a tree: target_path and sync-target refuse, a write in target/ is denied and hot.md is core/hot.py's, worktree surgery in target/ is denied, promote waits, --clean removes only pushed scratch" {
   windowless_prime
   run --separate-stderr tp s1; [ "$status" -ne 0 ]
   case "$stderr" in *"started before the upgrade to 0.7.0 finished"*) : ;; *) echo "$stderr"; return 1 ;; esac
   run env DAEDALUS_SESSION_ID=s1 bash "$DAEDALUS_HOME/core/sync-target.sh"
   [ "$status" -ne 0 ]; case "$output" in *"started before the upgrade to 0.7.0 finished"*) : ;; *) echo "$output"; return 1 ;; esac
   run write_as s1 "$T/new.txt"; case "$output" in *'"deny"'*) : ;; *) echo "target/ write allowed: $output"; return 1 ;; esac
-  run write_as s1 "$DAEDALUS_HOME/vault/hot.md"; case "$output" in *'"deny"'*) echo "hot.md denied: $output"; return 1 ;; *) : ;; esac
+  run write_as s1 "$DAEDALUS_HOME/vault/hot.md"; case "$output" in *'"deny"'*"hot.md changes only through core/hot.py"*) : ;; *) echo "hot.md by hand: $output"; return 1 ;; esac
   run guard_as s1 "git worktree prune" "$T"; case "$output" in *'"deny"'*) : ;; *) echo "prune allowed: $output"; return 1 ;; esac
   run env DAEDALUS_SESSION_ID=s1 CLAUDECODE=1 bash "$DAEDALUS_HOME/core/promote.sh" 01
   [ "$status" -ne 0 ]
@@ -112,13 +112,13 @@ promotion() {   # promotion <id> [pushed] — a promotion of window 01 with its 
   [ -d "$DAEDALUS_HOME/state/promote/01-20261016-100000-aaa/thing" ]
 }
 
-@test "after the stamp a session that took the pen without a window still builds in no tree until it claims one: target_path names claim and says it holds the pen, target/ stays denied, hot.md allowed, its Stop never reaches the trunk comparison; once it claims, it builds in its worktree and keeps the pen" {
+@test "after the stamp a session that took the pen without a window still builds in no tree until it claims one: target_path names claim and says it holds the pen, target/ stays denied, hot.md is core/hot.py's, its Stop never reaches the trunk comparison; once it claims, it builds in its worktree and keeps the pen" {
   windowless_prime
   printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"; git -C "$T" checkout -q main
   run --separate-stderr tp s1; [ "$status" -ne 0 ]
-  case "$stderr" in *"This session holds no window"*"It holds the pen: hot.md and \`core/vault-commit.sh\` are its"*"core/lease.sh create"*"claim <NN>"*) : ;; *) echo "$stderr"; return 1 ;; esac
+  case "$stderr" in *"This session holds no window"*"It holds the pen: \`core/vault-commit.sh\` is its"*"core/lease.sh create"*"claim <NN>"*) : ;; *) echo "$stderr"; return 1 ;; esac
   run write_as s1 "$T/new.txt"; case "$output" in *'"deny"'*) : ;; *) echo "target/ write allowed: $output"; return 1 ;; esac
-  run write_as s1 "$DAEDALUS_HOME/vault/hot.md"; case "$output" in *'"deny"'*) echo "hot.md denied: $output"; return 1 ;; *) : ;; esac
+  run write_as s1 "$DAEDALUS_HOME/vault/hot.md"; case "$output" in *'"deny"'*"hot.md changes only through core/hot.py"*) : ;; *) echo "hot.md by hand: $output"; return 1 ;; esac
   run --separate-stderr stop s1
   case "$output$stderr" in *"does not apply in a lease worktree"*|*"origin/main moved"*|*"commits on"*) echo "$output $stderr"; return 1 ;; esac
   case "$stderr" in *"It holds the pen"*"claim"*) : ;; *) echo "status $status: $output $stderr"; return 1 ;; esac
@@ -139,7 +139,7 @@ promotion() {   # promotion <id> [pushed] — a promotion of window 01 with its 
 
 board_as() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"hello"}' "$1" | python3 "$DAEDALUS_HOME/core/lease-board.py" \
   | python3 -c 'import json,sys; t=sys.stdin.read(); print(json.loads(t)["hookSpecificOutput"]["additionalContext"] if t.strip() else "")'; }
-CLOSE="At its close, \`core/lease.sh log\` prints this session's log path; when no live session holds the pen, \`core/lease.sh prime take\` gives it the pen, for hot.md and \`core/vault-commit.sh\`."
+CLOSE="At its close, \`core/lease.sh log\` prints this session's log path; when no live session holds the pen, \`core/lease.sh prime take\` gives it the pen, for \`core/vault-commit.sh\`."
 
 @test "every message a session holding no window is shown while the upgrade is pending — the no-window sentence of each kind, the start, the board, the Stop, lease.sh and vault-commit.sh refusals — names commands that work for it, or the operator's own-shell command; the only refusal is the documented live-holder one" {
   cp "$SRC/promote.py" "$SRC/promote.sh" "$DAEDALUS_HOME/core/"; git -C "$DAEDALUS_HOME" add -A core; cmt "$DAEDALUS_HOME" -m "promote"
@@ -243,7 +243,7 @@ PY
   pick_up; [ "$status" -eq 0 ] || { echo "$output"; return 1; }           # window 01 now exists
   run board_as s1
   [ "$(printf '%s\n' "$output" | grep -cF "$CLOSE")" -eq 1 ] || { echo "$output"; return 1; }
-  case "$output" in *"You hold the pen, with no window: hot.md and \`core/vault-commit.sh\` are yours."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"You hold the pen, with no window: \`core/vault-commit.sh\` is yours."*) : ;; *) echo "$output"; return 1 ;; esac
   run env DAEDALUS_SESSION_ID=sZ bash "$DAEDALUS_HOME/core/lease.sh" list
   case "$output" in *"The pen is held by a session holding no window (peer name first-one)."*) : ;; *) echo "$output"; return 1 ;; esac
   rm -rf "$DAEDALUS_HOME/state/leases"

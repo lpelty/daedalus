@@ -131,12 +131,12 @@ remove` of it — resolved against the `-C` directory git runs in, and also
 matched the way git itself matches a relative operand, as a path suffix of
 every registered worktree (`git worktree remove 01/thing` from window 02's
 worktree removes window 01's); a released window's own
-worktree is closed; vault/hot.md is the prime's alone; raw `git add`,
+worktree is closed; vault/hot.md is written only by core/hot.py; raw `git add`,
 `commit` and `stash` under vault/ are denied from EVERY session, prime
 included, naming core/vault-commit.sh; a non-prime's `commit` or `push`
 under vault/ is denied naming the prime's window number, read from
 prime.json at denial time. A session that cannot be bound while lease
-files exist fails CLOSED under target/, worktrees/ and hot.md (§4.4).
+files exist fails CLOSED under target/ and worktrees/ (§4.4).
 """
 from __future__ import annotations
 

@@ -1851,3 +1851,17 @@ cc_lines() { printf '%s\n' "$output" | sed 's/^daedalus: //' | grep -E '^(OK|NOT
   [ "$status" -eq 0 ]
   [ "$(cc_lines)" = "NOTE     code context: check failed (core/context.py --doctor exited 3)" ]
 }
+
+# v0.12.6 (spec 2026-10-20 D): doctor lists hot.md's due entries and its text not in entry form, read-only, as NOTEs.
+@test "doctor: hot.md entries that have sat for 14 days and text not in entry form are NOTEs, the file unchanged; never a MISSING, never a word about length" {
+  cp "$SRC/hot.py" "$SRC/leaselib.py" "$DAEDALUS_HOME/core/"
+  printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n  - true\n' > "$DAEDALUS_HOME/config.yaml"
+  mkdir -p "$DAEDALUS_HOME/vault"
+  old="$(python3 -c 'import datetime; print(datetime.date.today()-datetime.timedelta(days=20))')"
+  printf -- '---\ntype: rolling-state\n---\n\n## In flight\n\nA paragraph of history.\n\n### the old one\n- owner: operator\n- since: %s\n- next: n\n- done when: d\n' "$old" > "$DAEDALUS_HOME/vault/hot.md"
+  before="$(cat "$DAEDALUS_HOME/vault/hot.md")"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"NOTE     hot.md: entry 'the old one' has sat for 20 days (owner: operator)"*"NOTE     hot.md: text not in entry form (In flight): A paragraph of history."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"MISSING  hot.md"*|*"hot.md"*"lines"*) echo "$output"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/vault/hot.md")" = "$before" ]
+}

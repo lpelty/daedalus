@@ -497,3 +497,19 @@ d=[k for k,n in collections.Counter(ids).items() if n>1]
 print(ids); sys.exit(1 if d else 0)' "$BATS_TEST_TMPDIR/posts.jsonl"
   [ "$status" -eq 0 ] || { echo "a document id was POSTed twice: $output"; return 1; }
 }
+
+# v0.12.6 (spec 2026-10-20 C): the close marks this window's remaining hot.md entries carried, after the capture and
+# before the vault commit, so the marking lands in the commit; --no-commit still marks; a failed carry is a line.
+@test "close runs core/hot.py carry after the capture and before the vault commit; --no-commit still runs it; a failed carry does not fail the close" {
+  printf '#!/usr/bin/env bash\necho VAULT-COMMIT-RAN\n' > "$DAEDALUS_HOME/core/vault-commit.sh"
+  printf 'import sys\nprint("HOT-CARRY-RAN %%s" %% " ".join(sys.argv[1:]))\n' > "$DAEDALUS_HOME/core/hot.py"
+  configure_capture; start_stub
+  run bash "$CLOSE"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"phase 1/2"*"HOT-CARRY-RAN carry"*"phase 2/2: vault commit"*VAULT-COMMIT-RAN*"close complete") : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CLOSE" --no-commit; [ "$status" -eq 0 ]
+  case "$output" in *"HOT-CARRY-RAN carry"*"close complete") : ;; *) echo "$output"; return 1 ;; esac
+  printf 'import sys\nsys.stderr.write("daedalus: the lock stayed busy\\n"); sys.exit(1)\n' > "$DAEDALUS_HOME/core/hot.py"
+  run bash "$CLOSE"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"hot.md entries were not marked carried: the lock stayed busy"*VAULT-COMMIT-RAN*"close complete") : ;; *) echo "$output"; return 1 ;; esac
+  stop_stub
+}

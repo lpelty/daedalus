@@ -399,7 +399,7 @@ def pending_stop(root: Path) -> Optional[Tuple[str, str, str]]:
 # What every no-window sentence of a pending upgrade ends with: the close that works for a session holding no window.
 # True whether or not it holds the pen yet, so the Stop's once-only comparison does not re-block when the pen moves.
 WINDOWLESS_CLOSE = ("At its close, `core/lease.sh log` prints this session's log path; when no live session holds "
-                    "the pen, `core/lease.sh prime take` gives it the pen, for hot.md and `core/vault-commit.sh`.")
+                    "the pen, `core/lease.sh prime take` gives it the pen, for `core/vault-commit.sh`.")
 
 
 def no_window_pending(pending) -> str:
@@ -430,8 +430,8 @@ def pen_without_tree(leases: Dict[str, dict], sid: Optional[str], pending=None) 
     return bool(pending) or prime.get("taken_without_window") == sid
 
 
-PEN_NO_TREE = ("This session holds no window: no lease names it. It holds the pen: hot.md and `core/vault-commit.sh` "
-               "are its; to build, run `core/lease.sh create` and then `claim <NN>`.")
+PEN_NO_TREE = ("This session holds no window: no lease names it. It holds the pen: `core/vault-commit.sh` is "
+               "its; to build, run `core/lease.sh create` and then `claim <NN>`.")
 
 
 def resolve_lease(leases: Dict[str, dict], sid: str,
@@ -1654,6 +1654,7 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
                 continue
             _remove_lease_files(root, nn)
             del leases[nn]
+            carry_hot_locked(root, nn, leases)
             out.append((nn, "Swept window %s: it was released and its session has ended; its worktree and branch are "
                             "kept." % nn))
             continue
@@ -1673,6 +1674,7 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
             continue
         _remove_lease_files(root, nn)
         del leases[nn]
+        carry_hot_locked(root, nn, leases)
         # v0.7.5 (spec §3.2): what reclaim proved goes into the board's cache, at the SHAs and history view it was
         # proved at and for exactly the repos it checked, so the reclaimed number costs the board nothing until a
         # tip moves. Under this lock, but taking none of its own; a failed write never fails the reclaim.
@@ -2119,6 +2121,23 @@ def _remove_lease_files(root: Path, nn: str) -> None:
             p.unlink()
         except FileNotFoundError:
             pass
+
+
+HOT_CARRY_WAIT = 2.0     # seconds a sweep waits for state/hot.lock; a window's hot.py write holds it for milliseconds
+
+
+def carry_hot_locked(root: Path, nn: str, leases: Dict[str, dict]) -> None:
+    """A window that goes without its close (swept, reclaimed, its released lease removed) leaves its hot.md entries
+    `carried from window NN, <date>`, as its close would have (v0.12.6, spec 2026-10-20 C), so the number's next
+    holder never inherits them. CALLER HOLDS THE LOCK; `leases` is what it holds now, the removed window gone. The
+    lock order is this one: lease lock, then state/hot.lock (core/hot.py never waits for the lease lock while it
+    holds its own). A hot lock busy past HOT_CARRY_WAIT, or any failure, changes nothing and never fails the sweep."""
+    try:
+        import hot
+        hot.carry_windows(root, [nn], {k: d for k, d in leases.items() if k != nn}, who="the sweep",
+                          deadline=time.time() + HOT_CARRY_WAIT)
+    except Exception:
+        pass
 
 
 def release(root: Path, token: str, sid: Optional[str], remove: bool = False, force: bool = False,
@@ -3961,6 +3980,7 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
             else:
                 continue
             _remove_lease_files(root, nn)
+            carry_hot_locked(root, nn, leases)
             lines.append("removed the lease of window %s (%s); its worktree and branch are kept" % (nn, why))
     return lines
 
@@ -3986,6 +4006,7 @@ def session_end_sweep(root: Path, sid: Optional[str]) -> Optional[str]:
             # it goes when the last of them ends, or at a start once none is live (review 2026-10-19, finding 2)
             return None
         _remove_lease_files(root, nn)
+        carry_hot_locked(root, nn, {k: d for k, d in read_all(root).items()})
         return nn
 
 
@@ -4526,7 +4547,7 @@ def log_path_locked(root: Path, key: str, leases: Dict[str, dict], today: str, n
 
 # What a session that starts while the upgrade is pending (it holds no window) is told about its close.
 WINDOWLESS_PEN_AT_CLOSE = ("At the close, when no live session holds the pen, `core/lease.sh prime take` gives this "
-                           "session the pen for hot.md and `core/vault-commit.sh` — no window is made.")
+                           "session the pen for `core/vault-commit.sh` — no window is made.")
 LOG_BUSY_AT_START = ("Your session log was not reserved at start: the lease lock stayed busy past the start budget. "
                      "`core/lease.sh log` reserves it and prints the path.")
 # The upgrade has not made state/leases/ yet: no number can be reserved, and there is nothing to hold — hot.md and the
@@ -4766,21 +4787,21 @@ def prime_take(root: Path, sid: str, reason: Optional[str], mode: str = "transcr
         fresh.pop("taken_while_pending", None)
         fresh.update(dict({"session_id": sid}, **pen_bound()))
         write_lease(root, "prime", fresh)
-    return "Window %s holds the pen now (prime): hot.md, vault commits, promote." % mine
+    return "Window %s holds the pen now (prime): vault commits, promote." % mine
 
 
 WINDOWLESS_NOT_IN_REGISTRY = ("This session is not in the session registry, so no later session could tell it is "
                               "live; it cannot take the pen.")
 WINDOWLESS_PEN_HELD = ("The pen is held by a live session, %s; a session holding no window never takes it from a live "
-                       "holder. Your session log is still yours (`core/lease.sh log`); for hot.md and the vault "
+                       "holder. Your session log is still yours (`core/lease.sh log`); for the vault "
                        "commit, message that session (SendMessage to %s); or the operator commits the vault from "
                        "their own shell: `cd %s && core/vault-commit.sh`.")
 WINDOWLESS_PEN_UNTOLD = ("The pen is held by a session holding no window, and on this build (no session registry) it "
                          "cannot be told whether it is live, so it is treated as live; a session holding no window "
                          "never takes it from a live holder. Your session log is still yours (`core/lease.sh log`); "
-                         "for hot.md and the vault commit, message that session; or the operator commits the vault "
+                         "for the vault commit, message that session; or the operator commits the vault "
                          "from their own shell: `cd %s && core/vault-commit.sh`.")
-WINDOWLESS_PEN_TAKEN = "This session holds the pen now, with no window: hot.md and `core/vault-commit.sh` are yours%s."
+WINDOWLESS_PEN_TAKEN = "This session holds the pen now, with no window: `core/vault-commit.sh` is yours%s."
 PROMOTE_WAITS_CLAUSE = "; promote waits until the upgrade finishes"
 
 
@@ -5067,7 +5088,7 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
     # a pen held by a session holding no window shows on no numbered line: say so, so a window knows why it is not its
     if prime_sid and lease_of_session(leases, str(prime_sid))[0] is None:
         if prime_sid == sid:
-            lines.append("You hold the pen, with no window: hot.md and `core/vault-commit.sh` are yours.")
+            lines.append("You hold the pen, with no window: `core/vault-commit.sh` is yours.")
         else:
             names = [e.get("name") for e in live_map.get(str(prime_sid), []) if e.get("name")]
             lines.append("The pen is held by a session holding no window (peer name %s)."
@@ -5103,7 +5124,7 @@ def render_board(root: Path, sid: Optional[str], leases: Dict[str, dict], change
                              % (d.get("peer_name") or "daedalus-%s" % nn))
         else:
             if prime_sid and d.get("session_id") == prime_sid:
-                parts.append("prime (holds the pen: hot.md, vault commits, promote)")
+                parts.append("prime (holds the pen: vault commits, promote)")
             if entries and entries[0].get("kind") == "bg" and not d.get("spawned"):
                 parts.append("background clone")
             # distinct paths across repos, as board_json counts them (lease-board spec §3.4; finding 23)

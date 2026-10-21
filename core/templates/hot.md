@@ -1,6 +1,6 @@
 ---
 type: rolling-state
-leases:             # a copy of the lease board when the prime last wrote this: which windows are open and why (intent, not status)
+leases:             # the lease board when core/hot.py last wrote this: which windows are open and why (intent, not status)
 author: <who wrote this>
 created: YYYY-MM-DD
 updated-by: <who last modified this>
@@ -20,14 +20,33 @@ probe at read time.
 **The test: can this change without anyone editing a file? Then it is state —
 probe it.**
 
+Every session start shows In flight and Blocked. Change them only with
+`python3 core/hot.py` (`add`, `update`, `remove`, `keep`); nobody edits this
+file by hand. Each entry is one block in this shape:
+
+```markdown
+### <topic, one line>
+- owner: <window NN, or operator, or another agent's name>
+- since: YYYY-MM-DD
+- where: <branch / file / proposal / backlog id>
+- next: <the one next action>
+- done when: <the observable condition that removes this entry>
+```
+
+`kept: YYYY-MM-DD` is added when the operator keeps an entry after its 14-day
+question; it restarts the clock. Entries keep to these fields. History,
+rounds and evidence go in the session log; a design question goes in a
+proposal; work for later goes in a backlog row. What was done belongs in the
+session log, not here. When an entry's `done when:` is met, the session that
+sees it removes it in that same turn.
+
 ## In flight
 
-<!-- The assignment underway, with the constraint or next action that makes it
-     resumable. -->
+<!-- The assignment underway, one entry each. -->
 
 ## Blocked
 
-<!-- Questions asked and unanswered, and who owns each. -->
+<!-- Questions asked and unanswered; the owner is who answers. -->
 
 ## Standing gotchas
 

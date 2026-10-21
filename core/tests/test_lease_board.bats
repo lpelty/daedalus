@@ -32,7 +32,7 @@ bind_live() {  # bind_live <NN> <sid> [name] — claim with a live registry pid
   c="$(ctx)"
   case "$c" in "Lease board (3 windows; you are window 02):"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"- 02 (you) (poc-ui) — 4 changed: four.txt, one.txt, three.txt, … (+1) — last commit \"capture: read error before error_message\" — note: EX-024 capture error-field fix — based on origin/main"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"- 01 — prime (holds the pen: hot.md, vault commits, promote) — 0 changed — no commits yet — last seen"*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"- 01 — prime (holds the pen: vault commits, promote) — 0 changed — no commits yet — last seen"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"- 03 — "*"peer name daedalus-07 (not a window number)"*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"daedalus-01"*|*"daedalus-02"*) echo "peer names equal to daedalus-NN must not print: $c"; return 1 ;; *) : ;; esac
   case "$c" in *"If you need a file another window has changed, message that window (SendMessage to its peer name, from this board) before changing it."*) : ;; *) echo "$c"; return 1 ;; esac

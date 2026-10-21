@@ -63,13 +63,13 @@ not yours to set. The task is yours to keep: the operator never sets it, and
 it is not their `note`. A spawned clone starts with the first line of its
 task already set.
 
-One window holds the **pen** (the board marks it `prime`): only it writes
-`hot.md` and commits the vault, always through `core/vault-commit.sh`, which
-checks every claim first. The first interactive window up takes the pen; it
+One window holds the **pen** (the board marks it `prime`): only it commits
+the vault, always through `core/vault-commit.sh`, which checks every claim
+first. Every window writes its own `hot.md` entries (see "hot.md"). The first interactive window up takes the pen; it
 moves only when the operator says so (`core/lease.sh prime take --reason "…"`
 from the window that takes it). A session holding no window may take the pen
 when no live session holds it (`core/lease.sh prime take`, no reason needed),
-never from a live one; it gets `hot.md` and the vault commit, not a tree —
+never from a live one; it gets the vault commit, not a tree —
 `target/` stays closed to it until it claims a window, and promote waits
 while an upgrade is pending. A pen whose session has ended moves to the next
 session that commits the vault; one held by a live session never moves
@@ -177,7 +177,7 @@ window 02. My work is ready to promote: branch lease/02, two commits, gates
 PASS on evidence run 20260925-113022-a1b2c3. Please promote window 02 when you
 are free." A handover, from the prime: "This is window 01, the prime. The
 operator wants you to hold the pen; when they say so in your window, take it
-with a few of their words as the reason. I will stop writing hot.md now."
+with a few of their words as the reason. I will stop committing the vault now."
 
 **When the stop-once warning names another window's file, do not edit it.**
 Message that window, then go on with other work — or, if you are blocked, tell
@@ -417,7 +417,7 @@ that started while an upgrade was pending — and by `core/lease.sh log`; the
 number is reserved for it under the same lock, and moves into the window it
 claims later. Its log's frontmatter says `lease: none`. Its close order is
 `core/lease.sh log` → `core/lease.sh prime take` (when no live session holds
-the pen) → `hot.md` (only if this session holds the pen) → `core/close.sh`.
+the pen) → its `hot.md` entries through `core/hot.py` → `core/close.sh`.
 When a live session holds the pen, `prime take`'s refusal says whom to
 message, and the close leaves the vault commit to that session. A window
 swept before its session wrote the log frees the number.
@@ -433,9 +433,10 @@ The window is recorded in the frontmatter, never in the filename: `lease:`
 only, because an alias can change mid-day) and `lease-created:`.
 
 Holding the pen is a line in the log, not a second file. `hot.md`'s `leases:`
-field is a copy of the lease board at the time the prime wrote it — intent
-(which windows are open and why), not status. Only the prime writes `hot.md`,
-and only through `core/vault-commit.sh` does the vault get committed.
+field is a copy of the lease board, refreshed by `core/hot.py` at each write —
+intent (which windows are open and why), not status. `hot.md` changes only
+through `core/hot.py`, and the vault is committed only through
+`core/vault-commit.sh`.
 
 Logs written under v0.7.0's window naming (a two-digit tail) are outside the
 sequence and are not counted. The operator may rename one into the sequence
@@ -446,6 +447,68 @@ title inside the file carries the description.
 
 Template: `vault/sessions/_template.md`. Never overwrite a past log — a
 correction goes in the current session's log, not into history.
+
+## hot.md
+
+`vault/hot.md` answers two questions: what is underway, and what it is
+waiting on. Every session start shows its `## In flight` and `## Blocked`
+entries, in every window, each with its owner, next action, done-when and age
+in days; the full file is one Read away. It is updated at the close, and
+during the session whenever something needs to come off it.
+
+It changes only through `core/hot.py`. An Edit or Write of it is refused and
+names the command. Each entry is one block:
+
+```markdown
+### <topic, one line>
+- owner: <window NN, or operator, or another agent's name>
+- since: YYYY-MM-DD
+- where: <branch / file / proposal / backlog id>
+- next: <the one next action>
+- done when: <the observable condition that removes this entry>
+```
+
+- **Add** your own: `python3 core/hot.py add "<topic>" --where "…" --next "…"
+  --done-when "…"` (`--blocked` puts it under Blocked; `--owner operator` when it
+  waits on the operator). The owner is your window unless you say otherwise.
+- **Done when met:** the window that sees an entry's `done when:` met runs
+  `python3 core/hot.py remove "<topic>"` in that same turn. It messages no one.
+- **Moved:** `python3 core/hot.py update "<topic>" --next "…"` (also `--where`,
+  `--done-when`, `--owner NN`, `--blocked`, `--in-flight`).
+- **Whose:** you change your own entries, carried ones, and ones owned by the operator
+  or another agent. Another open window's entry is that window's: `hot.py`
+  refuses and names it, and you message that window. If the operator named the
+  entry in this session, add `--operator-said "<a few of their words>"`.
+- **At your close:** for each entry you own, `remove` it if it is done, `update
+  --next` if it moved, otherwise leave it. `core/close.sh` then marks the rest
+  `owner: carried from window NN, YYYY-MM-DD`; a sweep does the same for a
+  window closed without a close. Window numbers are reused, so the topic names
+  the work. The window that picks it up runs `python3 core/hot.py update
+  "<topic>" --owner <your NN>`.
+- **Keep to the fields.** History, rounds and evidence go in your session log;
+  a design question in a proposal; work for later in a backlog row. What was
+  done goes in the session log, never here. There is no limit on length.
+
+**The 14-day question.** An entry that has sat 14 days (since its `since:`, or
+its `kept:` when it has one) is put at the top of the first session start of
+the day that reads it: "hot.md entry '<topic>' has sat for N days (owner: …).
+Move it to the backlog, or keep working on it in a window?" Ask the operator
+in your first reply. Their answer, in any words, is the decision, and your
+window applies it:
+
+- Backlog: add a backlog row (a backlog candidate in your session log when the
+  backlog cannot be reached), then `python3 core/hot.py remove "<topic>"`.
+- Keep, or work on it here: `python3 core/hot.py keep "<topic>"`, which stamps
+  `kept:` today and restarts the 14 days; add `--owner <your NN>` when they put
+  it in your window.
+
+Later windows are not asked the same day. An alert left unanswered is asked
+again at the next day's first start.
+
+Text in In flight or Blocked that is not in entry form is never deleted. The
+start lists it once to the pen's holder, which reshapes it: the history to its
+session log, an `add` in entry form, then `python3 core/hot.py drop <id>`.
+`core/doctor.sh` lists it, and every due entry, again.
 
 ## Memory
 
@@ -462,8 +525,9 @@ live session holds the pen, it says so in one line and leaves the commit to
 that session's close; if the pen's holder has ended, this session takes the
 pen and commits. `--no-commit` skips the commit. The close order for every
 session: `core/lease.sh log` → write the log → `core/lease.sh prime take` when
-the board says no live session holds the pen → `hot.md` (only if this session
-holds the pen) → `core/close.sh`. It can take several minutes (up
+the board says no live session holds the pen → this window's `hot.md` entries
+through `core/hot.py` (see "hot.md") → `core/close.sh`, which marks the rest
+carried. It can take several minutes (up
 to 90 s waiting for a capture already in flight, then settling, pushing and
 verifying inside the run's 300 s in-flight ceiling), so run it with the Bash
 tool's timeout at its maximum, 600000 ms. If it says a capture is

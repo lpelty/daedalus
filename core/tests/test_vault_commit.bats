@@ -352,3 +352,13 @@ PY
   run env DIRECT_CALL_ID=x DAEDALUS_SESSION_ID=sB python3 "$DAEDALUS_HOME/core/leaselib.py" mark-log-pending; [ "$status" -eq 0 ]; [ -z "$output" ]
   [ ! -e "$DAEDALUS_HOME/state/vault-pending" ]
 }
+
+# v0.12.6, ruling A (the operator, 2026-10-20): no size limit, no warning and no refusal anywhere for hot.md's length.
+@test "hot.md of any length commits: no refusal, no warning, no line about its size" {
+  { printf -- '---\ntype: rolling-state\n---\n\n# Hot\n\n## In flight\n\n'
+    for i in $(seq 1 600); do printf '### entry %s\n- owner: window 01\n- since: 2026-10-20\n- next: n\n- done when: d\n\n' "$i"; done; } > "$DAEDALUS_HOME/vault/hot.md"
+  [ "$(wc -l < "$DAEDALUS_HOME/vault/hot.md")" -gt 3000 ]
+  run --separate-stderr env DAEDALUS_SESSION_ID=sA bash "$VC"; [ "$status" -eq 0 ] || { echo "$status $output $stderr"; return 1; }
+  git -C "$DAEDALUS_HOME/vault" show --name-only --format= HEAD | grep -qx hot.md
+  case "$output$stderr" in *"hot.md"*|*[Bb]udget*|*"too long"*|*"lines"*) echo "a line about hot.md: $output $stderr"; return 1 ;; *) : ;; esac
+}

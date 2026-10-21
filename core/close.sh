@@ -75,6 +75,13 @@ esac
 CAPTURE_VERIFY_EXTRACTION=1 \
 python3 "$DAEDALUS_HOME/core/capture.py" capture ${transcript:+--transcript "$transcript"} --wait-in-flight "$wait_secs" </dev/null \
   || die "capture failed or is not yet confirmed — the session is not recorded yet; see the capture lines above and close again"
+# hot.md (v0.12.6, spec 2026-10-20 C): this window's entries still open are marked `carried from window NN, <date>`
+# before the commit, so they land in it and the window's number can be reused. A line, never a failed close; a home
+# without core/hot.py (a test fixture) skips it.
+if [ -f "$DAEDALUS_HOME/core/hot.py" ]; then
+  said="$(python3 "$DAEDALUS_HOME/core/hot.py" carry </dev/null 2>&1)" || said="hot.md entries were not marked carried: ${said#daedalus: }"
+  [ -z "$said" ] || log "${said#daedalus: }"
+fi
 # Phase 2, the vault commit (spec §4.7), runs only after the capture succeeded —
 # a failed capture stops the close before anything is committed.
 # rc=0 … || rc=$?: lib.sh sets -e, and `|| die` alone cannot tell exit 3 from exit 1.
