@@ -836,7 +836,6 @@ nothing_named() {   # nothing_named <NN> — no lease file, no worktree, no leas
   run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"removed the lease of window 01 (stale), and its worktree and branch: nothing uncommitted, nothing trunk lacks"*) : ;; *) echo "$output"; return 1 ;; esac
   nothing_named 01
-  [ ! -e "$DAEDALUS_HOME/state/swept-trees" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/swept-trees")" ]
 }
 
 @test "PROP-029: unmerged commits on lease/NN keep both worktree and branch, and the sentence names the commit count and the trunk" {
@@ -937,9 +936,41 @@ nothing_named() {   # nothing_named <NN> — no lease file, no worktree, no leas
   LS create >/dev/null; stale_lease 01
   touch "$T/.git/refs/heads/lease/01.lock"
   run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in *"removed the lease of window 01 (stale); its worktree was removed, but lease/01 in thing was kept: git branch -D failed ("*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"removed the lease of window 01 (stale); its worktree was moved to state/swept-trees/01-"*", but lease/01 in thing was kept: git branch -D failed ("*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -e "$DAEDALUS_HOME/worktrees/01" ]
   rm -f "$T/.git/refs/heads/lease/01.lock"; git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+}
+
+# --- review 2026-10-21, round 2: swept trees go to a recoverable trash, kept 7 days ------------------------------------
+@test "review 2026-10-21 round 2: a sweep moves a merged, clean window's worktree to state/swept-trees/<NN>-<stamp> with .swept.json naming each repo's branch and tip — ignored files survive there — and says where it went" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf '*.env\n' >> "$T/.git/info/exclude"; printf 'SECRET=1\n' > "$W/local.env"
+  tip="$(git -C "$T" rev-parse lease/01)"; subtip="$(git -C "$T/sub" rev-parse lease/01)"
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"and its worktree and branch: nothing uncommitted, nothing trunk lacks; its worktree moved to state/swept-trees/01-"*", deleted after 7 days"*) : ;; *) echo "$output"; return 1 ;; esac
+  nothing_named 01
+  e="$(ls "$DAEDALUS_HOME/state/swept-trees")"
+  case "$e" in 01-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) : ;; *) echo "entry name: $e"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/swept-trees/$e/thing/local.env")" = "SECRET=1" ]
+  python3 - "$DAEDALUS_HOME/state/swept-trees/$e/.swept.json" "$tip" "$subtip" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["window"] == "01" and d["moved_from"] == "worktrees/01", d
+got = {r["repo"]: (r["branch"], r["tip"]) for r in d["repos"]}
+assert got == {"thing": ("lease/01", sys.argv[2]), "thing/sub": ("lease/01", sys.argv[3])}, got
+PY
+}
+
+@test "review 2026-10-21 round 2: a trash entry older than 7 days (by the stamp in its name) is deleted at the next sweep; a younger one is kept" {
+  mkdir -p "$DAEDALUS_HOME/state/swept-trees/04-20200101T000000/thing" "$DAEDALUS_HOME/state/swept-trees/05-$(date +%Y%m%dT%H%M%S)/thing"
+  young="$(ls "$DAEDALUS_HOME/state/swept-trees" | grep '^05-')"
+  LS create >/dev/null; stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/swept-trees/04-20200101T000000" ]
+  [ -d "$DAEDALUS_HOME/state/swept-trees/$young/thing" ]
+  [ "$(python3 "$LL" doctor-lines | grep -c 'swept-trees/')" -ge 2 ] || { python3 "$LL" doctor-lines; return 1; }
+  python3 "$LL" doctor-lines | grep -q "NOTE     swept trees: state/swept-trees/$young (0 days old; deleted after 7)" || { python3 "$LL" doctor-lines; return 1; }
 }
 
 @test "a visitor (DIRECT_CALL_ID set) never creates, claims, spawns, changes or sweeps a window and cannot take the pen: each refused in plain words before anything is written; list still works" {

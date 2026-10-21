@@ -716,7 +716,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   case "$output" in *"Swept window 01: it was released and its session has ended, and its worktree and branch: nothing uncommitted, nothing trunk lacks"*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
   # v0.12.7 (PROP-029): the swept window's merged, clean worktree went with it; the number's new holder gets a fresh one
   [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse --abbrev-ref HEAD)" = "lease/01" ]
-  [ ! -e "$DAEDALUS_HOME/state/swept-trees" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/swept-trees")" ]
+  ls "$DAEDALUS_HOME/state/swept-trees" | grep -q '^01-'           # the old tree is in the trash for 7 days
 }
 
 @test "a released window with unpromoted commits is swept once its session ends, but its number stays with the work: the new terminal is numbered after it and its start says why the lower number was skipped" {

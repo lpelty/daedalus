@@ -562,7 +562,11 @@ removes a window whose session has ended, its worktree and `lease/<NN>` go
 with it only if the worktree is its own checkout with no uncommitted or
 untracked file git does not ignore, nothing hidden from `git status`, no commit
 only its reflog holds, and the branch holds nothing `origin/<trunk>` lacks (a
-released window whose session is still open keeps both); otherwise both stay, the
+released window whose session is still open keeps both). The worktree is not
+deleted then but moved to `state/swept-trees/<NN>-<time>` with a `.swept.json`
+naming each branch's last commit, and kept 7 days — git-ignored files such as
+an `.env` go with it — before a later sweep deletes it; doctor lists what is
+there. Otherwise both stay, the
 sweep's line names which check kept them, and if the branch holds unpromoted
 commits the number stays with them — the board and the band show it as swept
 with work waiting, and a terminal numbered past it is told why. A stale window that still holds work, or a background clone that never

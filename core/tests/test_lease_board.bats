@@ -573,6 +573,7 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   [ "$status" -eq 0 ] && [ -z "$output" ] && [ -z "$stderr" ] || { echo "$status: $output / $stderr"; return 1; }
   [ ! -f "$L/01.json" ] && [ ! -f "$L/01.seen" ]; [ -f "$L/02.json" ]; [ -f "$L/03.json" ]
   [ ! -e "$DAEDALUS_HOME/worktrees/01" ]; ! git -C "$DAEDALUS_HOME/target/thing" rev-parse -q --verify lease/01 >/dev/null
+  ls "$DAEDALUS_HOME/state/swept-trees" | grep -q '^01-'           # moved to the trash, not deleted
   [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]                     # another session's released window: untouched
   run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sC","reason":"other"}'
   [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$L/03.json" ]
@@ -595,6 +596,20 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   [ "$status" -eq 0 ] && [ -z "$output" ] && [ -z "$stderr" ] || { echo "$status: $output / $stderr"; return 1; }
   [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ -d "$W" ]
   [ "$(git -C "$W" log -1 --format=%s lease/01)" = "kept work" ]
+}
+
+@test "review 2026-10-21 round 2, session end: the swept tree is only renamed into the trash, never deleted inside the hook; old trash is deleted when time remains; all within the hook's 3 s" {
+  LS create >/dev/null; bind_live 01 sA; CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null
+  mkdir -p "$DAEDALUS_HOME/state/swept-trees/07-20200101T000000/thing"
+  t0="$(python3 -c 'import time; print(time.time())')"
+  run --separate-stderr SE '{"session_id":"sA","reason":"prompt_input_exit"}'
+  t1="$(python3 -c 'import time; print(time.time())')"
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  python3 -c 'import sys; d=float(sys.argv[2])-float(sys.argv[1]); assert d < 3.0, "took %.2fs" % d' "$t0" "$t1"
+  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]
+  e="$(ls "$DAEDALUS_HOME/state/swept-trees" | grep '^01-')"; [ -n "$e" ] || { ls "$DAEDALUS_HOME/state/swept-trees"; return 1; }
+  [ -f "$DAEDALUS_HOME/state/swept-trees/$e/thing/a.txt" ] && [ -f "$DAEDALUS_HOME/state/swept-trees/$e/.swept.json" ]
+  [ ! -e "$DAEDALUS_HOME/state/swept-trees/07-20200101T000000" ]
 }
 
 @test "session-end: a released session still open in another terminal (two live registry entries) keeps its lease — that terminal's hooks still read it (review 2026-10-19, finding 2)" {
