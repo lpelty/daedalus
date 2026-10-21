@@ -628,7 +628,7 @@ cleanup_branch() {
 # are below and as gates.sh manifests run.json up front: the launcher (or the merge) writes it under vault/evidence,
 # and an unmanifested file there, even for the length of a review, is what every other window's boundary hook flags.
 # A manifested path whose file never appears is nothing. Nothing launches when the manifest cannot be written, so no
-# review file is ever written unaccounted for. The append after the verdict (below) stays, unchanged.
+# review file is ever written unaccounted for, and the path is manifested once.
 python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
   printf 'cannot append the review file to the evidence manifest — cannot certify the run; no reviewer was started (%s)\n' "$verdict_file" >&2
   [ "$mode" != branch ] || cleanup_branch
@@ -726,20 +726,11 @@ else
   python3 "$RL" merge "$verdict_file" "$run_id" "$earlier_json" "$hunks_json" "${sources[@]}" \
     || { rm -f "$verdict_file"; cleanup_branch; exit 2; }
 fi
-# Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
-# another window's gates run. The review file is written and manifested in the
-# same breath, so the RUNNING excuse covers the negligible window between.
-# A failed append is exit 2 — cannot certify — like every other failure here,
-# NEVER die (exit 1): gates.sh reads 1 as REFUTED with the review file as the
-# fail_log, so a STANDS review whose manifest line failed was recorded as a
-# refutation and the append's own error never reached the operator. The review
-# file is removed rather than left unmanifested under vault/evidence, a
-# protected path Daedalus cannot clean; the verdict was not certified anyway.
-python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
-  rm -f "$verdict_file"
-  printf 'cannot append the review file to the evidence manifest — cannot certify the run; the review file was removed rather than left unmanifested (%s)\n' "$verdict_file" >&2
-  exit 2
-}
+# The review file's manifest line was written before any reviewer started (above, v0.12.7), under the manifest lock
+# (spec §4.9). A failed append there is exit 2 — cannot certify — before anything is launched, so no review file is
+# ever written unaccounted for; the earlier safety (remove a review whose append failed afterwards, rather than leave
+# it unmanifested under vault/evidence, a protected path Daedalus cannot clean) holds by construction. NEVER die
+# (exit 1) on it: gates.sh reads 1 as REFUTED with the review file as the fail_log.
 # The verdict: verdict_of, defined at the top of this file. Its notes (what it counted, what it listed and did not
 # count) go to stderr with the review file named, for gates.sh to show the operator.
 notes="$(mktemp)"
