@@ -558,9 +558,11 @@ in the morning is window 01 again and takes the pen from yesterday's
 session. A released window needs no sweep either: its lease goes when its
 session ends (the SessionEnd hook), or at the next terminal start if that hook
 did not run. When a sweep (by hand, at a start or at the session's end)
-removes a released or stale window, its worktree and `lease/<NN>` go with it
-only if the worktree has no uncommitted or untracked file git does not ignore
-and the branch holds nothing `origin/<trunk>` lacks; otherwise both stay, the
+removes a window whose session has ended, its worktree and `lease/<NN>` go
+with it only if the worktree is its own checkout with no uncommitted or
+untracked file git does not ignore, nothing hidden from `git status`, no commit
+only its reflog holds, and the branch holds nothing `origin/<trunk>` lacks (a
+released window whose session is still open keeps both); otherwise both stay, the
 sweep's line names which check kept them, and if the branch holds unpromoted
 commits the number stays with them — the board and the band show it as swept
 with work waiting, and a terminal numbered past it is told why. A stale window that still holds work, or a background clone that never

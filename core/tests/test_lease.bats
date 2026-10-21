@@ -619,8 +619,10 @@ PY
   case "$output" in *"resumed in pid $pid; rebinding instead"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -f "$DAEDALUS_HOME/state/leases/04.json" ]; case "$output" in *"04"*"quiet"*"--force"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -f "$DAEDALUS_HOME/state/leases/05.json" ]; case "$output" in *"window 05"*"finished"*"promote 05 or release 05"*) : ;; *) echo "$output"; return 1 ;; esac
-  # v0.12.7 (PROP-029): 01 and 03 are clean and hold nothing trunk lacks, so their worktrees and branches went too
-  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]; [ ! -e "$DAEDALUS_HOME/worktrees/03" ]
+  # v0.12.7 (PROP-029): 01 is stale, clean and holds nothing trunk lacks, so its worktree and branch went too; 03 is
+  # released but its session is not known to have ended, so its worktree and branch stay (review 2026-10-21, M2)
+  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]; [ -d "$DAEDALUS_HOME/worktrees/03/thing" ]
+  case "$output" in *"window 03 (released); worktree and branch kept: the window's session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
   run git -C "$T" rev-parse --verify -q lease/01; [ "$status" -ne 0 ]
   [ -d "$DAEDALUS_HOME/worktrees/04/thing" ]; [ -d "$DAEDALUS_HOME/worktrees/05/thing" ]     # not swept: untouched
   run LS sweep --force 04; [ "$status" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/state/leases/04.json" ]
@@ -869,10 +871,75 @@ nothing_named() {   # nothing_named <NN> — no lease file, no worktree, no leas
   git -C "$BATS_TEST_TMPDIR/origin.git" fetch -q "$T" refs/heads/lease/04:refs/heads/main   # promoted: on origin/main now
   git -C "$T" fetch -q origin
   CLAUDE_CODE_SESSION_ID=s4 LS claim 04 >/dev/null; CLAUDE_CODE_SESSION_ID=s4 LS release 04 >/dev/null
+  stale_lease 04                                                                          # and its session has ended
   run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   case "$output" in *"removed the lease of window 04 (released), and its worktree and branch"*) : ;; *) echo "$output"; return 1 ;; esac
   nothing_named 04
   run LS unpromoted 04; case "$output" in *"There is no window 04"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- review 2026-10-21, round 1: what sweep must never delete -----------------------------------------------------------
+@test "review 2026-10-21 (C1): a nested worktree removed and its directory made again by hand, files in it — not its own checkout (git status walks up to the outer repo, which ignores it): kept, named, nothing deleted" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  git -C "$T/sub" worktree remove --force "$W/sub"; git -C "$T/sub" worktree prune
+  mkdir -p "$W/sub"; printf 'hours of work\n' > "$W/sub/notes.md"
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept its worktree and branch"*"worktrees/01/thing/sub is not its own checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$W/sub/notes.md")" = "hours of work" ]
+  git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+}
+
+@test "review 2026-10-21 (C1): a worktree whose .git file is gone (git walks up to the home's repository) is not its own checkout: kept, its untracked file untouched" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'my work\n' > "$W/untracked-work.txt"; rm -f "$W/.git"
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"worktrees/01/thing is not its own checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$W/untracked-work.txt" ]
+}
+
+@test "review 2026-10-21 (L2): an assume-unchanged edit, invisible to git status, keeps the worktree" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  git -C "$W" update-index --assume-unchanged a.txt; printf 'real edit\n' >> "$W/a.txt"
+  [ -z "$(git -C "$W" status --porcelain)" ]
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept worktrees/01/thing: git is told to look away from 1 file (assume-unchanged or skip-worktree)"*) : ;; *) echo "$output"; return 1 ;; esac
+  grep -q 'real edit' "$W/a.txt"
+}
+
+@test "review 2026-10-21 (L2): a commit only the worktree's HEAD reflog still holds (reset away) keeps the worktree" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'x\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unpushed"; c=$(git -C "$W" rev-parse HEAD)
+  git -C "$W" reset -q --hard HEAD~1
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept worktrees/01/thing: its HEAD reflog holds 1 commit not on main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" reflog --format=%H | grep -c "$c")" -ge 1 ]
+}
+
+@test "review 2026-10-21 (M2): a released window whose session is still open, and sweep --force on a quiet window, remove only the lease files — the worktree and branch stay under a session that may still be running" {
+  LS create >/dev/null; LS create >/dev/null
+  pid="$(live_pid)"; registry_entry "$pid" s1
+  CLAUDE_CODE_SESSION_ID=s1 LS claim 01 >/dev/null; CLAUDE_CODE_SESSION_ID=s1 LS release 01 >/dev/null
+  pid2="$(live_pid)"; registry_entry "$pid2" s2; CLAUDE_CODE_SESSION_ID=s2 LS claim 02 >/dev/null
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/02.seen"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (released); worktree and branch kept: the window's session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+  run LS sweep --force 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 02 (quiet, removed on --force); worktree and branch kept: the window's session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]
+}
+
+@test "review 2026-10-21 (L1): when lease/NN cannot be deleted after the worktree was moved aside, the line says the worktree was removed and the branch kept, with git's words" {
+  LS create >/dev/null; stale_lease 01
+  touch "$T/.git/refs/heads/lease/01.lock"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale); its worktree was removed, but lease/01 in thing was kept: git branch -D failed ("*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]
+  rm -f "$T/.git/refs/heads/lease/01.lock"; git -C "$T" rev-parse --verify -q lease/01 >/dev/null
 }
 
 @test "a visitor (DIRECT_CALL_ID set) never creates, claims, spawns, changes or sweeps a window and cannot take the pen: each refused in plain words before anything is written; list still works" {

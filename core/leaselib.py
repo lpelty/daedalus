@@ -1656,12 +1656,12 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
             # v0.12.7 (PROP-029): its worktree and branch go too when nothing would be lost — clean, and lease/<NN>
             # on trunk — and only while the start has the time for the git that tells (kept otherwise, as before).
             budget = _left(deadline, 20)
-            removed, kept = clear_swept_trees_locked(root, nn, lease, timeout=budget) \
-                if budget >= RECLAIM_MIN_SECS else (False, [])
+            how, kept = clear_swept_trees_locked(root, nn, lease, timeout=budget) \
+                if budget >= RECLAIM_MIN_SECS else ("none", [])
             _remove_lease_files(root, nn)
             del leases[nn]
             carry_hot_locked(root, nn, leases)
-            out.append((nn, "Swept window %s: it was released and its session has ended%s." % (nn, swept_words(removed, kept))))
+            out.append((nn, "Swept window %s: it was released and its session has ended%s." % (nn, swept_words(how, kept))))
             continue
         if lease.get("finished") or lease.get("spawned"):
             continue
@@ -3974,35 +3974,83 @@ def swept_tree_checks(root: Path, nn: str, lease: dict, timeout: int = 20) -> li
         src, dest = root / "target" / repo, base / repo
         where = "" if repo == next(iter(trunks)) else " in %s" % repo
         try:
-            files = dirty_files(dest, timeout=timeout)
-            if files:
-                out.append("kept worktrees/%s/%s: %s" % (nn, repo, _plural(len(files), "uncommitted file")))
-        except Refused as e:
-            out.append("kept worktrees/%s/%s: %s" % (nn, repo, e))
-        if dest.is_dir():
-            admin = worktree_records(src).get(os.path.realpath(str(dest)))
-            if admin is not None:
-                holds = record_holds(admin) + (["a lock"] if (admin / "locked").exists() else [])
-                if holds:
-                    out.append("kept worktrees/%s/%s: git's record of it holds %s" % (nn, repo, " and ".join(holds)))
-        try:
             subjects = waiting_work(src, trunk, nn, timeout=timeout)
             if subjects:
                 out.append("kept lease/%s%s: %s not on %s" % (nn, where, _plural(len(subjects), "commit"), trunk))
         except Refused as e:
             out.append("kept lease/%s%s: %s" % (nn, where, e))
-        if dest.is_dir():
-            code, head, _ = _git(dest, "rev-parse", "--verify", "-q", "HEAD", timeout=timeout)
-            head = head.strip()
-            if code == 0 and head and head != ref_oid(src, "refs/heads/lease/%s" % nn):
-                code, n, err = _git(dest, "rev-list", "--count", "%s..%s" % (remote_ref(trunk), head), timeout=timeout)
-                if code != 0:
-                    out.append("kept worktrees/%s/%s: cannot tell whether its checkout holds commits %s lacks (%s)"
-                               % (nn, repo, trunk, _last_line(err)))
-                elif n.strip() not in ("", "0"):
-                    out.append("kept worktrees/%s/%s: its checkout holds %s not on %s"
-                               % (nn, repo, _plural(int(n.strip()), "commit"), trunk))
+        if not dest.exists():
+            continue
+        # Its own checkout, or nothing below is believed (review 2026-10-21, C1): a directory with no usable .git —
+        # a nested worktree removed and its directory made again by hand, a .git file deleted — makes git walk up to
+        # the outer repository (which may ignore the path) or the home's, and `git status` there called files in it
+        # clean. The toplevel must be the directory itself and the common git directory target/<repo>'s.
+        why = not_own_checkout(src, dest, timeout)
+        if why:
+            out.append("kept worktrees/%s/%s: worktrees/%s/%s is not its own checkout (%s)" % (nn, repo, nn, repo, why))
+            continue
+        try:
+            files = dirty_files(dest, timeout=timeout)
+            if files:
+                out.append("kept worktrees/%s/%s: %s" % (nn, repo, _plural(len(files), "uncommitted file")))
+        except Refused as e:
+            out.append("kept worktrees/%s/%s: %s" % (nn, repo, e))
+        # An edit git status is told not to see (L2): assume-unchanged (a lower-case tag) or skip-worktree (S).
+        code, listing, err = _git(dest, "ls-files", "-v", timeout=timeout)
+        if code != 0:
+            out.append("kept worktrees/%s/%s: cannot list its files (%s)" % (nn, repo, _last_line(err)))
+        else:
+            hidden = [ln for ln in listing.splitlines() if ln[:1].islower() or ln[:1] == "S"]
+            if hidden:
+                out.append("kept worktrees/%s/%s: git is told to look away from %s (assume-unchanged or skip-worktree)"
+                           % (nn, repo, _plural(len(hidden), "file")))
+        admin = worktree_records(src).get(os.path.realpath(str(dest)))
+        if admin is not None:
+            holds = record_holds(admin) + (["a lock"] if (admin / "locked").exists() else [])
+            if holds:
+                out.append("kept worktrees/%s/%s: git's record of it holds %s" % (nn, repo, " and ".join(holds)))
+        lost = reflog_only(src, dest, trunk, nn, timeout)
+        if lost:
+            out.append("kept worktrees/%s/%s: %s" % (nn, repo, lost))
     return out
+
+
+REFLOG_CAP = 200        # HEAD reflog entries a sweep reads before it keeps a worktree rather than read on
+
+
+def not_own_checkout(src: Path, dest: Path, timeout: int) -> Optional[str]:
+    """Why <dest> is not its own checkout of target/<repo>'s repository, or None when it is: `rev-parse
+    --show-toplevel` there must be <dest> itself, and `--git-common-dir` the repository's own."""
+    code, top, err = _git(dest, "rev-parse", "--show-toplevel", timeout=timeout)
+    if code != 0:
+        return "git cannot read it: %s" % _last_line(err)
+    if os.path.realpath(top.strip()) != os.path.realpath(str(dest)):
+        return "git reads it as part of %s" % top.strip()
+    mine, theirs = _common_dir(dest), _common_dir(src)
+    if mine is None or theirs is None or os.path.realpath(str(mine)) != os.path.realpath(str(theirs)):
+        return "its git repository is not the target's"
+    return None
+
+
+def reflog_only(src: Path, dest: Path, trunk: str, nn: str, timeout: int) -> Optional[str]:
+    """A commit only the worktree's HEAD reflog still holds — committed, then reset away — is work no branch has
+    (review 2026-10-21, L2): the sentence naming it, or None. The walk reads REFLOG_CAP entries; a longer reflog,
+    or one git cannot read or count, keeps the worktree too. Commits on lease/<NN> are left to the branch check."""
+    code, out, err = _git(dest, "reflog", "show", "--format=%H", "-n", str(REFLOG_CAP + 1), "HEAD", timeout=timeout)
+    if code != 0:
+        return "cannot read its HEAD reflog (%s)" % _last_line(err)
+    shas = sorted(set(ln.strip() for ln in out.splitlines() if ln.strip()))
+    if len(out.splitlines()) > REFLOG_CAP:
+        return "its HEAD reflog is longer than %d entries, more than a sweep reads" % REFLOG_CAP
+    if not shas:
+        return None
+    nots = [remote_ref(trunk)] + (["refs/heads/lease/%s" % nn] if ref_oid(src, "refs/heads/lease/%s" % nn) else [])
+    code, n, err = _git(dest, "rev-list", "--count", *shas, "--not", *nots, timeout=timeout)
+    if code != 0:
+        return "cannot tell whether its HEAD reflog holds commits %s lacks (%s)" % (trunk, _last_line(err))
+    if n.strip() not in ("", "0"):
+        return "its HEAD reflog holds %s not on %s" % (_plural(int(n.strip()), "commit"), trunk)
+    return None
 
 
 def remove_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 20) -> Optional[str]:
@@ -4034,29 +4082,43 @@ def remove_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 2
         if ref_oid(src, "refs/heads/lease/%s" % nn) is not None:
             code, _, err = _git(src, "branch", "-D", "lease/%s" % nn, timeout=timeout)
             if code != 0:
-                return "kept lease/%s in %s: git branch -D failed (%s)" % (nn, repo, _last_line(err))
+                # the worktree is already gone (moved aside, its record pruned): say what happened (L1)
+                return "%s, but lease/%s in %s was kept: git branch -D failed (%s)" % (
+                    "its worktree was removed" if trash is not None else "it had no worktree left", nn, repo,
+                    _last_line(err))
     write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)
     if trash is not None:
         shutil.rmtree(str(trash), ignore_errors=True)
     return None
 
 
-def clear_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 20) -> Tuple[bool, list]:
-    """swept_tree_checks, then remove_swept_trees_locked when they found nothing to keep: (removed, the sentences
-    naming what was kept and why). CALLER HOLDS THE LOCK; before the lease files go."""
+def clear_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 20) -> Tuple[str, list]:
+    """swept_tree_checks, then remove_swept_trees_locked when they found nothing to keep: ("removed", []), ("kept",
+    the sentences naming why), ("partial", [what happened]) when the worktree went and the branch could not, or
+    ("none", []) for a lease with no repositories. CALLER HOLDS THE LOCK; before the lease files go; only for a
+    window whose session has ended (sweep's caller judges that, review 2026-10-21 M2)."""
     if not (lease.get("trunks") or {}):
-        return False, []
+        return "none", []
     kept = swept_tree_checks(root, nn, lease, timeout=timeout)
     if kept:
-        return False, kept
+        return "kept", kept
     failed = remove_swept_trees_locked(root, nn, lease, timeout=timeout)
-    return (False, [failed]) if failed else (True, [])
+    if failed is None:
+        return "removed", []
+    return ("partial" if not failed.startswith("kept worktrees/") else "kept"), [failed]
 
 
-def swept_words(removed: bool, kept: list) -> str:
+SESSION_OPEN = "open"       # clear_swept_trees_locked was not asked: the window's session may still be running
+
+
+def swept_words(how: str, kept: list) -> str:
     """The tail of a sweep's line for the window's worktrees and branch."""
-    if removed:
+    if how == "removed":
         return ", and its worktree and branch: nothing uncommitted, nothing trunk lacks"
+    if how == SESSION_OPEN:
+        return "; worktree and branch kept: the window's session is still open"
+    if how == "partial":
+        return "; " + "; ".join(kept)
     if kept:
         return "; kept its worktree and branch — " + "; ".join(kept)
     return "; its worktree and branch are kept"
@@ -4112,10 +4174,13 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
                 continue
             else:
                 continue
-            removed, kept = clear_swept_trees_locked(root, nn, lease)
+            # review 2026-10-21 (M2): trees go only under a session that has ended (liveness stale); a released
+            # window whose session is open, or one removed on --force while quiet, keeps them — that session may
+            # still be running in them
+            how, kept = clear_swept_trees_locked(root, nn, lease) if state == "stale" else (SESSION_OPEN, [])
             _remove_lease_files(root, nn)
             carry_hot_locked(root, nn, leases)
-            lines.append("removed the lease of window %s (%s)%s" % (nn, why, swept_words(removed, kept)))
+            lines.append("removed the lease of window %s (%s)%s" % (nn, why, swept_words(how, kept)))
     return lines
 
 
