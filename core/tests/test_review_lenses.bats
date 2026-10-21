@@ -165,6 +165,19 @@ grep -c -- \"-lens-\\\$lens-review.md\" \"$DAEDALUS_HOME/vault/evidence/.manifes
   [ "$(grep -cF -- "$id-lens-criteria-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest")" -eq 1 ]
 }
 
+@test "review 2026-10-21 (H1): the run's own verdict path, <run>-review.md, is manifested before its reviewer starts — one reviewer and the lens merge alike" {
+  write_config; small_change
+  sed -i '' "s|^cp \"\\\$p\" \"$STUB/prompt-\\\$lens-\\\$n\"\$|&\\
+grep -c -- '-[0-9a-f]\\\\{6\\\\}-review.md\$' \"$DAEDALUS_HOME/vault/evidence/.manifest\" > \"$STUB/verdict-manifested-\\\$lens\" 2>/dev/null|" "$STUB/claude"
+  grep -q "verdict-manifested-" "$STUB/claude" || { cat "$STUB/claude"; return 1; }
+  gates
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$STUB/verdict-manifested-all")" -ge 1 ] || { echo "one reviewer started with its verdict path unmanifested"; return 1; }
+  rm -f "$STUB"/verdict-manifested-*; large_change
+  gates
+  [ "$(cat "$STUB/verdict-manifested-criteria" 2>/dev/null)" -ge 2 ] 2>/dev/null || { echo "lens run: $(cat "$STUB/verdict-manifested-criteria" 2>&1) $output"; return 1; }
+}
+
 @test "a lens whose review cannot be certified (an unlabelled finding) fails the run closed" {
   write_config; large_change
   printf '### F1 — big.txt:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$STUB/out-criteria"

@@ -100,48 +100,6 @@ def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
     return bool(rec) and rec.get("source") == "state"
 
 
-RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
-
-
-def run_json(root: Path, rid: str, manifest: set) -> Optional[dict]:
-    """Run <rid>'s state-side run.json as gates.sh wrote it, or None. Only a MANIFESTED record counts: gates.sh
-    writes run.json first and manifests it in the same breath (§4.9), so every real run's record is there from its
-    first moment, while a record a session wrote under state/ by hand (state/ is not protected) vouches for
-    nothing."""
-    if not RUN_ID.fullmatch(rid or ""):
-        return None
-    rj = root / "state" / "evidence" / rid / "run.json"
-    if str(rj.resolve()) not in manifest:
-        return None
-    try:
-        d = json.loads(rj.read_text())
-    except (OSError, ValueError):
-        return None
-    return d if isinstance(d, dict) else None
-
-
-def another_sessions_run(rec: dict, sid: object, mine: Optional[str]) -> bool:
-    """check_protected's question (v0.12.7, PROP-035 §2): is this run some other session's? The session id the
-    run recorded decides when there is one — a different one is another session's run, whatever window it ran
-    in, and this session's own run is always its own (its unmanifested evidence is still flagged: the PROP-017
-    guard). A record with no session id is judged by its window: a lease other than this session's."""
-    rs = rec.get("session_id")
-    if rs:
-        return str(rs) != str(sid or "")
-    rl = rec.get("lease")
-    return bool(rl and mine and str(rl) != str(mine))
-
-
-def names_this_window(rec: dict, sid: object, mine: Optional[str]) -> bool:
-    """check_evidence's audience for a run (v0.12.7, PROP-035 §2): the session its run.json names, or the window
-    (lease) it names — a later holder of that number inherits its branch and hears about the run. A record that
-    names neither is everyone's, as before: nothing vouches for it."""
-    rs, rl = rec.get("session_id"), rec.get("lease")
-    if not rs and not rl:
-        return True
-    return bool((rs and str(rs) == str(sid or "")) or (rl and mine and str(rl) == str(mine)))
-
-
 def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
     snapshot = marker.get("protected_snapshot")
     if snapshot is None:
@@ -160,8 +118,6 @@ def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
     now = v.protected_snapshot(root)
     bad: List[str] = []
     manifest = None
-    mine: Optional[List[Optional[str]]] = None
-    sid = marker.get("session_id")
     for path, cur in now.items():
         before = snapshot.get(path)
         if before is None or cur.get("sha") != before.get("sha"):
@@ -174,18 +130,6 @@ def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
                     manifest = v.manifest_paths(root)
                 if _sanctioned_evidence(root, path, manifest):
                     continue
-                # v0.12.7 (PROP-035 §2, 2026-10-21): new is judged against THIS session's snapshot, so another
-                # window's gate run writing its evidence while this session lives looked new here too — refute.sh's
-                # lens reviews sit unmanifested while the lenses run, and a failed lens's once stayed so — and the
-                # advice "revert these" would have deleted that window's review record. Evidence is attributed by
-                # its run: a run whose manifested run.json names another session is never this session's dirt,
-                # manifested or not. check_evidence still judges it, for the run's own window.
-                rec = run_json(root, evidence_run_id(path), manifest)
-                if rec is not None:
-                    if mine is None and not rec.get("session_id"):
-                        mine = [v.lease_context(root, sid).get("mine")]      # one lease read, only when needed
-                    if another_sessions_run(rec, sid, (mine or [None])[0]):
-                        continue
             if path in ["vault/evidence/" + n for n in MANIFEST_FILES]:
                 continue   # rewritten/locked by every run; entries judged above/check_evidence
             bad.append(path)
@@ -439,22 +383,6 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
             running_ok.add(rid)
         else:
             never_finished.append((rid, nn))
-    # v0.12.7 (PROP-035 §2): a run is said to the session or window its manifested run.json names, never to
-    # another window — window 01's Stop kept saying "a gate run under window 04 never finished" over window 04's
-    # abandoned run (2026-10-20, 20261020-205918-5450b3, superseded 28 s later), and a lens review another window's
-    # run left unmanifested read here as evidence no gate run produced. Not while a lease file cannot be read:
-    # then nothing vouches either way (above).
-    sid = marker.get("session_id")
-    elsewhere: dict = {}
-
-    def theirs(rid: str) -> bool:
-        if ctx.get("unreadable") or not rid:
-            return False
-        if rid not in elsewhere:
-            rec = run_json(root, rid, manifest)
-            elsewhere[rid] = rec is not None and not names_this_window(rec, sid, ctx.get("mine"))
-        return elsewhere[rid]
-
     stray: List[str] = []
     for d in (ev_state, root / "vault" / "evidence"):
         if not d.is_dir():
@@ -470,9 +398,6 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
             if any(rid and rid in str(p) for rid in running_ok):
                 continue
             if str(p.resolve()) not in manifest:
-                rid = p.relative_to(ev_state).parts[0] if d == ev_state else evidence_run_id(p.name)
-                if theirs(rid):
-                    continue
                 stray.append(str(p))
     if stray:
         import leaselib as ll
@@ -617,7 +542,7 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
     session's own changed set is recomputed here (the one place git runs for the
     lease on the Stop side); each of its paths is looked up in the PREVIOUS Stop's
     `seen` snapshot of the other live windows' sets, keyed the way first_warning
-    keys `warned` (the resolved absolute path). A path both windows changed in the
+    keys `warned` (warned_key: the other window and the resolved absolute path). A path both windows changed in the
     same interval was in nobody's snapshot — not a false positive here; the
     pre-write hook catches it in whichever window touches it next. Then the
     snapshot is replaced with the other live leases' sets as they stand now. A set
@@ -668,9 +593,11 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
         for rel in paths:
             key = str((wt / repo / rel).resolve())
             if key in warned:
-                continue
+                continue                                 # a bare path: warned before v0.12.7, for every window
             for nn, snap in sorted(previous.items()):
                 if isinstance(snap, dict) and rel in (snap.get(repo) or {}):
+                    if warned_key(nn, key) in warned:
+                        continue
                     other = ctx["leases"].get(nn) or {}
                     alias = (" (%s)" % other["alias"]) if other.get("alias") else ""
                     merged = merge_of(nn, repo)
@@ -680,7 +607,7 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
                         reasons.append(MERGED_AGAIN % (rel, nn, alias, nn))
                     else:
                         reasons.append(NEVER_FIRED % (rel, nn, alias))
-                    warned[key] = stamp                  # said once; saved with the snapshot below
+                    warned[warned_key(nn, key)] = stamp  # said once; saved with the snapshot below
     b["seen"] = {nn: ctx["changed"].get(nn, {}) for nn in ctx["leases"]
                  if nn not in ("prime", mine_nn) and ctx["liveness"].get(nn) != "stale"
                  and not ctx["leases"][nn].get("released")}
@@ -737,6 +664,14 @@ def save_boundary(root: Path, sid: object, data: dict) -> None:
 RECORD_FAILED = "daedalus: could not record the boundary warning in state/ (%s); the stop will repeat until it can be recorded."
 SNAPSHOT_FAILED = ("daedalus: could not record the Stop snapshot in state/ (%s); "
                    "the backstop will use the previous snapshot next time.")
+
+
+def warned_key(nn: str, path: str) -> str:
+    """The `warned` key for a warning about <path> held by window <nn>: per path AND per other window (v0.12.7,
+    review 2026-10-21), so a later conflict on the same path with a third window still warns once. The pre-write
+    warning and the Stop backstop write and read the same key. A bare path — the key before v0.12.7 — still counts
+    as warned for every window, so a session that spans the upgrade repeats nothing."""
+    return "%s:%s" % (nn, path)
 
 
 def first_warning(root: Path, sid: object, key: str) -> bool:
@@ -954,7 +889,7 @@ def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[s
     entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
     background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
     text = warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
-    if first_warning(root, sid, str(p.resolve())):
+    if first_warning(root, sid, warned_key(nn, str(p.resolve()))):
         return text, None
     return None, text.replace(FIRST_STOP, "")
 

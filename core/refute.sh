@@ -624,6 +624,16 @@ cleanup_branch() {
   rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}
   [ "$hunks_json" = "-" ] || rm -f "$hunks_json"
 }
+# The run's own verdict path is manifested BEFORE any reviewer starts (v0.12.7, review 2026-10-21), as the lens paths
+# are below and as gates.sh manifests run.json up front: the launcher (or the merge) writes it under vault/evidence,
+# and an unmanifested file there, even for the length of a review, is what every other window's boundary hook flags.
+# A manifested path whose file never appears is nothing. Nothing launches when the manifest cannot be written, so no
+# review file is ever written unaccounted for. The append after the verdict (below) stays, unchanged.
+python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
+  printf 'cannot append the review file to the evidence manifest — cannot certify the run; no reviewer was started (%s)\n' "$verdict_file" >&2
+  [ "$mode" != branch ] || cleanup_branch
+  exit 2
+}
 if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ] && [ "$hunks_json" = "-" ]; then
   # One reviewer, no earlier findings to check and no new ground to mark: the launcher writes the review file
   # itself, as it always has. A later review goes through the merge, which labels findings outside the new ground.
