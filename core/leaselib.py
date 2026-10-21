@@ -3940,7 +3940,7 @@ def record_promotion(root: Path, nn: str, promote_id: str) -> None:
         write_lease(root, nn, lease)
 
 # v0.12.7 (PROP-029, 2026-10-19): a swept window's worktree and branch go with its lease when nothing would be lost.
-# `sweep` removed window 04's lease and kept worktrees/04/atlas and lease/04; the unpromoted window then read "There is
+# `sweep` removed window 04's lease and kept worktrees/04/<repo> and lease/04; the unpromoted window then read "There is
 # no window 04", so `release --remove` could not run, and nothing in Daedalus removed them. Claim and reclaim of an
 # idle window still keep them, for re-use; only a sweep of a released or stale window (by hand, at a start, at the
 # session's end) clears them.

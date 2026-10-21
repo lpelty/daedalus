@@ -85,24 +85,24 @@ print("ok")'
 
 @test "classify by size (PROP-035 §1, 2026-10-21: a pytest naming seven globbed groups, 322 tests, 4 min 18 s, ran with no question): the test files the positional arguments expand to, globs expanded against the payload's cwd — more than 3 is suite, 1 to 3 is targeted; a directory is suite; file::node is its file; duplicates count once; a glob that matches nothing is one file; a filter keeps a run targeted only over 1 to 3 files" {
   W="$BATS_TEST_TMPDIR/tree"; mkdir -p "$W/tests/sub" "$W/core/tests"
-  for n in test_atlas_repoint test_atlas_update_a test_atlas_update_b test_atlas_update_c test_repos_a test_repos_b test_repos_c test_one test_two test_three; do
+  for n in test_target_repoint test_target_update_a test_target_update_b test_target_update_c test_repos_a test_repos_b test_repos_c test_one test_two test_three; do
     printf 'def test_x(): pass\n' > "$W/tests/$n.py"; done
   for n in a b c d e; do printf '@test "x" { true; }\n' > "$W/core/tests/test_$n.bats"; done
   run ami_py '
 cwd = sys.argv[3]
 cases = [(["pytest", "tests/test_one.py"], "none"),
          (["pytest", "tests/test_one.py", "tests/test_two.py", "tests/test_three.py", "-q"], "none"),
-         (["pytest", "tests/test_atlas_update_*.py", "tests/test_repos_*.py", "tests/test_one.py"], "suite"),
+         (["pytest", "tests/test_target_update_*.py", "tests/test_repos_*.py", "tests/test_one.py"], "suite"),
          (["pytest", "tests/test_repos_*.py"], "none"),
          (["pytest", "tests/"], "suite"),
          (["pytest", "tests/sub"], "suite"),
          (["pytest", "-k", "foo"], "suite"),
          (["pytest", "tests/test_one.py", "-k", "foo"], "none"),
-         (["pytest", "-k", "foo", "tests/test_atlas_update_*.py", "tests/test_repos_*.py"], "suite"),
+         (["pytest", "-k", "foo", "tests/test_target_update_*.py", "tests/test_repos_*.py"], "suite"),
          (["pytest", "tests/test_one.py::test_x", "tests/test_one.py::test_y", "tests/test_two.py"], "none"),
          (["pytest", "tests/test_one.py", "tests/test_one.py", "./tests/test_one.py", "tests/test_two.py", "tests/test_three.py"], "none"),
          (["pytest", "tests/test_nothing_*.py"], "none"),
-         (["uv", "run", "pytest", "tests/test_atlas_repoint.py", "tests/test_atlas_update_*.py", "tests/test_repos_*.py", "-q"], "suite"),
+         (["uv", "run", "pytest", "tests/test_target_repoint.py", "tests/test_target_update_*.py", "tests/test_repos_*.py", "-q"], "suite"),
          (["bats", "core/tests/test_a.bats"], "none"),
          (["bats", "core/tests/test_a.bats", "core/tests/test_b.bats", "core/tests/test_c.bats"], "none"),
          (["bats", "core/tests/test_*.bats"], "suite"),
@@ -119,14 +119,14 @@ print("ok")' "$W"
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
 
-@test "classify by size: the PROP-035 command verbatim, against a fixture tree with matching files, is suite" {
-  W="$BATS_TEST_TMPDIR/atlas"; mkdir -p "$W/tests"
-  for n in test_atlas_repoint test_atlas_update_cli test_atlas_update_knowledge test_atlas_update_skills \
+@test "classify by size: the PROP-035 command verbatim (the target's name in its file names replaced: the distribution names no deployment), against a fixture tree with matching files, is suite" {
+  W="$BATS_TEST_TMPDIR/target-tree"; mkdir -p "$W/tests"
+  for n in test_target_repoint test_target_update_cli test_target_update_knowledge test_target_update_skills \
            test_repos_list test_repos_sync test_repos_remove; do printf 'def test_x(): pass\n' > "$W/tests/$n.py"; done
   run ami_py '
 cwd = sys.argv[3]
 import shlex
-cmd = "uv run pytest tests/test_atlas_repoint.py tests/test_atlas_update_*.py tests/test_repos_*.py -q"
+cmd = "uv run pytest tests/test_target_repoint.py tests/test_target_update_*.py tests/test_repos_*.py -q"
 assert a.classify([shlex.split(cmd)], cwd) == "suite", a.classify([shlex.split(cmd)], cwd)
 print("ok")' "$W"
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }

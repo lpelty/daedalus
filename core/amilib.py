@@ -490,7 +490,7 @@ def head(seg: List[str]) -> List[str]:
 
 
 # v0.12.7 (PROP-035 §1, 2026-10-21): a test run is judged by its size, not by whether it names a file. A window ran
-# `uv run pytest tests/test_atlas_repoint.py tests/test_atlas_update_*.py tests/test_repos_*.py … -q` — 322 tests in
+# `uv run pytest tests/test_target_repoint.py tests/test_target_update_*.py tests/test_repos_*.py … -q` — 322 tests in
 # seven groups, 4 min 18 s — and was never asked the suite question, because any `.py` argument made the segment
 # targeted: one file and seven globbed groups were the same. More test files than this is a suite run.
 TARGETED_MAX_FILES = 3
