@@ -147,6 +147,24 @@ PY
   [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
 }
 
+@test "PROP-035 §2 (2026-10-21, run 20261021-134402-54c704): every lens's review path is manifested before any lens starts, so another window never sees a lens file no run accounts for; a lens that times out leaves its path manifested" {
+  write_config "  refute_timeout: 2"; large_change
+  echo 30 > "$STUB/sleep-upgrade"
+  # each reviewer, as it starts, notes whether its own review path is in the manifest already
+  sed -i '' "s|^cp \"\\\$p\" \"$STUB/prompt-\\\$lens-\\\$n\"\$|&\\
+grep -c -- \"-lens-\\\$lens-review.md\" \"$DAEDALUS_HOME/vault/evidence/.manifest\" > \"$STUB/manifested-\\\$lens\" 2>/dev/null|" "$STUB/claude"
+  grep -q "manifested-" "$STUB/claude" || { cat "$STUB/claude"; return 1; }
+  gates
+  [ "$status" -ne 0 ]
+  id="$(run_id)"
+  for l in criteria trust upgrade failure; do
+    [ "$(cat "$STUB/manifested-$l" 2>/dev/null)" -ge 1 ] 2>/dev/null || { echo "lens $l started unmanifested: $(cat "$STUB/manifested-$l" 2>&1)"; return 1; }
+    grep -qF "$DAEDALUS_HOME/vault/evidence/$id-lens-$l-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest" || { echo "lens $l"; return 1; }
+  done
+  # each path once: manifested before the launch, not again after it
+  [ "$(grep -cF -- "$id-lens-criteria-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest")" -eq 1 ]
+}
+
 @test "a lens whose review cannot be certified (an unlabelled finding) fails the run closed" {
   write_config; large_change
   printf '### F1 — big.txt:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$STUB/out-criteria"

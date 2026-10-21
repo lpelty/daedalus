@@ -453,7 +453,7 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   case "$output" in *"(visitor, not blocking)"*) echo "PostToolUse must not downgrade: $output"; return 1 ;; *"gate.log"*) : ;; *) echo "the PostToolUse reason must surface for a visitor: $output"; return 1 ;; esac
 }
 
-@test "another live lease's RUNNING run — run dir, and a written vault summary with no review file yet — is not stray; a stale lease's is stray with the 'never finished' line" {
+@test "another live lease's RUNNING run — run dir, and a written vault summary with no review file yet — is not stray; a stale lease's is not this window's either (v0.12.7: the note goes only to the session or window the run names)" {
   two_leases; live_holder 01; live_holder 02
   cp "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
   rid="20991231-000000-abcdef"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid"
@@ -463,8 +463,75 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$DAEDALUS_HOME/vault/evidence/$rid.md"
   run hook_as Stop sA; [ "$status" -eq 0 ]
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(pid=1,proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  # v0.12.7 (PROP-035 §2, 2026-10-20 run 20261020-205918-5450b3): the unfinished-run note is said only to the
+  # session or window its run.json names; another window sees nothing of that run
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "another window's unfinished run reached window 01: $output"; return 1; }
+  case "$output" in *"never finished"*|*"gate-1.log"*) echo "$output"; return 1 ;; *) : ;; esac
+}
+
+# --- v0.12.7 (PROP-035 §2): evidence is attributed by run, not by snapshot time -----------------------------------
+
+# visible_vault — the layout PROP-017 found: the vault is not its own repository and not ignored, so vault/evidence/
+# is protected dirt the home's git can see. Before two_leases, so both sessions' snapshots are taken in it.
+visible_vault() {
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  printf 'target/\nconfig.yaml\nstate/\nworktrees/\n.claude/settings.local.json\n' > "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add .gitignore
+  cp "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
+}
+# run_json <run-id> <lease> <session> <result> — gates.sh's run record, manifested as gates.sh manifests it
+run_json() {
+  mkdir -p "$DAEDALUS_HOME/state/evidence/$1"
+  printf '{"run_id":"%s","started":"2026-10-21T13:44:02","lease":"%s","session_id":"%s","result":"%s"}' "$1" "$2" "$3" "$4" \
+    > "$DAEDALUS_HOME/state/evidence/$1/run.json"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$1/run.json"
+}
+
+@test "PROP-035 §2 (2026-10-21, run 20261021-134402-54c704): window 02's review writes a lens file not yet manifested — window 01's PostToolUse and Stop are silent; window 02's still name it" {
+  visible_vault; two_leases; live_holder 01; live_holder 02; sess sB
+  rid="20261021-134402-54c704"; run_json "$rid" 02 sB RUNNING
+  lens="vault/evidence/$rid-lens-failure-review.md"
+  printf -- '---\ntype: evidence-review\n---\nVERDICT: STANDS\n' > "$DAEDALUS_HOME/$lens"
+  for ev in PostToolUse Stop; do
+    run hook_as "$ev" sA; [ "$status" -eq 0 ] || { echo "window 01 $ev blamed for window 02's run: $output"; return 1; }
+    case "$output" in *"$rid"*) echo "window 01 $ev named it: $output"; return 1 ;; *) : ;; esac
+  done
+  run hook_as PostToolUse sB; [ "$status" -eq 2 ]
+  case "$output" in *"Protected files changed this session: $lens"*) : ;; *) echo "window 02 must still see its own unmanifested evidence: $output"; return 1 ;; esac
+  # the run finished (PASS) and the lens file was still never manifested: still not window 01's
+  run_json "$rid" 02 sB PASS
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "PROP-035 §2: the run.json names this session but the evidence file is unmanifested — still flagged; a hand-written vault/evidence review with no run.json — still flagged (PROP-017 guard holds)" {
+  visible_vault; two_leases; live_holder 01; live_holder 02
+  rid="20261021-140000-aaaaaa"; run_json "$rid" 01 sA PASS
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/$rid-lens-trust-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"Protected files changed this session: vault/evidence/$rid-lens-trust-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$DAEDALUS_HOME/vault/evidence/$rid-lens-trust-review.md"
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/x-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/x-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$DAEDALUS_HOME/vault/evidence/x-review.md"
+  # a run.json that is not manifested vouches for nothing: a session cannot excuse a file by writing state/ itself
+  rid2="20261021-150000-bbbbbb"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid2"
+  printf '{"run_id":"%s","lease":"02","session_id":"sB","result":"PASS"}' "$rid2" > "$DAEDALUS_HOME/state/evidence/$rid2/run.json"
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/$rid2-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/$rid2-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "PROP-035 §2 (2026-10-20, run 20261020-205918-5450b3 superseded 28 s later): an unfinished run's note goes to the session its run.json names, and to no other window" {
+  two_leases; live_holder 01; live_holder 02
+  cp "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
+  rid="20261020-205918-5450b3"; run_json "$rid" 09 sA RUNNING      # this session, under a window that is gone
+  printf 'x\n' > "$DAEDALUS_HOME/state/evidence/$rid/gate-1.log"
   run hook_as Stop sA; [ "$status" -eq 2 ]
-  case "$output" in *"a gate run under window 02 (poc-ui) never finished; its session is gone"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"a gate run under window 09 never finished"*"gate-1.log"*) : ;; *) echo "the run's own session must hear it: $output"; return 1 ;; esac
+  run_json "$rid" 09 sGone RUNNING                                  # another session's, under a window that is gone
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"never finished"*) echo "$output"; return 1 ;; *) : ;; esac
 }
 
 @test "a lease file that cannot be read never turns a live window's RUNNING run into 'never finished; its session is gone': the block names the unreadable file, at Stop and at PostToolUse" {

@@ -659,6 +659,19 @@ else
     cleanup_branch
     exit 2
   fi
+  # Every lens's review path is manifested BEFORE any lens starts, the way gates.sh manifests run.json and the vault
+  # summary up front (v0.12.7, PROP-035 §2, 2026-10-21): each launcher writes its file under vault/evidence while it
+  # runs, and while the paths were appended only after the whole batch, every other window's boundary hook saw a
+  # new, unaccounted-for evidence file and called it that window's tampering; a lens that failed was skipped before
+  # its append, so a file it left was never manifested and the block never ended. A manifested path whose file is
+  # absent is nothing; one whose file is there is this recorded run's output. Nothing launches when the manifest
+  # cannot be written: a review whose files nobody can account for is not started.
+  for l in "${lenses[@]}"; do printf '%s\n' "$ev/$run_id-lens-$l-review.md"; done \
+    | python3 "$DAEDALUS_HOME/core/manifest-append.py" - || {
+    printf 'the lens reviews could not be added to the evidence manifest — cannot certify the run\n' >&2
+    cleanup_branch
+    exit 2
+  }
   work="$(mktemp -d)"
   i=0
   for l in "${lenses[@]}"; do
@@ -685,10 +698,6 @@ else
       failed="${failed}the $l lens: $(launch_failure "$rc" "$work/$l.err" | tr '\n' ' ' | sed 's/ *$//'); "
       continue
     fi
-    # Written by the launcher under vault/evidence: manifested now, whatever the others did, so a lens review
-    # never sits there unaccounted for.
-    python3 "$DAEDALUS_HOME/core/manifest-append.py" "$lf" \
-      || { failed="${failed}the $l lens: its review could not be added to the evidence manifest; "; continue; }
     lnotes="$(mktemp)"
     verdict_of "$lf" run >/dev/null 2>"$lnotes"
     if [ "$?" -eq 2 ]; then
