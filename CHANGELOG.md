@@ -4,6 +4,67 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.6 — hot.md is shown at every start, every window writes its own entries, and an old entry gets a question
+
+**In short.** Every session start now shows hot.md's In flight and Blocked
+entries, in every window. Each entry is a short block: who owns it, the next
+action, and the condition that removes it. Any window writes its own entries
+through one command. An entry that has sat for 14 days is put to you once:
+move it to the backlog, or keep working on it.
+
+**What went wrong.**
+- hot.md only grew. On one deployment it reached 798 lines.
+- Nothing read it at the start, so nobody saw it grow.
+- Removing an entry took judgment nothing supplied. No entry said who owned
+  it, when it began, or what would make it done.
+- Only the window holding the pen could write it. A window that closed with
+  unfinished work could leave it only in its session log.
+- Most of the growth sat in the "Done since the last entry" section.
+
+**What changed.**
+- Each entry under In flight or Blocked is one block, with `owner:`,
+  `since:`, `where:`, `next:` and `done when:`.
+- `core/hot.py` is the only way the file changes: `add`, `update`, `remove`,
+  `keep`. It changes one entry under a lock, so two windows writing at once
+  both land.
+- An Edit or Write of `vault/hot.md` is refused, and the refusal names the
+  command.
+- Any window adds entries. A window changes its own, carried ones, and ones
+  owned by you or another agent. Another open window's entry is refused,
+  naming that window.
+- When an entry's `done when:` is met, the window that sees it removes it in
+  that same turn.
+- At a close, `core/close.sh` marks the window's remaining entries carried. A
+  sweep does the same for a window closed without a close.
+- An entry 14 days old is asked about at the first start of the day. Your
+  answer, in any words, is applied by that window. `keep` stamps `kept:` and
+  restarts the 14 days.
+- The template's Done section is gone. What was done goes in the session log.
+- There is no limit on the file's length, and no warning about it.
+
+**What you will see.**
+- At every start, a list under In flight and Blocked. Each entry shows its
+  owner, next action, done-when and age in days.
+- At most once a day for each old entry: "hot.md entry '<topic>' has sat for
+  14 days (owner: window 02). Move it to the backlog, or keep working on it in
+  a window?"
+- At the first start after the update, an entry with no date gets today's
+  date, so no wave of questions follows.
+- Any other section, such as "Done since the last entry" or a "Waiting on"
+  section, is named at every start with its line count. Nothing in the file
+  is hidden.
+- Text not in entry form, and those sections, are listed once to the window
+  holding the pen. They are kept until that window moves them: waiting items
+  to Blocked entries, done items to the session log, standing rules to
+  `pitfalls/`.
+- `core/doctor.sh` lists old entries and text not in entry form.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.6`. A session start
+shows "hot.md — what is underway and what it waits on".
+
 ## v0.12.5 — your instruction is your yes
 
 **In short.** Say "promote window 2" in any words, and a clean result is
