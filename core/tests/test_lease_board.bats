@@ -564,7 +564,7 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
 # --- the SessionEnd sweep (the operator, 2026-10-19): a window's own released lease goes when its session ends ----------
 SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end; }
 
-@test "session-end: the ending session's own released lease is removed (worktree and branch kept); another session's released lease, its own unreleased one, and a bad or empty payload are left — exit 0 and nothing printed every time" {
+@test "session-end: the ending session's own released lease is removed (with its worktree and branch, merged and clean — v0.12.7, PROP-029); another session's released lease, its own unreleased one, and a bad or empty payload are left — exit 0 and nothing printed every time" {
   LS create >/dev/null; LS create >/dev/null; LS create >/dev/null
   bind_live 01 sA; bind_live 02 sB; bind_live 03 sC
   CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null; CLAUDE_CODE_SESSION_ID=sB LS release 02 >/dev/null
@@ -572,7 +572,8 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sA","reason":"prompt_input_exit"}'
   [ "$status" -eq 0 ] && [ -z "$output" ] && [ -z "$stderr" ] || { echo "$status: $output / $stderr"; return 1; }
   [ ! -f "$L/01.json" ] && [ ! -f "$L/01.seen" ]; [ -f "$L/02.json" ]; [ -f "$L/03.json" ]
-  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; git -C "$DAEDALUS_HOME/target/thing" rev-parse -q --verify lease/01 >/dev/null
+  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]; ! git -C "$DAEDALUS_HOME/target/thing" rev-parse -q --verify lease/01 >/dev/null
+  [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]                     # another session's released window: untouched
   run --separate-stderr SE '{"hook_event_name":"SessionEnd","session_id":"sC","reason":"other"}'
   [ "$status" -eq 0 ] && [ -z "$output" ]; [ -f "$L/03.json" ]
   # /clear: the terminal goes on (session-start treats a clear as continuing the session) — its released lease stays
@@ -583,6 +584,17 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
     run --separate-stderr SE "$bad"; [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "payload '$bad': $status $output $stderr"; return 1; }
   done
   [ -f "$L/02.json" ]
+}
+
+@test "PROP-029 at session end: a released window with an unpromoted commit keeps its worktree and branch when its session ends; its lease goes, silently" {
+  LS create >/dev/null; bind_live 01 sA
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'w\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "kept work"
+  CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null
+  run --separate-stderr SE '{"session_id":"sA","reason":"prompt_input_exit"}'
+  [ "$status" -eq 0 ] && [ -z "$output" ] && [ -z "$stderr" ] || { echo "$status: $output / $stderr"; return 1; }
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ -d "$W" ]
+  [ "$(git -C "$W" log -1 --format=%s lease/01)" = "kept work" ]
 }
 
 @test "session-end: a released session still open in another terminal (two live registry entries) keeps its lease — that terminal's hooks still read it (review 2026-10-19, finding 2)" {
