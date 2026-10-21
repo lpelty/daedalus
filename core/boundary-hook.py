@@ -34,7 +34,10 @@ decision), so the Stop hook carries the backstop (§4.6 "Budget, and what a
 timeout costs"): at every Stop it records under `seen` every other live
 lease's changed set as it stands; at the next Stop a path of this
 session's own changed set that was in the PREVIOUS snapshot and has no
-`warned` entry blocks with "the warning never fired". A visitor — a
+`warned` entry blocks with "the warning never fired", once (v0.12.7: a
+said block is recorded under `warned`) — and not at all for a path this
+window took over by merging that window's branch, unless it changed the
+path again after the merge (check_backstop). A visitor — a
 session with DIRECT_CALL_ID in its environment (§4.8, §8.5) — is
 read-only and cannot have caused any Stop-time dirt: the backstop does
 not run for it and every Stop reason becomes a "(visitor, not blocking)"
@@ -563,6 +566,50 @@ RESOLUTION_FAILED = "the lease resolution "                          # verifylib
 
 NEVER_FIRED = ("you changed %s, which window %s%s had already changed, and the warning never fired "
                "(the pre-write hook timed out?). Message that window before you go on.")
+# v0.12.7 (PROP-035 §3): a path still contested after this window merged the other window's branch says so — the
+# merge is why no pre-write warning was ever written, not a hook that timed out.
+MERGED_AGAIN = ("you changed %s again after merging window %s%s's branch (lease/%s), which had changed it. "
+                "Message that window before you go on.")
+GIT_SECS = 5        # each git call the backstop makes for a merge; the Stop hook's whole budget is larger
+
+
+def _git_out(tree: Path, *args: str) -> Tuple[int, str]:
+    code, out, _ = v.run(["git", "-C", str(tree)] + list(args), timeout=GIT_SECS)
+    return code, out
+
+
+def lease_tip(tree: Path, nn: str) -> Optional[str]:
+    """lease/<NN>'s commit, read in this window's checkout of the repo (a worktree shares its repository's
+    branches), or None when the branch is not there."""
+    code, out = _git_out(tree, "rev-parse", "--verify", "-q", "refs/heads/lease/%s^{commit}" % nn)
+    return out.strip() if code == 0 and out.strip() else None
+
+
+def handed_over(tree: Path, trunk: Optional[str], tips: List[Optional[str]]) -> Optional[Tuple[str, set]]:
+    """(the merged tip, the paths its commits changed) when one of `tips` — the other window's lease/<NN> as it is
+    now, then as the previous Stop recorded it — is an ancestor of this window's HEAD: this window merged that
+    branch. The paths are the ones that branch committed since it left trunk (origin/<trunk>, the ref promote
+    and `unpromoted` judge by), so an uncommitted change in the other window — no merge can carry it — is never
+    handed over. None when nothing was merged or anything cannot be told: then the backstop says what it said
+    before."""
+    if not trunk:
+        return None
+    for tip in [t for i, t in enumerate(tips) if t and t not in tips[:i]]:
+        if _git_out(tree, "merge-base", "--is-ancestor", tip, "HEAD")[0] != 0:
+            continue
+        code, out = _git_out(tree, "diff", "--name-only", "--no-renames", "refs/remotes/origin/%s...%s" % (trunk, tip))
+        if code != 0:
+            return None
+        return tip, set(ln for ln in out.splitlines() if ln)
+    return None
+
+
+def changed_after_merge(tree: Path, tip: str, rel: str) -> bool:
+    """This window's copy of rel — committed after the merge, staged, or only in the working tree — is not what
+    the merged tip had: changed again after the merge, and still contested. One `git diff` of the tip against the
+    working tree; an answer git cannot give counts as changed, so the backstop blocks rather than passes."""
+    code, _ = _git_out(tree, "diff", "--quiet", tip, "--", rel)
+    return code != 0
 
 
 def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]) -> None:
@@ -579,7 +626,17 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
     Likewise a snapshot that cannot be written: the reasons already found still
     block, one stderr line says why, and the previous snapshot stands for next
     time — the OSError climbing to main's outer except was a silent pass at
-    exactly the event where a timeout is meant to block (Task 12 review)."""
+    exactly the event where a timeout is meant to block (Task 12 review).
+
+    After an agreed merge (v0.12.7, PROP-035 §3, 2026-10-21): the operator had three windows ship as one version,
+    one window merged the other two's branches, and every Stop after it listed all ~31 merged files as "the warning
+    never fired (the pre-write hook timed out?)" — a `git merge` never passes the pre-write hook, so no `warned`
+    entry was ever written and the block never cleared. Now, when lease/<NN>'s tip (as it is now, or as the
+    previous Stop recorded it under `seen_tips`) is an ancestor of this window's HEAD, the paths that branch
+    committed are handed over and skipped — unless this window changed the path again after the merge (a later
+    commit, or its working tree), which is contested and blocks with words that name the merge. And a path whose
+    block has been said is recorded under `warned`, the once-per-path rule the pre-write warning keeps, so a Stop
+    never repeats what it already said: messaging the owner is the remedy, and it must not take another Stop."""
     import leaselib as ll
     ctx = v.lease_context(root, str(sid) if sid else None)
     if not ctx["leases"] or not ctx["mine"]:
@@ -588,13 +645,25 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
     lease = ctx["leases"][mine_nn]
     b = load_boundary(root, sid)
     previous = b.get("seen") or {}
-    warned = b.get("warned") or {}
+    previous_tips = b.get("seen_tips") or {}
+    warned = b.setdefault("warned", {})
     try:
         mine = ll.recompute_changed(root, mine_nn, lease)
     except ll.Refused as e:
         notes.append(str(e))
         mine = ctx["changed"].get(mine_nn) or {}
     wt = root / str(lease.get("worktree") or ("worktrees/%s" % mine_nn))
+    trunks = lease.get("trunks") or {}
+    merges: dict = {}
+
+    def merge_of(nn: str, repo: str) -> Optional[Tuple[str, set]]:
+        if (nn, repo) not in merges:
+            tree = wt / repo
+            recorded = (previous_tips.get(nn) or {}).get(repo) if isinstance(previous_tips.get(nn), dict) else None
+            merges[(nn, repo)] = handed_over(tree, trunks.get(repo), [lease_tip(tree, nn), recorded])
+        return merges[(nn, repo)]
+
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     for repo, paths in mine.items():
         for rel in paths:
             key = str((wt / repo / rel).resolve())
@@ -604,10 +673,21 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
                 if isinstance(snap, dict) and rel in (snap.get(repo) or {}):
                     other = ctx["leases"].get(nn) or {}
                     alias = (" (%s)" % other["alias"]) if other.get("alias") else ""
-                    reasons.append(NEVER_FIRED % (rel, nn, alias))
+                    merged = merge_of(nn, repo)
+                    if merged is not None and rel in merged[1]:
+                        if not changed_after_merge(wt / repo, merged[0], rel):
+                            continue                     # handed over by the merge: nothing contested
+                        reasons.append(MERGED_AGAIN % (rel, nn, alias, nn))
+                    else:
+                        reasons.append(NEVER_FIRED % (rel, nn, alias))
+                    warned[key] = stamp                  # said once; saved with the snapshot below
     b["seen"] = {nn: ctx["changed"].get(nn, {}) for nn in ctx["leases"]
                  if nn not in ("prime", mine_nn) and ctx["liveness"].get(nn) != "stale"
                  and not ctx["leases"][nn].get("released")}
+    # the tips the snapshot's sets stood at, so a merge of that tip is recognised even once lease/<NN> moved on or
+    # was deleted (a sweep removes a merged window's branch)
+    b["seen_tips"] = {nn: {repo: t for repo in (sets or {}) for t in [lease_tip(wt / repo, nn)] if t}
+                      for nn, sets in b["seen"].items() if isinstance(sets, dict) and sets}
     try:
         save_boundary(root, sid, b)
     except OSError as e:

@@ -436,6 +436,51 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   case "$output" in *"daedalus: could not record"*) echo "no stderr line once state/ is writable: $output"; return 1 ;; *"the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+# --- v0.12.7 (PROP-035 §3): the backstop after an agreed merge ------------------------------------------------------
+gitc() { git -C "$1" -c user.email=t@x -c user.name=t "${@:2}"; }
+
+@test "PROP-035 §3 (2026-10-21, window 01 merged lease/06 f78a0a5 and lease/04 55196c3 for 0.36.0): after merging window 02's branch the Stop is silent for its paths; a merged path changed again in a later commit blocks once with the merge wording, and the next Stop is silent" {
+  two_leases; live_holder 01; live_holder 02
+  W1="$DAEDALUS_HOME/worktrees/01/thing"; W2="$DAEDALUS_HOME/worktrees/02/thing"
+  mkdir -p "$W2/hooks" "$W2/tests"; printf 'theirs\n' > "$W2/hooks/capture.py"; printf 't\n' > "$W2/tests/test_capture.py"
+  gitc "$W2" add -A; gitc "$W2" commit -q -m "window 02's work"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }       # records 02's set as seen
+  gitc "$W1" merge -q --no-edit lease/02
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "a merged branch's paths blocked: $output"; return 1; }
+  case "$output" in *"never fired"*|*"hooks/capture.py"*) echo "$output"; return 1 ;; *) : ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'mine after the merge\n' > "$W1/hooks/capture.py"; gitc "$W1" commit -q -am "window 01 changes it again"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py again after merging window 02 (poc-ui)'s branch (lease/02), which had changed it. Message that window before you go on."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"timed out"*|*"tests/test_capture.py"*) echo "only the path changed again, in merge words: $output"; return 1 ;; *) : ;; esac
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert sys.argv[2] in d["warned"], d' "$DAEDALUS_HOME/state/session-sA-boundary.json" "$W1/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "said once, never again: $output"; return 1; }
+}
+
+@test "PROP-035 §3: a merged path changed again in the working tree, uncommitted, blocks once with the merge wording; the merge with a merge commit is still a merge" {
+  two_leases; live_holder 01; live_holder 02
+  W1="$DAEDALUS_HOME/worktrees/01/thing"; W2="$DAEDALUS_HOME/worktrees/02/thing"
+  mkdir -p "$W2/hooks"; printf 'theirs\n' > "$W2/hooks/capture.py"; gitc "$W2" add -A; gitc "$W2" commit -q -m "window 02's work"
+  printf 'own\n' > "$W1/own.txt"; gitc "$W1" add -A; gitc "$W1" commit -q -m "window 01's own work"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  gitc "$W1" merge -q --no-ff --no-edit lease/02
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'edited, not committed\n' > "$W1/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py again after merging window 02 (poc-ui)'s branch (lease/02)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "PROP-035 §3: the original backstop case, a window 02 path changed with no merge, still says the warning never fired — and, said once, is recorded under warned so the next Stop is silent" {
+  two_leases; live_holder 01; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py, which window 02 (poc-ui) had already changed, and the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "a visitor (DIRECT_CALL_ID set) is never blocked at Stop: stray evidence, an unbindable session and a backstop hit all become notes, exit 0; its PreToolUse denials still apply" {
   two_leases; live_holder 01; live_holder 02
   mkdir -p "$DAEDALUS_HOME/state/evidence/x"; printf 'x\n' > "$DAEDALUS_HOME/state/evidence/x/gate.log"   # unmanifested: stray
