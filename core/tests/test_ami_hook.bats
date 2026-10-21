@@ -46,7 +46,7 @@ print("ok")'
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
 
-@test "classify: the §6.1 table — evidence runs and the switch's own commands are none at any depth; a whole-suite bats or pytest is suite; a targeted one is none; everything else is destructive; none beats suite beats destructive" {
+@test "classify: the §6.1 table — evidence runs and the switch's own commands are none at any depth; a whole-suite bats or pytest is suite (a filter over a directory, or over no file, too — v0.12.7); a targeted one is none; everything else is destructive; none beats suite beats destructive" {
   run ami_py '
 cases = [([["core/gates.sh"]], "none"),
          ([["bash", "core/gates.sh"]], "none"),
@@ -60,13 +60,14 @@ cases = [([["core/gates.sh"]], "none"),
          ([["timeout", "600", "bats", "core/tests"]], "suite"),
          ([["/opt/homebrew/bin/bats", "--jobs", "8", "core/tests"]], "suite"),
          ([["bats", "core/tests/test_x.bats"]], "none"),
-         ([["bats", "-f", "pat", "core/tests"]], "none"),
-         ([["bats", "--filter", "pat", "core/tests"]], "none"),
+         ([["bats", "-f", "pat", "core/tests/test_x.bats"]], "none"),
+         ([["bats", "--filter", "pat", "core/tests"]], "suite"),
          ([["pytest"]], "suite"),
          ([["uv", "run", "pytest", "tests/", "-q"]], "suite"),
          ([["python3", "-m", "pytest", "-q"]], "suite"),
          ([["pytest", "tests/test_a.py"]], "none"),
-         ([["pytest", "-k", "a"]], "none"),
+         ([["pytest", "-k", "a"]], "suite"),
+         ([["pytest", "tests/test_a.py", "-k", "a"]], "none"),
          ([["pytest", "tests/test_a.py::test_b"]], "none"),
          ([["rm", "-rf", "x"]], "destructive"),
          ([["git", "status"]], "destructive"),
@@ -79,6 +80,55 @@ for segs, want in cases:
     got = a.classify(segs)
     assert got == want, (segs, got, want)
 print("ok")'
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "classify by size (PROP-035 §1, 2026-10-21: a pytest naming seven globbed groups, 322 tests, 4 min 18 s, ran with no question): the test files the positional arguments expand to, globs expanded against the payload's cwd — more than 3 is suite, 1 to 3 is targeted; a directory is suite; file::node is its file; duplicates count once; a glob that matches nothing is one file; a filter keeps a run targeted only over 1 to 3 files" {
+  W="$BATS_TEST_TMPDIR/tree"; mkdir -p "$W/tests/sub" "$W/core/tests"
+  for n in test_atlas_repoint test_atlas_update_a test_atlas_update_b test_atlas_update_c test_repos_a test_repos_b test_repos_c test_one test_two test_three; do
+    printf 'def test_x(): pass\n' > "$W/tests/$n.py"; done
+  for n in a b c d e; do printf '@test "x" { true; }\n' > "$W/core/tests/test_$n.bats"; done
+  run ami_py '
+cwd = sys.argv[3]
+cases = [(["pytest", "tests/test_one.py"], "none"),
+         (["pytest", "tests/test_one.py", "tests/test_two.py", "tests/test_three.py", "-q"], "none"),
+         (["pytest", "tests/test_atlas_update_*.py", "tests/test_repos_*.py", "tests/test_one.py"], "suite"),
+         (["pytest", "tests/test_repos_*.py"], "none"),
+         (["pytest", "tests/"], "suite"),
+         (["pytest", "tests/sub"], "suite"),
+         (["pytest", "-k", "foo"], "suite"),
+         (["pytest", "tests/test_one.py", "-k", "foo"], "none"),
+         (["pytest", "-k", "foo", "tests/test_atlas_update_*.py", "tests/test_repos_*.py"], "suite"),
+         (["pytest", "tests/test_one.py::test_x", "tests/test_one.py::test_y", "tests/test_two.py"], "none"),
+         (["pytest", "tests/test_one.py", "tests/test_one.py", "./tests/test_one.py", "tests/test_two.py", "tests/test_three.py"], "none"),
+         (["pytest", "tests/test_nothing_*.py"], "none"),
+         (["uv", "run", "pytest", "tests/test_atlas_repoint.py", "tests/test_atlas_update_*.py", "tests/test_repos_*.py", "-q"], "suite"),
+         (["bats", "core/tests/test_a.bats"], "none"),
+         (["bats", "core/tests/test_a.bats", "core/tests/test_b.bats", "core/tests/test_c.bats"], "none"),
+         (["bats", "core/tests/test_*.bats"], "suite"),
+         (["bats", "core/tests"], "suite"),
+         (["bats", "--jobs", "8", "core/tests/test_a.bats", "core/tests/test_b.bats"], "none"),
+         (["bats", "-f", "pat", "core/tests/test_a.bats"], "none"),
+         (["bats", "-f", "pat", "core/tests/test_*.bats"], "suite"),
+         (["bats", "core/tests/test_nothing_*.bats"], "none")]
+for seg, want in cases:
+    got = a.classify([seg], cwd)
+    assert got == want, (seg, got, want)
+assert a.TARGETED_MAX_FILES == 3
+print("ok")' "$W"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "classify by size: the PROP-035 command verbatim, against a fixture tree with matching files, is suite" {
+  W="$BATS_TEST_TMPDIR/atlas"; mkdir -p "$W/tests"
+  for n in test_atlas_repoint test_atlas_update_cli test_atlas_update_knowledge test_atlas_update_skills \
+           test_repos_list test_repos_sync test_repos_remove; do printf 'def test_x(): pass\n' > "$W/tests/$n.py"; done
+  run ami_py '
+cwd = sys.argv[3]
+import shlex
+cmd = "uv run pytest tests/test_atlas_repoint.py tests/test_atlas_update_*.py tests/test_repos_*.py -q"
+assert a.classify([shlex.split(cmd)], cwd) == "suite", a.classify([shlex.split(cmd)], cwd)
+print("ok")' "$W"
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
 

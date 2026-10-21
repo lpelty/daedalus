@@ -16,6 +16,7 @@ hook talks HTTP to the daemon. Every JSON file under state/ami/ is written whole
 never sees a torn file; the daily log is the one append-only file.
 """
 import fcntl
+import glob
 import hashlib
 import http.client
 import json
@@ -488,10 +489,80 @@ def head(seg: List[str]) -> List[str]:
     return seg
 
 
-def _kind_of(seg: List[str]) -> str:
+# v0.12.7 (PROP-035 §1, 2026-10-21): a test run is judged by its size, not by whether it names a file. A window ran
+# `uv run pytest tests/test_atlas_repoint.py tests/test_atlas_update_*.py tests/test_repos_*.py … -q` — 322 tests in
+# seven groups, 4 min 18 s — and was never asked the suite question, because any `.py` argument made the segment
+# targeted: one file and seven globbed groups were the same. More test files than this is a suite run.
+TARGETED_MAX_FILES = 3
+# The options that take their value as the next word, so the value is never read as a test path. An option missing
+# here costs at most one phantom "file" (a word that names nothing counts as one), never a suite run.
+_VALUE_OPTS = {
+    "pytest": {"-k", "-m", "-c", "-p", "-o", "-W", "-n", "--maxfail", "--deselect", "--ignore", "--ignore-glob",
+               "--rootdir", "--basetemp", "--junitxml", "--junit-xml", "--cov", "--cov-report", "--tb", "--durations",
+               "--log-level", "--confcutdir", "--override-ini", "--capture", "--import-mode", "--color", "--dist",
+               "--numprocesses"},
+    "bats": {"-f", "--filter", "-j", "--jobs", "-F", "--formatter", "-o", "--output", "--filter-tags",
+             "--filter-status", "--report-formatter", "--gather-test-outputs-in", "--setup-suite-file"},
+}
+_LARGE = TARGETED_MAX_FILES + 1
+
+
+def _test_files(exe: str, args: List[str], cwd) -> Optional[int]:
+    """How many test files a pytest or bats segment's positional arguments name (§6.1, v0.12.7): `_LARGE` for a
+    directory (or a word that is neither a test file nor anything that exists — `pytest tests/` from elsewhere, as
+    the table always read it), None when no argument names a path at all. The command string arrives unexpanded,
+    so a glob is expanded here against the payload's cwd — and a glob that matches nothing counts as one file: the
+    shell would pass it on literally, and an unmatchable pattern is never turned into a suite. `file::node` counts
+    as its file; the same file named twice counts once. Nothing is run: deciding whether a run is too big must not
+    run the test runner (no `--collect-only`). A few stats and one glob per pattern."""
+    takes = _VALUE_OPTS.get(exe, set())
+    ext = ".py" if exe == "pytest" else ".bats"
+    base = str(cwd) if cwd else os.getcwd()
+    files = set()
+    named = False
+    skip = literal = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if not literal and a == "--":
+            literal = True
+            continue
+        if not literal and a.startswith("-"):
+            skip = a in takes
+            continue
+        named = True
+        if exe == "pytest" and "::" in a:
+            a = a.split("::", 1)[0]
+        full = a if os.path.isabs(a) else os.path.join(base, a)
+        if glob.has_magic(a):
+            pattern = a if os.path.isabs(a) else os.path.join(glob.escape(base), a)
+            hits = glob.glob(pattern)
+            if not hits:
+                files.add(("unmatched", a))
+                continue
+            for h in hits:
+                if os.path.isdir(h):
+                    return _LARGE
+                files.add(os.path.realpath(h))
+            continue
+        if os.path.isdir(full) or (not os.path.exists(full) and not a.endswith(ext)):
+            return _LARGE
+        files.add(os.path.realpath(full))
+        if len(files) > TARGETED_MAX_FILES:
+            return _LARGE
+    return min(len(files), _LARGE) if named else None
+
+
+def _kind_of(seg: List[str], cwd=None) -> str:
     """One unwrapped, headed segment against the §6.1 table: `exempt` (an evidence run or the switch's own
     command — the whole call gets no question), `suite` (a full run), `targeted` (already targeted —
-    nothing to ask about this segment), `destructive` (everything else)."""
+    nothing to ask about this segment), `destructive` (everything else). A pytest or bats segment is judged by
+    the number of test files its positional arguments name (`_test_files`, globs expanded against `cwd`, the
+    payload's): 1 to TARGETED_MAX_FILES is targeted; more, a directory, or none at all (a bare `pytest`, a
+    `pytest -k foo`) is a suite. A filter (`-k`, `-f`, `--filter`) narrows a run but no longer makes it targeted
+    on its own: it keeps a run targeted only over files within the limit (v0.12.7, PROP-035 §1). A `bats` with no
+    path at all (`bats --version`) runs no test and stays targeted, as it always was."""
     if not seg:
         return "targeted"
     exe = seg[0]
@@ -503,32 +574,25 @@ def _kind_of(seg: List[str]) -> str:
     names = {exe, script} if script else {exe}
     if names & EVIDENCE or names & SWITCH_OWN:
         return "exempt"
-    if exe == "bats":
-        args = seg[1:]
-        for a in args:
-            if a.endswith(".bats") or a in ("-f", "--filter") or a.startswith("--filter=") or (a.startswith("-f") and len(a) > 2):
-                return "targeted"
-        if any(not a.startswith("-") for a in args):
-            return "suite"
-        return "targeted"
-    if exe == "pytest":
-        for a in seg[1:]:
-            if a.startswith("-k") or "::" in a or a.endswith(".py"):
-                return "targeted"
-        return "suite"
+    if exe in ("bats", "pytest"):
+        n = _test_files(exe, seg[1:], cwd)
+        if n is None:
+            return "targeted" if exe == "bats" else "suite"
+        return "targeted" if 1 <= n <= TARGETED_MAX_FILES else "suite"
     return "destructive"
 
 
-def classify(segments: List[List[str]]) -> str:
+def classify(segments: List[List[str]], cwd=None) -> str:
     """`none` | `suite` | `destructive` over every unwrapped segment at every depth the guard walked
     (§6.1): an evidence run or a switch command anywhere makes the whole call `none`; else a full-suite
     segment makes it `suite`; else any other segment makes it `destructive`; a call of only targeted
-    test runs (or nothing) is `none`."""
+    test runs (or nothing) is `none`. `cwd` is the payload's, where a test run's globs are expanded
+    (`_test_files`); None reads the process's own."""
     kinds = set()
     for seg in segments or []:
         if not seg:
             continue
-        k = _kind_of(head(seg))
+        k = _kind_of(head(seg), cwd)
         if k == "exempt":
             return "none"
         kinds.add(k)
@@ -1192,7 +1256,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     if not any(asked.values()):
         return None                                      # no question is asked: no segmentation, no row
     segs = segments() if callable(segments) else segments
-    question = classify(segs or [])
+    question = classify(segs or [], cwd)
     extra = {"guard": guard, "cwd": str(cwd), "device": d.get("device")}
     if question == "suite":
         if not asked["suite"]:

@@ -1536,11 +1536,11 @@ q = [e for e in q if e.get("method") == "POST"]
 print(eval(sys.argv[2]))' "${FAKE_LOG:-$BATS_TEST_TMPDIR/fake.log}" "$1"
 }
 
-@test "suite classification through the live hook: core/gates.sh, bash -c 'core/gates.sh', \$(core/promote.py --doctor) and python3 core/frame-jack.py status write no row; timeout 600 bats core/tests and /opt/homebrew/bin/bats core/tests take the suite path; bats core/tests/test_x.bats and pytest -k x take no question (spec §6.1: already targeted)" {
+@test "suite classification through the live hook: core/gates.sh, bash -c 'core/gates.sh', \$(core/promote.py --doctor) and python3 core/frame-jack.py status write no row; timeout 600 bats core/tests and /opt/homebrew/bin/bats core/tests take the suite path; bats core/tests/test_x.bats and pytest tests/test_x.py -k x take no question (spec §6.1: already targeted; a bare pytest -k is a suite since v0.12.7)" {
   suite_repo
   ami_on_with_fake FAKE_P=0.5
   for c in 'core/gates.sh' "bash -c 'core/gates.sh'" 'echo $(core/promote.py --doctor)' 'python3 core/frame-jack.py status' \
-           'bats core/tests/test_x.bats' 'pytest -k x'; do
+           'bats core/tests/test_x.bats' 'pytest tests/test_x.py -k x'; do
     run guard_ami sN "$c" "$R"; [ "$status" -eq 0 ]; allowed || { echo "$c: $output"; return 1; }
   done
   [ "$(ami_rows_count)" -eq 0 ] || { ami_rows; return 1; }
