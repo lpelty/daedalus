@@ -462,9 +462,9 @@ prints it again on every prompt and is the window's heartbeat; a
 the first attempt to change a file another window has already changed is
 stopped once with the advice to message that window, and goes through on the
 next try (`core/guard-bash.py` does the same for Bash write operands). One
-window holds the pen — the board marks it `prime` — and only it writes
-`vault/hot.md` and commits the vault, through `core/vault-commit.sh`. It
-commits every window's session log too. A window that closes while the pen's
+window holds the pen — the board marks it `prime` — and only it commits the
+vault, through `core/vault-commit.sh`. It commits every window's session log
+too, and `vault/hot.md`. A window that closes while the pen's
 holder is live is told "Your log is saved; window NN holds the pen and
 commits it", and the holder commits that log at its next turn or when it
 ends, whichever comes first. You never close windows in an order or move the
@@ -477,10 +477,38 @@ opens until the upgrade finishes, so its safety copy reads `target/` first.
 It can still close. `core/lease.sh log` reserves its session-log number
 (kept in `state/leases/unwindowed.json`), and `core/lease.sh prime take` gives
 it the pen when no live session holds it — never from a live one. The pen
-gives it `vault/hot.md` and `core/vault-commit.sh`, not a tree: `target/`
+gives it `core/vault-commit.sh`, not a tree: `target/`
 stays closed to it until it claims a window, and promote waits until the
 upgrade finishes. When a live session holds the pen, the operator can commit
 the vault from their own shell: `cd <home> && core/vault-commit.sh`.
+
+**`vault/hot.md`** answers two questions: what is underway, and what it is
+waiting on. Every session start shows its In flight and Blocked entries in
+every window, each with its owner, its next action, the condition that removes
+it, and its age in days. Any window writes its own entries, and only through
+`core/hot.py` (`add`, `update`, `remove`, `keep`), which changes one entry
+under a lock, so two windows writing at once both land; an Edit or Write of the
+file is refused and names the command. An entry looks like this:
+
+```markdown
+### the probe for the capture lock
+- owner: window 02
+- since: 2026-10-20
+- where: lease/02
+- next: run the probe twice
+- done when: the probe passes twice in a row
+```
+
+When an entry's `done when:` is met, the window that sees it removes it in
+that turn. At a window's close, `core/close.sh` marks its remaining entries
+`owner: carried from window 02, <date>`; a sweep does the same for a window
+closed without a close. The next window to take the work runs
+`python3 core/hot.py update "<topic>" --owner 03`. An entry that has sat for
+14 days is put to you at the first session start of the day: move it to the
+backlog, or keep working on it in a window. Your answer, in any words, is
+applied by that window (`keep` stamps `kept:` and restarts the 14 days).
+There is no limit on the file's length. `core/doctor.sh` lists due entries and
+any text not in entry form.
 
 The board is also on your screen. A Claude Code mod under `mods/lease-board/`
 draws it in the band above the prompt in every window and refreshes it every

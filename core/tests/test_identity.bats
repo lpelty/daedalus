@@ -542,7 +542,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
   CM="$(tr '\n' ' ' < "$DAEDALUS_HOME/CLAUDE.md" | tr -s ' ')"
   for s in 'A session holding no window may take the pen when no live session holds it' \
            'A session holding no window is told its number at start' 'lease: none' \
-           '`core/lease.sh log` → `core/lease.sh prime take` (when no live session holds the pen) → `hot.md` (only if this session holds the pen) → `core/close.sh`.'; do
+           '`core/lease.sh log` → `core/lease.sh prime take` (when no live session holds the pen) → its `hot.md` entries through `core/hot.py` → `core/close.sh`.'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
 }
@@ -554,7 +554,7 @@ print("\n".join(long)); sys.exit(1 if long else 0)' "$rel"
            "if the pen's holder has ended, this session takes the pen and commits." '`--no-commit` skips the commit.' \
            'If it exits 4, the session is recorded but the vault commit did not run' 'then run `core/vault-commit.sh`' \
            'A pen whose session has ended moves to the next session that commits the vault; one held by a live session never moves without `prime take` and the operator' \
-           '→ `hot.md` (only if this session holds the pen) → `core/close.sh`.'; do
+           '→ this window'"'"'s `hot.md` entries through `core/hot.py` (see "hot.md") → `core/close.sh`, which marks the rest carried.'; do
     case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
   done
   case "$CM" in *'core/close.sh --commit'*) echo "CLAUDE.md still teaches --commit"; return 1 ;; esac

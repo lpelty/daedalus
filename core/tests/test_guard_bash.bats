@@ -339,7 +339,7 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   run guard_as sB 'echo x > a.txt' "$DAEDALUS_HOME/worktrees/02/thing"; denied; case "$output" in *"this window is released; its worktree is closed"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
-@test "vault: git add / commit / commit -a / stash under vault/ denied from every session naming core/vault-commit.sh — a non-prime's commit or push also names the prime's window number; a write to vault/hot.md denied for a non-prime with the prime's window number; allowed for the prime" {
+@test "vault: git add / commit / commit -a / stash under vault/ denied from every session naming core/vault-commit.sh — a non-prime's commit or push also names the prime's window number; a write to vault/hot.md denied for every session, the prime included, naming core/hot.py" {
   guard_leases
   for c in 'git add -A' 'git commit -m x' 'git commit -am x' 'git stash'; do
     run guard_as sA "$c" "$DAEDALUS_HOME/vault"; denied; case "$output" in *"The vault is committed by \`core/vault-commit.sh\`, which checks every claim first"*) : ;; *) echo "'$c': $output"; return 1 ;; esac
@@ -348,9 +348,10 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   run guard_as sB 'git commit -m x' "$DAEDALUS_HOME/vault"; denied
   case "$output" in *"You are window 02; the pen is held by window 01"*"core/vault-commit.sh"*) : ;; *) echo "non-prime commit must name the prime's window: $output"; return 1 ;; esac
   run guard_as sB 'git push origin main' "$DAEDALUS_HOME/vault"; denied; case "$output" in *"You are window 02; the pen is held by window 01"*) : ;; *) echo "$output"; return 1 ;; esac
-  run guard_as sB 'echo x > hot.md' "$DAEDALUS_HOME/vault"; denied; case "$output" in *"Only the prime window commits the vault and writes hot.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  for s in sA sB; do
+    run guard_as "$s" 'echo x > hot.md' "$DAEDALUS_HOME/vault"; denied; case "$output" in *"hot.md changes only through core/hot.py"*) : ;; *) echo "$s: $output"; return 1 ;; esac
+  done
   run guard_as sA 'git push origin main' "$DAEDALUS_HOME/vault"; allowed
-  run guard_as sA 'echo x > hot.md' "$DAEDALUS_HOME/vault"; allowed
   run guard_as sB 'echo x > proposals/PROP-9.md' "$DAEDALUS_HOME/vault"; allowed
 }
 
@@ -359,7 +360,7 @@ guard_leases() {   # 01=sA prime (live), 02=sB (live, changed hooks/capture.py)
   run guard 'git -C vault push origin main'; allowed
 }
 
-@test "a heredoc whose body shlex cannot tokenize (an apostrophe) is checked like a plain redirect: the prime's checkout, hot.md for a non-prime, the stop-once cross-lease warning; a body that only mentions a guarded path is allowed" {
+@test "a heredoc whose body shlex cannot tokenize (an apostrophe) is checked like a plain redirect: the prime's checkout, hot.md (core/hot.py's alone), the stop-once cross-lease warning; a body that only mentions a guarded path is allowed" {
   # Before: the ValueError fallback ran is_protected alone, so every lease-era rule was waved through for
   # one of the most common Bash shapes Claude Code emits.
   guard_leases; W="$DAEDALUS_HOME/worktrees/01/thing"
@@ -368,7 +369,7 @@ it's
 EOF2" "$T"; denied; case "$output" in *"This is the prime's checkout (target/thing)."*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sB "cat > hot.md <<'EOF2'
 don't
-EOF2" "$DAEDALUS_HOME/vault"; denied; case "$output" in *"Only the prime window commits the vault and writes hot.md"*) : ;; *) echo "$output"; return 1 ;; esac
+EOF2" "$DAEDALUS_HOME/vault"; denied; case "$output" in *"hot.md changes only through core/hot.py"*) : ;; *) echo "$output"; return 1 ;; esac
   run guard_as sA "cat > hooks/capture.py <<'EOF2'
 it's
 EOF2" "$W"; denied; case "$output" in *"changed in window 02"*) : ;; *) echo "$output"; return 1 ;; esac
@@ -1831,5 +1832,16 @@ PY
            "uv pip install --python .venv/bin/python 'code-review-graph==2.3.9'" 'uv pip show code-review-graph' \
            'uv tool install code-review-graph==2.3.9' 'pipx install code-review-graph==2.3.9'; do
     run guard "$c"; allowed || { echo "denied: $c -> $output"; return 1; }
+  done
+}
+
+@test "the core/hot.py commands pass the guard from any window: add, update, remove, keep, carry (hot.md's one write path, v0.12.6)" {
+  guard_leases
+  for s in sA sB; do
+    for c in 'python3 core/hot.py add "the probe" --next "run it" --done-when "it passes"' \
+             'python3 core/hot.py update "the probe" --next "run it twice" --owner 02' \
+             'python3 core/hot.py remove "the probe"' 'python3 core/hot.py keep "the probe"' 'python3 core/hot.py carry'; do
+      run guard_as "$s" "$c" "$DAEDALUS_HOME"; allowed || { echo "$s '$c': $output"; return 1; }
+    done
   done
 }

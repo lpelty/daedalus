@@ -105,6 +105,10 @@ if [ "$pending_only" -eq 1 ]; then
   done <<PEND
 $(python3 "$LL" pending-logs 2>/dev/null)
 PEND
+  # v0.12.6: hot.md goes with the closed windows' logs — their closes marked their entries carried there
+  if [ $# -gt 0 ] && [ -f "$V/hot.md" ] && [ -n "$(git -C "$G" status --porcelain -- "$(git_path vault/hot.md)" 2>/dev/null)" ]; then
+    set -- "$@" "$(git_path vault/hot.md)"
+  fi
   if [ $# -gt 0 ]; then
     ident="$(vault_ident)"
     # shellcheck disable=SC2086

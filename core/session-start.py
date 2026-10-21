@@ -234,6 +234,29 @@ LOG_LINE = ("Your session log for today is %s (the window goes in its frontmatte
             "`core/lease.sh log` prints the path again.")
 
 
+def _windowless_pen(ll, root: Path, sid: object) -> bool:
+    """Whether this session holds the pen with no window (a start while the upgrade is pending): the bind's answer
+    covers only a bound window. One shared read, bounded; any failure is no."""
+    if ll is None:
+        return False
+    try:
+        with ll.lock(root, shared=True, deadline=time.time() + 1):
+            return (ll.read_lease(root, "prime") or {}).get("session_id") == sid
+    except Exception:
+        return False
+
+
+def _spawned(ll, root: Path, nn: Optional[str]) -> bool:
+    """A background clone (core/lease.sh spawn) has nobody to ask: its first reply goes to its task, not to the
+    operator, so it must not use up the day's 14-day question (review 2026-10-20, finding 2)."""
+    if ll is None or not nn:
+        return False
+    try:
+        return bool((ll.read_lease(root, nn) or {}).get("spawned"))
+    except Exception:
+        return False
+
+
 def main() -> int:
     # A SIGTERM (a cancelled hook, a shutdown) becomes SystemExit, so
     # leaselib._run_bounded kills the running git's process group on its way
@@ -333,14 +356,14 @@ def main() -> int:
             if b["numbered"]:
                 line = "You are window %s." % lease_nn
                 if b["took_pen"]:
-                    line = ("You are window %s and you hold the pen (prime): hot.md, vault commits, promote. "
+                    line = ("You are window %s and you hold the pen (prime): vault commits, promote. "
                             "No other window may do those until you hand over." % lease_nn)
                 entry = ll.registry_entry_for(sid)
                 if entry and entry.get("name") != "daedalus-%s" % lease_nn:
                     line += " (you may `/rename daedalus-%s` so the board reads cleanly — optional)" % lease_nn
                 bind_notes.append(line)
             elif b["took_pen"]:
-                bind_notes.append("You hold the pen (prime) now: hot.md, vault commits, promote.")
+                bind_notes.append("You hold the pen (prime) now: vault commits, promote.")
             if b.get("log"):
                 bind_notes.append(LOG_LINE % b["log"])
             if lease_nn is None:
@@ -517,6 +540,19 @@ def main() -> int:
             line = None
         if line:
             notes.append(line)
+    # hot.md (v0.12.6, spec 2026-10-20 C, D): every window, prime or not, sees In flight and Blocked at its start; an
+    # entry that has sat for 14 days is asked about at the top of the first start of the day that reads it. A visitor
+    # writes nothing and is not asked. Bounded like the board; a busy lock or a failure is a line or nothing.
+    hot_top, hot_tail = [], []
+    if not visitor and sid:
+        try:
+            import hot
+            hot_top, hot_tail = hot.at_start(root, str(sid), holds_pen or _windowless_pen(ll, root, sid),
+                                             deadline=max(started_at + ADD_BUDGET_SECS, time.time() + 1),
+                                             ask=not _spawned(ll, root, lease_nn))
+        except Exception as e:
+            if type(e).__name__ == "Refused":
+                hot_tail = ["hot.md was not read at this start: %s `python3 core/hot.py show` shows it." % e]
     # Whom this Daedalus may ask (SPEC-011 §3): a visitor's tools cannot run a call, so it is not told.
     if not visitor:
         try:
@@ -535,7 +571,8 @@ def main() -> int:
     except Exception:
         head = "Daedalus session orientation: unleased, %s" % root
     v.emit({"hookSpecificOutput": {"hookEventName": "SessionStart",
-                                   "additionalContext": "\n\n".join([head] + bind_notes + notes + ([board] if board else []))}})
+                                   "additionalContext": "\n\n".join([head] + hot_top + bind_notes + notes + hot_tail
+                                                                      + ([board] if board else []))}})
     return 0
 
 

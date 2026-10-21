@@ -17,9 +17,9 @@ state/session-<sid>-boundary.json, pruned with the marker, §4.10) and let
 through with the warning as context on every later attempt; the prime's
 checkout target/<repo> is denied for every window; a released lease's
 worktree is closed; another window's worktree is denied every time (§3.1);
-vault/hot.md is the prime's alone (§4.7). A session that cannot be bound
-while lease files exist — or a lease file that cannot be read — fails
-CLOSED under target/, worktrees/ and hot.md (§4.4). The whole check is
+vault/hot.md is written only by core/hot.py, for every session (v0.12.6). A
+session that cannot be bound while lease files exist — or a lease file that
+cannot be read — fails CLOSED under target/ and worktrees/ (§4.4). The whole check is
 write_check, which guard-bash.py runs on every Bash write operand too, so
 the Edit and Bash legs are one function and say the same sentences.
 Ownership of a tree is judged from the PATH alone (tree_deny), before any
@@ -645,8 +645,12 @@ def warning_text(nn: str, lease: dict, rel: str, background: bool, ago: str) -> 
     return first + "\n" + FIRST_STOP + tail
 
 
-NOT_PRIME = ("Only the prime window commits the vault and writes hot.md. You are window %s; the pen is held by window %s — "
+NOT_PRIME = ("Only the prime window commits the vault. You are window %s; the pen is held by window %s — "
              "ask it to commit, or take the pen with `core/lease.sh prime take` if the operator says so.")
+# v0.12.6 (spec 2026-10-20 C): any window writes its own hot.md entries, and only through core/hot.py, under its lock.
+HOT_DENY = ("hot.md changes only through core/hot.py, which edits one entry under a lock so no window's write is lost: "
+            "`python3 core/hot.py add \"<topic>\" --next \"…\" --done-when \"…\"` for a new entry, or `update`, "
+            "`remove` or `keep` with its topic (`python3 core/hot.py --help` lists every option).")
 WORKTREES_ROOT = "worktrees/ holds every window's worktree; nothing writes or removes it as a whole. Your work goes in %s."
 TRANSCRIPT_DENY = "the session transcript is the record of the operator's yes; nothing writes it."
 
@@ -753,26 +757,29 @@ def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[s
     """The lease-era checks for one resolved write path — the Edit/Write leg and every Bash
     write operand run this same function. In order: the session transcript (§7.4, any
     session, leases or none); git's own gate; the two briefs (brief_deny, any session, leases
-    or none — a session with no leases is exactly the pending-upgrade state); fail closed under target/, worktrees/ and
-    hot.md for a session that cannot be bound or a lease file that cannot be read (§4.4 —
+    or none — a session with no leases is exactly the pending-upgrade state); vault/hot.md for every
+    session (core/hot.py is its one write path, v0.12.6); fail closed under target/ and worktrees/
+    for a session that cannot be bound or a lease file that cannot be read (§4.4 —
     judged BEFORE the empty-leases return, which is what a read failure leaves; `refused` is
-    the caller's, since the guard's may also come from the bash seam); vault/hot.md for a
-    non-prime (§4.7); the trees (tree_deny); the stop-once cross-lease warning (§4.6).
+    the caller's, since the guard's may also come from the bash seam); the trees (tree_deny);
+    the stop-once cross-lease warning (§4.6).
     Returns (deny reason, context): a deny; or context alone for a cross-lease path already
     warned this session; or (None, None)."""
     reason = transcript_deny(root, p) or git_gate_deny(p) or brief_deny(root, p)
     if reason:
         return reason, None
     rroot = root.resolve()
-    is_hot = p == rroot / "vault" / "hot.md"
-    # hot.md stays the pen holder's even when it can be given no tree (leaselib.pen_without_tree): the vault is not
-    # what the upgrade's safety copy protects.
-    if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees") or (is_hot and not ctx["prime"])):
+    try:
+        rel_lower = p.resolve().relative_to(rroot).as_posix().lower()
+    except ValueError:
+        rel_lower = ""
+    if rel_lower == "vault/hot.md":     # without case, as brief_deny: the default macOS file system opens either spelling
+        # every session, the pen's holder too, leases or none: core/hot.py is the one write path
+        return HOT_DENY, None
+    if refused and (under(p, rroot / "target") or under(p, rroot / "worktrees")):
         return refused, None
     if not ctx["leases"]:
         return None, None
-    if is_hot and not ctx["prime"]:
-        return NOT_PRIME % (ctx["mine"] or "none", ctx["prime_nn"] or "none"), None
     reason = tree_deny(root, ctx, p)
     if reason:
         return reason, None

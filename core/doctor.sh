@@ -317,6 +317,21 @@ EOF
   fi
 fi
 
+# hot.md (v0.12.6, spec 2026-10-20 D): entries that have sat for 14 days and text not in entry form, as NOTEs —
+# read-only, never a problem, and never a word about the file's length (ruling A). One reader, core/hot.py --doctor.
+# Skipped when a fixture has no hot.py.
+if [ -f "$DAEDALUS_HOME/core/hot.py" ] && [ -f "$DAEDALUS_HOME/vault/hot.md" ]; then
+  if hot_out="$(python3 "$DAEDALUS_HOME/core/hot.py" --doctor 2>/dev/null)"; then
+    while IFS= read -r line; do
+      [ -z "$line" ] || log "$line"
+    done <<EOF
+$hot_out
+EOF
+  else
+    log "NOTE     hot.md: check failed (core/hot.py --doctor)"
+  fi
+fi
+
 # The upgrade (spec §14, §15): the stamp, what in target/ it would still move, hot.md's
 # field. One reader, core/upgrade.py --doctor — local refs only, it never fetches; the
 # here-string loop keeps the MISSING count (see the leases block). Skipped when a

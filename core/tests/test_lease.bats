@@ -2134,7 +2134,7 @@ hist_last() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["h
   pw="$(live_pid)"; registry_entry "$pw" sW interactive cli daedalus-xx
   CLAUDE_CODE_SESSION_ID=sW run LS prime take
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  case "$output" in "This session holds the pen now, with no window: hot.md and \`core/vault-commit.sh\` are yours."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in "This session holds the pen now, with no window: \`core/vault-commit.sh\` is yours."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"promote waits"*) echo "nothing is pending: $output"; return 1 ;; esac
   [ "$(lease_json prime session_id)" = sW ]; [ "$(lease_json prime taken_without_window)" = sW ]
   [ "$(hist_last no_window)" = True ]

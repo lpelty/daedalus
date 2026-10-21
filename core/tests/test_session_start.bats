@@ -146,7 +146,7 @@ PY
   pid="$(live_pid)"; registry_entry "$pid" sN interactive cli daedalus-01
   run start sN startup; [ "$status" -eq 0 ]
   [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ]
-  case "$output" in *"You are window 01 and you hold the pen (prime): hot.md, vault commits, promote."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"You are window 01 and you hold the pen (prime): vault commits, promote."*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"/rename"*) echo "registry name already daedalus-01: no courtesy expected: $output"; return 1 ;; *) : ;; esac
   [ "$(lease_json 01 session_id)" = "sN" ]; [ "$(lease_json prime session_id)" = "sN" ]
   [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
@@ -938,7 +938,7 @@ pending_stopped_home() {
   run start s1 startup; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   c="$(ctx)"
   case "$c" in *"Your session log for today is vault/sessions/$(date +%Y/%m)/$(date +%Y-%m-%d)-001.md"*) : ;; *) echo "$c"; return 1 ;; esac
-  case "$c" in *"At the close, when no live session holds the pen, \`core/lease.sh prime take\` gives this session the pen for hot.md and \`core/vault-commit.sh\` — no window is made."*) : ;; *) echo "$c"; return 1 ;; esac
+  case "$c" in *"At the close, when no live session holds the pen, \`core/lease.sh prime take\` gives this session the pen for \`core/vault-commit.sh\` — no window is made."*) : ;; *) echo "$c"; return 1 ;; esac
   case "$c" in *"You are window"*) echo "$c"; return 1 ;; esac
   [ -d "$DAEDALUS_HOME/state/leases" ]
   [ -z "$(cd "$DAEDALUS_HOME/state/leases" && ls | grep -v '^unwindowed.json$')" ] || { ls "$DAEDALUS_HOME/state/leases"; return 1; }

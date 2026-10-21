@@ -48,7 +48,7 @@ pre_upgrade_session_after_pick_up() {
   case "$stderr" in *"lease.sh create"*|*"claim <NN>"*) echo "$stderr"; return 1 ;; esac
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import verifylib as v; from pathlib import Path; print(v.lease_context(Path(sys.argv[1]).parent, "s1")["refused"])' "$DAEDALUS_HOME/core"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$output" = "$PENDING_SENTENCE At its close, \`core/lease.sh log\` prints this session's log path; when no live session holds the pen, \`core/lease.sh prime take\` gives it the pen, for hot.md and \`core/vault-commit.sh\`." ] || { echo "$output"; return 1; }
+  [ "$output" = "$PENDING_SENTENCE At its close, \`core/lease.sh log\` prints this session's log path; when no live session holds the pen, \`core/lease.sh prime take\` gives it the pen, for \`core/vault-commit.sh\`." ] || { echo "$output"; return 1; }
 }
 
 @test "the board for that session — lease-board.py's per-prompt context and \`core/lease.sh list\` — says the same sentence in place of the create/claim nag" {

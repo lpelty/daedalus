@@ -292,12 +292,12 @@ fi
 check "lease/02 now contains the trunk commit" git -C "$(T)" merge-base --is-ancestor "$trunk_commit" lease/02
 
 step 6 "Terminal 2" "push your branch onto main. — then: update hot.md to say the probe is done." \
-  "the guard's sentence (\"Trunk is reached only through promote …\"); then a refusal naming the prime, window 01, for hot.md"
+  "the guard's sentence (\"Trunk is reached only through promote …\"); then a refusal naming core/hot.py, hot.md's one write path"
 if [ "$mode" = rehearse ]; then
   said sC "push your branch onto main."
   d="$(bash_attempt sC "$(W 02)" "git push origin HEAD:main")"; has "$d" "Trunk is reached only through promote" || fail "guard: $d"
   said sC "update hot.md to say the probe is done."
-  d="$(edit_attempt sC "$H/vault/hot.md")"; has "$d" '"permissionDecision": "deny"' || fail "hot.md: $d"; has "$d" "window 01" || fail "hot.md refusal does not name window 01: $d"
+  d="$(edit_attempt sC "$H/vault/hot.md")"; has "$d" '"permissionDecision": "deny"' || fail "hot.md: $d"; has "$d" "core/hot.py" || fail "hot.md refusal does not name core/hot.py: $d"
 fi
 note "Step 6, the script's half: the same push, run from a shell inside window 02's worktree, past the guard — git's own pre-push hook refuses it:"
 p="$(git -C "$(W 02)" push origin HEAD:main 2>&1)"; printf '%s\n' "$p" | sed 's/^/  /'
