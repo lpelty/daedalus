@@ -110,7 +110,13 @@ cases = [(["pytest", "tests/test_one.py"], "none"),
          (["bats", "--jobs", "8", "core/tests/test_a.bats", "core/tests/test_b.bats"], "none"),
          (["bats", "-f", "pat", "core/tests/test_a.bats"], "none"),
          (["bats", "-f", "pat", "core/tests/test_*.bats"], "suite"),
-         (["bats", "core/tests/test_nothing_*.bats"], "none")]
+         (["bats", "core/tests/test_nothing_*.bats"], "none"),
+         # review 2026-10-21 (M1): an option this table does not know takes a value that names nothing — one file at
+         # most, never a suite
+         (["pytest", "tests/test_one.py", "-r", "a"], "none"),
+         (["pytest", "tests/test_one.py", "--timeout", "30"], "none"),
+         (["pytest", "tests/test_one.py", "--cov-fail-under", "80"], "none"),
+         (["pytest", "tests/test_one.py", "--pyargs", "pkg"], "none")]
 for seg, want in cases:
     got = a.classify([seg], cwd)
     assert got == want, (seg, got, want)

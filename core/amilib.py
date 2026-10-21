@@ -495,7 +495,7 @@ def head(seg: List[str]) -> List[str]:
 # targeted: one file and seven globbed groups were the same. More test files than this is a suite run.
 TARGETED_MAX_FILES = 3
 # The options that take their value as the next word, so the value is never read as a test path. An option missing
-# here costs at most one phantom "file" (a word that names nothing counts as one), never a suite run.
+# here costs at most one phantom "file" (a word that names nothing counts as one), never a suite run on its own.
 _VALUE_OPTS = {
     "pytest": {"-k", "-m", "-c", "-p", "-o", "-W", "-n", "--maxfail", "--deselect", "--ignore", "--ignore-glob",
                "--rootdir", "--basetemp", "--junitxml", "--junit-xml", "--cov", "--cov-report", "--tb", "--durations",
@@ -509,8 +509,9 @@ _LARGE = TARGETED_MAX_FILES + 1
 
 def _test_files(exe: str, args: List[str], cwd) -> Optional[int]:
     """How many test files a pytest or bats segment's positional arguments name (§6.1, v0.12.7): `_LARGE` for a
-    directory (or a word that is neither a test file nor anything that exists — `pytest tests/` from elsewhere, as
-    the table always read it), None when no argument names a path at all. The command string arrives unexpanded,
+    directory (one that exists, or a path that names nothing and is written as one — `tests/`, `core/tests` from
+    another cwd, as the table always read it), None when no argument names a path at all; any other word that names
+    nothing (an unknown option's value) counts as one file. The command string arrives unexpanded,
     so a glob is expanded here against the payload's cwd — and a glob that matches nothing counts as one file: the
     shell would pass it on literally, and an unmatchable pattern is never turned into a suite. `file::node` counts
     as its file; the same file named twice counts once. Nothing is run: deciding whether a run is too big must not
@@ -546,8 +547,11 @@ def _test_files(exe: str, args: List[str], cwd) -> Optional[int]:
                     return _LARGE
                 files.add(os.path.realpath(h))
             continue
-        if os.path.isdir(full) or (not os.path.exists(full) and not a.endswith(ext)):
-            return _LARGE
+        if os.path.isdir(full) or a.endswith("/") or (
+                not os.path.exists(full) and "/" in a and "." not in a.rsplit("/", 1)[-1]):
+            return _LARGE                                # a directory, or a path written as one (`tests/`, `core/tests`)
+        # anything else — a test file, or a word that names nothing (an unknown option's value: `-r a`,
+        # `--timeout 30`, `--pyargs pkg`) — is one file at most (review 2026-10-21, M1)
         files.add(os.path.realpath(full))
         if len(files) > TARGETED_MAX_FILES:
             return _LARGE
