@@ -506,10 +506,14 @@ window applies it:
 Later windows are not asked the same day. An alert left unanswered is asked
 again at the next day's first start.
 
-Text in In flight or Blocked that is not in entry form is never deleted. The
-start lists it once to the pen's holder, which reshapes it: the history to its
-session log, an `add` in entry form, then `python3 core/hot.py drop <id>`.
-`core/doctor.sh` lists it, and every due entry, again.
+Text in In flight or Blocked that is not in entry form is never deleted, and
+every other `##` section is named at every start with its line count. The
+start lists both once to the pen's holder, which reshapes them: what is
+waiting on someone becomes a Blocked entry each (the owner is who it waits
+on); what was done goes to its session log; a standing rule or gotcha goes to
+`pitfalls/` or CLAUDE.md. Then `python3 core/hot.py drop <id>`, or `drop
+"<section name>"` for a whole section. `core/doctor.sh` lists them, and every
+due entry, again.
 
 ## Memory
 

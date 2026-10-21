@@ -37,8 +37,10 @@ file by hand. Each entry is one block in this shape:
 question; it restarts the clock. Entries keep to these fields. History,
 rounds and evidence go in the session log; a design question goes in a
 proposal; work for later goes in a backlog row. What was done belongs in the
-session log, not here. When an entry's `done when:` is met, the session that
-sees it removes it in that same turn.
+session log, not here; a standing rule or gotcha goes in `pitfalls/` or
+CLAUDE.md. Every start names any other `##` section, so nothing here is
+hidden. When an entry's `done when:` is met, the session that sees it removes
+it in that same turn.
 
 ## In flight
 
@@ -47,8 +49,3 @@ sees it removes it in that same turn.
 ## Blocked
 
 <!-- Questions asked and unanswered; the owner is who answers. -->
-
-## Standing gotchas
-
-<!-- Durable rules only. A rule holds until the system changes; a status holds
-     until the next process restarts. -->

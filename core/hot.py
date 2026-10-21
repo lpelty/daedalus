@@ -6,7 +6,8 @@
   python3 core/hot.py update "<topic>" [--next …] [--where …] [--done-when …] [--owner …] [--blocked|--in-flight]
   python3 core/hot.py remove "<topic>"            python3 core/hot.py keep "<topic>" [--owner NN]
   python3 core/hot.py carry [NN]                  (the close: this window's remaining entries become carried)
-  python3 core/hot.py drop <id>                   (the pen's holder: text not in entry form, once it is reshaped)
+  python3 core/hot.py drop <id>|"<section>"       (the pen's holder: text not in entry form, or a section outside
+                                                  In flight and Blocked, once what it held has moved)
   python3 core/hot.py show | due | --doctor       (read-only)
   update, remove and keep take --operator-said "<a few of their words>" for an entry the operator named.
 
@@ -106,6 +107,32 @@ class Loose:
         return next((ln.strip() for ln in self.text.splitlines() if ln.strip()), "")
 
 
+class Other:
+    """A `## ` section that is neither In flight nor Blocked (a deployment's own: "Done since the last entry",
+    "Waiting on …", gotchas): lines [start, end), its heading included. Never hidden: every start names it."""
+
+    def __init__(self, name: str, start: int, end: int, lines: List[str]):
+        self.name, self.start, self.end = name, start, end
+        self.count = _content_lines(lines[start + 1:end])
+        self.id = "section:" + hashlib.sha1("".join(lines[start:end]).encode("utf-8")).hexdigest()[:8]
+
+    def label(self) -> str:
+        return "## %s (%s)" % (one_line(self.name), "%d line%s" % (self.count, "" if self.count == 1 else "s"))
+
+
+def _content_lines(lines: List[str]) -> int:
+    """Lines that say something: not blank, not inside an HTML comment."""
+    n, comment = 0, False
+    for ln in lines:
+        s = ln.strip()
+        if comment or s.startswith("<!--"):
+            comment = "-->" not in s
+            continue
+        if s:
+            n += 1
+    return n
+
+
 class Doc:
     def __init__(self, text: str):
         self.lines = text.splitlines(True)
@@ -124,6 +151,7 @@ class Doc:
         self.sections: Dict[str, Tuple[int, int]] = {}
         self.entries: List[Entry] = []
         self.loose: List[Loose] = []
+        self.others: List[Other] = []
         heads = []                      # (index, level, title) of every heading outside a code fence or comment
         fence, comment = "", False
         for i in range(self.fm_end, len(self.lines)):
@@ -146,9 +174,12 @@ class Doc:
             if level != 2:
                 continue
             name = next((s for s in SECTIONS if norm(s) == norm(title)), None)
-            if name is None or name in self.sections:
-                continue
             end = next((j for (j, lv, _t) in heads[k + 1:] if lv <= 2), len(self.lines))
+            if name is None or name in self.sections:
+                other = Other(title, i, end, self.lines)
+                if other.count:
+                    self.others.append(other)
+                continue
             self.sections[name] = (i, end)
             subs = [j for (j, lv, _t) in heads[k + 1:] if j < end and lv == 3]
             self._preamble(name, i + 1, subs[0] if subs else end)
@@ -224,13 +255,7 @@ class Doc:
     def insert_entry(self, section: str, block: List[str]) -> None:
         """At the end of the section: after its last line that is not blank, a blank line between."""
         if section not in self.sections:
-            if self.lines and not self.lines[-1].endswith("\n"):
-                self.lines[-1] += "\n"
-            if self.lines and self.lines[-1].strip():
-                self.lines.append("\n")
-            self.lines.append("## %s\n" % section)
-            self.lines.append("\n")
-            self.parse()
+            self._add_section(section)
         head, end = self.sections[section]
         at = end
         while at > head + 1 and not self.lines[at - 1].strip():
@@ -243,6 +268,23 @@ class Doc:
         if at >= len(self.lines) or self.lines[at].strip():
             new.append("\n")
         self.replace(at, at, new)
+
+    def _add_section(self, section: str) -> None:
+        """Blocked goes right after In flight; In flight right before Blocked, or before the first `## ` heading —
+        never at the end of the file beside a deployment's own waiting section (review 2026-10-20)."""
+        if self.lines and not self.lines[-1].endswith("\n"):
+            self.lines[-1] += "\n"
+        if section == "Blocked" and "In flight" in self.sections:
+            at = self.sections["In flight"][1]
+        elif section == "In flight" and "Blocked" in self.sections:
+            at = self.sections["Blocked"][0]
+        else:
+            at = next((i for i in range(self.fm_end, len(self.lines)) if self.lines[i].startswith("## ")), len(self.lines))
+        new = ["## %s\n" % section, "\n"]
+        if at > 0 and self.lines[at - 1].strip():
+            new.insert(0, "\n")
+        self.lines[at:at] = new
+        self.parse()
 
     def set_frontmatter(self, values: Dict[str, str]) -> None:
         """Replace each key's line (and any indented continuation under it) in the frontmatter; add a key it lacks
@@ -545,11 +587,18 @@ def change(root: Path, op: str, topic: str, opts: dict, deadline: Optional[float
             return "Added '%s' under %s, owner %s." % (one_line(topic), section, owner)
         if op == "drop":
             if caller.sid is not None and not caller.prime:
-                raise Refused("Only the pen's holder drops text not in entry form; it reshapes it into entries first.")
+                raise Refused("Only the pen's holder drops text not in entry form, or a section outside the shape; it "
+                              "moves what is in it first.")
+            sec = [o for o in doc.others if norm(o.name) == norm(topic) or o.id == topic]
+            if sec:
+                o = sec[0]
+                doc.replace(o.start, o.end, [])
+                _write(root, doc, leases, states, caller.who())
+                return "Dropped the section %s." % o.label()
             hit = [x for x in doc.loose if x.id == topic]
             if not hit:
-                raise Refused("hot.md has no text not in entry form with the id %s (`python3 core/hot.py --doctor` "
-                              "lists the ids)." % topic)
+                raise Refused("hot.md has no section named '%s' outside In flight and Blocked, and no text not in entry "
+                              "form with that id (`python3 core/hot.py --doctor` lists both)." % one_line(topic))
             x = hit[0]
             end = x.end
             while end < len(doc.lines) and not doc.lines[end].strip() and end < _section_end(doc, x.section):
@@ -674,6 +723,9 @@ def listing(doc: Doc) -> str:
         if loose:
             rows.append("- and %s of text not in entry form" % _plural(len(loose), "paragraph"))
         out.extend(rows or ["- nothing"])
+    if doc.others:
+        out.append("Not in the hot.md shape (named here so nothing in hot.md is hidden; the text is in vault/hot.md):")
+        out.extend("- " + o.label() for o in doc.others)
     out.append("Change hot.md only with `python3 core/hot.py` (add, update, remove, keep). When an entry's done when "
                "is met, remove it in that same turn.")
     return "\n".join(out)
@@ -742,17 +794,25 @@ def at_start(root: Path, sid: str, holds_pen: bool, deadline: Optional[float] = 
             changed = True
         if changed:
             _atomic(root / DUE, json.dumps(asked, indent=2, sort_keys=True))
-        if holds_pen and doc.loose:
+        if holds_pen and (doc.loose or doc.others):
             seen = _read_json(root / LISTED)
             fresh = [x for x in doc.loose if x.id not in seen]
-            if fresh:
+            fresh_sec = [o for o in doc.others if o.id not in seen]
+            if fresh or fresh_sec:
                 rows = ["hot.md has text not in entry form. Reshape each into an entry (`python3 core/hot.py add`), "
                         "with its history in your session log, then drop the old text with `python3 core/hot.py drop "
-                        "<id>`. Nothing is deleted until you do. Listed once here; core/doctor.sh lists them again:"]
+                        "<id>`, or a whole section with `python3 core/hot.py drop \"<section name>\"`. Where each kind "
+                        "goes: what is waiting on someone → a Blocked entry each (`add --blocked`, the owner is who it waits "
+                        "on); what was done → your session log, then drop it; a standing rule or gotcha → pitfalls/ or "
+                        "CLAUDE.md, then drop it. Nothing is deleted until you do. Listed once here; core/doctor.sh "
+                        "lists them again:"]
                 for x in fresh:
                     rows.append("- %s (%s): %s (%s)" % (x.id, x.section, x.first_line()[:100],
                                                          _plural(x.text.count("\n") or 1, "line")))
                     seen[x.id] = today()
+                for o in fresh_sec:
+                    rows.append("- %s, a section outside In flight and Blocked" % o.label())
+                    seen[o.id] = today()
                 tail.append("\n".join(rows))
                 _atomic(root / LISTED, json.dumps(seen, indent=2, sort_keys=True))
         tail.append(listing(doc))
@@ -770,6 +830,9 @@ def doctor_lines(root: Path) -> List[str]:
     for x in doc.loose:
         out.append("NOTE     hot.md: text not in entry form (%s): %s — id %s, for the pen's holder to reshape"
                    % (x.section, x.first_line()[:100], x.id))
+    for o in doc.others:
+        out.append("NOTE     hot.md: section not in the hot.md shape: %s — for the pen's holder to move, then "
+                   "`python3 core/hot.py drop \"%s\"`" % (o.label(), one_line(o.name)))
     if not out:
         out.append("OK       hot.md: %s, none due, all in entry form" % _entries(len(doc.entries)).replace(" hot.md", ""))
     return out

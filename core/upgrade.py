@@ -309,6 +309,31 @@ def _hot_session_line(lines: List[str]) -> Optional[int]:
     return next((i for i in range(1, end) if lines[i].startswith("session:")), None)
 
 
+def _hot_locked(root: Path, deadline: Optional[float], fn) -> None:
+    """Run fn under core/hot.py's lock on state/hot.lock (v0.12.6: hot.py is hot.md's one write path, so the upgrade's
+    own edit of it waits for a window's write instead of racing it). A lock still busy past a few seconds, or no
+    hot.py, runs fn as before."""
+    try:
+        import hot
+        lock = hot.hot_lock(root, deadline=max(deadline or 0, time.time() + 5))
+        with lock:
+            fn()
+        return
+    except Exception as e:
+        if type(e).__name__ != "Refused" and not isinstance(e, ImportError):
+            raise
+    fn()
+
+
+def _rename_session_line(p: Path) -> None:
+    """Re-read under the lock: the line is renamed in the file as it is now, never in a copy read before the wait."""
+    lines = p.read_text().split("\n")
+    i = _hot_session_line(lines)
+    if i is not None:
+        lines[i] = HOT_LEASES
+        _write(p, "\n".join(lines))
+
+
 def step_hot(root: Path, head: str, dry: bool, deadline: Optional[float]) -> List[str]:
     p = root / "vault" / "hot.md"
     try:
@@ -319,8 +344,7 @@ def step_hot(root: Path, head: str, dry: bool, deadline: Optional[float]) -> Lis
     if i is None:
         return []
     if not dry:
-        lines[i] = HOT_LEASES
-        _write(p, "\n".join(lines))
+        _hot_locked(root, deadline, lambda: _rename_session_line(p))
     return ["%s: %s vault/hot.md's session: line to leases: (left uncommitted for the prime's next vault commit)."
             % (head, "would rename" if dry else "renamed")]
 

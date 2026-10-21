@@ -312,3 +312,97 @@ EOF
   run python3 "$DAEDALUS_HOME/core/hot.py" show
   case "$output" in *"- after the fence — owner: window 01"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# A deployment's hot.md as it stands before v0.12.6: the section names of a live one, made-up bodies.
+legacy_hot() {
+  cat > "$HOT" <<'EOF2'
+---
+type: rolling-state
+leases: "02 — prime"
+updated: 2026-10-14
+---
+
+# Hot — where the work stands
+
+Intent only.
+
+## Standing decision (the operator, 2026-08-30)
+
+**The diagnosis duty is mine.** A paragraph that settles an old question.
+
+## In flight
+
+**EX-1 — a long-running item.** Its history, round after round.
+
+## Done since the last entry
+
+- **A finished thing (window 01).** Merged and verified.
+- **Another finished thing.** Also merged.
+
+## Still waiting on the agent
+
+- The reply on the migration design (asked 2026-10-01).
+
+## Waiting on the operator
+
+- Whether the doctor tenant retires.
+- Whether the budget rises.
+
+## Proposals budget: 4/5
+
+PROP-1, PROP-2, PROP-3, PROP-4 open.
+
+## Standing gotchas
+
+- Never commit the target's lockfile.
+EOF2
+}
+
+@test "a hot.md with sections outside the shape: every window's start names each one with its line count; the pen's holder gets the reshaping list once with where each kind goes; drop removes a moved section by name; add --blocked puts Blocked right after In flight; doctor names them" {
+  two_windows; legacy_hot
+  before="$(cat "$HOT")"
+  run start sB; c="$(ctx)"
+  for s in "## Standing decision (the operator, 2026-08-30) (1 line)" "## Done since the last entry (2 lines)" "## Still waiting on the agent (1 line)" \
+           "## Waiting on the operator (2 lines)" "## Proposals budget: 4/5 (1 line)" "## Standing gotchas (1 line)"; do
+    case "$c" in *"Not in the hot.md shape"*"- $s"*) : ;; *) echo "the start hides: $s"; echo "$c"; return 1 ;; esac
+  done
+  case "$c" in *"hot.md has text not in entry form"*) echo "a non-prime got the reshaping list: $c"; return 1 ;; esac
+  [ "$(cat "$HOT")" = "$before" ] || { echo "the start changed the file"; return 1; }
+  run start sA; c="$(ctx)"
+  case "$c" in *"hot.md has text not in entry form"*'python3 core/hot.py drop "<section name>"'*"waiting on someone → a Blocked entry each"*"the owner is who it waits on"*"done → your session log"*"pitfalls/ or CLAUDE.md"*"- ## Waiting on the operator (2 lines), a section outside In flight and Blocked"*) : ;; *) echo "$c"; return 1 ;; esac
+  run start sA; c="$(ctx)"
+  case "$c" in *"hot.md has text not in entry form"*) echo "listed twice: $c"; return 1 ;; esac
+  case "$c" in *"- ## Waiting on the operator (2 lines)"*) : ;; *) echo "the start stopped naming it: $c"; return 1 ;; esac
+  # the waiting items become Blocked entries: Blocked lands right after In flight, never at the end of the file
+  hot_as sA add "whether the doctor tenant retires" --blocked --owner operator --next "ask the operator" --done-when "the operator decides"
+  [ "$(grep -c '^## Blocked$' "$HOT")" -eq 1 ]
+  [ "$(awk '/^## /{print}' "$HOT" | sed -n '3p')" = "## Blocked" ] || { awk '/^## /' "$HOT"; return 1; }
+  [ "$(awk '/^## /{print}' "$HOT" | sed -n '2p')" = "## In flight" ]
+  # drop removes a moved section by name; another window may not
+  run hot_as sB drop "Waiting on the operator"; [ "$status" -ne 0 ]
+  run hot_as sA drop "Waiting on the operator"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  ! grep -q 'Waiting on the operator' "$HOT"; ! grep -q 'Whether the budget rises' "$HOT"
+  grep -q '^## Proposals budget: 4/5' "$HOT"; grep -q '^## Still waiting on the agent' "$HOT"
+  run hot_as sA drop "no such section"; [ "$status" -ne 0 ]
+  run python3 "$DAEDALUS_HOME/core/hot.py" --doctor
+  case "$output" in *"NOTE     hot.md: section not in the hot.md shape: ## Done since the last entry (2 lines)"*"NOTE     hot.md: section not in the hot.md shape: ## Standing gotchas (1 line)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Waiting on the operator"*) echo "$output"; return 1 ;; esac
+}
+
+@test "the upgrade's session: → leases: rename of hot.md waits for state/hot.lock, so it never races a window's hot.py write (review 2026-10-20, finding 8)" {
+  cp "$SRC/upgrade.py" "$DAEDALUS_HOME/core/" 2>/dev/null || true
+  printf -- '---\ntype: rolling-state\nsession: 011\n---\n\n## In flight\n' > "$HOT"
+  python3 -c 'import sys,time; sys.path.insert(0,sys.argv[1]); import hot
+from pathlib import Path
+with hot.hot_lock(Path(sys.argv[2])):
+    open(sys.argv[3],"w").close(); time.sleep(2)' "$DAEDALUS_HOME/core" "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR/held" 3>&- &
+  until [ -f "$BATS_TEST_TMPDIR/held" ]; do sleep 0.05; done
+  run python3 -c 'import sys,time; sys.path.insert(0,sys.argv[1]); import upgrade
+from pathlib import Path
+t=time.time(); print(upgrade.step_hot(Path(sys.argv[2]), "Upgrade", False, None)); print("waited %.1f" % (time.time()-t))' "$DAEDALUS_HOME/core" "$DAEDALUS_HOME"
+  wait
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"renamed vault/hot.md's session: line to leases:"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 -c 'import sys; w=float(sys.argv[1].rsplit("waited ",1)[1]); assert w >= 1.5, w' "$output"
+  grep -q '^leases:' "$HOT"; ! grep -q '^session:' "$HOT"
+}
