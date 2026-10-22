@@ -7,6 +7,7 @@ load fixtures/ami/setup.bash
 
 setup() {
   ami_fixture
+  SRC_CORE="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SID=sA; export SID
   AMI="$DAEDALUS_HOME/state/ami"
   MODEL=StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
@@ -185,6 +186,54 @@ for seg, want in cases:
     assert got == want, (seg, got, want)
 assert a._expand_braces(\"x{a,b{c,d}}y\") == [\"xay\", \"xbcy\", \"xbdy\"], a._expand_braces(\"x{a,b{c,d}}y\")
 print(\"ok\")' '$W'"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 round 4 (H/M-1): a word that names nothing counts as one file only right after an option that may take a value — uv --directory, env -C, a subshell cd, \$(cd …) and pushd all give suite through the guard's own segmentation; the M1 cases stay targeted; pytest -q tests with tests missing is suite" {
+  W="$BATS_TEST_TMPDIR/ws"; mkdir -p "$W/repo/tests" "$W/docs"
+  for n in a b c d e; do printf 'x\n' > "$W/repo/tests/test_$n.py"; done
+  run python3 - "$SRC_CORE" "$W" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+spec = importlib.util.spec_from_file_location("guard_bash", sys.argv[1] + "/guard-bash.py")
+gb = importlib.util.module_from_spec(spec); spec.loader.exec_module(gb)
+import amilib as a
+cwd = sys.argv[2]
+cases = [("uv run --directory=repo pytest tests", "suite"),
+         ("env -C repo pytest tests", "suite"),
+         ("(cd docs && make html); pytest tests", "suite"),
+         ('echo "$(cd docs; pwd)"; uv run pytest tests', "suite"),
+         ("pushd repo; pytest tests", "suite"),
+         ("pytest -q tests", "suite"),
+         ("pytest repo/tests/test_a.py -r a", "none"),
+         ("pytest repo/tests/test_a.py --timeout 30", "none"),
+         ("pytest repo/tests/test_a.py --cov-fail-under 80", "none"),
+         ("pytest repo/tests/test_a.py --pyargs pkg", "none"),
+         ("pytest -q repo/tests/test_a.py", "none"),
+         ("cd repo && pytest tests/test_a.py", "destructive"),
+         ("cd repo && uv run pytest tests -q", "suite")]
+for cmd, want in cases:
+    got = a.classify(gb.segments_of(cmd, Path(cwd), None), cwd)
+    assert got == want, (cmd, got, want)
+print("ok")
+PY
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 round 4 (LOW): counting is bounded and never raises — 22 {a,b} groups come back quickly as suite, 1200-deep brace nesting and a NUL in a word do not raise" {
+  run ami_py '
+import time
+cwd = sys.argv[3]
+t = time.time()
+assert a.classify([["pytest", "t" + "{a,b}" * 22 + ".py"]], cwd) == "suite"
+assert time.time() - t < 1.0, time.time() - t
+deep = "{a," * 1200 + "b" + "}" * 1200
+assert a.classify([["pytest", deep + ".py"]], cwd) == "suite"
+assert a.classify([["pytest", "x\x00y.py"]], cwd) == "suite"
+assert a._expand_braces("x{a,b{c,d}}y") == ["xay", "xbcy", "xbdy"]
+assert a._expand_braces("{a,b}" * 7) is None            # 128 alternatives: past the cap
+print("ok")' "$BATS_TEST_TMPDIR"
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
 
