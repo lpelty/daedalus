@@ -55,22 +55,22 @@ calls() { ls "$FAKE_CLAUDE_DIR"/*.argv 2>/dev/null | wc -l | tr -d ' '; }
 
 # refuter_fixture — a fresh caller_fixture with something to review in the
 # target (an uncommitted edit), an evidence summary outside the evidence tree
-# (as gates.sh hands one over) and run r1's run.json; the fake claude answers
+# (as gates.sh hands one over) and run 20261021-000000-0000a1's run.json; the fake claude answers
 # STANDS. review [run-id] runs refute.sh on it.
 refuter_fixture() {
   rm -rf "$BATS_TEST_TMPDIR/dae" "$BATS_TEST_TMPDIR/origin.git" "$BATS_TEST_TMPDIR/sub-origin.git" "$BATS_TEST_TMPDIR/fake"
   caller_fixture
   T="$DAEDALUS_HOME/target/thing"
   printf 'changed\n' >> "$T/a.txt"                          # something to review
-  printf -- '---\ntype: evidence\nrun-id: r1\nresult: PASS\n---\n# Gate run r1 — PASS\n' > "$BATS_TEST_TMPDIR/evidence.md"
-  mkdir -p "$DAEDALUS_HOME/state/evidence/r1"
-  printf '{"run_id":"r1","lease":null,"result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  printf -- '---\ntype: evidence\nrun-id: 20261021-000000-0000a1\nresult: PASS\n---\n# Gate run 20261021-000000-0000a1 — PASS\n' > "$BATS_TEST_TMPDIR/evidence.md"
+  mkdir -p "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1"
+  printf '{"run_id":"20261021-000000-0000a1","lease":null,"result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"
   export FAKE_ANSWER="F1 — nothing found.
 VERDICT: STANDS"
   # No managed policy CLAUDE.md, whatever machine runs the suite (Decision 17).
   export DAEDALUS_MANAGED_CLAUDE_MD_PATHS="$BATS_TEST_TMPDIR/no-managed-CLAUDE.md"
 }
-review() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" "${1:-r1}" "" "$BATS_TEST_TMPDIR/evidence.md"; }
+review() { run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" "${1:-20261021-000000-0000a1}" "" "$BATS_TEST_TMPDIR/evidence.md"; }
 
 # isolation_problems <n> — every isolation property of the reviewer's launch
 # (spec §6.1) that the fake claude's call n lacks, one per line; empty when

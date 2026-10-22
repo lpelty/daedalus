@@ -247,6 +247,12 @@ if [ "$render_only" -eq 1 ] && [ "$mode" != promote ]; then
 fi
 run_id="${pos[0]:-}"; criteria="${pos[1]:-}"
 [ -n "$run_id" ] || { printf 'usage: refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]\n' >&2; exit 2; }
+# A run id is what gates.sh makes — date, time, six hex digits — and nothing else, checked before any path is built
+# from it (review 2026-10-21, round 4): "../x" would put the review, its manifest line and unwritten.json elsewhere.
+case "$run_id" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+  *) printf 'refute.sh: %s is not a run id (YYYYmmdd-HHMMSS-xxxxxx, as core/gates.sh makes them)\n' "$run_id" >&2; exit 2 ;;
+esac
 target="$(target_path)"
 base="$(cfg target.branch 2>/dev/null || printf main)"
 ev="$DAEDALUS_HOME/vault/evidence"
@@ -624,6 +630,49 @@ cleanup_branch() {
   rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}
   [ "$hunks_json" = "-" ] || rm -f "$hunks_json"
 }
+# A path manifested before its writer ran stands for that writer's output — so a run that ends without a verdict
+# (a launch that failed, a lens that timed out, a merge that could not be written) records each such path with the
+# sha256 its file has at that moment, or "absent", in state/evidence/<run-id>/unwritten.json (review 2026-10-21,
+# round 3, M-A). The boundary hook sanctions a listed path only while its file still has that sha: a failed lens's
+# genuine file stays quiet, and a file hand-written there later — at a path the manifest already names — does not.
+premanifested=()
+verdict_given=""
+record_unwritten() {
+  [ "${#premanifested[@]}" -gt 0 ] || return 0
+  python3 - "$DAEDALUS_HOME/state/evidence/$run_id/unwritten.json" "${premanifested[@]}" <<'PY' 2>/dev/null || true
+import hashlib, json, os, sys
+out, paths = sys.argv[1], sys.argv[2:]
+try:
+    d = json.load(open(out))
+except (OSError, ValueError):
+    d = {}
+recs = d.get("paths") if isinstance(d, dict) and isinstance(d.get("paths"), dict) else {}
+for p in paths:
+    try:
+        with open(p, "rb") as fh:
+            recs[os.path.realpath(p)] = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        recs[os.path.realpath(p)] = "absent"
+os.makedirs(os.path.dirname(out), exist_ok=True)
+with open(out + ".tmp", "w") as fh:
+    json.dump({"paths": recs}, fh, indent=1)
+os.replace(out + ".tmp", out)
+PY
+  # the record is the run's evidence too: manifested, so check_evidence does not call it stray
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$run_id/unwritten.json" 2>/dev/null || true
+}
+trap '[ -n "$verdict_given" ] || record_unwritten' EXIT
+# The run's own verdict path is manifested BEFORE any reviewer starts (v0.12.7, review 2026-10-21), as the lens paths
+# are below and as gates.sh manifests run.json up front: the launcher (or the merge) writes it under vault/evidence,
+# and an unmanifested file there, even for the length of a review, is what every other window's boundary hook flags.
+# A manifested path whose file never appears is nothing. Nothing launches when the manifest cannot be written, so no
+# review file is ever written unaccounted for, and the path is manifested once.
+python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
+  printf 'cannot append the review file to the evidence manifest — cannot certify the run; no reviewer was started (%s)\n' "$verdict_file" >&2
+  [ "$mode" != branch ] || cleanup_branch
+  exit 2
+}
+premanifested+=("$verdict_file")
 if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ] && [ "$hunks_json" = "-" ]; then
   # One reviewer, no earlier findings to check and no new ground to mark: the launcher writes the review file
   # itself, as it always has. A later review goes through the merge, which labels findings outside the new ground.
@@ -659,6 +708,20 @@ else
     cleanup_branch
     exit 2
   fi
+  # Every lens's review path is manifested BEFORE any lens starts, the way gates.sh manifests run.json and the vault
+  # summary up front (v0.12.7, PROP-035 §2, 2026-10-21): each launcher writes its file under vault/evidence while it
+  # runs, and while the paths were appended only after the whole batch, every other window's boundary hook saw a
+  # new, unaccounted-for evidence file and called it that window's tampering; a lens that failed was skipped before
+  # its append, so a file it left was never manifested and the block never ended. A manifested path whose file is
+  # absent is nothing; one whose file is there is this recorded run's output. Nothing launches when the manifest
+  # cannot be written: a review whose files nobody can account for is not started.
+  for l in "${lenses[@]}"; do printf '%s\n' "$ev/$run_id-lens-$l-review.md"; done \
+    | python3 "$DAEDALUS_HOME/core/manifest-append.py" - || {
+    printf 'the lens reviews could not be added to the evidence manifest — cannot certify the run\n' >&2
+    cleanup_branch
+    exit 2
+  }
+  for l in "${lenses[@]}"; do premanifested+=("$ev/$run_id-lens-$l-review.md"); done
   work="$(mktemp -d)"
   i=0
   for l in "${lenses[@]}"; do
@@ -685,10 +748,6 @@ else
       failed="${failed}the $l lens: $(launch_failure "$rc" "$work/$l.err" | tr '\n' ' ' | sed 's/ *$//'); "
       continue
     fi
-    # Written by the launcher under vault/evidence: manifested now, whatever the others did, so a lens review
-    # never sits there unaccounted for.
-    python3 "$DAEDALUS_HOME/core/manifest-append.py" "$lf" \
-      || { failed="${failed}the $l lens: its review could not be added to the evidence manifest; "; continue; }
     lnotes="$(mktemp)"
     verdict_of "$lf" run >/dev/null 2>"$lnotes"
     if [ "$?" -eq 2 ]; then
@@ -707,20 +766,11 @@ else
   python3 "$RL" merge "$verdict_file" "$run_id" "$earlier_json" "$hunks_json" "${sources[@]}" \
     || { rm -f "$verdict_file"; cleanup_branch; exit 2; }
 fi
-# Under the manifest lock, one write (spec §4.9): a bare `>>` interleaved with
-# another window's gates run. The review file is written and manifested in the
-# same breath, so the RUNNING excuse covers the negligible window between.
-# A failed append is exit 2 — cannot certify — like every other failure here,
-# NEVER die (exit 1): gates.sh reads 1 as REFUTED with the review file as the
-# fail_log, so a STANDS review whose manifest line failed was recorded as a
-# refutation and the append's own error never reached the operator. The review
-# file is removed rather than left unmanifested under vault/evidence, a
-# protected path Daedalus cannot clean; the verdict was not certified anyway.
-python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
-  rm -f "$verdict_file"
-  printf 'cannot append the review file to the evidence manifest — cannot certify the run; the review file was removed rather than left unmanifested (%s)\n' "$verdict_file" >&2
-  exit 2
-}
+# The review file's manifest line was written before any reviewer started (above, v0.12.7), under the manifest lock
+# (spec §4.9). A failed append there is exit 2 — cannot certify — before anything is launched, so no review file is
+# ever written unaccounted for; the earlier safety (remove a review whose append failed afterwards, rather than leave
+# it unmanifested under vault/evidence, a protected path Daedalus cannot clean) holds by construction. NEVER die
+# (exit 1) on it: gates.sh reads 1 as REFUTED with the review file as the fail_log.
 # The verdict: verdict_of, defined at the top of this file. Its notes (what it counted, what it listed and did not
 # count) go to stderr with the review file named, for gates.sh to show the operator.
 notes="$(mktemp)"
@@ -762,5 +812,6 @@ if [ "$mode" = branch ]; then
   recorded=1
   cleanup_branch
 fi
+verdict_given=1
 printf '%s\n' "$word"
 exit "$rc"

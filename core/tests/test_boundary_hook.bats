@@ -436,6 +436,92 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   case "$output" in *"daedalus: could not record"*) echo "no stderr line once state/ is writable: $output"; return 1 ;; *"the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+# --- v0.12.7 (PROP-035 §3): the backstop after an agreed merge ------------------------------------------------------
+gitc() { git -C "$1" -c user.email=t@x -c user.name=t "${@:2}"; }
+
+@test "PROP-035 §3 (2026-10-21, window 01 merged lease/06 f78a0a5 and lease/04 55196c3 for 0.36.0): after merging window 02's branch the Stop is silent for its paths; a merged path changed again in a later commit blocks once with the merge wording, and the next Stop is silent" {
+  two_leases; live_holder 01; live_holder 02
+  W1="$DAEDALUS_HOME/worktrees/01/thing"; W2="$DAEDALUS_HOME/worktrees/02/thing"
+  mkdir -p "$W2/hooks" "$W2/tests"; printf 'theirs\n' > "$W2/hooks/capture.py"; printf 't\n' > "$W2/tests/test_capture.py"
+  gitc "$W2" add -A; gitc "$W2" commit -q -m "window 02's work"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }       # records 02's set as seen
+  gitc "$W1" merge -q --no-edit lease/02
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "a merged branch's paths blocked: $output"; return 1; }
+  case "$output" in *"never fired"*|*"hooks/capture.py"*) echo "$output"; return 1 ;; *) : ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'mine after the merge\n' > "$W1/hooks/capture.py"; gitc "$W1" commit -q -am "window 01 changes it again"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py again after merging window 02 (poc-ui)'s branch (lease/02), which had changed it. Message that window before you go on."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"timed out"*|*"tests/test_capture.py"*) echo "only the path changed again, in merge words: $output"; return 1 ;; *) : ;; esac
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "02:" + sys.argv[2] in d["warned"], d' "$DAEDALUS_HOME/state/session-sA-boundary.json" "$W1/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "said once, never again: $output"; return 1; }
+}
+
+@test "PROP-035 §3: a merged path changed again in the working tree, uncommitted, blocks once with the merge wording; the merge with a merge commit is still a merge" {
+  two_leases; live_holder 01; live_holder 02
+  W1="$DAEDALUS_HOME/worktrees/01/thing"; W2="$DAEDALUS_HOME/worktrees/02/thing"
+  mkdir -p "$W2/hooks"; printf 'theirs\n' > "$W2/hooks/capture.py"; gitc "$W2" add -A; gitc "$W2" commit -q -m "window 02's work"
+  printf 'own\n' > "$W1/own.txt"; gitc "$W1" add -A; gitc "$W1" commit -q -m "window 01's own work"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  gitc "$W1" merge -q --no-ff --no-edit lease/02
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf 'edited, not committed\n' > "$W1/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py again after merging window 02 (poc-ui)'s branch (lease/02)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "PROP-035 §3: the original backstop case, a window 02 path changed with no merge, still says the warning never fired — and, said once, is recorded under warned so the next Stop is silent" {
+  two_leases; live_holder 01; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"you changed hooks/capture.py, which window 02 (poc-ui) had already changed, and the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 (L3): warned is keyed per path and per other window — warned about window 02's change to a path, a Stop still says once that window 03 changed it too" {
+  export PYTHONDONTWRITEBYTECODE=1     # the Edit leg imports transcriptlib; its .pyc under core/ would be protected dirt
+  two_leases; live_holder 01; live_holder 02
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 03 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(session_id="sC"); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/03.json")"
+  live_holder 03
+  printf '{"thing":{"hooks/capture.py":"2026-10-21T10:00:00"}}' > "$DAEDALUS_HOME/state/leases/03.changed"
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run edit_as sA "$W/hooks/capture.py"; case "$output" in *'"permissionDecision": "deny"'*"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+  run edit_as sA "$W/hooks/capture.py"; case "$output" in *'"permissionDecision"'*) echo "second attempt must pass: $output"; return 1 ;; *) : ;; esac
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "02:" + sys.argv[2] in d["warned"], d' "$DAEDALUS_HOME/state/session-sA-boundary.json" "$W/hooks/capture.py"
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"which window 03 had already changed, and the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"window 02"*) echo "window 02 was already warned: $output"; return 1 ;; *) : ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 round 3 (L-C): a backstop block is recorded under warned only after the Stop has said it — a Stop that dies before its output (stderr closed) repeats the block next time" {
+  two_leases; live_holder 01; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sA\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py' 2>&-"
+  [ "$status" -ne 0 ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert not any(k.endswith("hooks/capture.py") for k in d.get("warned", {})), d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"which window 02 (poc-ui) had already changed, and the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 round 3 (L-D): a bare-path warned key from before v0.12.7 counts for the pre-write warning too — the Edit goes through with context, not a second stop" {
+  export PYTHONDONTWRITEBYTECODE=1
+  two_leases; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  python3 -c 'import json,sys; json.dump({"warned": {sys.argv[2]: "x"}}, open(sys.argv[1], "w"))' "$DAEDALUS_HOME/state/session-sA-boundary.json" "$W/hooks/capture.py"
+  run edit_as sA "$W/hooks/capture.py"
+  case "$output" in *'"permissionDecision"'*) echo "warned before the upgrade, stopped again: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "a visitor (DIRECT_CALL_ID set) is never blocked at Stop: stray evidence, an unbindable session and a backstop hit all become notes, exit 0; its PreToolUse denials still apply" {
   two_leases; live_holder 01; live_holder 02
   mkdir -p "$DAEDALUS_HOME/state/evidence/x"; printf 'x\n' > "$DAEDALUS_HOME/state/evidence/x/gate.log"   # unmanifested: stray
@@ -465,6 +551,98 @@ d=json.load(open(sys.argv[1])); d.update(pid=int(sys.argv[2]),proc_started=int(s
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(pid=1,proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
   run hook_as Stop sA; [ "$status" -eq 2 ]
   case "$output" in *"a gate run under window 02 (poc-ui) never finished; its session is gone"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- v0.12.7 (PROP-035 §2): evidence is attributed by run, not by snapshot time -----------------------------------
+
+# visible_vault — the layout PROP-017 found: the vault is not its own repository and not ignored, so vault/evidence/
+# is protected dirt the home's git can see. Before two_leases, so both sessions' snapshots are taken in it.
+visible_vault() {
+  rm -rf "$DAEDALUS_HOME/vault/.git"
+  printf 'target/\nconfig.yaml\nstate/\nworktrees/\n.claude/settings.local.json\n' > "$DAEDALUS_HOME/.gitignore"
+  git -C "$DAEDALUS_HOME" add .gitignore
+  cp "$SRC/manifest-append.py" "$DAEDALUS_HOME/core/"
+}
+# run_json <run-id> <lease> <session> <result> — gates.sh's run record, manifested as gates.sh manifests it
+run_json() {
+  mkdir -p "$DAEDALUS_HOME/state/evidence/$1"
+  printf '{"run_id":"%s","started":"2026-10-21T13:44:02","lease":"%s","session_id":"%s","result":"%s"}' "$1" "$2" "$3" "$4" \
+    > "$DAEDALUS_HOME/state/evidence/$1/run.json"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$1/run.json"
+}
+
+@test "PROP-035 §2 (2026-10-21, run 20261021-134402-54c704): window 02's review has its lens file manifested before the lens writes it (refute.sh, v0.12.7) — window 01's PostToolUse and Stop are silent; a lens file nobody manifested is still flagged, as on main" {
+  visible_vault; two_leases; live_holder 01; live_holder 02; sess sB
+  rid="20261021-134402-54c704"; run_json "$rid" 02 sB RUNNING
+  lens="vault/evidence/$rid-lens-failure-review.md"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/$lens"
+  printf -- '---\ntype: evidence-review\n---\nVERDICT: STANDS\n' > "$DAEDALUS_HOME/$lens"
+  for ev in PostToolUse Stop; do
+    run hook_as "$ev" sA; [ "$status" -eq 0 ] || { echo "window 01 $ev blamed for window 02's run: $output"; return 1; }
+    case "$output" in *"$rid"*) echo "window 01 $ev named it: $output"; return 1 ;; *) : ;; esac
+  done
+  run_json "$rid" 02 sB PASS
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  other="vault/evidence/$rid-lens-trust-review.md"
+  printf 'x\n' > "$DAEDALUS_HOME/$other"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"Protected files changed this session: $other"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "PROP-035 §2: the run.json names this session but the evidence file is unmanifested — still flagged; a hand-written vault/evidence review with no run.json — still flagged (PROP-017 guard holds)" {
+  visible_vault; two_leases; live_holder 01; live_holder 02
+  rid="20261021-140000-aaaaaa"; run_json "$rid" 01 sA PASS
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/$rid-lens-trust-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"Protected files changed this session: vault/evidence/$rid-lens-trust-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$DAEDALUS_HOME/vault/evidence/$rid-lens-trust-review.md"
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/x-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/x-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  rm -f "$DAEDALUS_HOME/vault/evidence/x-review.md"
+  # a run.json that is not manifested vouches for nothing: a session cannot excuse a file by writing state/ itself
+  rid2="20261021-150000-bbbbbb"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid2"
+  printf '{"run_id":"%s","lease":"02","session_id":"sB","result":"PASS"}' "$rid2" > "$DAEDALUS_HOME/state/evidence/$rid2/run.json"
+  printf 'x\n' > "$DAEDALUS_HOME/vault/evidence/$rid2-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/$rid2-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "review 2026-10-21 (forge): window 01 hand-writes an unmanifested <run>-review.md under window 02's real gate run — window 01 is blocked, as on main" {
+  visible_vault; two_leases; live_holder 01; live_holder 02
+  ( cd "$DAEDALUS_HOME" && DAEDALUS_SESSION_ID=sB bash core/gates.sh >/dev/null 2>&1 ) || true
+  rid="$(ls "$DAEDALUS_HOME/state/evidence" | head -1)"
+  grep -q '"session_id": "sB"' "$DAEDALUS_HOME/state/evidence/$rid/run.json" || { cat "$DAEDALUS_HOME/state/evidence/$rid/run.json"; return 1; }
+  printf -- '---\ntype: evidence-review\n---\nVERDICT: STANDS\n' > "$DAEDALUS_HOME/vault/evidence/$rid-review.md"
+  for ev in PostToolUse Stop; do
+    run hook_as "$ev" sA; [ "$status" -eq 2 ] || { echo "$ev: the forged review passed: $output"; return 1; }
+    case "$output" in *"$rid-review.md"*) : ;; *) echo "$ev: $output"; return 1 ;; esac
+  done
+}
+
+@test "review 2026-10-21 round 3 (M-A): a path refute.sh manifested but whose writer failed — absent in unwritten.json — and a file hand-written there later is flagged; a failed lens's own file (its sha recorded) is silent until it is edited" {
+  visible_vault; two_leases; live_holder 01; live_holder 02
+  rid="20261021-190000-dddddd"; run_json "$rid" 01 sA FAIL
+  E="$DAEDALUS_HOME/vault/evidence"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$E/$rid-review.md" "$E/$rid-lens-trust-review.md"
+  printf 'lens wrote this\n' > "$E/$rid-lens-trust-review.md"
+  python3 - "$DAEDALUS_HOME/state/evidence/$rid/unwritten.json" "$E" "$rid" <<'PY'
+import hashlib, json, sys
+out, e, rid = sys.argv[1:4]
+lens = e + "/" + rid + "-lens-trust-review.md"
+json.dump({"paths": {e + "/" + rid + "-review.md": "absent",
+                     lens: hashlib.sha256(open(lens, "rb").read()).hexdigest()}}, open(out, "w"))
+PY
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/unwritten.json"   # as refute.sh does
+  run hook_as PostToolUse sA; [ "$status" -eq 0 ] || { echo "the failed lens's own file blocked: $output"; return 1; }
+  printf -- '---\ntype: evidence-review\n---\nVERDICT: STANDS\n' > "$E/$rid-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/$rid-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lens-trust"*) echo "the unchanged lens file was named: $output"; return 1 ;; *) : ;; esac
+  rm -f "$E/$rid-review.md"
+  printf 'edited\n' >> "$E/$rid-lens-trust-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/$rid-lens-trust-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "a lease file that cannot be read never turns a live window's RUNNING run into 'never finished; its session is gone': the block names the unreadable file, at Stop and at PostToolUse" {

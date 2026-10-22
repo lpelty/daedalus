@@ -147,6 +147,74 @@ PY
   [ ! -f "$DAEDALUS_HOME/vault/evidence/$id-review.md" ]
 }
 
+@test "PROP-035 §2 (2026-10-21, run 20261021-134402-54c704): every lens's review path is manifested before any lens starts, so another window never sees a lens file no run accounts for; a lens that times out leaves its path manifested" {
+  write_config "  refute_timeout: 2"; large_change
+  echo 30 > "$STUB/sleep-upgrade"
+  # each reviewer, as it starts, notes whether its own review path is in the manifest already
+  sed -i '' "s|^cp \"\\\$p\" \"$STUB/prompt-\\\$lens-\\\$n\"\$|&\\
+grep -c -- \"-lens-\\\$lens-review.md\" \"$DAEDALUS_HOME/vault/evidence/.manifest\" > \"$STUB/manifested-\\\$lens\" 2>/dev/null|" "$STUB/claude"
+  grep -q "manifested-" "$STUB/claude" || { cat "$STUB/claude"; return 1; }
+  gates
+  [ "$status" -ne 0 ]
+  id="$(run_id)"
+  for l in criteria trust upgrade failure; do
+    [ "$(cat "$STUB/manifested-$l" 2>/dev/null)" -ge 1 ] 2>/dev/null || { echo "lens $l started unmanifested: $(cat "$STUB/manifested-$l" 2>&1)"; return 1; }
+    grep -qF "$DAEDALUS_HOME/vault/evidence/$id-lens-$l-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest" || { echo "lens $l"; return 1; }
+  done
+  # each path once: manifested before the launch, not again after it
+  [ "$(grep -cF -- "$id-lens-criteria-review.md" "$DAEDALUS_HOME/vault/evidence/.manifest")" -eq 1 ]
+}
+
+@test "review 2026-10-21 (H1): the run's own verdict path, <run>-review.md, is manifested before its reviewer starts — one reviewer and the lens merge alike" {
+  write_config; small_change
+  sed -i '' "s|^cp \"\\\$p\" \"$STUB/prompt-\\\$lens-\\\$n\"\$|&\\
+grep -c -- '-[0-9a-f]\\\\{6\\\\}-review.md\$' \"$DAEDALUS_HOME/vault/evidence/.manifest\" > \"$STUB/verdict-manifested-\\\$lens\" 2>/dev/null|" "$STUB/claude"
+  grep -q "verdict-manifested-" "$STUB/claude" || { cat "$STUB/claude"; return 1; }
+  gates
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$STUB/verdict-manifested-all")" -ge 1 ] || { echo "one reviewer started with its verdict path unmanifested"; return 1; }
+  rm -f "$STUB"/verdict-manifested-*; large_change
+  gates
+  [ "$(cat "$STUB/verdict-manifested-criteria" 2>/dev/null)" -ge 2 ] 2>/dev/null || { echo "lens run: $(cat "$STUB/verdict-manifested-criteria" 2>&1) $output"; return 1; }
+}
+
+@test "review 2026-10-21 round 3 (M-A): a run that ends without a verdict records each pre-manifested path in state/evidence/<run>/unwritten.json — absent when its writer wrote nothing, its sha256 when it did" {
+  write_config; small_change
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 3\n' > "$STUB/claude"; chmod +x "$STUB/claude"
+  gates
+  [ "$status" -ne 0 ]
+  id="$(ls "$DAEDALUS_HOME/state/evidence" | head -1)"
+  python3 - "$DAEDALUS_HOME/state/evidence/$id/unwritten.json" "$(cd "$DAEDALUS_HOME/vault/evidence" && pwd -P)/$id-review.md" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))["paths"]
+assert d == {sys.argv[2]: "absent"}, d
+PY
+  grep -qF "$DAEDALUS_HOME/state/evidence/$id/unwritten.json" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  # the lens case: the timed-out lens is absent, a finished lens's file is recorded by its sha
+  stub_claude; write_config "  refute_timeout: 2"; large_change; echo 30 > "$STUB/sleep-upgrade"
+  gates; [ "$status" -ne 0 ]
+  id2="$(ls "$DAEDALUS_HOME/state/evidence" | grep -v "^$id\$" | head -1)"
+  E="$(cd "$DAEDALUS_HOME/vault/evidence" && pwd -P)"
+  python3 - "$DAEDALUS_HOME/state/evidence/$id2/unwritten.json" "$E" "$id2" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[1]))["paths"]; e, rid = sys.argv[2], sys.argv[3]
+assert d[e + "/" + rid + "-lens-upgrade-review.md"] == "absent", d
+assert d[e + "/" + rid + "-review.md"] == "absent", d
+crit = e + "/" + rid + "-lens-criteria-review.md"
+assert d[crit] == hashlib.sha256(open(crit, "rb").read()).hexdigest(), d
+PY
+}
+
+@test "review 2026-10-21 round 4: refute.sh refuses a run id that is not gates.sh's format before it builds any path from it" {
+  write_config
+  for bad in "../../x" "20261021-120000-ABCDEF" "r1" "20261021-120000-abcdef/../y"; do
+    run bash "$DAEDALUS_HOME/core/refute.sh" "$bad"
+    [ "$status" -eq 2 ] || { echo "$bad: $status $output"; return 1; }
+    case "$output" in *"is not a run id"*) : ;; *) echo "$bad: $output"; return 1 ;; esac
+  done
+  [ ! -e "$DAEDALUS_HOME/vault/evidence/.manifest" ] || ! grep -q '\.\.' "$DAEDALUS_HOME/vault/evidence/.manifest"
+}
+
 @test "a lens whose review cannot be certified (an unlabelled finding) fails the run closed" {
   write_config; large_change
   printf '### F1 — big.txt:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$STUB/out-criteria"

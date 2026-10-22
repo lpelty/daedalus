@@ -713,8 +713,10 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   # the pen's holder (sA) has ended, so the new terminal takes it too
   [ "$(first_line)" = "Daedalus session orientation: window 01, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
   [ "$(lease_json 01 session_id)" = "sC" ]; [ "$(lease_json 01 released)" = "None" ]
-  case "$output" in *"Swept window 01: it was released and its session has ended"*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
+  case "$output" in *"Swept window 01: it was released and its session has ended, and its worktree and branch: nothing uncommitted, nothing trunk lacks"*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
+  # v0.12.7 (PROP-029): the swept window's merged, clean worktree went with it; the number's new holder gets a fresh one
   [ "$(git -C "$DAEDALUS_HOME/worktrees/01/thing" rev-parse --abbrev-ref HEAD)" = "lease/01" ]
+  ls "$DAEDALUS_HOME/state/swept-trees" | grep -q '^01-'           # the old tree is in the trash for 7 days
 }
 
 @test "a released window with unpromoted commits is swept once its session ends, but its number stays with the work: the new terminal is numbered after it and its start says why the lower number was skipped" {
@@ -728,7 +730,9 @@ fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o644); fcntl.flock(fd, fcntl.LOCK
   [ "$(first_line)" = "Daedalus session orientation: window 02, prime, $DAEDALUS_HOME" ] || { echo "$output"; return 1; }
   [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]
   [ "$(git -C "$T1" log -1 --format=%s lease/01)" = "kept work" ]
-  case "$output" in *"Swept window 01"*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
+  # (the context is JSON: the dash between the two parts arrives escaped)
+  case "$output" in *"Swept window 01: it was released and its session has ended; kept its worktree and branch "*"kept lease/01: 1 commit not on main."*) : ;; *) echo "no sweep sentence: $output"; return 1 ;; esac
+  [ -d "$T1" ]
   case "$output" in *"Numbered 02, not a lower number: 01 has unpromoted commits on lease/01"*) : ;; *) echo "no skip sentence: $output"; return 1 ;; esac
 }
 

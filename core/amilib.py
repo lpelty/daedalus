@@ -16,6 +16,7 @@ hook talks HTTP to the daemon. Every JSON file under state/ami/ is written whole
 never sees a torn file; the daily log is the one append-only file.
 """
 import fcntl
+import glob
 import hashlib
 import http.client
 import json
@@ -488,10 +489,217 @@ def head(seg: List[str]) -> List[str]:
     return seg
 
 
-def _kind_of(seg: List[str]) -> str:
+# v0.12.7 (PROP-035 §1, 2026-10-21): a test run is judged by its size, not by whether it names a file. A window ran
+# `uv run pytest tests/test_target_repoint.py tests/test_target_update_*.py tests/test_repos_*.py … -q` — 322 tests in
+# seven groups, 4 min 18 s — and was never asked the suite question, because any `.py` argument made the segment
+# targeted: one file and seven globbed groups were the same. More test files than this is a suite run.
+TARGETED_MAX_FILES = 3
+# The options that take their value as the next word, so the value is never read as a test path. An option missing
+# here costs at most one phantom "file" (a word that names nothing counts as one), never a suite run on its own.
+_VALUE_OPTS = {
+    "pytest": {"-k", "-m", "-c", "-p", "-o", "-W", "-n", "--maxfail", "--deselect", "--ignore", "--ignore-glob",
+               "--rootdir", "--basetemp", "--junitxml", "--junit-xml", "--cov", "--cov-report", "--tb", "--durations",
+               "--log-level", "--confcutdir", "--override-ini", "--capture", "--import-mode", "--color", "--dist",
+               "--numprocesses"},
+    "bats": {"-f", "--filter", "-j", "--jobs", "-F", "--formatter", "-o", "--output", "--filter-tags",
+             "--filter-status", "--report-formatter", "--gather-test-outputs-in", "--setup-suite-file"},
+}
+_LARGE = TARGETED_MAX_FILES + 1
+
+
+class _UnknownCwd:
+    """The cwd after a `cd` that cannot be resolved without a shell: a variable, a command substitution, `cd -`, a
+    directory that is not there (review 2026-10-21, round 3, H-A)."""
+    def __repr__(self) -> str:
+        return "UNKNOWN_CWD"
+
+
+UNKNOWN_CWD = _UnknownCwd()
+
+
+BRACE_CAP = 64             # alternatives one word may expand to; past it the word counts as large
+WALK_CAP = 20000           # directory entries a recursive `**` may walk before its word counts as large
+
+
+def _expand_braces(word: str) -> Optional[List[str]]:
+    """The shell's brace expansion of one word, `{a,b}` and nested `{a,b{c,d}}` — no shell, no ranges — or None
+    past BRACE_CAP alternatives (review 2026-10-21, round 4: 22 groups are four million words). Iterative, so no
+    nesting depth can recurse: each step expands the first top-level group with a comma of one pending word."""
+    pending, done = [word], []
+    while pending:
+        w = pending.pop()
+        depth, start, hit = 0, None, None
+        for i, ch in enumerate(w):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}" and depth:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    parts, d, cur = [], 0, []
+                    for c in w[start + 1:i]:
+                        if c == "," and d == 0:
+                            parts.append("".join(cur))
+                            cur = []
+                            continue
+                        d += (c == "{") - (c == "}")
+                        cur.append(c)
+                    parts.append("".join(cur))
+                    if len(parts) >= 2:
+                        hit = (start, i, parts)
+                        break
+                    start = None
+        if hit is None:
+            done.append(w)
+        else:
+            st, en, parts = hit
+            pending += [w[:st] + part + w[en + 1:] for part in reversed(parts)]
+        if len(done) + len(pending) > BRACE_CAP:
+            return None
+    return done
+
+
+def _walk_bounded(pattern: str) -> bool:
+    """A recursive `**` pattern walks at most WALK_CAP entries below its fixed prefix: True when it stays within."""
+    parts = pattern.split(os.sep)
+    fixed = []
+    for part in parts:
+        if glob.has_magic(part):
+            break
+        fixed.append(part)
+    top = os.sep.join(fixed) or "."
+    seen = 0
+    for _dirpath, dirs, files in os.walk(top):
+        seen += len(dirs) + len(files)
+        if seen > WALK_CAP:
+            return False
+    return True
+
+
+def resolve_cd(args: List[str], cwd):
+    """The cwd after `cd <args>` run in <cwd>: a literal directory, `~` expanded, relative to <cwd>; no argument is
+    the home directory. UNKNOWN_CWD for what only a shell knows — `$`, a backquote, `cd -` — for a directory that is
+    not there, or when <cwd> itself is unknown and the target is relative."""
+    words = [t for t in args if t not in ("-L", "-P", "-e", "-@")]
+    target = words[0] if words else "~"
+    if target == "-" or "$" in target or "`" in target:
+        return UNKNOWN_CWD
+    target = os.path.expanduser(target)
+    if not os.path.isabs(target):
+        if cwd is UNKNOWN_CWD:
+            return UNKNOWN_CWD
+        target = os.path.join(str(cwd) if cwd else os.getcwd(), target)
+    return os.path.realpath(target) if os.path.isdir(target) else UNKNOWN_CWD
+
+
+# Options that never take a value (review 2026-10-21, round 4): a word right after one of these is a test path,
+# never an option's value. Any other `-x`/`--long` may take the next word as its value.
+_BOOL_OPTS = {
+    "pytest": {"-q", "-v", "-vv", "-vvv", "-x", "-s", "-l", "--lf", "--ff", "--nf", "--sw", "--exitfirst", "--quiet",
+               "--verbose", "--last-failed", "--failed-first", "--new-first", "--stepwise"},
+    "bats": {"-t", "--tap", "-p", "--pretty", "-T", "--timing", "-r", "--recursive"},
+}
+
+
+def _test_files(exe: str, args: List[str], cwd) -> Optional[int]:
+    """How many test files a pytest or bats segment's positional arguments name (§6.1, v0.12.7): `_LARGE` past
+    TARGETED_MAX_FILES, None when no argument names a path at all. Each word is expanded as the shell would —
+    braces (`_expand_braces`, capped), `~`, then a glob against `cwd` (the payload's, or where a literal `cd` before
+    it moved) with `**` recursive and its walk bounded — and judged:
+      * a test file that is there, or a glob's matches, count as files; a directory counts as large;
+      * a glob that matches nothing counts as one file, as the shell would pass it on literally;
+      * a word that names nothing on disk counts as large — unless it ends in the runner's extension or names a
+        `file::node` (one file), or the word just before it is an option that may take a value (not in
+        _BOOL_OPTS; an `--opt=value` has its value attached), when it is that option's value: one file at most.
+    The rule is by POSITION, not by cwd (review 2026-10-21, round 4): every way of changing directory a command
+    can take — `uv run --directory`, `env -C`, a subshell `cd`, `pushd` — leaves a bare `tests` naming nothing
+    here, and that is a suite, as main read it. Any error while counting a word (a NUL, an unreadable directory)
+    counts that word as large: the hook never crashes on it. The same file named twice counts once; counting
+    stops past the limit. Nothing is run (no `--collect-only`)."""
+    takes = _VALUE_OPTS.get(exe, set())
+    bools = _BOOL_OPTS.get(exe, set())
+    ext = ".py" if exe == "pytest" else ".bats"
+    unknown = cwd is UNKNOWN_CWD
+    base = os.getcwd() if (unknown or not cwd) else str(cwd)
+    files = set()
+    named = False
+    skip = literal = False
+    prev = None
+    for a in args:
+        before, prev = prev, a
+        if skip:
+            skip = False
+            continue
+        if not literal and a == "--":
+            literal = True
+            continue
+        if not literal and a.startswith("-"):
+            skip = a in takes
+            continue
+        named = True
+        value_slot = (not literal and before is not None and before.startswith("-") and "=" not in before
+                      and before not in bools and before != "--")
+        try:
+            n = _count_word(a, exe, ext, base, unknown, value_slot, files)
+        except (Exception, RecursionError):
+            n = _LARGE
+        if n is _LARGE or len(files) > TARGETED_MAX_FILES:
+            return _LARGE
+    return min(len(files), _LARGE) if named else None
+
+
+def _count_word(a: str, exe: str, ext: str, base: str, unknown: bool, value_slot: bool, files: set):
+    """_test_files for one positional word: adds what it names to `files`; `_LARGE` when the word alone decides."""
+    node = exe == "pytest" and "::" in a
+    if node:
+        a = a.split("::", 1)[0]
+    words = _expand_braces(a)
+    if words is None:
+        return _LARGE
+    for w in words:
+        if "\x00" in w:
+            return _LARGE
+        w = os.path.expanduser(w)
+        if unknown and not os.path.isabs(w):
+            if glob.has_magic(w) or not (w.endswith(ext) or node or value_slot):
+                return _LARGE                            # nothing relative can be looked at
+            files.add(("unknown cwd", w))
+        elif glob.has_magic(w):
+            pattern = w if os.path.isabs(w) else os.path.join(glob.escape(base), w)
+            if "**" in w and not _walk_bounded(pattern):
+                return _LARGE
+            hit = False
+            for h in glob.iglob(pattern, recursive=True):
+                hit = True
+                if os.path.isdir(h):
+                    return _LARGE
+                files.add(os.path.realpath(h))
+                if len(files) > TARGETED_MAX_FILES:
+                    return _LARGE
+            if not hit:
+                files.add(("unmatched", w))
+        else:
+            full = w if os.path.isabs(w) else os.path.join(base, w)
+            if os.path.isdir(full) or w.endswith("/"):
+                return _LARGE
+            if not os.path.exists(full) and not (w.endswith(ext) or node or value_slot):
+                return _LARGE                            # names nothing, in no option's value slot: a suite
+            files.add(os.path.realpath(full))
+        if len(files) > TARGETED_MAX_FILES:
+            return _LARGE
+    return None
+
+
+def _kind_of(seg: List[str], cwd=None) -> str:
     """One unwrapped, headed segment against the §6.1 table: `exempt` (an evidence run or the switch's own
     command — the whole call gets no question), `suite` (a full run), `targeted` (already targeted —
-    nothing to ask about this segment), `destructive` (everything else)."""
+    nothing to ask about this segment), `destructive` (everything else). A pytest or bats segment is judged by
+    the number of test files its positional arguments name (`_test_files`, globs expanded against `cwd`, the
+    payload's): 1 to TARGETED_MAX_FILES is targeted; more, a directory, or none at all (a bare `pytest`, a
+    `pytest -k foo`) is a suite. A filter (`-k`, `-f`, `--filter`) narrows a run but no longer makes it targeted
+    on its own: it keeps a run targeted only over files within the limit (v0.12.7, PROP-035 §1). A `bats` with no
+    path at all (`bats --version`) runs no test and stays targeted, as it always was."""
     if not seg:
         return "targeted"
     exe = seg[0]
@@ -503,32 +711,31 @@ def _kind_of(seg: List[str]) -> str:
     names = {exe, script} if script else {exe}
     if names & EVIDENCE or names & SWITCH_OWN:
         return "exempt"
-    if exe == "bats":
-        args = seg[1:]
-        for a in args:
-            if a.endswith(".bats") or a in ("-f", "--filter") or a.startswith("--filter=") or (a.startswith("-f") and len(a) > 2):
-                return "targeted"
-        if any(not a.startswith("-") for a in args):
-            return "suite"
-        return "targeted"
-    if exe == "pytest":
-        for a in seg[1:]:
-            if a.startswith("-k") or "::" in a or a.endswith(".py"):
-                return "targeted"
-        return "suite"
+    if exe in ("bats", "pytest"):
+        n = _test_files(exe, seg[1:], cwd)
+        if n is None:
+            return "targeted" if exe == "bats" else "suite"
+        return "targeted" if 1 <= n <= TARGETED_MAX_FILES else "suite"
     return "destructive"
 
 
-def classify(segments: List[List[str]]) -> str:
+def classify(segments: List[List[str]], cwd=None) -> str:
     """`none` | `suite` | `destructive` over every unwrapped segment at every depth the guard walked
     (§6.1): an evidence run or a switch command anywhere makes the whole call `none`; else a full-suite
     segment makes it `suite`; else any other segment makes it `destructive`; a call of only targeted
-    test runs (or nothing) is `none`."""
+    test runs (or nothing) is `none`. `cwd` is the payload's, where a test run's globs are expanded
+    (`_test_files`); None reads the process's own. A `cd` segment moves it for the segments after it, in the order
+    the guard walked them (resolve_cd; UNKNOWN_CWD when only a shell could say where)."""
     kinds = set()
+    here = cwd
     for seg in segments or []:
         if not seg:
             continue
-        k = _kind_of(head(seg))
+        h = head(seg)
+        if h and h[0] == "cd":
+            # a `cd` moves the cwd the later segments' paths are read against (review 2026-10-21, round 3, H-A)
+            here = resolve_cd(h[1:], here)
+        k = _kind_of(h, here)
         if k == "exempt":
             return "none"
         kinds.add(k)
@@ -1192,7 +1399,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     if not any(asked.values()):
         return None                                      # no question is asked: no segmentation, no row
     segs = segments() if callable(segments) else segments
-    question = classify(segs or [])
+    question = classify(segs or [], cwd)
     extra = {"guard": guard, "cwd": str(cwd), "device": d.get("device")}
     if question == "suite":
         if not asked["suite"]:

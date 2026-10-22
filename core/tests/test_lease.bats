@@ -599,7 +599,7 @@ PY
   case "$output" in *"SendMessage"*) : ;; *) echo "no send instruction: $output"; return 1 ;; esac
 }
 
-@test "sweep removes stale and released leases, refuses a quiet one without --force, keeps a finished one until promote or release, never touches a worktree, and rebinds a resumed session instead of removing it" {
+@test "sweep removes stale and released leases, refuses a quiet one without --force, keeps a finished one until promote or release, removes a swept window's worktree and branch only when clean and merged (v0.12.7), and rebinds a resumed session instead of removing it" {
   LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; LS create >/dev/null
   python3 "$LL" _test-write 01 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="sA"; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/01.json")"
   pid="$(live_pid)"; registry_entry "$pid" sB
@@ -619,8 +619,12 @@ PY
   case "$output" in *"resumed in pid $pid; rebinding instead"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -f "$DAEDALUS_HOME/state/leases/04.json" ]; case "$output" in *"04"*"quiet"*"--force"*) : ;; *) echo "$output"; return 1 ;; esac
   [ -f "$DAEDALUS_HOME/state/leases/05.json" ]; case "$output" in *"window 05"*"finished"*"promote 05 or release 05"*) : ;; *) echo "$output"; return 1 ;; esac
-  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; [ -d "$DAEDALUS_HOME/worktrees/03/thing" ]
-  run git -C "$T" rev-parse --verify -q lease/01; [ "$status" -eq 0 ]
+  # v0.12.7 (PROP-029): 01 is stale, clean and holds nothing trunk lacks, so its worktree and branch went too; 03 is
+  # released but its session is not known to have ended, so its worktree and branch stay (review 2026-10-21, M2)
+  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]; [ -d "$DAEDALUS_HOME/worktrees/03/thing" ]
+  case "$output" in *"window 03 (released); worktree and branch kept: the window's session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
+  run git -C "$T" rev-parse --verify -q lease/01; [ "$status" -ne 0 ]
+  [ -d "$DAEDALUS_HOME/worktrees/04/thing" ]; [ -d "$DAEDALUS_HOME/worktrees/05/thing" ]     # not swept: untouched
   run LS sweep --force 04; [ "$status" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/state/leases/04.json" ]
   [ -f "$DAEDALUS_HOME/state/leases/02.json" ]; [ -f "$DAEDALUS_HOME/state/leases/05.json" ]
   run LS sweep --force 05; [ ! -f "$DAEDALUS_HOME/state/leases/05.json" ]
@@ -814,6 +818,231 @@ PY
   kill "$pa"; wait "$pa" 2>/dev/null || true
   CLAUDE_CODE_SESSION_ID=sB run LS prime take; [ "$status" -eq 0 ]; [ "$(lease_json prime session_id)" = "sB" ]
   python3 -c 'import json,sys; h=json.load(open(sys.argv[1]))["history"]; assert h[-1]["reason"]=="previous holder gone", h' "$DAEDALUS_HOME/state/leases/prime.json"
+}
+
+# --- v0.12.7 (PROP-029, 2026-10-19): sweep removes a merged, clean window's worktree and branch -------------------------
+# stale_lease <NN> — the window's recorded process is gone (pid 1, a start time it never had): sweep reads it stale
+stale_lease() { python3 "$LL" _test-write "$1" "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["session_id"]="s"+sys.argv[2]; d["pid"]=1; d["proc_started"]=1; print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/$1.json" "$1")"; }
+nothing_named() {   # nothing_named <NN> — no lease file, no worktree, no lease/<NN> in any repo, no git record of one
+  [ ! -e "$DAEDALUS_HOME/state/leases/$1.json" ] && [ ! -e "$DAEDALUS_HOME/worktrees/$1" ] || { echo "files left for $1"; ls -R "$DAEDALUS_HOME/worktrees" 2>&1 | head; return 1; }
+  for r in "$T" "$T/sub"; do
+    ! git -C "$r" rev-parse --verify -q "refs/heads/lease/$1" >/dev/null || { echo "lease/$1 left in $r"; return 1; }
+    ! git -C "$r" worktree list --porcelain | grep -q "worktrees/$1/" || { echo "a record of worktrees/$1 left in $r"; return 1; }
+  done
+}
+
+@test "PROP-029 (2026-10-19): sweep of a stale window that is merged and clean removes its worktrees and lease/NN in every repo, and says so" {
+  LS create >/dev/null; stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale), and its worktree and branch: nothing uncommitted, nothing trunk lacks"*) : ;; *) echo "$output"; return 1 ;; esac
+  nothing_named 01
+}
+
+@test "PROP-029: unmerged commits on lease/NN keep both worktree and branch, and the sentence names the commit count and the trunk" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  for i in 1 2 3; do printf '%s\n' "$i" >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "work $i"; done
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale); kept its worktree and branch — kept lease/01: 3 commits not on main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$DAEDALUS_HOME/state/leases/01.json" ]; [ -d "$W" ]; [ -d "$W/sub" ]
+  git -C "$T" rev-parse --verify -q lease/01 >/dev/null; git -C "$T/sub" rev-parse --verify -q lease/01 >/dev/null
+}
+
+@test "PROP-029: a clean branch with a dirty worktree keeps both, and the sentence names the uncommitted files; git-ignored files alone do not block" {
+  LS create >/dev/null; LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/01/thing"; W2="$DAEDALUS_HOME/worktrees/02/thing"
+  printf 'edit\n' >> "$W/a.txt"; printf 'new\n' > "$W/untracked.txt"
+  # 02: only ignored files (a merged branch's build output is not work)
+  printf '*.log\n' >> "$T/.git/info/exclude"; printf 'build\n' > "$W2/build.log"
+  [ -z "$(git -C "$W2" status --porcelain)" ]
+  stale_lease 01; stale_lease 02
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale); kept its worktree and branch — kept worktrees/01/thing: 2 uncommitted files"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$W" ]; git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+  case "$output" in *"removed the lease of window 02 (stale), and its worktree and branch"*) : ;; *) echo "$output"; return 1 ;; esac
+  nothing_named 02
+}
+
+@test "PROP-029, the 10-19 case end to end: window 04 released, its work promoted (merged into origin/main) — after sweep nothing named 04 remains, and 'There is no window 04' has nothing behind it" {
+  LS create >/dev/null; LS create >/dev/null; LS create >/dev/null; LS create >/dev/null
+  W="$DAEDALUS_HOME/worktrees/04/thing"
+  printf 'promoted\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "window 04's work"
+  git -C "$BATS_TEST_TMPDIR/origin.git" fetch -q "$T" refs/heads/lease/04:refs/heads/main   # promoted: on origin/main now
+  git -C "$T" fetch -q origin
+  CLAUDE_CODE_SESSION_ID=s4 LS claim 04 >/dev/null; CLAUDE_CODE_SESSION_ID=s4 LS release 04 >/dev/null
+  stale_lease 04                                                                          # and its session has ended
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 04 (released), and its worktree and branch"*) : ;; *) echo "$output"; return 1 ;; esac
+  nothing_named 04
+  run LS unpromoted 04; case "$output" in *"There is no window 04"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+# --- review 2026-10-21, round 1: what sweep must never delete -----------------------------------------------------------
+@test "review 2026-10-21 (C1): a nested worktree removed and its directory made again by hand, files in it — not its own checkout (git status walks up to the outer repo, which ignores it): kept, named, nothing deleted" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  git -C "$T/sub" worktree remove --force "$W/sub"; git -C "$T/sub" worktree prune
+  mkdir -p "$W/sub"; printf 'hours of work\n' > "$W/sub/notes.md"
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept its worktree and branch"*"worktrees/01/thing/sub is not its own checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$W/sub/notes.md")" = "hours of work" ]
+  git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+}
+
+@test "review 2026-10-21 (C1): a worktree whose .git file is gone (git walks up to the home's repository) is not its own checkout: kept, its untracked file untouched" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'my work\n' > "$W/untracked-work.txt"; rm -f "$W/.git"
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"worktrees/01/thing is not its own checkout"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$W/untracked-work.txt" ]
+}
+
+@test "review 2026-10-21 (L2): an assume-unchanged edit, invisible to git status, keeps the worktree" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  git -C "$W" update-index --assume-unchanged a.txt; printf 'real edit\n' >> "$W/a.txt"
+  [ -z "$(git -C "$W" status --porcelain)" ]
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept worktrees/01/thing: git is told to look away from 1 file (assume-unchanged or skip-worktree)"*) : ;; *) echo "$output"; return 1 ;; esac
+  grep -q 'real edit' "$W/a.txt"
+}
+
+@test "review 2026-10-21 (L2): a commit only the worktree's HEAD reflog still holds (reset away) keeps the worktree" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf 'x\n' >> "$W/a.txt"; git -C "$W" -c user.email=t@x -c user.name=t commit -q -am "unpushed"; c=$(git -C "$W" rev-parse HEAD)
+  git -C "$W" reset -q --hard HEAD~1
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept worktrees/01/thing: its HEAD reflog holds 1 commit not on main"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(git -C "$W" reflog --format=%H | grep -c "$c")" -ge 1 ]
+}
+
+@test "review 2026-10-21 (M2): a released window whose session is still open, and sweep --force on a quiet window, remove only the lease files — the worktree and branch stay under a session that may still be running" {
+  LS create >/dev/null; LS create >/dev/null
+  pid="$(live_pid)"; registry_entry "$pid" s1
+  CLAUDE_CODE_SESSION_ID=s1 LS claim 01 >/dev/null; CLAUDE_CODE_SESSION_ID=s1 LS release 01 >/dev/null
+  pid2="$(live_pid)"; registry_entry "$pid2" s2; CLAUDE_CODE_SESSION_ID=s2 LS claim 02 >/dev/null
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/02.seen"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (released); worktree and branch kept: the window's session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]; git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+  run LS sweep --force 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 02 (quiet, removed on --force); worktree and branch kept: the window's session is still open"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/02/thing" ]
+}
+
+@test "review 2026-10-21 (L1): when lease/NN cannot be deleted after the worktree was moved aside, the line says the worktree was removed and the branch kept, with git's words" {
+  LS create >/dev/null; stale_lease 01
+  touch "$T/.git/refs/heads/lease/01.lock"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale); its worktree was moved to state/swept-trees/01-"*"; lease/01 in thing was kept: git branch -D failed ("*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/worktrees/01" ]
+  rm -f "$T/.git/refs/heads/lease/01.lock"; git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+}
+
+# --- review 2026-10-21, round 2: swept trees go to a recoverable trash, kept 7 days ------------------------------------
+@test "review 2026-10-21 round 2: a sweep moves a merged, clean window's worktree to state/swept-trees/<NN>-<stamp> with .swept.json naming each repo's branch and tip — ignored files survive there — and says where it went" {
+  LS create >/dev/null; W="$DAEDALUS_HOME/worktrees/01/thing"
+  printf '*.env\n' >> "$T/.git/info/exclude"; printf 'SECRET=1\n' > "$W/local.env"
+  tip="$(git -C "$T" rev-parse lease/01)"; subtip="$(git -C "$T/sub" rev-parse lease/01)"
+  stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"and its worktree and branch: nothing uncommitted, nothing trunk lacks; its worktree moved to state/swept-trees/01-"*", deleted after 7 days"*) : ;; *) echo "$output"; return 1 ;; esac
+  nothing_named 01
+  e="$(ls "$DAEDALUS_HOME/state/swept-trees")"
+  case "$e" in 01-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) : ;; *) echo "entry name: $e"; return 1 ;; esac
+  [ "$(cat "$DAEDALUS_HOME/state/swept-trees/$e/thing/local.env")" = "SECRET=1" ]
+  python3 - "$DAEDALUS_HOME/state/swept-trees/$e/.swept.json" "$tip" "$subtip" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["window"] == "01" and d["moved_from"] == "worktrees/01", d
+got = {r["repo"]: (r["branch"], r["tip"]) for r in d["repos"]}
+assert got == {"thing": ("lease/01", sys.argv[2]), "thing/sub": ("lease/01", sys.argv[3])}, got
+PY
+}
+
+@test "review 2026-10-21 round 2: a trash entry older than 7 days (by the stamp in its name) is deleted at the next sweep; a younger one is kept" {
+  mkdir -p "$DAEDALUS_HOME/state/swept-trees/04-20200101T000000/thing" "$DAEDALUS_HOME/state/swept-trees/05-$(date +%Y%m%dT%H%M%S)/thing"
+  young="$(ls "$DAEDALUS_HOME/state/swept-trees" | grep '^05-')"
+  LS create >/dev/null; stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for i in $(seq 1 50); do [ -e "$DAEDALUS_HOME/state/swept-trees/04-20200101T000000" ] || [ -e "$DAEDALUS_HOME/state/swept-trees/.deleting-04-20200101T000000" ] || break; sleep 0.1; done
+  [ ! -e "$DAEDALUS_HOME/state/swept-trees/04-20200101T000000" ] && [ ! -e "$DAEDALUS_HOME/state/swept-trees/.deleting-04-20200101T000000" ]
+  [ -d "$DAEDALUS_HOME/state/swept-trees/$young/thing" ]
+  [ "$(python3 "$LL" doctor-lines | grep -c 'swept-trees/')" -ge 2 ] || { python3 "$LL" doctor-lines; return 1; }
+  python3 "$LL" doctor-lines | grep -q "NOTE     swept trees: state/swept-trees/$young (0 days old; deleted after 7)" || { python3 "$LL" doctor-lines; return 1; }
+}
+
+# --- review 2026-10-21, round 3 -----------------------------------------------------------------------------------------
+@test "review 2026-10-21 round 3 (M-D): prune only renames an old entry under the lock — thousands of files, back within 0.5 s — and a detached delete removes it shortly after; a leftover .deleting-* is started again" {
+  O="$DAEDALUS_HOME/state/swept-trees/04-20200101T000000"; mkdir -p "$O/thing"
+  python3 -c 'import sys,os; [open(os.path.join(sys.argv[1], "f%d" % i), "w").close() for i in range(4000)]' "$O/thing"
+  mkdir -p "$DAEDALUS_HOME/state/swept-trees/.deleting-03-20200101T000000/x"
+  run python3 -c 'import sys,time; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path
+t=time.time(); g=ll.prune_swept_trees(Path(sys.argv[2])); d=time.time()-t
+assert d < 0.5, "took %.2fs" % d; print(g)' "$DAEDALUS_HOME/core" "$DAEDALUS_HOME"
+  [ "$status" -eq 0 ] && [ "$output" = "['04-20200101T000000']" ] || { echo "$output"; return 1; }
+  for i in $(seq 1 100); do [ -z "$(ls -A "$DAEDALUS_HOME/state/swept-trees")" ] && break; sleep 0.1; done
+  [ -z "$(ls -A "$DAEDALUS_HOME/state/swept-trees")" ] || { ls -A "$DAEDALUS_HOME/state/swept-trees"; return 1; }
+}
+
+@test "review 2026-10-21 round 4: the delete really is detached — with an rm that takes 2 s, prune still returns within 0.5 s and the rm finishes afterwards" {
+  O="$DAEDALUS_HOME/state/swept-trees/04-20200101T000000"; mkdir -p "$O/thing"
+  B="$BATS_TEST_TMPDIR/slowbin"; mkdir -p "$B"
+  printf '#!/bin/sh\nsleep 2\ntouch "%s"\nexec /bin/rm "$@"\n' "$BATS_TEST_TMPDIR/rm-finished" > "$B/rm"; chmod +x "$B/rm"
+  run env PATH="$B:$PATH" python3 -c 'import sys,time; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path
+t=time.time(); ll.prune_swept_trees(Path(sys.argv[2])); d=time.time()-t
+assert d < 0.5, "took %.2fs" % d; print("ok")' "$DAEDALUS_HOME/core" "$DAEDALUS_HOME"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/rm-finished" ]                      # still sleeping: prune did not wait for it
+  for i in $(seq 1 60); do [ -e "$BATS_TEST_TMPDIR/rm-finished" ] && break; sleep 0.1; done
+  [ -e "$BATS_TEST_TMPDIR/rm-finished" ]
+  for i in $(seq 1 30); do [ -e "$DAEDALUS_HOME/state/swept-trees/.deleting-04-20200101T000000" ] || break; sleep 0.1; done
+  [ ! -e "$DAEDALUS_HOME/state/swept-trees/.deleting-04-20200101T000000" ]
+}
+
+@test "review 2026-10-21 round 3 (M-C): a state/swept-trees that is a symbolic link is never pruned or moved into — the outside directory is untouched, sweep keeps the worktree, doctor says so; an entry with no readable stamp or a stamp in the future is never pruned and doctor names it; an old symbolic-link entry is unlinked, its target kept" {
+  X="$BATS_TEST_TMPDIR/outside"; mkdir -p "$X/04-20200101T000000/keep"; printf 'precious\n' > "$X/04-20200101T000000/keep/f"
+  ln -s "$X" "$DAEDALUS_HOME/state/swept-trees"
+  LS create >/dev/null; stale_lease 01
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"kept worktrees/01: state/swept-trees is a symbolic link"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -f "$X/04-20200101T000000/keep/f" ]; [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+  python3 "$LL" doctor-lines | grep -q "NOTE     swept trees: state/swept-trees is a symbolic link" || { python3 "$LL" doctor-lines; return 1; }
+  rm "$DAEDALUS_HOME/state/swept-trees"; mkdir -p "$DAEDALUS_HOME/state/swept-trees/notes" "$DAEDALUS_HOME/state/swept-trees/05-29991231T000000"
+  ln -s "$X" "$DAEDALUS_HOME/state/swept-trees/06-20200101T000000"
+  touch -t 202001010000 "$DAEDALUS_HOME/state/swept-trees/notes"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -d "$DAEDALUS_HOME/state/swept-trees/notes" ] && [ -d "$DAEDALUS_HOME/state/swept-trees/05-29991231T000000" ]
+  [ ! -L "$DAEDALUS_HOME/state/swept-trees/06-20200101T000000" ] && [ -f "$X/04-20200101T000000/keep/f" ]
+  python3 "$LL" doctor-lines | grep -q "swept-trees/notes (stamp unreadable; never deleted by a sweep)" || { python3 "$LL" doctor-lines; return 1; }
+  python3 "$LL" doctor-lines | grep -q "swept-trees/05-29991231T000000 (stamp in the future; never deleted by a sweep)" || { python3 "$LL" doctor-lines; return 1; }
+}
+
+@test "review 2026-10-21 round 3 (L-A): a claimed window with no pid on file, idle past stale_after, loses only its lease files at a sweep — no session record proves its session ended" {
+  LS create >/dev/null
+  CLAUDE_CODE_SESSION_ID=s1 LS claim 01 >/dev/null
+  [ "$(lease_json 01 pid)" = "None" ] || skip "this build records a pid on claim from a shell"
+  touch -t 202001010000 "$DAEDALUS_HOME/state/leases/01.seen"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"removed the lease of window 01 (stale); worktree and branch kept: no session record to prove it ended"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ -d "$DAEDALUS_HOME/worktrees/01/thing" ]
+}
+
+@test "review 2026-10-21 round 3 (L-B): a branch delete that fails in the nested repo does not stop the outer one, and the line says each repo's outcome" {
+  LS create >/dev/null; stale_lease 01
+  touch "$(git -C "$T/sub" rev-parse --absolute-git-dir)/refs/heads/lease/01.lock"
+  run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"its worktree was moved to state/swept-trees/01-"*"; lease/01 was deleted in thing; lease/01 in thing/sub was kept: git branch -D failed ("*) : ;; *) echo "$output"; return 1 ;; esac
+  ! git -C "$T" rev-parse --verify -q lease/01 >/dev/null
+}
+
+@test "review 2026-10-21 round 3 (L-G): when .swept.json cannot be written, every lease branch is kept, and the line says so" {
+  LS create >/dev/null; stale_lease 01
+  LEASE_TEST_SWEPT_RECORD_FAIL=1 run LS sweep; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"its worktree was moved to state/swept-trees/01-"*", but every lease/01 was kept: the record of their tips could not be written"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" rev-parse --verify -q lease/01 >/dev/null; git -C "$T/sub" rev-parse --verify -q lease/01 >/dev/null
 }
 
 @test "a visitor (DIRECT_CALL_ID set) never creates, claims, spawns, changes or sweeps a window and cannot take the pen: each refused in plain words before anything is written; list still works" {

@@ -1621,7 +1621,9 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
     and re-use-or-refuse adopts its worktree. Nothing to lose: no commit on
     lease/<NN> that origin/<trunk> lacks (waiting_work) and no uncommitted
     or untracked file in any of its worktrees (dirty_files); the worktree and
-    branch are kept, as sweep keeps them (§4.5). Nobody to lose it: its
+    branch of an idle window are kept, for the number's re-use (§4.5); a
+    released window's go too when nothing would be lost (v0.12.7, PROP-029,
+    as sweep clears them). Nobody to lose it: its
     RECORDED process is gone — liveness "stale" with a pid on file — never a
     lease that recorded no pid (its staleness is a heartbeat's age, not proof
     the terminal closed), never a finished clone (kept until promote or
@@ -1647,16 +1649,19 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
             # was only for its holder's hooks, and they are gone. A pid on file that is dead and not resumed (liveness
             # "stale" with a pid), as for an idle one below: a lease with no pid is left to `sweep` and SessionEnd,
             # since a heartbeat's age is not proof its terminal closed (review 2026-10-19, finding 3). What `sweep`
-            # does for a released lease, no more: no git, so it runs before the budget check, and the branch and
-            # worktree stay — unpromoted work on lease/<NN> still holds the number (free_number), and the board
-            # names it.
+            # does for a released lease, no more: the branch and worktree stay unless nothing would be lost (below);
+            # unpromoted work on lease/<NN> still holds the number (free_number), and the board names it.
             if lease.get("pid") is None or liveness(root, nn, lease) != "stale":
                 continue
+            # v0.12.7 (PROP-029): its worktree and branch go too when nothing would be lost — clean, and lease/<NN>
+            # on trunk — and only while the start has the time for the git that tells (kept otherwise, as before).
+            budget = _left(deadline, 20)
+            how, kept = clear_swept_trees_locked(root, nn, lease, timeout=budget) \
+                if budget >= RECLAIM_MIN_SECS else ("none", [])
             _remove_lease_files(root, nn)
             del leases[nn]
             carry_hot_locked(root, nn, leases)
-            out.append((nn, "Swept window %s: it was released and its session has ended; its worktree and branch are "
-                            "kept." % nn))
+            out.append((nn, "Swept window %s: it was released and its session has ended%s." % (nn, swept_words(how, kept))))
             continue
         if lease.get("finished") or lease.get("spawned"):
             continue
@@ -1682,6 +1687,9 @@ def reclaim_idle_locked(root: Path, leases: Dict[str, dict], trunks: Dict[str, s
             write_unpromoted_cache(root, seeds)
         out.append((nn, "Reclaimed window %s: %s, its worktree is clean and nothing is unpromoted; the number is free again."
                     % (nn, why)))
+    # the sweep's trash older than SWEPT_TREES_KEEP_DAYS, while the start has time to spare (review 2026-10-21, round 2)
+    if _left(deadline, 20) >= RECLAIM_MIN_SECS:
+        prune_swept_trees(root, None if deadline is None else deadline - RECLAIM_MIN_SECS)
     return out
 
 
@@ -3934,12 +3942,319 @@ def record_promotion(root: Path, nn: str, promote_id: str) -> None:
         lease["promoted"] = (lease.get("promoted") or []) + [promote_id]
         write_lease(root, nn, lease)
 
+# v0.12.7 (PROP-029, 2026-10-19): a swept window's worktree and branch go with its lease when nothing would be lost.
+# `sweep` removed window 04's lease and kept worktrees/04/<repo> and lease/04; the unpromoted window then read "There is
+# no window 04", so `release --remove` could not run, and nothing in Daedalus removed them. Claim and reclaim of an
+# idle window still keep them, for re-use; only a sweep of a released or stale window (by hand, at a start, at the
+# session's end) clears them.
+SWEPT_TREES = "state/swept-trees"      # where a swept window's worktrees go, in one rename: a recoverable trash
+SWEPT_TREES_KEEP_DAYS = 7              # how long a swept tree stays there before a later sweep deletes it
+SWEPT_STAMP = "%Y%m%dT%H%M%S"          # the stamp in a trash entry's name, <NN>-<stamp>: its age is read from it
+
+
+DELETING = ".deleting-"                 # an old trash entry renamed for the background delete
+
+
+def trash_unsafe(root: Path) -> Optional[str]:
+    """Why nothing may be moved into or deleted from the trash, or None: state/ or state/swept-trees that is a
+    symbolic link points the moves and deletes somewhere outside the home (review 2026-10-21, round 3, M-C)."""
+    for rel in ("state", SWEPT_TREES):
+        if (root / rel).is_symlink():
+            return "%s is a symbolic link, so a sweep moves nothing into it and deletes nothing from it" % rel
+    return None
+
+
+def swept_entry_age(entry: Path, now: Optional[float] = None) -> Tuple[Optional[float], str]:
+    """(a trash entry's age in seconds, "") from the stamp in its name (<NN>-<YYYYmmddTHHMMSS>[-n]), or (None, why):
+    "stamp unreadable" or "stamp in the future". Never the mtime: an entry is aged by its name alone, and one whose
+    name says nothing usable is never deleted (review 2026-10-21, round 3, M-C)."""
+    now = time.time() if now is None else now
+    m = re.match(r"^[0-9]{2}-([0-9]{8}T[0-9]{6})(-[0-9]+)?$", entry.name)
+    if not m:
+        return None, "stamp unreadable"
+    try:
+        age = now - time.mktime(time.strptime(m.group(1), SWEPT_STAMP))
+    except (ValueError, OverflowError):
+        return None, "stamp unreadable"
+    if age < -60:
+        return None, "stamp in the future"
+    return max(age, 0.0), ""
+
+
+def _delete_in_background(paths: list) -> None:
+    """One detached `rm -rf` over <paths>, never waited for: deleting a tree never runs inside a hook's time budget
+    (review 2026-10-21, round 3, M-D). Its own session, every stream to /dev/null; a failure to start is left for
+    the next prune, which starts it again over what is left."""
+    if not paths:
+        return
+    try:
+        subprocess.Popen(["rm", "-rf", "--"] + [str(p) for p in paths], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError:
+        pass
+
+
+def prune_swept_trees(root: Path, deadline: Optional[float] = None) -> list:
+    """Take the trash entries older than SWEPT_TREES_KEEP_DAYS out — any sweep does it (by hand, at a start, at the
+    session's end), each one only while `deadline` (an absolute time.time()) has not passed. Under the lock nothing
+    is deleted but a symbolic link or a plain file (unlinked as what it is, never handed to a tree delete): each old
+    directory is renamed to .deleting-<name>, which is instant, and one detached `rm -rf` is started over every
+    .deleting-* entry — a leftover from a delete cut off before is started again. Nothing at all while trash_unsafe.
+    An entry whose name carries no readable stamp, or a stamp in the future, is never taken. Returns the names
+    taken out (unlinked, or renamed for the background delete)."""
+    gone: list = []
+    d = root / SWEPT_TREES
+    if trash_unsafe(root):
+        return gone
+    try:
+        entries = sorted(d.iterdir()) if d.is_dir() else []
+    except OSError:
+        return gone
+    for e in entries:
+        if e.name.startswith(DELETING):
+            continue
+        if deadline is not None and time.time() >= deadline:
+            break
+        age, _ = swept_entry_age(e)
+        if age is None or age <= SWEPT_TREES_KEEP_DAYS * 86400:
+            continue
+        try:
+            if e.is_symlink() or not e.is_dir():
+                e.unlink()
+            else:
+                os.rename(str(e), str(d / (DELETING + e.name)))
+        except OSError:
+            continue
+        gone.append(e.name)
+    try:
+        doomed = [p for p in d.iterdir() if p.name.startswith(DELETING) and p.is_dir() and not p.is_symlink()] \
+            if d.is_dir() else []
+    except OSError:
+        doomed = []
+    _delete_in_background(doomed)
+    return gone
+
+
+def _plural(n: int, word: str) -> str:
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def swept_tree_checks(root: Path, nn: str, lease: dict, timeout: int = 20) -> list:
+    """Why a swept window's worktrees and lease/<NN> must stay, one sentence per failed check; [] when they may go.
+    Per repository of the window: the worktree has no uncommitted and no untracked file that git does not ignore
+    (dirty_files — an ignored file is a merged branch's build output, not work); git's record of it holds nothing
+    no branch does and is not locked (record_holds, the rule prune_under keeps); lease/<NN>'s tip is reachable from
+    origin/<trunk>, the ref promote and `unpromoted` judge by (waiting_work); and a checkout whose HEAD is not
+    lease/<NN> holds no commit trunk lacks. Anything that cannot be told is a reason to keep, named — cannot tell is
+    not "nothing". And worktrees/<NN> holds nothing but the window's repositories."""
+    trunks = lease.get("trunks") or {}
+    base = root / "worktrees" / nn
+    out = []
+    if base.is_dir():
+        tops = {r.split("/", 1)[0] for r in trunks}
+        try:
+            other = sorted(p.name for p in base.iterdir() if p.name not in tops)
+        except OSError as e:
+            other = ["(it cannot be listed: %s)" % e]
+        if other:
+            out.append("kept worktrees/%s: it holds %s, which is none of the window's repositories" % (nn, name_paths(other)))
+    for repo, trunk in trunks.items():
+        src, dest = root / "target" / repo, base / repo
+        where = "" if repo == next(iter(trunks)) else " in %s" % repo
+        try:
+            subjects = waiting_work(src, trunk, nn, timeout=timeout)
+            if subjects:
+                out.append("kept lease/%s%s: %s not on %s" % (nn, where, _plural(len(subjects), "commit"), trunk))
+        except Refused as e:
+            out.append("kept lease/%s%s: %s" % (nn, where, e))
+        if not dest.exists():
+            continue
+        # Its own checkout, or nothing below is believed (review 2026-10-21, C1): a directory with no usable .git —
+        # a nested worktree removed and its directory made again by hand, a .git file deleted — makes git walk up to
+        # the outer repository (which may ignore the path) or the home's, and `git status` there called files in it
+        # clean. The toplevel must be the directory itself and the common git directory target/<repo>'s.
+        why = not_own_checkout(src, dest, timeout)
+        if why:
+            out.append("kept worktrees/%s/%s: worktrees/%s/%s is not its own checkout (%s)" % (nn, repo, nn, repo, why))
+            continue
+        try:
+            files = dirty_files(dest, timeout=timeout)
+            if files:
+                out.append("kept worktrees/%s/%s: %s" % (nn, repo, _plural(len(files), "uncommitted file")))
+        except Refused as e:
+            out.append("kept worktrees/%s/%s: %s" % (nn, repo, e))
+        # An edit git status is told not to see (L2): assume-unchanged (a lower-case tag) or skip-worktree (S).
+        code, listing, err = _git(dest, "ls-files", "-v", timeout=timeout)
+        if code != 0:
+            out.append("kept worktrees/%s/%s: cannot list its files (%s)" % (nn, repo, _last_line(err)))
+        else:
+            hidden = [ln for ln in listing.splitlines() if ln[:1].islower() or ln[:1] == "S"]
+            if hidden:
+                out.append("kept worktrees/%s/%s: git is told to look away from %s (assume-unchanged or skip-worktree)"
+                           % (nn, repo, _plural(len(hidden), "file")))
+        admin = worktree_records(src).get(os.path.realpath(str(dest)))
+        if admin is not None:
+            holds = record_holds(admin) + (["a lock"] if (admin / "locked").exists() else [])
+            if holds:
+                out.append("kept worktrees/%s/%s: git's record of it holds %s" % (nn, repo, " and ".join(holds)))
+        lost = reflog_only(src, dest, trunk, nn, timeout)
+        if lost:
+            out.append("kept worktrees/%s/%s: %s" % (nn, repo, lost))
+    return out
+
+
+REFLOG_CAP = 1000       # HEAD reflog entries a sweep reads before it keeps a worktree rather than read on
+
+
+def not_own_checkout(src: Path, dest: Path, timeout: int) -> Optional[str]:
+    """Why <dest> is not its own checkout of target/<repo>'s repository, or None when it is: `rev-parse
+    --show-toplevel` there must be <dest> itself, and `--git-common-dir` the repository's own."""
+    code, top, err = _git(dest, "rev-parse", "--show-toplevel", timeout=timeout)
+    if code != 0:
+        return "git cannot read it: %s" % _last_line(err)
+    if os.path.realpath(top.strip()) != os.path.realpath(str(dest)):
+        return "git reads it as part of %s" % top.strip()
+    mine, theirs = _common_dir(dest), _common_dir(src)
+    if mine is None or theirs is None or os.path.realpath(str(mine)) != os.path.realpath(str(theirs)):
+        return "its git repository is not the target's"
+    return None
+
+
+def reflog_only(src: Path, dest: Path, trunk: str, nn: str, timeout: int) -> Optional[str]:
+    """A commit only the worktree's HEAD reflog still holds — committed, then reset away — is work no branch has
+    (review 2026-10-21, L2): the sentence naming it, or None. The walk reads REFLOG_CAP entries; a longer reflog,
+    or one git cannot read or count, keeps the worktree too. Commits on lease/<NN> are left to the branch check."""
+    code, out, err = _git(dest, "reflog", "show", "--format=%H", "-n", str(REFLOG_CAP + 1), "HEAD", timeout=timeout)
+    if code != 0:
+        return "cannot read its HEAD reflog (%s)" % _last_line(err)
+    shas = sorted(set(ln.strip() for ln in out.splitlines() if ln.strip()))
+    if len(out.splitlines()) > REFLOG_CAP:
+        return "its HEAD reflog is longer than %d entries, more than a sweep reads" % REFLOG_CAP
+    if not shas:
+        return None
+    nots = [remote_ref(trunk)] + (["refs/heads/lease/%s" % nn] if ref_oid(src, "refs/heads/lease/%s" % nn) else [])
+    code, n, err = _git(dest, "rev-list", "--count", *shas, "--not", *nots, timeout=timeout)
+    if code != 0:
+        return "cannot tell whether its HEAD reflog holds commits %s lacks (%s)" % (trunk, _last_line(err))
+    if n.strip() not in ("", "0"):
+        return "its HEAD reflog holds %s not on %s" % (_plural(int(n.strip()), "commit"), trunk)
+    return None
+
+
+def remove_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 20) -> Tuple[Optional[str], Optional[str]]:
+    """Take a swept window's worktrees and lease/<NN> away in every repository, once swept_tree_checks found nothing
+    to keep: (the trash entry, relative to the home, or None; a sentence when something stayed, else None).
+    worktrees/<NN> is moved whole, in one rename, into the trash, state/swept-trees/<NN>-<stamp>, and kept there
+    SWEPT_TREES_KEEP_DAYS (review 2026-10-21, round 2): the checks never look at git-ignored files — an .env, local
+    notes, which claim keeps a worktree for — so nothing a sweep takes is deleted outright; a later sweep deletes
+    the entry once it is older (prune_swept_trees). A rename is all a hook cut off by its timeout can be in the
+    middle of (the session's end has three seconds). Each lease/<NN> tip goes into the entry's .swept.json (window,
+    repo, branch, tip) before the branch is deleted — a commit is in the repository's objects until git's gc, and
+    the record makes it findable. Then each repository's records of the gone directory are pruned (prune_under,
+    under worktrees/ only), lease/<NN> deleted (its tip is on trunk: checked), and the number's unpromoted-work
+    answers dropped. CALLER HOLDS THE LOCK, and calls this before the lease files go (prune_under knows a window's
+    record by them)."""
+    trunks = lease.get("trunks") or {}
+    unsafe = trash_unsafe(root)
+    if unsafe:
+        return None, "kept worktrees/%s: %s" % (nn, unsafe)
+    trash_root = root / SWEPT_TREES
+    base = root / "worktrees" / nn
+    stamp = time.strftime(SWEPT_STAMP)
+    trash = trash_root / ("%s-%s" % (nn, stamp))
+    n = 1
+    while trash.exists():
+        n += 1
+        trash = trash_root / ("%s-%s-%d" % (nn, stamp, n))
+    rel = trash.relative_to(root).as_posix()
+    try:
+        trash_root.mkdir(parents=True, exist_ok=True)
+        if base.exists():
+            os.rename(str(base), str(trash))
+        else:
+            trash.mkdir()
+    except OSError as e:
+        return None, "kept worktrees/%s: it could not be moved to %s (%s)" % (nn, SWEPT_TREES, e)
+    record = {"window": nn, "moved_from": "worktrees/%s" % nn, "swept": now_stamp(),
+              "repos": [{"repo": repo, "branch": "lease/%s" % nn, "tip": ref_oid(root / "target" / repo, "refs/heads/lease/%s" % nn)}
+                        for repo in trunks]}
+    try:
+        if os.environ.get("LEASE_TEST_SWEPT_RECORD_FAIL"):      # test knob: the record cannot be written
+            raise OSError("test: record write refused")
+        (trash / ".swept.json").write_text(json.dumps(record, indent=1) + "\n")
+    except OSError as e:
+        # no record of the tips, no branch deleted (review 2026-10-21, round 3, L-G)
+        for repo in reversed(list(trunks)):
+            prune_under(root / "target" / repo, root / "worktrees")
+        return rel, ("its worktree was moved to %s, but every lease/%s was kept: the record of their tips could not "
+                     "be written (%s)" % (rel, nn, e))
+    done, failed = [], []
+    for repo in reversed(list(trunks)):          # nested repos first, as release --remove goes; every repo, always
+        src = root / "target" / repo
+        prune_under(src, root / "worktrees")
+        if ref_oid(src, "refs/heads/lease/%s" % nn) is None:
+            continue
+        code, _, err = _git(src, "branch", "-D", "lease/%s" % nn, timeout=timeout)
+        if code == 0:
+            done.append(repo)
+        else:
+            failed.append("lease/%s in %s was kept: git branch -D failed (%s)" % (nn, repo, _last_line(err)))
+    if failed:
+        # the worktree is already in the trash, its records pruned: say each repo's outcome (L1, L-B)
+        said = ["its worktree was moved to %s" % rel]
+        if done:
+            said.append("lease/%s was deleted in %s" % (nn, ", ".join(done)))
+        return rel, "; ".join(said + failed)
+    write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)
+    return rel, None
+
+
+def clear_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 20) -> Tuple[str, list]:
+    """swept_tree_checks, then remove_swept_trees_locked when they found nothing to keep: ("removed", [the trash
+    entry]), ("kept",
+    the sentences naming why), ("partial", [what happened]) when the worktree went and the branch could not, or
+    ("none", []) for a lease with no repositories. CALLER HOLDS THE LOCK; before the lease files go; only for a
+    window whose session has ended (sweep's caller judges that, review 2026-10-21 M2)."""
+    if not (lease.get("trunks") or {}):
+        return "none", []
+    kept = swept_tree_checks(root, nn, lease, timeout=timeout)
+    if kept:
+        return "kept", kept
+    entry, failed = remove_swept_trees_locked(root, nn, lease, timeout=timeout)
+    if failed is None:
+        return "removed", [entry]
+    return ("partial" if entry else "kept"), [failed]
+
+
+SESSION_OPEN = "open"       # clear_swept_trees_locked was not asked: the window's session may still be running
+NO_SESSION_RECORD = "no-pid"   # nor for a lease with no pid on file: nothing proves its session ended
+
+
+def swept_words(how: str, kept: list) -> str:
+    """The tail of a sweep's line for the window's worktrees and branch."""
+    if how == "removed":
+        return (", and its worktree and branch: nothing uncommitted, nothing trunk lacks; its worktree moved to %s, "
+                "deleted after %d days" % (kept[0], SWEPT_TREES_KEEP_DAYS))
+    if how == SESSION_OPEN:
+        return "; worktree and branch kept: the window's session is still open"
+    if how == NO_SESSION_RECORD:
+        return "; worktree and branch kept: no session record to prove it ended"
+    if how == "partial":
+        return "; " + "; ".join(kept)
+    if kept:
+        return "; kept its worktree and branch — " + "; ".join(kept)
+    return "; its worktree and branch are kept"
+
+
 def sweep(root: Path, force_nn: Optional[str] = None) -> list:
     """Remove stale and released lease files. A quiet one only as --force <NN>
     (the operator's word); a finished one waits for promote or release (or
     --force); a resumed one (dead recorded pid, session id live in the
     registry) is rebound, never removed; a plainly live one is refused even
-    forced. Worktrees and branches are always kept (§4.5). Returns the lines."""
+    forced. A removed window's worktrees and lease/<NN> go too when nothing
+    would be lost — clean, and its tip on trunk (v0.12.7, PROP-029:
+    clear_swept_trees_locked); otherwise they are kept, and the line names
+    the check that kept them. Returns the lines."""
     lines = []
     with lock(root):
         leases = read_all(root)
@@ -3952,6 +4267,7 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
                 raise Refused("There is no window %s." % force_nn)
         now = time.time()
         quiet_after = stale_after_secs(root)
+        prune_swept_trees(root)                  # trash older than SWEPT_TREES_KEEP_DAYS (review 2026-10-21, round 2)
         for nn in sorted(k for k in leases if k != "prime"):
             lease = leases[nn]
             state = liveness(root, nn, lease, now=now, quiet_after=quiet_after)
@@ -3981,24 +4297,38 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
                 continue
             else:
                 continue
+            # review 2026-10-21 (M2): trees go only under a session that has ended (liveness stale); a released
+            # window whose session is open, or one removed on --force while quiet, keeps them — that session may
+            # still be running in them
+            # a lease with no pid on file is stale on its heartbeat's age alone, which proves nothing (review
+            # 2026-10-21, round 3, L-A): its lease goes, its trees stay
+            if state != "stale":
+                how, kept = SESSION_OPEN, []
+            elif lease.get("pid") is None:
+                how, kept = NO_SESSION_RECORD, []
+            else:
+                how, kept = clear_swept_trees_locked(root, nn, lease)
             _remove_lease_files(root, nn)
             carry_hot_locked(root, nn, leases)
-            lines.append("removed the lease of window %s (%s); its worktree and branch are kept" % (nn, why))
+            lines.append("removed the lease of window %s (%s)%s" % (nn, why, swept_words(how, kept)))
     return lines
 
 
 SESSION_END_LOCK_WAIT = 1.0     # seconds; SessionEnd's hooks share a short budget (the settings.json timeout raises it)
+SESSION_END_GIT_SECS = 1        # seconds for each git call of the session end's worktree check (PROP-029)
+SESSION_END_PRUNE_BY = 2.0      # seconds after the session end began past which it deletes no old trash (3 s hook)
 
 
 def session_end_sweep(root: Path, sid: Optional[str]) -> Optional[str]:
     """SessionEnd (2026-10-19, the operator: no sweep by hand): the ending session's own lease is removed when it is
     released — the hold `release` leaves is for this session's hooks, and this is the last of them. What `sweep`
-    does for a released lease and no more: the worktree and branch stay, and unpromoted work on lease/<NN> keeps the
-    number (free_number). Never another session's lease, never an unreleased one (a window closed without release
+    does for a released lease and no more: the worktree and branch go too only when nothing would be lost (v0.12.7,
+    clear_swept_trees_locked), and unpromoted work on lease/<NN> keeps them and the number (free_number). Never another session's lease, never an unreleased one (a window closed without release
     is reclaim's or the board's), never makes state/leases/, and gives up when the lock stays busy past
     SESSION_END_LOCK_WAIT (Refused; the next terminal start sweeps it — reclaim_idle_locked). Returns the number."""
     if not sid or not leases_dir(root).is_dir():
         return None
+    started = time.time()
     with lock(root, deadline=time.time() + SESSION_END_LOCK_WAIT, busy="the lease lock stayed busy at session end"):
         nn, lease = lease_of_session(read_all(root), sid)
         if nn is None or not (lease or {}).get("released"):
@@ -4007,8 +4337,16 @@ def session_end_sweep(root: Path, sid: Optional[str]) -> Optional[str]:
             # the session is open in another terminal too (claude --resume): that one's hooks still read the lease;
             # it goes when the last of them ends, or at a start once none is live (review 2026-10-19, finding 2)
             return None
+        try:
+            # v0.12.7 (PROP-029): the worktree and branch go too when nothing would be lost; a git call gets a second,
+            # and the delete itself is a rename then a prune, so the hook's three seconds never cut a checkout in half
+            clear_swept_trees_locked(root, nn, lease or {}, timeout=SESSION_END_GIT_SECS)
+        except Exception:
+            pass
         _remove_lease_files(root, nn)
         carry_hot_locked(root, nn, {k: d for k, d in read_all(root).items()})
+        # the trash older than SWEPT_TREES_KEEP_DAYS, only with time to spare: the swept tree itself was only renamed
+        prune_swept_trees(root, started + SESSION_END_PRUNE_BY)
         return nn
 
 
@@ -5692,6 +6030,24 @@ def doctor_lines(root: Path) -> list:
         lines.append("NOTE     leases: worktrees/%s holds uncommitted or untracked files of swept window %s (%s) — say "
                      "\"this is window %s\" to a new window to continue it, or remove them"
                      % (where, nn, name_paths(paths), nn))
+    # the sweep's trash (review 2026-10-21, round 2): one line per entry, with its age
+    d = root / SWEPT_TREES
+    try:
+        entries = sorted(d.iterdir()) if d.is_dir() else []
+    except OSError:
+        entries = []
+    unsafe = trash_unsafe(root)
+    if unsafe:
+        lines.append("NOTE     swept trees: %s" % unsafe)
+        entries = []
+    for e in entries:
+        if e.name.startswith(DELETING):
+            lines.append("NOTE     swept trees: %s/%s (being deleted)" % (SWEPT_TREES, e.name))
+            continue
+        age, why = swept_entry_age(e, now)
+        lines.append("NOTE     swept trees: %s/%s (%s)"
+                     % (SWEPT_TREES, e.name, "%s; never deleted by a sweep" % why if age is None else
+                        "%s old; deleted after %d" % (_plural(int(age // 86400), "day"), SWEPT_TREES_KEEP_DAYS)))
     return lines
 
 

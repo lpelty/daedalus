@@ -130,7 +130,7 @@ PY
   review
   [ "$status" -eq 2 ] || { echo "exit $status: $output / $stderr"; return 1; }
   case "$stderr" in *"Distribution code is modified (core/lib.sh); restore it"*"Nothing was launched."*) : ;; *) echo "$stderr"; return 1 ;; esac
-  [ "$(calls)" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/vault/evidence/r1-review.md" ]
+  [ "$(calls)" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md" ]
   # The entry script sources lib.sh before the launcher's check runs: the
   # guarantee starts at call-agent.sh / promote.sh. If this line starts
   # failing, an entry script gained its own check — update the comment in
