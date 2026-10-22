@@ -3952,39 +3952,86 @@ SWEPT_TREES_KEEP_DAYS = 7              # how long a swept tree stays there befor
 SWEPT_STAMP = "%Y%m%dT%H%M%S"          # the stamp in a trash entry's name, <NN>-<stamp>: its age is read from it
 
 
-def swept_entry_age(entry: Path, now: Optional[float] = None) -> Optional[float]:
-    """A trash entry's age in seconds, from the stamp in its name (<NN>-<YYYYmmddTHHMMSS>[-n]); the directory's
-    mtime for a name that carries none; None when neither can be read."""
+DELETING = ".deleting-"                 # an old trash entry renamed for the background delete
+
+
+def trash_unsafe(root: Path) -> Optional[str]:
+    """Why nothing may be moved into or deleted from the trash, or None: state/ or state/swept-trees that is a
+    symbolic link points the moves and deletes somewhere outside the home (review 2026-10-21, round 3, M-C)."""
+    for rel in ("state", SWEPT_TREES):
+        if (root / rel).is_symlink():
+            return "%s is a symbolic link, so a sweep moves nothing into it and deletes nothing from it" % rel
+    return None
+
+
+def swept_entry_age(entry: Path, now: Optional[float] = None) -> Tuple[Optional[float], str]:
+    """(a trash entry's age in seconds, "") from the stamp in its name (<NN>-<YYYYmmddTHHMMSS>[-n]), or (None, why):
+    "stamp unreadable" or "stamp in the future". Never the mtime: an entry is aged by its name alone, and one whose
+    name says nothing usable is never deleted (review 2026-10-21, round 3, M-C)."""
     now = time.time() if now is None else now
     m = re.match(r"^[0-9]{2}-([0-9]{8}T[0-9]{6})(-[0-9]+)?$", entry.name)
-    if m:
-        try:
-            return now - time.mktime(time.strptime(m.group(1), SWEPT_STAMP))
-        except (ValueError, OverflowError):
-            pass
+    if not m:
+        return None, "stamp unreadable"
     try:
-        return now - entry.stat().st_mtime
+        age = now - time.mktime(time.strptime(m.group(1), SWEPT_STAMP))
+    except (ValueError, OverflowError):
+        return None, "stamp unreadable"
+    if age < -60:
+        return None, "stamp in the future"
+    return max(age, 0.0), ""
+
+
+def _delete_in_background(paths: list) -> None:
+    """One detached `rm -rf` over <paths>, never waited for: deleting a tree never runs inside a hook's time budget
+    (review 2026-10-21, round 3, M-D). Its own session, every stream to /dev/null; a failure to start is left for
+    the next prune, which starts it again over what is left."""
+    if not paths:
+        return
+    try:
+        subprocess.Popen(["rm", "-rf", "--"] + [str(p) for p in paths], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     except OSError:
-        return None
+        pass
 
 
 def prune_swept_trees(root: Path, deadline: Optional[float] = None) -> list:
-    """Delete the trash entries older than SWEPT_TREES_KEEP_DAYS — any sweep does it (by hand, at a start, at the
-    session's end), each one only while `deadline` (an absolute time.time()) has not passed. A delete cut off
-    halfway leaves part of an old entry, which the next sweep deletes. Returns the names deleted."""
-    gone = []
+    """Take the trash entries older than SWEPT_TREES_KEEP_DAYS out — any sweep does it (by hand, at a start, at the
+    session's end), each one only while `deadline` (an absolute time.time()) has not passed. Under the lock nothing
+    is deleted but a symbolic link or a plain file (unlinked as what it is, never handed to a tree delete): each old
+    directory is renamed to .deleting-<name>, which is instant, and one detached `rm -rf` is started over every
+    .deleting-* entry — a leftover from a delete cut off before is started again. Nothing at all while trash_unsafe.
+    An entry whose name carries no readable stamp, or a stamp in the future, is never taken. Returns the names
+    taken out (unlinked, or renamed for the background delete)."""
+    gone: list = []
     d = root / SWEPT_TREES
+    if trash_unsafe(root):
+        return gone
     try:
         entries = sorted(d.iterdir()) if d.is_dir() else []
     except OSError:
         return gone
     for e in entries:
+        if e.name.startswith(DELETING):
+            continue
         if deadline is not None and time.time() >= deadline:
             break
-        age = swept_entry_age(e)
-        if age is not None and age > SWEPT_TREES_KEEP_DAYS * 86400:
-            shutil.rmtree(str(e), ignore_errors=True)
-            gone.append(e.name)
+        age, _ = swept_entry_age(e)
+        if age is None or age <= SWEPT_TREES_KEEP_DAYS * 86400:
+            continue
+        try:
+            if e.is_symlink() or not e.is_dir():
+                e.unlink()
+            else:
+                os.rename(str(e), str(d / (DELETING + e.name)))
+        except OSError:
+            continue
+        gone.append(e.name)
+    try:
+        doomed = [p for p in d.iterdir() if p.name.startswith(DELETING) and p.is_dir() and not p.is_symlink()] \
+            if d.is_dir() else []
+    except OSError:
+        doomed = []
+    _delete_in_background(doomed)
     return gone
 
 
@@ -4108,6 +4155,9 @@ def remove_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 2
     answers dropped. CALLER HOLDS THE LOCK, and calls this before the lease files go (prune_under knows a window's
     record by them)."""
     trunks = lease.get("trunks") or {}
+    unsafe = trash_unsafe(root)
+    if unsafe:
+        return None, "kept worktrees/%s: %s" % (nn, unsafe)
     trash_root = root / SWEPT_TREES
     base = root / "worktrees" / nn
     stamp = time.strftime(SWEPT_STAMP)
@@ -4129,18 +4179,32 @@ def remove_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 2
               "repos": [{"repo": repo, "branch": "lease/%s" % nn, "tip": ref_oid(root / "target" / repo, "refs/heads/lease/%s" % nn)}
                         for repo in trunks]}
     try:
+        if os.environ.get("LEASE_TEST_SWEPT_RECORD_FAIL"):      # test knob: the record cannot be written
+            raise OSError("test: record write refused")
         (trash / ".swept.json").write_text(json.dumps(record, indent=1) + "\n")
-    except OSError:
-        pass
-    for repo in reversed(list(trunks)):          # nested repos first, as release --remove goes
+    except OSError as e:
+        # no record of the tips, no branch deleted (review 2026-10-21, round 3, L-G)
+        for repo in reversed(list(trunks)):
+            prune_under(root / "target" / repo, root / "worktrees")
+        return rel, ("its worktree was moved to %s, but every lease/%s was kept: the record of their tips could not "
+                     "be written (%s)" % (rel, nn, e))
+    done, failed = [], []
+    for repo in reversed(list(trunks)):          # nested repos first, as release --remove goes; every repo, always
         src = root / "target" / repo
         prune_under(src, root / "worktrees")
-        if ref_oid(src, "refs/heads/lease/%s" % nn) is not None:
-            code, _, err = _git(src, "branch", "-D", "lease/%s" % nn, timeout=timeout)
-            if code != 0:
-                # the worktree is already in the trash, its record pruned: say what happened (L1)
-                return rel, "its worktree was moved to %s, but lease/%s in %s was kept: git branch -D failed (%s)" % (
-                    rel, nn, repo, _last_line(err))
+        if ref_oid(src, "refs/heads/lease/%s" % nn) is None:
+            continue
+        code, _, err = _git(src, "branch", "-D", "lease/%s" % nn, timeout=timeout)
+        if code == 0:
+            done.append(repo)
+        else:
+            failed.append("lease/%s in %s was kept: git branch -D failed (%s)" % (nn, repo, _last_line(err)))
+    if failed:
+        # the worktree is already in the trash, its records pruned: say each repo's outcome (L1, L-B)
+        said = ["its worktree was moved to %s" % rel]
+        if done:
+            said.append("lease/%s was deleted in %s" % (nn, ", ".join(done)))
+        return rel, "; ".join(said + failed)
     write_unpromoted_cache(root, {}, keep=lambda k: k.partition(" ")[0] != nn)
     return rel, None
 
@@ -4163,6 +4227,7 @@ def clear_swept_trees_locked(root: Path, nn: str, lease: dict, timeout: int = 20
 
 
 SESSION_OPEN = "open"       # clear_swept_trees_locked was not asked: the window's session may still be running
+NO_SESSION_RECORD = "no-pid"   # nor for a lease with no pid on file: nothing proves its session ended
 
 
 def swept_words(how: str, kept: list) -> str:
@@ -4172,6 +4237,8 @@ def swept_words(how: str, kept: list) -> str:
                 "deleted after %d days" % (kept[0], SWEPT_TREES_KEEP_DAYS))
     if how == SESSION_OPEN:
         return "; worktree and branch kept: the window's session is still open"
+    if how == NO_SESSION_RECORD:
+        return "; worktree and branch kept: no session record to prove it ended"
     if how == "partial":
         return "; " + "; ".join(kept)
     if kept:
@@ -4233,7 +4300,14 @@ def sweep(root: Path, force_nn: Optional[str] = None) -> list:
             # review 2026-10-21 (M2): trees go only under a session that has ended (liveness stale); a released
             # window whose session is open, or one removed on --force while quiet, keeps them — that session may
             # still be running in them
-            how, kept = clear_swept_trees_locked(root, nn, lease) if state == "stale" else (SESSION_OPEN, [])
+            # a lease with no pid on file is stale on its heartbeat's age alone, which proves nothing (review
+            # 2026-10-21, round 3, L-A): its lease goes, its trees stay
+            if state != "stale":
+                how, kept = SESSION_OPEN, []
+            elif lease.get("pid") is None:
+                how, kept = NO_SESSION_RECORD, []
+            else:
+                how, kept = clear_swept_trees_locked(root, nn, lease)
             _remove_lease_files(root, nn)
             carry_hot_locked(root, nn, leases)
             lines.append("removed the lease of window %s (%s)%s" % (nn, why, swept_words(how, kept)))
@@ -5962,11 +6036,18 @@ def doctor_lines(root: Path) -> list:
         entries = sorted(d.iterdir()) if d.is_dir() else []
     except OSError:
         entries = []
+    unsafe = trash_unsafe(root)
+    if unsafe:
+        lines.append("NOTE     swept trees: %s" % unsafe)
+        entries = []
     for e in entries:
-        age = swept_entry_age(e, now)
-        lines.append("NOTE     swept trees: %s/%s (%s old; deleted after %d)"
-                     % (SWEPT_TREES, e.name, "age unknown" if age is None else _plural(max(0, int(age // 86400)), "day"),
-                        SWEPT_TREES_KEEP_DAYS))
+        if e.name.startswith(DELETING):
+            lines.append("NOTE     swept trees: %s/%s (being deleted)" % (SWEPT_TREES, e.name))
+            continue
+        age, why = swept_entry_age(e, now)
+        lines.append("NOTE     swept trees: %s/%s (%s)"
+                     % (SWEPT_TREES, e.name, "%s; never deleted by a sweep" % why if age is None else
+                        "%s old; deleted after %d" % (_plural(int(age // 86400), "day"), SWEPT_TREES_KEEP_DAYS)))
     return lines
 
 

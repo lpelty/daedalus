@@ -598,9 +598,10 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   [ "$(git -C "$W" log -1 --format=%s lease/01)" = "kept work" ]
 }
 
-@test "review 2026-10-21 round 2, session end: the swept tree is only renamed into the trash, never deleted inside the hook; old trash is deleted when time remains; all within the hook's 3 s" {
+@test "review 2026-10-21 round 2, session end: the swept tree is only renamed into the trash, never deleted inside the hook; old trash (4,000 files) is taken out when time remains and deleted in the background; all within the hook's 3 s" {
   LS create >/dev/null; bind_live 01 sA; CLAUDE_CODE_SESSION_ID=sA LS release 01 >/dev/null
   mkdir -p "$DAEDALUS_HOME/state/swept-trees/07-20200101T000000/thing"
+  python3 -c 'import sys,os; [open(os.path.join(sys.argv[1], "f%d" % i), "w").close() for i in range(4000)]' "$DAEDALUS_HOME/state/swept-trees/07-20200101T000000/thing"
   t0="$(python3 -c 'import time; print(time.time())')"
   run --separate-stderr SE '{"session_id":"sA","reason":"prompt_input_exit"}'
   t1="$(python3 -c 'import time; print(time.time())')"
@@ -609,7 +610,9 @@ SE() { printf '%s' "$1" | python3 "$DAEDALUS_HOME/core/leaselib.py" session-end;
   [ ! -e "$DAEDALUS_HOME/worktrees/01" ]
   e="$(ls "$DAEDALUS_HOME/state/swept-trees" | grep '^01-')"; [ -n "$e" ] || { ls "$DAEDALUS_HOME/state/swept-trees"; return 1; }
   [ -f "$DAEDALUS_HOME/state/swept-trees/$e/thing/a.txt" ] && [ -f "$DAEDALUS_HOME/state/swept-trees/$e/.swept.json" ]
-  [ ! -e "$DAEDALUS_HOME/state/swept-trees/07-20200101T000000" ]
+  [ ! -e "$DAEDALUS_HOME/state/swept-trees/07-20200101T000000" ]                 # renamed for the background delete
+  for i in $(seq 1 100); do ls -A "$DAEDALUS_HOME/state/swept-trees" | grep -q '^\.deleting-' || break; sleep 0.1; done
+  ! ls -A "$DAEDALUS_HOME/state/swept-trees" | grep -q '^\.deleting-'
 }
 
 @test "session-end: a released session still open in another terminal (two live registry entries) keeps its lease — that terminal's hooks still read it (review 2026-10-19, finding 2)" {
