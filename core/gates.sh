@@ -467,8 +467,15 @@ done <<EOF
 $([ -n "$reused_from" ] || cfg_list gates_setup)
 EOF
 if [ "$setup_failed" -eq 0 ] && [ "$setup_count" -gt 0 ]; then
-  if tree_moved; then
-    invalid_reason="gates_setup changed the tree under test (git sees what a step left behind), so no gate ran: what a setup step leaves behind must be ignored by git"
+  if [ -n "$clean_dir" ]; then
+    if tree_moved; then
+      invalid_reason="gates_setup changed the tree under test (git sees what a step left in the clean copy), so no gate ran: what a setup step leaves behind must be ignored by git"
+    fi
+  else
+    fp_setup="$(fingerprint)"
+    if [ "$fp_setup" != "$fp_before" ]; then
+      invalid_reason="gates_setup changed the tree under test (fingerprint ${fp_before:0:12} before, ${fp_setup:0:12} after), so no gate ran: what a setup step leaves behind must be ignored by git"
+    fi
   fi
 fi
 
