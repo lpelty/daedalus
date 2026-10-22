@@ -540,9 +540,9 @@ def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
     - the review file is the run's (vault/evidence/<run>-review.md), manifested, written in branch mode for that run,
       and refute.sh --verdict-of reads STANDS or REFUTED from it — the run's result agreeing (PASS for STANDS, FAIL
       for REFUTED: gates.sh folds the verdict into it);
-    - every reviewer behind it (review_sources) fingerprinted exactly fp_merged when it was launched, and ran the
-      distribution's current core/ and charter — the confirm refuses a review run by other distribution code
-      ("Distribution code changed since the review"), so promote never offers one.
+    - every reviewer behind it (review_sources) fingerprinted exactly fp_merged when it was launched, its receipt
+      vouches for its file, and it ran the distribution's current core/ and charter (reviewer_problem, the confirm's
+      own check) — so promote never offers a review the confirm would refuse.
 
     The newest such run wins (run ids sort by time). No such review — trunk moved, the window added commits since its
     last review, it was never reviewed, or the review was written by older distribution code — and promote runs the
@@ -551,7 +551,6 @@ def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
     if not re.fullmatch(r"[0-9a-f]{64}", fp or "") or not ev.is_dir():
         return None
     manifest = v.manifest_paths(root)
-    head = dc.committed_dist(root)
     for name in sorted((n for n in os.listdir(str(ev)) if RUN_ID.fullmatch(n)), reverse=True):
         rj = ev / name / "run.json"
         try:
@@ -574,8 +573,7 @@ def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
         if (verdict, rec.get("result")) not in (("STANDS", "PASS"), ("REFUTED", "FAIL")):
             continue
         sources = review_sources(root, vf, manifest)
-        if not sources or any(s.get("fingerprint") != fp or s.get("core-tree") != head.get("core_tree")
-                              or s.get("charter-sha") != head.get("charter_sha") for _, s in sources):
+        if not sources or reviewer_problem(root, sources, fp, name):
             continue
         counts, live = review_counts(root, vf, text)
         return {"call_id": ",".join(s["call-id"] for _, s in sources), "verdict": verdict, "file": rel(root, vf),
@@ -1219,6 +1217,38 @@ def check_review(root: Path, p: dict, run_rec: dict, tree: Path) -> str:
     return str(fm["call-id"])
 
 
+def reviewer_problem(root: Path, sources: List[Tuple[Path, dict]], fp: str, wrid: str) -> Optional[str]:
+    """The confirm's sentence for the first reviewer file behind a reused review (review_sources) that its receipt
+    does not vouch for, or None when every one holds: the gate run's fingerprint in its frontmatter and in its
+    receipt (launch.json, which the launcher wrote before the call), its request-sha equal to the receipt's, the
+    receipt naming the window's run, a clean first attempt, its answer the file's body byte for byte, and the
+    distribution's current core/ and charter. prepare (window_review) asks the same question before it offers a review,
+    so a review the confirm would refuse is never offered — a prepare that offered one would offer it again on every
+    run, and the confirm would refuse every time."""
+    head = dc.committed_dist(root)
+    for path, sfm in sources:
+        if sfm.get("fingerprint") != fp:
+            return "Evidence disagrees with the prepared promotion (the review's fingerprint and the gate run's)."
+        launch = read_json(root / "state" / "direct-calls" / str(sfm["call-id"]) / "launch.json") or {}
+        if (launch.get("fingerprint") != fp or not sfm.get("request-sha")
+                or sfm.get("request-sha") != launch.get("request_sha256")
+                or str(launch.get("tag") or "") != sfm.get("run-id") or not str(sfm.get("run-id")).startswith(wrid)):
+            return "The review did not see the change that will be pushed."
+        if sfm.get("core-tree") != head.get("core_tree") or sfm.get("charter-sha") != head.get("charter_sha"):
+            return "Distribution code changed since the review."
+        text = path.read_text()
+        first = (launch.get("attempts") or [{}])[0]
+        body = text.split("---\n", 2)[2] if text.startswith("---\n") and text.count("---\n") >= 2 else ""
+        try:
+            answer = Path(first.get("answer") or "").read_bytes()
+        except OSError:
+            answer = b""
+        if (first.get("exit_code") != 0 or first.get("advisory") or launch.get("core_tree") != sfm.get("core-tree")
+                or sha256_bytes(answer) != sha256_bytes(body.encode())):
+            return "Evidence disagrees with the prepared promotion (the review's receipt and the review)."
+    return None
+
+
 def check_reused_review(root: Path, p: dict, run_rec: dict) -> str:
     """§7.2 step 3 for a reused review (v0.12.8, spec 2026-10-21 B): the window's own branch review of exactly the
     tree that will be pushed, re-derived from its primaries as a fresh review is. A fresh review's prompt is
@@ -1257,27 +1287,9 @@ def check_reused_review(root: Path, p: dict, run_rec: dict) -> str:
     sources = review_sources(root, vf, manifest)
     if not sources or ",".join(s["call-id"] for _, s in sources) != rv.get("call_id"):
         raise Stop("Evidence disagrees with the prepared promotion (the review's call id).")
-    head = dc.committed_dist(root)
-    for path, sfm in sources:
-        if sfm.get("fingerprint") != fp:
-            raise Stop("Evidence disagrees with the prepared promotion (the review's fingerprint and the gate run's).")
-        launch = read_json(root / "state" / "direct-calls" / str(sfm["call-id"]) / "launch.json") or {}
-        if (launch.get("fingerprint") != fp or not sfm.get("request-sha")
-                or sfm.get("request-sha") != launch.get("request_sha256")
-                or str(launch.get("tag") or "") != sfm.get("run-id") or not str(sfm.get("run-id")).startswith(wrid)):
-            raise Stop("The review did not see the change that will be pushed.")
-        if sfm.get("core-tree") != head.get("core_tree") or sfm.get("charter-sha") != head.get("charter_sha"):
-            raise Stop("Distribution code changed since the review.")
-        text = path.read_text()
-        first = (launch.get("attempts") or [{}])[0]
-        body = text.split("---\n", 2)[2] if text.startswith("---\n") and text.count("---\n") >= 2 else ""
-        try:
-            answer = Path(first.get("answer") or "").read_bytes()
-        except OSError:
-            answer = b""
-        if (first.get("exit_code") != 0 or first.get("advisory") or launch.get("core_tree") != sfm.get("core-tree")
-                or sha256_bytes(answer) != sha256_bytes(body.encode())):
-            raise Stop("Evidence disagrees with the prepared promotion (the review's receipt and the review).")
+    problem = reviewer_problem(root, sources, fp, wrid)
+    if problem:
+        raise Stop(problem)
     return str(rv["call_id"])
 
 
