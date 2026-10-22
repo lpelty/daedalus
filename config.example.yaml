@@ -68,23 +68,35 @@ gates:
 
 # Optional. One command per gate, in the gates' order ("" for a gate with
 # none): what to run ONCE when that gate fails, to re-run only its failures
-# instead of the whole suite. Same trust as gates:, run from the target root,
-# on the same tree (gates.sh re-checks the fingerprint first and does not
-# re-run on a tree that changed). Exit 0 makes the gate PASS after a rerun —
+# instead of the whole suite. Same trust as gates:, run where the gate ran,
+# on the same tree (gates.sh checks the tree is unchanged first and does not
+# re-run on one that changed). Exit 0 makes the gate PASS after a rerun —
 # both logs kept in the evidence, and the summary says so; anything else and
-# the gate FAILs as before. For pytest, `--lf --lfnf=none`: --lf re-runs the
-# last failures, and --lfnf=none makes "no recorded failures" run nothing
-# (pytest then exits non-zero, so a gate that failed before any test ran
-# stays FAIL) rather than the full suite. Without this key a failed gate is
-# simply FAIL, as before; core/doctor.sh notes the gates that have none.
+# the gate FAILs as before. A rerun stands in for the whole gate, so it must
+# cover everything the gate covers: a gate that stops at its first failure
+# (pytest -x or --maxfail) never ran the rest, and re-running only what
+# failed would pass tests that never ran — never use those in a gate that
+# has a rerun. A compound gate (&&, ||, ;, |, beyond one leading `cd <dir>
+# &&`) gets no rerun. For pytest, `--lf --lfnf=none`: --lf re-runs the tests
+# that failed last; --lfnf=none makes "no recorded failures" run no tests
+# (pytest exits non-zero) instead of the full suite. A clean copy or a
+# promote scratch starts with no pytest cache, so there --lf re-runs only
+# that run's own failures. Without this key a failed gate is simply FAIL, as
+# before; core/doctor.sh notes the gates that have none.
+# gates:
+#   - cd engine && uv run pytest -q
 # gates_rerun_failed:
 #   - cd engine && uv run pytest --lf --lfnf=none -q
 #
-# A tree that already passed is never tested again: when an earlier run's
-# tree fingerprint, config.yaml (config_sha) and core/ are all the same as
-# this run's and its gates passed, gates.sh records PASS by reuse
-# (reused_from: <run id>) and runs no setup step and no gate. Any edit to the
-# tree, to config.yaml or to core/ runs them in full.
+# Where the gates run: when the tree under test is committed (nothing
+# modified or untracked that git sees), gates.sh runs gates_setup and the
+# gates in a fresh copy of that commit, tracked files only, the way promote
+# does (tree: clean-copy in run.json); a tree with uncommitted work runs in
+# place (tree: worktree). A tree that already passed is not tested again:
+# an earlier run with the same tree fingerprint, config.yaml and core/ whose
+# gates passed makes the run PASS by reuse (reused_from: <run id>); promote
+# reuses only a clean-copy or promote run under this config.yaml, so a PASS
+# that leaned on git-ignored files (a .venv, a .env) is never promoted.
 
 proposals:
   # Maximum open PROPOSED documents. Daedalus must retire one to raise
