@@ -573,15 +573,19 @@ writes the evidence: logs under `state/evidence/<run-id>/`, a summary at
 that says `IMPLEMENTED` cites that run as `evidence-run:`; the session
 cannot end while a claim stands without one, or with one for a different
 tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
-path — the honest state. A tree that already passed is not tested again: when
-an earlier run's tree fingerprint, `config.yaml` and `core/` are all the same
-as now and its gates passed, the run is PASS by reuse — it says "reused from
-run <id> (same tree, same gates); nothing re-ran", records `reused_from`, and
-is cited like any run. So after a refutation, re-running the gates on a tree
-you have not changed costs only the review. Any edit runs them in full. Where
-config has `gates_rerun_failed:`, a gate that fails re-runs only its failures
-once, on the same tree; if that passes, the run says "gate N passed after
-re-running its failures" — a PASS, both logs kept; say so when you report it. A gate that exits 127 never ran: the tree under
+path — the honest state. When your tree is committed (nothing modified or
+untracked), the gates run in a fresh copy of the commit, tracked files only,
+as promote's do: commit before the run that should count, and that run is the
+one promote uses. With uncommitted work they run in your worktree. A tree that
+already passed is not tested again: when an earlier run's tree fingerprint,
+`config.yaml` and `core/` are all the same as now and its gates passed, the
+run is PASS by reuse — it says "reused from run <id> (same tree, same gates);
+nothing re-ran", records `reused_from`, and is cited like any run. So after a
+refutation, re-running the gates on a tree you have not changed costs only the
+review. Any edit runs them in full. Where config has `gates_rerun_failed:`, a
+gate that fails re-runs only its failures once, on the same tree (never a
+compound gate); if that passes, the run says "gate N passed after re-running
+its failures" — a PASS, both logs kept; say so when you report it. A gate that exits 127 never ran: the tree under
 test lacks something it needs (promote's scratch holds tracked files only,
 so a virtual environment is not there). The remedy is a `gates_setup:` step
 in `config.yaml` that builds it before the gates — the operator's file, and a
@@ -704,14 +708,17 @@ the pen. When the operator says a window's work is ready ("ship window 2"):
    paragraphs — the decision in plain words, then the record. Nothing has
    been pushed. What runs on the merge depends on whether that exact tree
    was already judged. When the merge is byte-identical to a tree that
-   passed its gates (trunk had not moved, the window's last run was on its
-   last commit), the gates are not run again: "Tests on the merged result:
-   PASS (…; this exact tree already passed them, nothing re-ran)". When
-   window 02's own review judged that exact tree, no reviewer is launched:
-   "Review STANDS — window 02's review of this exact tree, not repeated" (or
-   REFUTED, below), with the run named in the record. Otherwise — trunk
-   moved, or the window committed after its last review — the gates and one
-   fresh reviewer run on exactly that merge.
+   passed its gates in a clean copy of a commit (trunk had not moved, the
+   window ran its gates after its last commit, with nothing uncommitted), the
+   gates are not run again: "Tests on the merged result: PASS (…; this exact
+   tree already passed them, nothing re-ran)". A run in a worktree with
+   uncommitted work never counts for promote. When the newest review of that
+   tree is window 02's own gate run's review — its reviewer on under this
+   `config.yaml` — no reviewer is launched: "Review STANDS — window 02's
+   review of this exact tree, not repeated" (or REFUTED, below), with the run
+   named in the record. A review called any other way is never reused.
+   Otherwise — trunk moved, or the window committed after its last run — the
+   gates and one fresh reviewer run on exactly that merge.
 2. The operator's instruction is their yes. When the result is clean — gates
    PASS, the review STANDS, no live checks, nothing they have not seen — run
    `core/promote.sh 02 --confirm --operator-said "<a few of their words>"`
