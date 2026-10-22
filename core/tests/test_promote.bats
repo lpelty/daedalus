@@ -1363,3 +1363,14 @@ PY
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["review"].get("reused"))' "$(prepared)")" = None ]
   grep -q '^mode: promote$' "$DAEDALUS_HOME/vault/evidence/$(pj run_id)-review.md"
 }
+
+@test "2026-10-21: a window review its receipt no longer vouches for is not offered — promote launches a fresh reviewer instead of a review the confirm would refuse on every run" {
+  counting_gates refute; work_on_02
+  window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  wrid="$(printf '%s\n' "$output" | tail -1)"; n0="$(calls)"
+  printf '\nan extra line the reviewer never wrote\n' >> "$DAEDALUS_HOME/vault/evidence/$wrid-review.md"
+  run --separate-stderr as_prime bash "$PROMOTE" 02
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(calls)" = "$((n0 + 1))" ] || { echo "a review its receipt does not vouch for was reused"; return 1; }
+  [ "${lines[3]}" = "Reviewer on the merged change: STANDS — no high findings." ]
+}
