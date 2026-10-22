@@ -573,7 +573,15 @@ writes the evidence: logs under `state/evidence/<run-id>/`, a summary at
 that says `IMPLEMENTED` cites that run as `evidence-run:`; the session
 cannot end while a claim stands without one, or with one for a different
 tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
-path — the honest state. A gate that exits 127 never ran: the tree under
+path — the honest state. A tree that already passed is not tested again: when
+an earlier run's tree fingerprint, `config.yaml` and `core/` are all the same
+as now and its gates passed, the run is PASS by reuse — it says "reused from
+run <id> (same tree, same gates); nothing re-ran", records `reused_from`, and
+is cited like any run. So after a refutation, re-running the gates on a tree
+you have not changed costs only the review. Any edit runs them in full. Where
+config has `gates_rerun_failed:`, a gate that fails re-runs only its failures
+once, on the same tree; if that passes, the run says "gate N passed after
+re-running its failures" — a PASS, both logs kept; say so when you report it. A gate that exits 127 never ran: the tree under
 test lacks something it needs (promote's scratch holds tracked files only,
 so a virtual environment is not there). The remedy is a `gates_setup:` step
 in `config.yaml` that builds it before the gates — the operator's file, and a
@@ -628,7 +636,9 @@ full suite run it answers "would a targeted run do?" (and, only where the
 operator set `ami.ask_destructive: true`, "is this destructive?" before a
 Bash call), and it only writes the answer down. It never
 asks the operator, never shortens a run, and never touches `core/gates.sh` —
-the evidence run always runs in full. Run the suite as you would without it.
+what the evidence run runs is gates.sh's decision alone (in full, unless that
+exact tree already passed, or a gate re-runs only its failures: see above).
+Run the suite as you would without it.
 `state/ami/` is the AMI's record and is not yours to write: the guard denies
 writes and removals there, and `/frame-jack off` is the switch, only on the
 operator's word.
@@ -690,9 +700,18 @@ Trunk is reached only through `core/promote.sh`, run by the window that holds
 the pen. When the operator says a window's work is ready ("ship window 2"):
 
 1. Run `core/promote.sh 02` (a window number, never an alias). It merges
-   window 02's branch onto current trunk in a scratch copy, runs the gates
-   and a fresh reviewer on exactly that merge, and prints two paragraphs —
-   the decision in plain words, then the record. Nothing has been pushed.
+   window 02's branch onto current trunk in a scratch copy and prints two
+   paragraphs — the decision in plain words, then the record. Nothing has
+   been pushed. What runs on the merge depends on whether that exact tree
+   was already judged. When the merge is byte-identical to a tree that
+   passed its gates (trunk had not moved, the window's last run was on its
+   last commit), the gates are not run again: "Tests on the merged result:
+   PASS (…; this exact tree already passed them, nothing re-ran)". When
+   window 02's own review judged that exact tree, no reviewer is launched:
+   "Review STANDS — window 02's review of this exact tree, not repeated" (or
+   REFUTED, below), with the run named in the record. Otherwise — trunk
+   moved, or the window committed after its last review — the gates and one
+   fresh reviewer run on exactly that merge.
 2. The operator's instruction is their yes. When the result is clean — gates
    PASS, the review STANDS, no live checks, nothing they have not seen — run
    `core/promote.sh 02 --confirm --operator-said "<a few of their words>"`
@@ -717,13 +736,16 @@ line the confirm prints and let them type yes in their own shell; that shell
 does the push, and your next prompt tells you it happened. Never run the
 confirm through a program that makes a terminal: the guard refuses it.
 
-If the reviewer refutes the merge, say so plainly, repeating the block. To
-ask it about a finding, run `core/call-agent.sh --resume-review 02 "<their
-question>"` and repeat the answer. When the operator says to promote it
-anyway, in any words, run `core/promote.sh 02 --skip-review --reason "<a few
-of their words>"` and then the confirm, in the same turn: their words are
+If the reviewer refutes the merge — or promote shows that window 02's own
+review of that exact tree refuted it — say so plainly, repeating the block.
+To ask it about a finding, run `core/call-agent.sh --resume-review 02
+"<their question>"` and repeat the answer. When the operator says to promote
+it anyway, in any words, run `core/promote.sh 02 --skip-review --reason "<a
+few of their words>"` and then the confirm, in the same turn: their words are
 recorded as the reason beside the verdict it sets aside, checked the same
-way as the confirm. The gates always run.
+way as the confirm. `--skip-review` runs no reviewer; the gates run only if
+that merged tree has not already passed them, so after a prepare on the same
+merge nothing re-runs.
 
 If promote says a gate could not run (exit 127, "command not found"), that
 is not a merge problem: the scratch holds tracked files only. Say so: the

@@ -674,7 +674,22 @@ tree, runs the gates (`core/gates.sh --no-refute --promote <id>`) and the
 fresh-context reviewer (`core/refute.sh --mode promote`) on exactly that
 merge, and prints two paragraphs: the decision, in plain words, and the
 record (merge commit, trunk, evidence run, review, fingerprint, promotion
-id). Nothing is pushed. `core/promote.sh 02 --confirm` then re-derives every
+id). Nothing is pushed.
+
+What already passed is not repeated (v0.12.8). When the merged tree is
+byte-identical to a tree that already passed its gates — trunk had not moved
+and the window ran its gates on its last commit — the promotion's gate run is
+PASS by reuse and runs nothing (the block says "this exact tree already
+passed them, nothing re-ran"; the record names the run it reused). When the
+window's own branch review judged exactly that tree, promote launches no
+reviewer: "Review STANDS — window 02's review of this exact tree, not
+repeated", or, for a refuted one, the refutation and your choice, as for any
+REFUTED. `--skip-review` then re-runs nothing either. Only a merged tree no
+earlier run or review has judged gets the gates and a fresh reviewer. The
+confirm re-derives a reused review from its own files as it does a fresh
+one: the review and each reviewer's receipt must name exactly the
+fingerprint of what will be pushed, and the distribution code that ran it
+must be today's. `core/promote.sh 02 --confirm` then re-derives every
 piece of evidence from its own file, records the operator's yes, and pushes
 exactly the merge commit the evidence names; the prime's checkout is
 fast-forwarded when it is on trunk and clean, and the window's worktree stays
@@ -992,7 +1007,16 @@ test — a window's worktree or promote's scratch, which holds tracked files
 only — to build what the gates need, such as a virtual environment; a
 setup step that fails, or one whose output git can see, makes the run
 INVALID before any gate, and a gate that exits 127 is reported as unable
-to start rather than as a failing merge. The
+to start rather than as a failing merge. A tree that already passed is not
+tested again (v0.12.8): an earlier run with the same tree fingerprint, the
+same `config.yaml` and the same `core/`, whose gates passed, makes the run
+PASS by reuse — no setup step or gate runs, and the record says
+`reused_from: <run id>`. Never a null fingerprint, a gates FAIL, an INVALID or
+unfinished run, or a run the evidence manifest does not list. An optional
+`gates_rerun_failed:` list (one command per gate, in order) runs once when its
+gate fails, on the same tree, to re-run only the failures (for pytest,
+`--lf --lfnf=none`); exit 0 makes the gate PASS after a rerun, both logs kept
+and named in the summary. The
 `Stop` hook checks any `IMPLEMENTED`/`completion` document changed this
 session against it; the boundary hook blocks edits to Daedalus's own code,
 the gate definition, and the evidence. Everything is snapshotted at session
@@ -1088,7 +1112,10 @@ diff to hunt. The run says how the earlier findings fared:
 
 **Promote's review takes neither.** It is the last gate: one fresh reviewer,
 not told what earlier reviews found — so it cannot inherit their blind spots
-— whose prompt is re-rendered byte for byte at confirm.
+— whose prompt is re-rendered byte for byte at confirm. When the merged tree
+is exactly one the window's own review already judged, that review is
+promote's (v0.12.8), and the confirm checks its receipts' fingerprints
+instead of a re-render.
 
 The diff is assembled per repository: the target checkout against
 `origin/<target.branch>`, then each `target.nested` checkout against its
@@ -1380,7 +1407,8 @@ knows two questions and **only writes its answers down** (shadow mode):
 
 - before a full-suite run during a build: "given the files edited since the
   last run, would a targeted run do?". The evidence run, `core/gates.sh`,
-  is never asked; it always runs in full. Asked by default
+  is never asked; what it runs is its own rule (in full, unless that exact
+  tree already passed or a gate re-runs only its failures). Asked by default
   (`ask_suite: true`).
 - before every Bash call the guard did not deny: "is this command
   destructive or irreversible?". **Off by default** (`ask_destructive:
