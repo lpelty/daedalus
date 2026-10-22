@@ -4,6 +4,78 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.7 — three checks stop misjudging what a window did, and sweep cleans up after itself
+
+**In short.** The suite question is asked for a large test run that names
+files. Another window's review files no longer show up as this window's
+dirt. Merging another window's branch no longer blocks every Stop. And a
+swept window's merged, clean worktree and branch are removed, kept for 7
+days in a trash first.
+
+**What went wrong.**
+- A pytest or bats run that named any file counted as "targeted". Seven
+  globbed groups, 322 tests and four minutes got no question; only a bare
+  `pytest` did.
+- The review lenses wrote their files under `vault/evidence/` and listed
+  them in the manifest only after every lens finished. For the whole review,
+  every other window was told "Protected files changed this session …
+  Revert these" about files it never wrote. A lens that failed but left its
+  file was never listed, so that message never stopped.
+- After a window merged another window's branch, as asked, the Stop check
+  listed every merged file as "the warning never fired (the pre-write hook
+  timed out?)", at every Stop, even after the owner was messaged. A merge
+  never passes through the pre-write hook.
+- Sweep removed a window's lease but kept its worktree and branch. The
+  window then no longer existed, so nothing in Daedalus could remove them.
+
+**What changed.**
+- A test run is judged by how many test files its arguments name, after
+  globs (`*`, `**`), braces and `~` are expanded and a `cd` earlier in the
+  command is followed. More than 3 files, a directory, or no files at all
+  is a full run and gets the suite question. A word that names nothing
+  counts as one file only right after an option that takes a value, as in
+  `--timeout 30`; otherwise it counts as large.
+- Every review path, the lenses' and the verdict's, is listed in the
+  manifest before any reviewer starts. A review that ends without a verdict
+  records each path's state in `state/evidence/<run>/unwritten.json`: the
+  file's checksum if it was there, or "absent". Only that exact file is
+  excused afterwards; a file written there later is flagged.
+- The Stop check treats files that arrived by merging another window's
+  branch as handed over. A file this window changed again after the merge is
+  said once, naming the merge. Every such block is said once per file and
+  per other window, and recorded only after it was said.
+- Sweep removes a window's worktree and deletes `lease/NN` only when all of
+  these hold, and otherwise keeps both and names the check that failed:
+  - the window's session has ended, or its process is gone; a window with
+    no process on file keeps both;
+  - each worktree is its own checkout, with nothing uncommitted, nothing
+    git is told to look away from, and no commit in its history that the
+    trunk lacks;
+  - `lease/NN` is on the trunk.
+- A removed worktree is moved, with its git-ignored files, to
+  `state/swept-trees/<NN>-<time>`, with a `.swept.json` naming each branch
+  and its last commit. A later sweep deletes it once it is 7 days old, in
+  the background, outside any hook's time.
+
+**What you will see.**
+- Sometimes a suite question where there was none: "Given the files edited
+  since the last run, is a targeted test run sufficient?" An unneeded question
+  is the cheap way to be wrong.
+- No more "Revert these" about another window's review files, and no
+  repeated "the warning never fired" after an agreed merge.
+- After a sweep: "… its worktree moved to state/swept-trees/04-…, deleted
+  after 7 days", or "worktree and branch kept: <reason>".
+- `core/doctor.sh` lists each entry in `state/swept-trees/` with its age.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.7`. `core/doctor.sh`
+has a "swept trees" line once a sweep has moved a worktree.
+
+**Not in this release.** Worktrees and branches left behind by sweeps before
+this release are not cleaned up; sweep acts only when it removes a lease.
+
 ## v0.12.6 — hot.md is shown at every start, every window writes its own entries, and an old entry gets a question
 
 **In short.** Every session start now shows hot.md's In flight and Blocked
