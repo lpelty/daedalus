@@ -507,18 +507,80 @@ _VALUE_OPTS = {
 _LARGE = TARGETED_MAX_FILES + 1
 
 
+class _UnknownCwd:
+    """The cwd after a `cd` that cannot be resolved without a shell: a variable, a command substitution, `cd -`, a
+    directory that is not there (review 2026-10-21, round 3, H-A)."""
+    def __repr__(self) -> str:
+        return "UNKNOWN_CWD"
+
+
+UNKNOWN_CWD = _UnknownCwd()
+
+
+def _expand_braces(word: str) -> List[str]:
+    """The shell's brace expansion of one word, `{a,b}` and nested `{a,b{c,d}}` — no shell, no ranges: the first
+    top-level group with a comma is expanded and the rest recursively. A word with none is itself."""
+    depth, start = 0, None
+    for i, ch in enumerate(word):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                inner, parts, d, cur = word[start + 1:i], [], 0, ""
+                for c in inner:
+                    if c == "," and d == 0:
+                        parts.append(cur)
+                        cur = ""
+                        continue
+                    d += (c == "{") - (c == "}")
+                    cur += c
+                parts.append(cur)
+                if len(parts) < 2:
+                    start = None
+                    continue
+                out: List[str] = []
+                for part in parts:
+                    out += _expand_braces(word[:start] + part + word[i + 1:])
+                return out
+    return [word]
+
+
+def resolve_cd(args: List[str], cwd):
+    """The cwd after `cd <args>` run in <cwd>: a literal directory, `~` expanded, relative to <cwd>; no argument is
+    the home directory. UNKNOWN_CWD for what only a shell knows — `$`, a backquote, `cd -` — for a directory that is
+    not there, or when <cwd> itself is unknown and the target is relative."""
+    words = [t for t in args if t not in ("-L", "-P", "-e", "-@")]
+    target = words[0] if words else "~"
+    if target == "-" or "$" in target or "`" in target:
+        return UNKNOWN_CWD
+    target = os.path.expanduser(target)
+    if not os.path.isabs(target):
+        if cwd is UNKNOWN_CWD:
+            return UNKNOWN_CWD
+        target = os.path.join(str(cwd) if cwd else os.getcwd(), target)
+    return os.path.realpath(target) if os.path.isdir(target) else UNKNOWN_CWD
+
+
 def _test_files(exe: str, args: List[str], cwd) -> Optional[int]:
-    """How many test files a pytest or bats segment's positional arguments name (§6.1, v0.12.7): `_LARGE` for a
-    directory (one that exists, or a path that names nothing and is written as one — `tests/`, `core/tests` from
-    another cwd, as the table always read it), None when no argument names a path at all; any other word that names
-    nothing (an unknown option's value) counts as one file. The command string arrives unexpanded,
-    so a glob is expanded here against the payload's cwd — and a glob that matches nothing counts as one file: the
-    shell would pass it on literally, and an unmatchable pattern is never turned into a suite. `file::node` counts
-    as its file; the same file named twice counts once. Nothing is run: deciding whether a run is too big must not
-    run the test runner (no `--collect-only`). A few stats and one glob per pattern."""
+    """How many test files a pytest or bats segment's positional arguments name (§6.1, v0.12.7): `_LARGE` past
+    TARGETED_MAX_FILES or for a directory (one that exists, or a path that names nothing and is written as one —
+    `tests/`, `core/tests` from another cwd, as the table always read it), None when no argument names a path at
+    all; any other word that names nothing (an unknown option's value) counts as one file. The command string
+    arrives unexpanded, so each word is expanded here as the shell would: braces `{a,b}` (_expand_braces), `~`,
+    then a glob against `cwd` — the payload's, or the directory an earlier `cd` in the command moved to — with
+    `**` recursive (review 2026-10-21, round 3, M-B); a glob that matches nothing counts as one file, as the
+    shell would pass it on literally. When `cwd` is UNKNOWN_CWD (a `cd` no one can resolve without a shell),
+    nothing relative can be looked at: a word ending in the runner's extension is one file, anything else is
+    large. `file::node` counts as its file; the same file named twice counts once. Counting stops as soon as the
+    limit is passed, so a huge tree costs nothing inside the hook. Nothing is run: deciding whether a run is too
+    big must not run the test runner (no `--collect-only`)."""
     takes = _VALUE_OPTS.get(exe, set())
     ext = ".py" if exe == "pytest" else ".bats"
-    base = str(cwd) if cwd else os.getcwd()
+    unknown = cwd is UNKNOWN_CWD
+    base = os.getcwd() if (unknown or not cwd) else str(cwd)
     files = set()
     named = False
     skip = literal = False
@@ -535,26 +597,34 @@ def _test_files(exe: str, args: List[str], cwd) -> Optional[int]:
         named = True
         if exe == "pytest" and "::" in a:
             a = a.split("::", 1)[0]
-        full = a if os.path.isabs(a) else os.path.join(base, a)
-        if glob.has_magic(a):
-            pattern = a if os.path.isabs(a) else os.path.join(glob.escape(base), a)
-            hits = glob.glob(pattern)
-            if not hits:
-                files.add(("unmatched", a))
-                continue
-            for h in hits:
-                if os.path.isdir(h):
-                    return _LARGE
-                files.add(os.path.realpath(h))
-            continue
-        if os.path.isdir(full) or a.endswith("/") or (
-                not os.path.exists(full) and "/" in a and "." not in a.rsplit("/", 1)[-1]):
-            return _LARGE                                # a directory, or a path written as one (`tests/`, `core/tests`)
-        # anything else — a test file, or a word that names nothing (an unknown option's value: `-r a`,
-        # `--timeout 30`, `--pyargs pkg`) — is one file at most (review 2026-10-21, M1)
-        files.add(os.path.realpath(full))
-        if len(files) > TARGETED_MAX_FILES:
-            return _LARGE
+        for w in _expand_braces(a):
+            w = os.path.expanduser(w)
+            if unknown and not os.path.isabs(w):
+                if not w.endswith(ext) or glob.has_magic(w):
+                    return _LARGE                        # nothing relative can be looked at
+                files.add(("unknown cwd", w))
+            elif glob.has_magic(w):
+                pattern = w if os.path.isabs(w) else os.path.join(glob.escape(base), w)
+                hit = False
+                for h in glob.iglob(pattern, recursive=True):
+                    hit = True
+                    if os.path.isdir(h):
+                        return _LARGE
+                    files.add(os.path.realpath(h))
+                    if len(files) > TARGETED_MAX_FILES:
+                        return _LARGE
+                if not hit:
+                    files.add(("unmatched", w))
+            else:
+                full = w if os.path.isabs(w) else os.path.join(base, w)
+                if os.path.isdir(full) or w.endswith("/") or (
+                        not os.path.exists(full) and "/" in w and "." not in w.rsplit("/", 1)[-1]):
+                    return _LARGE                        # a directory, or a path written as one (`tests/`, `core/tests`)
+                # anything else — a test file, or a word that names nothing (an unknown option's value: `-r a`,
+                # `--timeout 30`, `--pyargs pkg`) — is one file at most (review 2026-10-21, M1)
+                files.add(os.path.realpath(full))
+            if len(files) > TARGETED_MAX_FILES:
+                return _LARGE
     return min(len(files), _LARGE) if named else None
 
 
@@ -591,12 +661,18 @@ def classify(segments: List[List[str]], cwd=None) -> str:
     (§6.1): an evidence run or a switch command anywhere makes the whole call `none`; else a full-suite
     segment makes it `suite`; else any other segment makes it `destructive`; a call of only targeted
     test runs (or nothing) is `none`. `cwd` is the payload's, where a test run's globs are expanded
-    (`_test_files`); None reads the process's own."""
+    (`_test_files`); None reads the process's own. A `cd` segment moves it for the segments after it, in the order
+    the guard walked them (resolve_cd; UNKNOWN_CWD when only a shell could say where)."""
     kinds = set()
+    here = cwd
     for seg in segments or []:
         if not seg:
             continue
-        k = _kind_of(head(seg), cwd)
+        h = head(seg)
+        if h and h[0] == "cd":
+            # a `cd` moves the cwd the later segments' paths are read against (review 2026-10-21, round 3, H-A)
+            here = resolve_cd(h[1:], here)
+        k = _kind_of(h, here)
         if k == "exempt":
             return "none"
         kinds.add(k)

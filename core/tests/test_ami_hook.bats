@@ -138,6 +138,56 @@ print("ok")' "$W"
   [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
 }
 
+@test "review 2026-10-21 round 3 (H-A): a cd before the runner is followed — cd repo && uv run pytest tests -q and cd repo && bats tests are suite (main asked); cd repo && pytest tests/test_a.py is not a suite (its cd alone is asked about, as on main); a cd that cannot be resolved makes the cwd unknown, so a bare word is large; the M1 cases stay targeted" {
+  W="$BATS_TEST_TMPDIR/top"; mkdir -p "$W/repo/tests"
+  for n in a b c d e; do printf 'x\n' > "$W/repo/tests/test_$n.py"; printf 'x\n' > "$W/repo/tests/test_$n.bats"; done
+  run ami_py '
+import shlex
+cwd = sys.argv[3]
+def segs(cmd):   # what the guard hands classify: one token list per segment
+    return [shlex.split(part) for part in cmd.split("&&")]
+# a `cd` segment is itself `destructive` (anything else, as on main), so a cd plus a targeted run is destructive —
+# not suite: the run is targeted, and only the cd is asked about, as it always was
+cases = [("cd repo && uv run pytest tests -q", "suite"),
+         ("cd repo && bats tests", "suite"),
+         ("cd repo && pytest tests/test_a.py", "destructive"),
+         ("cd \"$X\" && pytest tests", "suite"),
+         ("cd $(pwd)/repo && pytest tests", "suite"),
+         ("cd - && pytest tests", "suite"),
+         ("cd nowhere && pytest tests", "suite"),
+         ("cd repo && pytest tests/test_a.py -r a", "destructive"),
+         ("cd repo && pytest tests/test_a.py --timeout 30", "destructive"),
+         ("cd repo && pytest tests/test_a.py --cov-fail-under 80", "destructive"),
+         ("cd repo && pytest tests/test_a.py --pyargs pkg", "destructive"),
+         ("pytest repo/tests/test_a.py --pyargs pkg", "none")]
+for cmd, want in cases:
+    got = a.classify(segs(cmd), cwd)
+    assert got == want, (cmd, got, want)
+print("ok")' "$W"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 round 3 (M-B): ** is expanded recursively, {a,b} braces and ~ are expanded, and counting stops past the limit" {
+  W="$BATS_TEST_TMPDIR/globfx"; mkdir -p "$W/tests/a" "$W/tests/b/c" "$BATS_TEST_TMPDIR/h/proj/tests"
+  printf 'x\n' > "$W/tests/test_top.py"; printf 'x\n' > "$W/tests/a/test_1.py"
+  for n in 2 3 4 5 6; do printf 'x\n' > "$W/tests/b/c/test_$n.py"; done
+  for n in p q r s t; do printf 'x\n' > "$W/tests/test_$n.py"; printf 'x\n' > "$BATS_TEST_TMPDIR/h/proj/tests/test_$n.py"; done
+  run env HOME="$BATS_TEST_TMPDIR/h" bash -c "$(declare -f ami_py); SID=sA DAEDALUS_HOME='$DAEDALUS_HOME' ami_py '
+cwd = sys.argv[3]
+cases = [([\"pytest\", \"tests/**/test_*.py\"], \"suite\"),
+         ([\"pytest\", \"tests/test_{p,q,r,s}.py\"], \"suite\"),
+         ([\"pytest\", \"~/proj/tests/test_*.py\"], \"suite\"),
+         ([\"pytest\", \"tests/test_{p,q}.py\"], \"none\"),
+         ([\"pytest\", \"~/proj/tests/test_p.py\"], \"none\"),
+         ([\"pytest\", \"tests/**/test_1.py\"], \"none\")]
+for seg, want in cases:
+    got = a.classify([seg], cwd)
+    assert got == want, (seg, got, want)
+assert a._expand_braces(\"x{a,b{c,d}}y\") == [\"xay\", \"xbcy\", \"xbdy\"], a._expand_braces(\"x{a,b{c,d}}y\")
+print(\"ok\")' '$W'"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+}
+
 @test "state text: state_destructive and state_suite over the two fixture items equal the stored score.py output after substituting the home and the scratchpad (a weaker claim than byte-equality with the lab, by design)" {
   # The home substituted is a short synthetic one, not the bats fixture's: the builder caps the previous
   # suite-run line at 400 characters (and the command at 1,800), and a home path three times longer than
