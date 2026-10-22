@@ -105,6 +105,24 @@ EOF
 gate_list_count="$(cfg_list gates | grep -c .)" || gate_list_count=0
 [ "$gate_list_count" -gt 0 ] || die "no gates configured — refusing to report success (check the gates: list in config.yaml)"
 
+# gates_rerun_failed (v0.12.8, spec 2026-10-21 C): optional, one command per gate, in the gates' order — `""` for a
+# gate with none. The same trust as gates:, and the same tab rule (a rerun is logged in the same row format). A list
+# longer than gates: names a rerun for a gate that does not exist — almost certainly a list that drifted out of line
+# with the gates — so it is refused here, before a run id exists, rather than pairing commands with the wrong gates.
+while IFS= read -r rr; do
+  case "$rr" in
+    *"$(printf '\t')"*) die "config gates_rerun_failed: command contains a tab character — refusing (the evidence row format is tab-delimited): $rr" ;;
+  esac
+done <<EOF
+$(cfg_list gates_rerun_failed)
+EOF
+rerun_list_count="$(cfg_list gates_rerun_failed | wc -l | tr -d ' ')"
+if [ "$rerun_list_count" -gt "$gate_list_count" ]; then
+  die "config gates_rerun_failed has $rerun_list_count commands but gates: has $gate_list_count — one rerun command per gate, in the same order (\"\" for a gate with none); refusing before any gate runs"
+fi
+# rerun_of <n> — gate n's rerun command, or nothing.
+rerun_of() { cfg_list gates_rerun_failed | sed -n "${1}p"; }
+
 # The refuter is ON unless the operator says otherwise, in writing. An
 # unset verify.refute means true. `verify.refute: false` is honored only
 # with a non-empty verify.refute_off_reason beside it — an off-switch with
@@ -181,6 +199,106 @@ fp_before="$(fingerprint)"
 fp_secs="$(sed -n 's/^fingerprint_secs=//p' "$ev_state/fingerprint.err" 2>/dev/null | tail -1)"
 [ -n "$fp_secs" ] || fp_secs=0
 
+# --- Has this exact tree already passed these gates? (v0.12.8, spec 2026-10-21 A) ------------------------------
+# On 2026-10-21 one combined release ran a ~3,100-test suite (9–12 minutes) seven times on nearly the same code; the
+# seventh was promote's, on a merged tree byte-identical to the one that had just passed, and an eighth was one
+# --skip-review away. Nothing asked "has this exact tree already passed?" although every run.json records what it
+# takes to answer: the tree's content fingerprint (fingerprint.sh — independent of HEAD and the index, untracked
+# content included), the config_sha of the gate definition and the outcome. So, before any setup step or gate: an
+# earlier run with the same fingerprint, the same config_sha and the same distribution core/ tree, whose gates all
+# passed, makes this run PASS by reuse — a normal record and summary, manifested the same way, carrying reused_from
+# and the earlier run's gate rows, and no setup or gate command executed. Here, so every caller gets it unchanged:
+# promote's prepare, --skip-review's prepare, a window re-running gates on a tree it has not changed.
+#
+# What counts as "passed its gates": gates_result PASS — the gates' outcome before the reviewer spoke. A run whose
+# review REFUTED it, or that the reviewer could not certify, is result FAIL, but its gates passed, and the same tree
+# passes them again; the reviewer is a separate rung and still runs on this run as on any PASS (verify.refute).
+# Never reused: a null fingerprint (fingerprint.sh's own rule — null is never citable, so it matches nothing), a
+# gates FAIL, an INVALID or RUNNING run, a run from before this release (it records no core_tree), and a run.json the
+# manifest does not list: the boundary hook sanctions evidence only when it is manifested and has its state-side
+# record, and a hand-written run.json at a path gates.sh never manifested is not evidence gates.sh wrote. The vault
+# summary must be manifested too and name the same fingerprint and config-sha.
+#
+# The distribution core/ tree is HEAD:core of this home (distcheck.committed_dist), recorded only while core/ on
+# disk is exactly HEAD's (distcheck.distribution_state): a modified core/ records null and matches nothing, since
+# the gate runner and fingerprint that produced an earlier PASS must be the ones running now. A home that is not a
+# git checkout, or one without distcheck.py, records null — no reuse, exactly the behaviour before this release.
+#
+# Fast with many runs: run ids sort by time, so the newest are read first and the first match ends the search; a
+# run.json whose raw text does not contain this fingerprint is skipped before it is parsed; the manifest is read
+# once. Never fails the run: anything it cannot read is a run it does not reuse.
+core_tree="null"; reused_from=""; reused_gates="$(mktemp)" || die "cannot create a temp file for the reuse lookup"
+IFS= read -r -d '' reuse_script <<'PY'
+import json, os, re, sys
+home, fp, config_sha, own, out = sys.argv[1:6]
+core_tree = None
+try:
+    sys.dont_write_bytecode = True          # a new core/__pycache__ would itself be a modified core/
+    sys.path.insert(0, os.path.join(home, "core"))
+    import distcheck as dc
+    from pathlib import Path
+    root = Path(home).resolve()
+    if dc.distribution_state(root, paths=("core",))[0] == "clean":
+        core_tree = dc.committed_dist(root).get("core_tree")
+except Exception:
+    core_tree = None
+print(core_tree or "null")
+if not core_tree or not re.fullmatch(r"[0-9a-f]{64}", fp or ""):
+    sys.exit(0)
+ev_state = os.path.join(home, "state", "evidence")
+ev_vault = os.path.join(home, "vault", "evidence")
+try:
+    with open(os.path.join(ev_vault, ".manifest")) as fh:
+        manifest = {os.path.realpath(ln.strip()) for ln in fh if ln.strip()}
+    names = sorted((n for n in os.listdir(ev_state) if re.fullmatch(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", n) and n != own),
+                   reverse=True)
+except OSError:
+    sys.exit(0)
+def frontmatter(path):
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return {}
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    return dict(ln.split(": ", 1) for ln in (m.group(1).splitlines() if m else []) if ": " in ln)
+for name in names:
+    rj = os.path.join(ev_state, name, "run.json")
+    try:
+        raw = open(rj).read()
+    except OSError:
+        continue
+    if fp not in raw or os.path.realpath(rj) not in manifest:
+        continue
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        continue
+    gates = rec.get("gates") if isinstance(rec, dict) else None
+    if (rec.get("run_id") != name or rec.get("fingerprint") != fp or rec.get("config_sha") != config_sha
+            or rec.get("core_tree") != core_tree or rec.get("gates_result") != "PASS"
+            or rec.get("result") not in ("PASS", "FAIL") or rec.get("invalid_reason") or rec.get("setup_failed")
+            or not isinstance(gates, list) or not gates
+            or not all(isinstance(g, dict) and g.get("exit") == 0 for g in gates)):
+        continue
+    summary = os.path.join(ev_vault, name + ".md")
+    fm = frontmatter(summary)
+    if (os.path.realpath(summary) not in manifest or fm.get("fingerprint") != fp
+            or fm.get("config-sha") != config_sha):
+        continue
+    with open(out, "w") as fh:
+        json.dump(gates, fh)
+    print(name)
+    break
+PY
+reuse_out="$(python3 -c "$reuse_script" "$DAEDALUS_HOME" "$fp_before" "$config_sha" "$run_id" "$reused_gates" 2>/dev/null)"
+core_tree="$(printf '%s\n' "$reuse_out" | sed -n 1p)"
+reused_from="$(printf '%s\n' "$reuse_out" | sed -n 2p)"
+[ -n "$core_tree" ] || core_tree="null"
+case "$reused_from" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+  *) reused_from="" ;;
+esac
+
 # gates_setup (2026-10-14): commands that prepare the tree under test — a window's
 # worktree, or promote's scratch, which holds tracked files only — before any gate
 # runs (a build environment, say). Same trust as gates:, same cwd, logged beside
@@ -209,7 +327,7 @@ $setup_count	$code	$dur	$log_file	$step"
     break
   fi
 done <<EOF
-$(cfg_list gates_setup)
+$([ -n "$reused_from" ] || cfg_list gates_setup)
 EOF
 if [ "$setup_failed" -eq 0 ] && [ "$setup_count" -gt 0 ]; then
   fp_setup="$(fingerprint)"
@@ -221,6 +339,7 @@ fi
 failed=0
 gate_count=0
 rows=""
+rerun_rows=""
 while IFS= read -r gate; do
   [ -n "$gate" ] || continue
   gate_count=$((gate_count + 1))
@@ -231,6 +350,40 @@ while IFS= read -r gate; do
   ( cd "$target" && eval "$gate" ) </dev/null >"$log_file" 2>&1
   code=$?
   dur=$(( $(date +%s) - t0 ))
+  # A failed gate with a gates_rerun_failed command (spec 2026-10-21 C): on 2026-10-21 two runs of an 11-minute
+  # suite each failed on one flaky test, so the reviewer never ran and the whole suite repeated just to reach it. The
+  # rerun command runs ONCE, in the same tree — the fingerprint is taken again first, and a tree that changed since
+  # the run started is not re-run (a pass on another tree says nothing about this one). Exit 0 makes the gate PASS
+  # after a rerun: its row then carries the rerun's exit and log, and rerun_rows keeps the first run's exit and log,
+  # so both logs stay in the evidence and the summary names it. Anything else and the gate FAILs as before, with the
+  # rerun's log as its log (what still fails). No command for the gate: exactly as before this release.
+  rerun_cmd=""
+  [ "$code" -eq 0 ] || rerun_cmd="$(rerun_of "$gate_count")"
+  if [ -n "$rerun_cmd" ]; then
+    first_code=$code; first_dur=$dur; first_log="$log_file"
+    fp_rerun="$(fingerprint)"
+    if [ "$fp_rerun" = "null" ] || [ "$fp_rerun" != "$fp_before" ]; then
+      rerun_rows="$rerun_rows
+$gate_count	$first_code	$first_dur	$first_log	tree-changed ${fp_before:0:12} ${fp_rerun:0:12}	$rerun_cmd"
+      log "gate $gate_count failed; its failures were not re-run: the tree changed after it failed"
+    else
+      log "FAIL  $gate — re-running its failures once: $rerun_cmd"
+      log_file="$ev_state/gate-$gate_count-rerun.log"
+      t0=$(date +%s)
+      ( cd "$target" && eval "$rerun_cmd" ) </dev/null >"$log_file" 2>&1
+      code=$?
+      dur=$(( first_dur + $(date +%s) - t0 ))
+      rerun_outcome=failed
+      [ "$code" -ne 0 ] || rerun_outcome=passed
+      rerun_rows="$rerun_rows
+$gate_count	$first_code	$first_dur	$first_log	$rerun_outcome	$rerun_cmd"
+      if [ "$code" -eq 0 ]; then
+        log "gate $gate_count passed after re-running its failures (first run log: $first_log)"
+      else
+        log "gate $gate_count failed again when its failures were re-run (rerun log: $log_file)"
+      fi
+    fi
+  fi
   if [ "$code" -eq 0 ]; then
     log "PASS  $gate"
   else
@@ -244,16 +397,35 @@ while IFS= read -r gate; do
   rows="$rows
 $gate_count	$code	$dur	$log_file	$gate"
 done <<EOF
-$([ -n "$invalid_reason" ] || cfg_list gates)
+$([ -n "$invalid_reason" ] || [ -n "$reused_from" ] || cfg_list gates)
 EOF
 
-fp_after="$(fingerprint)"
+# A reused run (A above): the earlier run's gate rows are this run's, as they were recorded — their logs are that
+# run's logs, already manifested — and nothing ran, so the tree cannot have moved under a gate.
+if [ -n "$reused_from" ]; then
+  IFS= read -r -d '' rows_script <<'PY'
+import json, sys
+for g in json.load(open(sys.argv[1])):
+    print("\t".join(str(x) for x in (g["n"], g["exit"], g.get("duration_s") or 0, g["log"], g["command"])))
+PY
+  rows="$(python3 -c "$rows_script" "$reused_gates")" || die "cannot read the gate rows of run $reused_from"
+  rows="
+$rows"
+  gate_count="$(printf '%s\n' "$rows" | grep -c .)"
+  log "PASS — reused from run $reused_from (same tree, same gates); nothing re-ran."
+  fp_after="$fp_before"
+else
+  fp_after="$(fingerprint)"
+fi
 result=PASS
 [ "$failed" -ne 0 ] && result=FAIL
 [ -n "$invalid_reason" ] && result=INVALID
 if [ "$fp_before" = "null" ] || [ "$fp_after" = "null" ] || [ "$fp_before" != "$fp_after" ]; then
   result=INVALID
 fi
+# The gates' own outcome, kept apart from `result`, which the reviewer may still turn to FAIL below: reuse (A above)
+# asks whether this tree passed its gates, not whether a review stood.
+gates_result="$result"
 
 # The evidence summary — no output excerpt; the vault is a pushed
 # repository. Written FIRST to a temp file outside the evidence tree, and
@@ -285,6 +457,19 @@ write_summary() {   # write_summary <path> <result>
         printf '| %s | `%s` | %s | %s | `%s` |\n' "$n" "$cmd" "$code" "$dur" "$logf"
       done
     fi
+    [ -z "$reused_from" ] || printf '\nPASS — reused from run %s (same tree, same gates); nothing re-ran.\n' "$reused_from"
+    if [ -n "$(printf '%s' "$rerun_rows" | tr -d '\n')" ]; then
+      printf '\n'
+      printf '%s\n' "$rerun_rows" | while IFS="$(printf '\t')" read -r n fcode fdur flog outcome cmd; do
+        [ -n "$n" ] || continue
+        case "$outcome" in
+          passed) printf 'gate %s passed after re-running its failures (first run log: `%s`).\n' "$n" "$flog" ;;
+          failed) printf 'gate %s failed again when its failures were re-run (first run log: `%s`).\n' "$n" "$flog" ;;
+          *) printf "gate %s's failures were not re-run: the tree changed after it failed (fingerprint %s before, %s after; first run log: \`%s\`).\n" \
+               "$n" "$(printf '%s' "$outcome" | cut -d' ' -f2)" "$(printf '%s' "$outcome" | cut -d' ' -f3)" "$flog" ;;
+        esac
+      done
+    fi
     [ -z "$invalid_reason" ] || printf '\nINVALID: %s\n' "$invalid_reason"
   } > "$1"
 }
@@ -304,6 +489,7 @@ write_summary "$summary_tmp" "$result"
   [ -f "$ev_state/fingerprint.err" ] && printf '%s\n' "$ev_state/fingerprint.err"
   printf '%s\n' "$setup_rows" | awk -F'\t' 'NF {print $4}'
   printf '%s\n' "$rows" | awk -F'\t' 'NF {print $4}'
+  printf '%s\n' "$rerun_rows" | awk -F'\t' 'NF {print $4}'
 } | python3 "$DAEDALUS_HOME/core/manifest-append.py" - \
   || die "cannot append to the evidence manifest"
 
@@ -418,9 +604,13 @@ rm -f "$summary_tmp"
 rows_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rows" > "$rows_tmp"
 printf '\n%s' "$setup_rows" >> "$rows_tmp"     # a blank line parts the gate rows from the setup rows
-python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" <<'PY'
+rerun_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
+printf '%s' "$rerun_rows" > "$rerun_tmp"
+python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" \
+    "$gates_result" "$core_tree" "$reused_from" "$reused_gates" "$rerun_tmp" <<'PY'
 import json, sys, time
 out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx, setup_failed, invalid = sys.argv[1:14]
+gates_result, core_tree, reused_from, reused_gates, rerun_path = sys.argv[14:19]
 gates, setup = [], []
 with open(rows_path) as fh:
     gate_part, _, setup_part = fh.read().partition("\n\n")
@@ -430,9 +620,25 @@ for part, into in ((gate_part, gates), (setup_part, setup)):
             continue
         n, code, dur, log, cmd = line.split("\t", 4)
         into.append({"n": int(n), "command": cmd, "exit": int(code), "duration_s": int(dur), "log": log})
+# A gate whose failures were re-run (spec 2026-10-21 C) keeps its first run beside the row: the row is the outcome.
+with open(rerun_path) as fh:
+    for line in fh.read().splitlines():
+        if not line.strip():
+            continue
+        n, fcode, fdur, flog, outcome, cmd = line.split("\t", 5)
+        for g in gates:
+            if g["n"] == int(n):
+                g["rerun"] = {"command": cmd, "outcome": outcome.split(" ", 1)[0], "first_exit": int(fcode),
+                              "first_duration_s": int(fdur), "first_log": flog}
+# A reused run (spec 2026-10-21 A) carries the earlier run's gate rows exactly as that run recorded them.
+if reused_from:
+    gates = json.load(open(reused_gates))
 rec = {"run_id": run_id, "started": started, "fingerprint": fp, "fingerprint_secs": int(fp_secs or 0),
-       "config_sha": config_sha, "setup": setup, "gates": gates, "result": result,
+       "config_sha": config_sha, "core_tree": None if core_tree in ("", "null") else core_tree,
+       "setup": setup, "gates": gates, "gates_result": gates_result, "result": result,
        "lease": lease or None, "session_id": sid or None}
+if reused_from:
+    rec["reused_from"] = reused_from
 if int(setup_failed or 0):
     rec["setup_failed"] = int(setup_failed)
 if invalid:
@@ -446,7 +652,7 @@ with open(out, "w") as fh:
     json.dump(rec, fh, indent=2)
 PY
 rj=$?
-rm -f "$rows_tmp"
+rm -f "$rows_tmp" "$rerun_tmp" "$reused_gates"
 if [ "$rj" -ne 0 ]; then
   # The vault summary was written above with the result; with no run.json behind
   # it, it must not say PASS.
