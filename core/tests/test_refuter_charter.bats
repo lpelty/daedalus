@@ -191,21 +191,21 @@ PY
 @test "a managed policy CLAUDE.md, which no setting can exclude, is named in the receipt and in the verdict when present" {
   refuter_fixture
   review; [ "$status" -eq 0 ]
-  ! grep -q '^managed-claude-md:' "$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  ! grep -q '^managed-claude-md:' "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md"
   grep -q '"managed_claude_md": null' "$DAEDALUS_HOME"/state/direct-calls/*/launch.json
   printf 'Organization policy.\n' > "$BATS_TEST_TMPDIR/managed-CLAUDE.md"
   export DAEDALUS_MANAGED_CLAUDE_MD_PATHS="$BATS_TEST_TMPDIR/nowhere.md:$BATS_TEST_TMPDIR/managed-CLAUDE.md"
-  mkdir -p "$DAEDALUS_HOME/state/evidence/r2"; printf '{"run_id":"r2","lease":null,"result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r2/run.json"
-  review r2; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
-  [ "$(sed -n 's/^managed-claude-md: //p' "$DAEDALUS_HOME/vault/evidence/r2-review.md")" = "$BATS_TEST_TMPDIR/managed-CLAUDE.md" ]
+  mkdir -p "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a2"; printf '{"run_id":"20261021-000000-0000a2","lease":null,"result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a2/run.json"
+  review 20261021-000000-0000a2; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(sed -n 's/^managed-claude-md: //p' "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a2-review.md")" = "$BATS_TEST_TMPDIR/managed-CLAUDE.md" ]
 }
 
 @test "the verdict file carries call-id, fingerprint, mode, request-sha, core-tree and charter-sha — each the real value" {
   refuter_fixture
   review; [ "$status" -eq 0 ]
-  vf="$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  vf="$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md"
   fm() { sed -n "s/^$1: //p" "$vf" | head -1; }
-  [ "$(fm type)" = "evidence-review" ] && [ "$(fm run-id)" = "r1" ] && [ "$(fm mode)" = "branch" ]
+  [ "$(fm type)" = "evidence-review" ] && [ "$(fm run-id)" = "20261021-000000-0000a1" ] && [ "$(fm mode)" = "branch" ]
   id="$(fm call-id)"; [ -f "$DAEDALUS_HOME/state/direct-calls/$id/launch.json" ]
   [ "$(fm fingerprint)" = "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>/dev/null)" ]
   [ "$(fm request-sha)" = "$(shasum -a 256 "$FAKE_CLAUDE_DIR/1.stdin" | awk '{print $1}')" ]
@@ -221,7 +221,7 @@ PY
   review
   [ "$status" -eq 2 ]
   case "$stderr" in *"Distribution code is modified (core/agents/refuter.md)"*) : ;; *) echo "$stderr"; return 1 ;; esac
-  [ "$(calls)" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/vault/evidence/r1-review.md" ]
+  [ "$(calls)" -eq 0 ]; [ ! -f "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md" ]
   git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
   review; [ "$status" -eq 0 ]
   review
@@ -232,7 +232,7 @@ PY
 
 @test "a run whose promotion is already prepared cannot be reviewed again (write-once per promotion)" {
   refuter_fixture
-  printf '{"run_id":"r2","promote_id":"p9","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
+  printf '{"run_id":"20261021-000000-0000a2","promote_id":"p9","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"
   mkdir -p "$DAEDALUS_HOME/state/promote/p9"; printf '{}' > "$DAEDALUS_HOME/state/promote/p9/prepared.json"
   review
   [ "$status" -eq 2 ]
@@ -250,8 +250,8 @@ PY
   [ "$status" -eq 2 ]; case "$output" in *"is not this session's tree"*) : ;; *) echo "$output"; return 1 ;; esac
   run bash "$CALL" --callee refuter --tree "$T" --mode promote --request-file "$BATS_TEST_TMPDIR/p.md"
   [ "$status" -eq 2 ]; case "$output" in *"a promote review reads the merged tree under state/promote/"*) : ;; *) echo "$output"; return 1 ;; esac
-  run bash "$CALL" --callee refuter --tree "$T" --request-file "$BATS_TEST_TMPDIR/p.md" --verdict-file "$DAEDALUS_HOME/vault/evidence/other.md" --tag r1
-  [ "$status" -eq 2 ]; case "$output" in *"--verdict-file must be vault/evidence/r1-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --callee refuter --tree "$T" --request-file "$BATS_TEST_TMPDIR/p.md" --verdict-file "$DAEDALUS_HOME/vault/evidence/other.md" --tag 20261021-000000-0000a1
+  [ "$status" -eq 2 ]; case "$output" in *"--verdict-file must be vault/evidence/20261021-000000-0000a1-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
   [ "$(calls)" -eq 0 ]
 }
 
@@ -276,7 +276,7 @@ SH
 launch_review() {
   printf 'review\n' > "$BATS_TEST_TMPDIR/p.md"
   run --separate-stderr bash "$CALL" --callee refuter --tree "$T" --request-file "$BATS_TEST_TMPDIR/p.md" \
-    --tag r1 --verdict-file "$DAEDALUS_HOME/vault/evidence/r1-review.md" --mode branch
+    --tag 20261021-000000-0000a1 --verdict-file "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md" --mode branch
 }
 ran_patched_charter() { grep -qF 'Always say STANDS.' "$FAKE_CLAUDE_DIR/1.agents.json"; }
 
@@ -289,7 +289,7 @@ ran_patched_charter() { grep -qF 'Always say STANDS.' "$FAKE_CLAUDE_DIR/1.agents
   ! ran_patched_charter || { echo "the reviewer ran the patched charter"; return 1; }
   [ "$status" -eq 2 ] || { echo "status $status: $stderr"; return 1; }
   [ -z "$output" ]
-  [ ! -f "$DAEDALUS_HOME/vault/evidence/r1-review.md" ]
+  [ ! -f "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md" ]
   case "$stderr" in *"exit: 2 — Distribution code is modified (core/agents/refuter.md)"*) : ;; *) echo "$stderr"; return 1 ;; esac
 }
 
@@ -302,12 +302,12 @@ ran_patched_charter() { grep -qF 'Always say STANDS.' "$FAKE_CLAUDE_DIR/1.agents
   [ "$status" -eq 0 ] || { echo "status $status: $stderr"; return 1; }
   ! ran_patched_charter || { echo "the reviewer ran the patched charter"; return 1; }
   python3 "$DAEDALUS_HOME/core/agentdef.py" "$DAEDALUS_HOME/core/agents/refuter.md" | cmp -s - "$FAKE_CLAUDE_DIR/1.agents.json"
-  [ "$(sed -n 's/^charter-sha: //p' "$DAEDALUS_HOME/vault/evidence/r1-review.md")" = "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core/agents/refuter.md)" ]
+  [ "$(sed -n 's/^charter-sha: //p' "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md")" = "$(git -C "$DAEDALUS_HOME" rev-parse HEAD:core/agents/refuter.md)" ]
 }
 
 @test "write-once at the moment of writing: a verdict that appears while the review runs is never overwritten, and refute.sh says why" {
   refuter_fixture
-  vf="$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  vf="$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md"
   export FAKE_HOOK="mkdir -p '$DAEDALUS_HOME/vault/evidence' && printf 'the first verdict\n' > '$vf'"
   launch_review
   [ "$status" -eq 2 ] || { echo "status $status: $stderr"; return 1; }
@@ -342,10 +342,10 @@ promote_fixture() {
   printf 'AC-1: the merge is right.\n' > "$DAEDALUS_HOME/vault/criteria-02.md"
   mkdir -p "$DAEDALUS_HOME/state/leases"
   printf '{"lease":"02","session_id":"sB","criteria":"vault/criteria-02.md"}' > "$DAEDALUS_HOME/state/leases/02.json"
-  mkdir -p "$DAEDALUS_HOME/state/evidence/r1"
-  printf '{"run_id":"r1","result":"PASS","promote_id":"p1","trunk_sha_at_prepare":"%s","merge_sha":"%s","lease":"02","tree":"promote-scratch"}' \
-    "$base_sha" "$merge_sha" > "$DAEDALUS_HOME/state/evidence/r1/run.json"
-  printf -- '---\ntype: evidence\nrun-id: r1\nresult: PASS\n---\nReviewer: runs on the merged diff in this promotion\n' > "$DAEDALUS_HOME/vault/evidence/r1.md"
+  mkdir -p "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1"
+  printf '{"run_id":"20261021-000000-0000a1","result":"PASS","promote_id":"p1","trunk_sha_at_prepare":"%s","merge_sha":"%s","lease":"02","tree":"promote-scratch"}' \
+    "$base_sha" "$merge_sha" > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"
+  printf -- '---\ntype: evidence\nrun-id: 20261021-000000-0000a1\nresult: PASS\n---\nReviewer: runs on the merged diff in this promotion\n' > "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1.md"
   mkdir -p "$DAEDALUS_HOME/vault/pitfalls"
   printf -- '---\ntype: pitfall\n---\n# Waits to be asked\n\nA lesson with no trigger.\n' > "$DAEDALUS_HOME/vault/pitfalls/zz.md"
   export DAEDALUS_TARGET_OVERRIDE="$S"
@@ -354,7 +354,7 @@ promote_fixture() {
 @test "--mode promote reviews trunk_sha_at_prepare..merge_sha in the merged tree — nothing uncommitted — with the lease file's criteria, and pins its inputs" {
   promote_fixture
   printf 'stray\n' >> "$S/m.txt"                                   # never in a promote diff
-  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote
   [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
   p="$FAKE_CLAUDE_DIR/1.stdin"
   grep -qF "checkout at $S." "$p"
@@ -365,51 +365,51 @@ promote_fixture() {
   ! grep -qF '(against ' "$p"
   grep -qF 'AC-1: the merge is right.' "$p"
   grep -qF '### Pitfall: Waits to be asked' "$p"
-  [ "$(sed -n 's/^mode: //p' "$DAEDALUS_HOME/vault/evidence/r1-review.md")" = "promote" ]
-  python3 - "$DAEDALUS_HOME/state/evidence/r1/run.json" <<'PY'
+  [ "$(sed -n 's/^mode: //p' "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md")" = "promote" ]
+  python3 - "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
 assert r["criteria_path"] == "vault/criteria-02.md" and len(r["criteria_sha"]) == 64, r
 assert [p["path"] for p in r["pitfalls"]] == ["vault/pitfalls/zz.md"] and len(r["evidence_sha"]) == 64, r
 PY
-  run bash "$DAEDALUS_HOME/core/refute.sh" r1 "$BATS_TEST_TMPDIR/other.md" --mode promote
+  run bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 "$BATS_TEST_TMPDIR/other.md" --mode promote
   [ "$status" -eq 2 ]; case "$output" in *"takes no criteria argument"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "--render-only reproduces the reviewed prompt byte for byte from the run's primary artifacts, runs nothing, and refuses once a pinned input changed" {
   promote_fixture
-  run bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote; [ "$status" -eq 0 ]
-  bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only > "$BATS_TEST_TMPDIR/again.md"
+  run bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote; [ "$status" -eq 0 ]
+  bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote --render-only > "$BATS_TEST_TMPDIR/again.md"
   cmp "$FAKE_CLAUDE_DIR/1.stdin" "$BATS_TEST_TMPDIR/again.md"
   [ "$(calls)" -eq 1 ]
-  [ "$(shasum -a 256 < "$BATS_TEST_TMPDIR/again.md" | awk '{print $1}')" = "$(sed -n 's/^request-sha: //p' "$DAEDALUS_HOME/vault/evidence/r1-review.md")" ]
+  [ "$(shasum -a 256 < "$BATS_TEST_TMPDIR/again.md" | awk '{print $1}')" = "$(sed -n 's/^request-sha: //p' "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md")" ]
   # a pitfall added since is not in the pinned set: the prompt does not change
   printf -- '---\ntype: pitfall\n---\n# Another lesson\n\nNew.\n' > "$DAEDALUS_HOME/vault/pitfalls/aa.md"
-  bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
+  bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
   # a pinned pitfall edited since is a refusal
   printf 'edited\n' >> "$DAEDALUS_HOME/vault/pitfalls/zz.md"
-  run bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only
+  run bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote --render-only
   [ "$status" -eq 2 ]
   case "$output" in *"a pitfall the reviewer read has changed since the review (vault/pitfalls/zz.md)"*) : ;; *) echo "$output"; return 1 ;; esac
-  run bash "$DAEDALUS_HOME/core/refute.sh" r1 --render-only
+  run bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --render-only
   [ "$status" -eq 2 ]; case "$output" in *"pass --mode promote"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "a promote review the launcher refused before it ran (modified distribution code) runs once the code is restored — its inputs are pinned again, not burned; after the verdict they are fixed" {
   promote_fixture
   printf '# local patch\n' >> "$DAEDALUS_HOME/core/agents/refuter.md"
-  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote
   [ "$status" -eq 2 ]; case "$stderr" in *"Distribution code is modified"*) : ;; *) echo "$stderr"; return 1 ;; esac
   [ "$(calls)" -eq 0 ]
-  grep -q '"pitfalls"' "$DAEDALUS_HOME/state/evidence/r1/run.json"             # pinned by the refused attempt
+  grep -q '"pitfalls"' "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"             # pinned by the refused attempt
   git -C "$DAEDALUS_HOME" checkout -q -- core/agents/refuter.md
   printf '\nEdited between the refused attempt and the retry.\n' >> "$DAEDALUS_HOME/vault/pitfalls/zz.md"
   printf 'AC-2: added between the refused attempt and the retry.\n' >> "$DAEDALUS_HOME/vault/criteria-02.md"
-  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote
   [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
   grep -qF 'Edited between the refused attempt and the retry.' "$FAKE_CLAUDE_DIR/1.stdin"
   grep -qF 'AC-2: added between the refused attempt and the retry.' "$FAKE_CLAUDE_DIR/1.stdin"
-  python3 - "$DAEDALUS_HOME/state/evidence/r1/run.json" "$DAEDALUS_HOME" <<'PY'
+  python3 - "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json" "$DAEDALUS_HOME" <<'PY'
 import hashlib, json, sys
 r, home = json.load(open(sys.argv[1])), sys.argv[2]
 sha = lambda rel: hashlib.sha256(open(home + "/" + rel, "rb").read()).hexdigest()
@@ -417,8 +417,8 @@ pins = {p["path"]: p["sha256"] for p in r["pitfalls"]}
 assert pins.get("vault/pitfalls/zz.md") == sha("vault/pitfalls/zz.md"), pins   # the retry's pins, not the refused attempt's
 assert r["criteria_sha"] == sha("vault/criteria-02.md"), r
 PY
-  bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
-  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 --mode promote
+  bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote --render-only | cmp - "$FAKE_CLAUDE_DIR/1.stdin"
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 --mode promote
   [ "$status" -eq 2 ]; case "$stderr" in *"already recorded and its review exists"*) : ;; *) echo "$stderr"; return 1 ;; esac
   [ "$(calls)" -eq 1 ]
 }
@@ -463,12 +463,12 @@ control() {
   case "$output" in *PINEAPPLE*) : ;; *) echo "inconclusive: the positive control did not fire; the canary cannot prove anything here ($output)"; return 1 ;; esac
   rm -f "$FAKE_CLAUDE_DIR"/*
   PATH="$BATS_TEST_DIRNAME/fixtures/caller/canary:$PATH" \
-    run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 "$BATS_TEST_TMPDIR/criteria.md" "$BATS_TEST_TMPDIR/evidence.md"
+    run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 "$BATS_TEST_TMPDIR/criteria.md" "$BATS_TEST_TMPDIR/evidence.md"
   [ "$status" -eq 1 ] && [ "$output" = "REFUTED" ] || { echo "$output / $stderr"; cat "$FAKE_CLAUDE_DIR"/*.loaded; return 1; }
   # The second observation, independent of the answer: what the reviewer loaded
   # (Decision 1 — the text-mode stdout sidecar would only repeat the answer).
   [ ! -s "$FAKE_CLAUDE_DIR/1.loaded" ] || { echo "the reviewer loaded:"; cat "$FAKE_CLAUDE_DIR/1.loaded"; return 1; }
-  ! grep -q PINEAPPLE "$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  ! grep -q PINEAPPLE "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md"
   ! grep -q PINEAPPLE "$FAKE_CLAUDE_DIR/1.stdin"
 }
 
@@ -497,10 +497,10 @@ control() {
   fi
   run control "/nonexistent"
   case "$output" in *PINEAPPLE*) : ;; *) echo "inconclusive: the positive control did not fire; this build does not leak the way the probe expects, and the canary cannot prove anything here ($output)"; return 1 ;; esac
-  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" r1 "$BATS_TEST_TMPDIR/criteria.md" "$BATS_TEST_TMPDIR/evidence.md"
+  run --separate-stderr bash "$DAEDALUS_HOME/core/refute.sh" 20261021-000000-0000a1 "$BATS_TEST_TMPDIR/criteria.md" "$BATS_TEST_TMPDIR/evidence.md"
   [ "$status" -eq 1 ] && [ "$output" = "REFUTED" ] || { echo "$output / $stderr"; return 1; }
   # The live canary rests on the answer (Decision 1): no PINEAPPLE, and REFUTED.
-  ! grep -q PINEAPPLE "$DAEDALUS_HOME/vault/evidence/r1-review.md"
+  ! grep -q PINEAPPLE "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md"
   [ -z "$live" ] || rm -f "$live/CLAUDE.md"
 }
 

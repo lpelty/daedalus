@@ -205,6 +205,16 @@ assert d[crit] == hashlib.sha256(open(crit, "rb").read()).hexdigest(), d
 PY
 }
 
+@test "review 2026-10-21 round 4: refute.sh refuses a run id that is not gates.sh's format before it builds any path from it" {
+  write_config
+  for bad in "../../x" "20261021-120000-ABCDEF" "r1" "20261021-120000-abcdef/../y"; do
+    run bash "$DAEDALUS_HOME/core/refute.sh" "$bad"
+    [ "$status" -eq 2 ] || { echo "$bad: $status $output"; return 1; }
+    case "$output" in *"is not a run id"*) : ;; *) echo "$bad: $output"; return 1 ;; esac
+  done
+  [ ! -e "$DAEDALUS_HOME/vault/evidence/.manifest" ] || ! grep -q '\.\.' "$DAEDALUS_HOME/vault/evidence/.manifest"
+}
+
 @test "a lens whose review cannot be certified (an unlabelled finding) fails the run closed" {
   write_config; large_change
   printf '### F1 — big.txt:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$STUB/out-criteria"

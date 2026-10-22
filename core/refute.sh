@@ -247,6 +247,12 @@ if [ "$render_only" -eq 1 ] && [ "$mode" != promote ]; then
 fi
 run_id="${pos[0]:-}"; criteria="${pos[1]:-}"
 [ -n "$run_id" ] || { printf 'usage: refute.sh <run-id> [criteria] [evidence-file] [--mode branch|promote] [--render-only]\n' >&2; exit 2; }
+# A run id is what gates.sh makes — date, time, six hex digits — and nothing else, checked before any path is built
+# from it (review 2026-10-21, round 4): "../x" would put the review, its manifest line and unwritten.json elsewhere.
+case "$run_id" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+  *) printf 'refute.sh: %s is not a run id (YYYYmmdd-HHMMSS-xxxxxx, as core/gates.sh makes them)\n' "$run_id" >&2; exit 2 ;;
+esac
 target="$(target_path)"
 base="$(cfg target.branch 2>/dev/null || printf main)"
 ev="$DAEDALUS_HOME/vault/evidence"

@@ -639,7 +639,7 @@ PY
   direct_call "callers: Peer"
   run --separate-stderr bash "$CALL" --callee self --caller Peer "first"
   id="$(printf '%s\n' "${stderr_lines[0]}" | sed -n 's/^Daedalus call \([0-9a-f-]*\);.*/\1/p')"; [ -n "$id" ]
-  for flag in "--tag r1" "--tree $BATS_TEST_TMPDIR" "--artifact-dir $BATS_TEST_TMPDIR" "--mode branch"; do
+  for flag in "--tag 20261021-000000-0000a1" "--tree $BATS_TEST_TMPDIR" "--artifact-dir $BATS_TEST_TMPDIR" "--mode branch"; do
     # shellcheck disable=SC2086
     run bash "$CALL" --resume "$id" $flag "again"
     [ "$status" -eq 2 ]; case "$output" in *"keeps its original tree, tag, mode and directories"*) : ;; *) echo "$flag: $output"; return 1 ;; esac
@@ -817,17 +817,17 @@ PY
 @test "--resume-review <NN> resumes the latest review of that window with the full launch set re-passed; the answer is advisory and never a verdict" {
   refuter_fixture
   printf 'verify:\n  refute_model: sonnet\n' >> "$DAEDALUS_HOME/config.yaml"
-  printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
-  review r1; [ "$status" -eq 0 ]
-  mkdir -p "$DAEDALUS_HOME/state/evidence/r2"; printf '{"run_id":"r2","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r2/run.json"
-  review r2; [ "$status" -eq 0 ]
-  id2="$(sed -n 's/^call-id: //p' "$DAEDALUS_HOME/vault/evidence/r2-review.md")"
-  before="$(shasum "$DAEDALUS_HOME/vault/evidence/r2-review.md")"
+  printf '{"run_id":"20261021-000000-0000a1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"
+  review 20261021-000000-0000a1; [ "$status" -eq 0 ]
+  mkdir -p "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a2"; printf '{"run_id":"20261021-000000-0000a2","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a2/run.json"
+  review 20261021-000000-0000a2; [ "$status" -eq 0 ]
+  id2="$(sed -n 's/^call-id: //p' "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a2-review.md")"
+  before="$(shasum "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a2-review.md")"
   FAKE_ANSWER="Line 12: the lock is released only on success." \
     run --separate-stderr bash "$CALL" --resume-review 02 "Finding F2 says the lock leaks. Show me the line."
   [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
   [ "$output" = "Line 12: the lock is released only on success." ]
-  [ "${stderr_lines[0]}" = "Refuter call $id2 (branch review of run r2, window 02; resumed from an operator shell); receipt state/direct-calls/$id2" ] || { echo "${stderr_lines[0]}"; return 1; }
+  [ "${stderr_lines[0]}" = "Refuter call $id2 (branch review of run 20261021-000000-0000a2, window 02; resumed from an operator shell); receipt state/direct-calls/$id2" ] || { echo "${stderr_lines[0]}"; return 1; }
   python3 - "$FAKE_CLAUDE_DIR/3.argv" "$id2" "$T" <<'PY'
 import json, sys
 argv = open(sys.argv[1]).read().split("\n"); pairs = list(zip(argv, argv[1:]))
@@ -841,7 +841,7 @@ PY
   [ "$(head -1 "$FAKE_CLAUDE_DIR/3.stdin")" = "Finding F2 says the lock leaks. Show me the line." ]
   cwd="$(cat "$FAKE_CLAUDE_DIR/3.cwd")"; [ ! -d "$cwd" ]; case "$cwd" in "$DAEDALUS_HOME"*) return 1 ;; esac
   grep -q '"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"' "$FAKE_CLAUDE_DIR/3.env.json"
-  [ "$(shasum "$DAEDALUS_HOME/vault/evidence/r2-review.md")" = "$before" ]
+  [ "$(shasum "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a2-review.md")" = "$before" ]
   python3 - "$DAEDALUS_HOME/state/direct-calls/$id2/launch.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -851,8 +851,8 @@ PY
 
 @test "A6: a resumed review runs under the same charter with the full launch set — the resume's --agents file is byte-identical to the first attempt's and its prompt is the refuter charter" {
   refuter_fixture
-  printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
-  review r1; [ "$status" -eq 0 ]
+  printf '{"run_id":"20261021-000000-0000a1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"
+  review 20261021-000000-0000a1; [ "$status" -eq 0 ]
   FAKE_ANSWER="advice only" run --separate-stderr bash "$CALL" --resume-review 02 "Why F1?"
   [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
   [ -f "$FAKE_CLAUDE_DIR/1.agents.json" ]; [ -f "$FAKE_CLAUDE_DIR/2.agents.json" ]
@@ -876,8 +876,8 @@ PY
 
 @test "--resume-review names the resumer (the prime), refuses an alias with its number, and says when a window has no review" {
   refuter_fixture
-  printf '{"run_id":"r1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/r1/run.json"
-  review r1; [ "$status" -eq 0 ]
+  printf '{"run_id":"20261021-000000-0000a1","lease":"02","result":"PASS"}' > "$DAEDALUS_HOME/state/evidence/20261021-000000-0000a1/run.json"
+  review 20261021-000000-0000a1; [ "$status" -eq 0 ]
   mkdir -p "$DAEDALUS_HOME/state/leases"
   printf '{"lease":"02","session_id":"s2","alias":"electron"}' > "$DAEDALUS_HOME/state/leases/02.json"
   printf '{"lease":"prime","session_id":"sP"}' > "$DAEDALUS_HOME/state/leases/prime.json"
@@ -889,7 +889,7 @@ PY
   [ "$status" -eq 2 ]; case "$output" in *"electron is an alias; window 02 carries it — say \`--resume-review 02\`"*) : ;; *) echo "$output"; return 1 ;; esac
   run bash "$CALL" --resume-review 05 "why?"
   [ "$status" -eq 2 ]; case "$output" in *"no review has run for window 05 yet"*) : ;; *) echo "$output"; return 1 ;; esac
-  run bash "$CALL" --resume-review 02 --verdict-file "$DAEDALUS_HOME/vault/evidence/r1-review.md" "why?"
+  run bash "$CALL" --resume-review 02 --verdict-file "$DAEDALUS_HOME/vault/evidence/20261021-000000-0000a1-review.md" "why?"
   [ "$status" -eq 2 ]; case "$output" in *"--verdict-file is refused on resume"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 

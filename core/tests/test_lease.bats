@@ -987,6 +987,21 @@ assert d < 0.5, "took %.2fs" % d; print(g)' "$DAEDALUS_HOME/core" "$DAEDALUS_HOM
   [ -z "$(ls -A "$DAEDALUS_HOME/state/swept-trees")" ] || { ls -A "$DAEDALUS_HOME/state/swept-trees"; return 1; }
 }
 
+@test "review 2026-10-21 round 4: the delete really is detached — with an rm that takes 2 s, prune still returns within 0.5 s and the rm finishes afterwards" {
+  O="$DAEDALUS_HOME/state/swept-trees/04-20200101T000000"; mkdir -p "$O/thing"
+  B="$BATS_TEST_TMPDIR/slowbin"; mkdir -p "$B"
+  printf '#!/bin/sh\nsleep 2\ntouch "%s"\nexec /bin/rm "$@"\n' "$BATS_TEST_TMPDIR/rm-finished" > "$B/rm"; chmod +x "$B/rm"
+  run env PATH="$B:$PATH" python3 -c 'import sys,time; sys.path.insert(0, sys.argv[1]); import leaselib as ll; from pathlib import Path
+t=time.time(); ll.prune_swept_trees(Path(sys.argv[2])); d=time.time()-t
+assert d < 0.5, "took %.2fs" % d; print("ok")' "$DAEDALUS_HOME/core" "$DAEDALUS_HOME"
+  [ "$status" -eq 0 ] && [ "$output" = ok ] || { echo "$output"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/rm-finished" ]                      # still sleeping: prune did not wait for it
+  for i in $(seq 1 60); do [ -e "$BATS_TEST_TMPDIR/rm-finished" ] && break; sleep 0.1; done
+  [ -e "$BATS_TEST_TMPDIR/rm-finished" ]
+  for i in $(seq 1 30); do [ -e "$DAEDALUS_HOME/state/swept-trees/.deleting-04-20200101T000000" ] || break; sleep 0.1; done
+  [ ! -e "$DAEDALUS_HOME/state/swept-trees/.deleting-04-20200101T000000" ]
+}
+
 @test "review 2026-10-21 round 3 (M-C): a state/swept-trees that is a symbolic link is never pruned or moved into — the outside directory is untouched, sweep keeps the worktree, doctor says so; an entry with no readable stamp or a stamp in the future is never pruned and doctor names it; an old symbolic-link entry is unlinked, its target kept" {
   X="$BATS_TEST_TMPDIR/outside"; mkdir -p "$X/04-20200101T000000/keep"; printf 'precious\n' > "$X/04-20200101T000000/keep/f"
   ln -s "$X" "$DAEDALUS_HOME/state/swept-trees"
