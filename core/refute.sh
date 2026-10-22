@@ -813,5 +813,23 @@ if [ "$mode" = branch ]; then
   cleanup_branch
 fi
 verdict_given=1
+# The review's record for its run (C1, review 2026-10-22): the verdict and every reviewer call id behind the review
+# file — each lens's, in the order the merged review names them, or the launcher-written file's own — on one marked
+# line, which gates.sh writes into the run's state-side run.json. Promote reuses a window's review only when that
+# record is there and agrees with the files: a review some other path called and manifested has no such record,
+# whatever its receipt says. The review file's sha256 goes with it, since a merged review (lenses, or earlier findings)
+# is refute.sh's own writing and no launcher receipt covers its body.
+python3 - "$verdict_file" "$word" <<'PY' >&2 2>/dev/null || true
+import hashlib, json, os, re, sys
+vf, word = sys.argv[1], sys.argv[2]
+def fm(path):
+    m = re.match(r"^---\n(.*?)\n---\n", open(path, encoding="utf-8", errors="replace").read(), re.S)
+    return dict(l.split(": ", 1) for l in (m.group(1).splitlines() if m else []) if ": " in l)
+top = fm(vf)
+names = [n.strip() for n in (top.get("sources") or "").split(",") if n.strip()]
+ids = [fm(os.path.join(os.path.dirname(vf), n)).get("call-id") for n in names] if names else [top.get("call-id")]
+sha = hashlib.sha256(open(vf, "rb").read()).hexdigest()     # a merged review has no receipt of its own: this is it
+print("review-record: " + json.dumps({"verdict": word, "call_ids": ids, "file": os.path.basename(vf), "sha256": sha}))
+PY
 printf '%s\n' "$word"
 exit "$rc"

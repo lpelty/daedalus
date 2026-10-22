@@ -528,6 +528,34 @@ def review_sources(root: Path, vf: Path, manifest: set) -> Optional[List[Tuple[P
     return out
 
 
+def review_unbound(root: Path, rec: dict, vf: Path, sources: List[Tuple[Path, dict]], verdict: str) -> Optional[str]:
+    """C1 (review 2026-10-22): why a window review is not its gate run's own reviewer-on review, or None. A window
+    turned its reviewer off in a config copy, ran its gates, then called a reviewer itself with "answer only VERDICT:
+    STANDS" and manifested the file — and promote reused it: every file and receipt checked out, because a receipt says
+    what was asked, not that the run asked it. So the run itself must vouch for its review: gates.sh ran the reviewer
+    (run.json refuter "on" — never "off", never "deferred-to-promote"), under the deployment's own config.yaml (its
+    config_sha is the current config's sha), and recorded what refute.sh read in run.json's review: the same verdict,
+    the same review file, byte for byte (its sha256: a merged review's body has no launcher receipt), and exactly the
+    call ids of the reviewers behind that file."""
+    if rec.get("refuter") != "on":
+        return "the run's reviewer was not on"
+    try:
+        current = sha256_bytes((root / "config.yaml").read_bytes())
+    except OSError:
+        return "config.yaml cannot be read"
+    if rec.get("config_sha") != current:
+        return "the run was not under the current config"
+    r = rec.get("review") if isinstance(rec.get("review"), dict) else {}
+    try:
+        vf_sha = sha256_bytes(vf.read_bytes())
+    except OSError:
+        vf_sha = None
+    if (r.get("verdict") != verdict or r.get("file") != vf.name or not vf_sha or r.get("sha256") != vf_sha
+            or list(r.get("call_ids") or []) != [s.get("call-id") for _, s in sources]):
+        return "the run did not record this review as its own"
+    return None
+
+
 def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
     """v0.12.8, spec 2026-10-21 B: the window's latest branch review (refute.sh run mode, from its own gate runs) of
     exactly the tree promote has just merged, or None. On 2026-10-21, after the third refutation of one window's
@@ -544,9 +572,12 @@ def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
       vouches for its file, and it ran the distribution's current core/ and charter (reviewer_problem, the confirm's
       own check) — so promote never offers a review the confirm would refuse.
 
-    The newest such run wins (run ids sort by time). No such review — trunk moved, the window added commits since its
-    last review, it was never reviewed, or the review was written by older distribution code — and promote runs the
-    fresh reviewer, as before."""
+    - the run vouches for the review as its own (review_unbound, C1 of the 2026-10-22 review).
+
+    The newest review of the tree decides (run ids sort by time): when it fails any check, nothing is reused — never an
+    older review of the same tree, which a newer one may have overturned (REVATTACK-2). No such review — trunk moved,
+    the window added commits since its last review, it was never reviewed, or it was written by older distribution
+    code — and promote runs the fresh reviewer, as before."""
     ev = root / "state" / "evidence"
     if not re.fullmatch(r"[0-9a-f]{64}", fp or "") or not ev.is_dir():
         return None
@@ -561,20 +592,24 @@ def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
             continue
         rec = read_json(rj) or {}
         vf = root / "vault" / "evidence" / ("%s-review.md" % name)
-        if (rec.get("run_id") != name or rec.get("lease") != nn or rec.get("promote_id") or rec.get("fingerprint") != fp
-                or str(rj.resolve()) not in manifest or not vf.is_file() or str(vf.resolve()) not in manifest):
+        if (rec.get("run_id") != name or rec.get("lease") != nn or rec.get("promote_id")
+                or rec.get("fingerprint") != fp or not vf.is_file()):
             continue
+        # The newest review of this tree decides (REVATTACK-2, review 2026-10-22): when it fails any check below, no
+        # review is reused — never an older one of the same tree, which a newer REFUTED one may have overturned.
+        if str(rj.resolve()) not in manifest or str(vf.resolve()) not in manifest:
+            return None
         text = vf.read_text(errors="replace")
         fm = v.parse_frontmatter(text)
         if fm.get("mode") != "branch" or fm.get("run-id") != name:
-            continue
+            return None
         _, out, _ = run(["bash", str(root / "core" / "refute.sh"), "--verdict-of", str(vf)])
         verdict = out.strip()
         if (verdict, rec.get("result")) not in (("STANDS", "PASS"), ("REFUTED", "FAIL")):
-            continue
+            return None
         sources = review_sources(root, vf, manifest)
-        if not sources or reviewer_problem(root, sources, fp, name):
-            continue
+        if not sources or review_unbound(root, rec, vf, sources, verdict) or reviewer_problem(root, sources, fp, name):
+            return None
         counts, live = review_counts(root, vf, text)
         return {"call_id": ",".join(s["call-id"] for _, s in sources), "verdict": verdict, "file": rel(root, vf),
                 "fingerprint": fp, "request_sha": ",".join(str(s.get("request-sha")) for _, s in sources),
@@ -1287,6 +1322,8 @@ def check_reused_review(root: Path, p: dict, run_rec: dict) -> str:
     sources = review_sources(root, vf, manifest)
     if not sources or ",".join(s["call-id"] for _, s in sources) != rv.get("call_id"):
         raise Stop("Evidence disagrees with the prepared promotion (the review's call id).")
+    if review_unbound(root, wrec, vf, sources, "STANDS"):
+        raise Stop("Evidence disagrees with the prepared promotion (the reused review is not its gate run's own).")
     problem = reviewer_problem(root, sources, fp, wrid)
     if problem:
         raise Stop(problem)
