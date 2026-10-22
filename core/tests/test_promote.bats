@@ -787,7 +787,7 @@ VERDICT: REFUTED"
   [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
 }
 
-@test "--skip-review over a REFUTED review: nothing typed since the session started is refused; the operator's turn, cited by a fragment, is recorded in their own words beside the verdict it sets aside, no reviewer runs, gates still run, and the confirm's ledger line names the overridden call" {
+@test "--skip-review over a REFUTED review: nothing typed since the session started is refused; the operator's turn, cited by a fragment, is recorded in their own words beside the verdict it sets aside, no reviewer runs, the gates PASS (reused from the refuted prepare on the same merge since v0.12.8), and the confirm's ledger line names the overridden call" {
   work_on_02
   FAKE_ANSWER="$REFUTE_ONE" run as_prime bash "$PROMOTE" 02; [ "$status" -eq 1 ]
   refuted="$(pj review.call_id)"; rrun="$(pj run_id)"; P="$(pj prepared_ts)"; n0="$(calls)"
@@ -1238,4 +1238,128 @@ PY
   tx "$TXP" operator "go on" "$(plus "$(now)" 1)" >/dev/null
   run as_prime bash "$PROMOTE" 02 --confirm --operator-said "ship it now"
   refused "The words cited (\"ship it now\") are in nothing the operator typed since window 02's last promote"
+}
+
+# --- v0.12.8 (2026-10-21): promote reuses what already passed ---------------------------------------------------
+
+# counting_gates [refute] — the fixture's one gate appends to $RAN, outside every tree, so a test counts the gate
+# commands that really ran; with "refute", a window's own gate runs are reviewed (by the fake claude), as they are on
+# a deployment with verify.refute on. promote's own run never reviews in gates.sh, whatever verify.refute says.
+counting_gates() {
+  RAN="$BATS_TEST_TMPDIR/gate-ran"
+  python3 - "$DAEDALUS_HOME/config.yaml" "$RAN" "${1:-}" <<'PY'
+import sys
+p, ran, refute = sys.argv[1:4]
+s = open(p).read()
+s = s.replace("gates:\n  - true\n", "gates:\n  - echo ran >> %s\n" % ran, 1)
+if refute:
+    s = s.replace("  refute: false\n  refute_off_reason: bats fixture — a real claude must never be invoked in tests\n",
+                  "  refute: true\n", 1)
+open(p, "w").write(s)
+PY
+  grep -qF "echo ran >> $RAN" "$DAEDALUS_HOME/config.yaml"
+}
+ran() { if [ -f "$RAN" ]; then wc -l < "$RAN" | tr -d ' '; else printf '0\n'; fi; }
+# window_gates — window 02 runs its gates in its own worktree, as `core/gates.sh` from that window does.
+window_gates() { run env CLAUDE_CODE_SESSION_ID=sC bash "$DAEDALUS_HOME/core/gates.sh"; }
+window_run_id() { printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1; }
+
+@test "2026-10-21 (the seventh run): promote on a merge byte-identical to the tree window 02 just passed reuses that PASS — no gate command runs, the promote context is kept; --skip-review after the prepare reuses too" {
+  counting_gates; work_on_02
+  window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  wrid="$(printf '%s\n' "$output" | tail -1)"; [ "$(ran)" = 1 ]
+  run --separate-stderr as_prime bash "$PROMOTE" 02
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(ran)" = 1 ] || { echo "promote re-ran the gates on a tree that already passed"; return 1; }
+  rid="$(pj run_id)"; pid="$(pj promote_id)"
+  [ "${lines[2]}" = "Tests on the merged result: PASS (1 gate; this exact tree already passed them, nothing re-ran)." ] || { echo "$output"; return 1; }
+  case "$output" in *"evidence run $rid (gates reused from run $wrid);"*) : ;; *) echo "$output"; return 1 ;; esac
+  python3 - "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$wrid" "$pid" "$(pj merge_sha)" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1])); wrid, pid, merge = sys.argv[2:5]
+assert r["reused_from"] == wrid and r["result"] == "PASS", r
+assert r["promote_id"] == pid and r["merge_sha"] == merge and r["tree"] == "promote-scratch", r
+assert r["refuter"] == "deferred-to-promote" and r["lease"] == "02", r
+PY
+  # --skip-review is a fresh prepare: its gate run finds the PASS on the same tree and runs nothing either.
+  tx "$TXP" operator "skip the review, the window's own review covered it" "$(plus "$(pj prepared_ts)" 3)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --skip-review; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(ran)" = 1 ] || { echo "--skip-review re-ran the gates"; return 1; }
+  [ -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reused_from") or "")' "$DAEDALUS_HOME/state/evidence/$(pj run_id)/run.json")" ]
+}
+
+@test "2026-10-21 (the reviewer loop): window 02's own review STANDS on exactly the tree promote merges — no reviewer is launched, the block says it was reused and names the window and run, the record carries its call id, and the confirm pushes" {
+  counting_gates refute; work_on_02
+  window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  wrid="$(printf '%s\n' "$output" | tail -1)"; n0="$(calls)"
+  wcall="$(sed -n 's/^call-id: //p' "$DAEDALUS_HOME/vault/evidence/$wrid-review.md")"; [ -n "$wcall" ]
+  run --separate-stderr as_prime bash "$PROMOTE" 02
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(calls)" = "$n0" ] || { echo "promote launched a reviewer on a tree the window's review already judged"; return 1; }
+  [ "$(ran)" = 1 ]
+  [ "${lines[3]}" = "Review STANDS — window 02's review of this exact tree, not repeated; no high findings." ] || { echo "$output"; return 1; }
+  [ "${lines[4]}" = "Nothing has been pushed. Push window 02's work to main?" ]
+  rid="$(pj run_id)"
+  case "$output" in *"review vault/evidence/$wrid-review.md (window 02's review of run $wrid, reused);"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(pj review.verdict)" = STANDS ]; [ "$(pj review.call_id)" = "$wcall" ]
+  [ "$(pj review.reused.run_id)" = "$wrid" ]; [ "$(pj review.reused.lease)" = 02 ]
+  [ "$(pj review.fingerprint)" = "$(pj fp_merged)" ]
+  shown_then_said "Yes, push it."
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(origin_main)" = "$(pj merge_sha)" ]
+  grep -qF "STANDS (review $wcall)" "$DAEDALUS_HOME/vault/evidence/promotions.log"
+}
+
+@test "2026-10-21: a reused review is checked at the confirm as a fresh one is — a review whose fingerprint, call id or receipt no longer agrees refuses the push" {
+  counting_gates refute; work_on_02
+  window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  wrid="$(printf '%s\n' "$output" | tail -1)"; vf="$DAEDALUS_HOME/vault/evidence/$wrid-review.md"
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  shown_then_said "yes"
+  cp "$vf" "$BATS_TEST_TMPDIR/review.bak"
+  sed -i '' 's/^fingerprint: .*/fingerprint: 0000000000000000000000000000000000000000000000000000000000000000/' "$vf"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion"
+  cp "$BATS_TEST_TMPDIR/review.bak" "$vf"
+  sed -i '' 's/^call-id: .*/call-id: someone-else/' "$vf"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion"
+  cp "$BATS_TEST_TMPDIR/review.bak" "$vf"
+  printf '\nan extra line the reviewer never wrote\n' >> "$vf"
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "Evidence disagrees with the prepared promotion"
+  cp "$BATS_TEST_TMPDIR/review.bak" "$vf"
+  [ "$(origin_main)" != "$(pj merge_sha)" ]
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "2026-10-21: window 02's own review REFUTED this exact tree — promote launches no reviewer, shows the refutation and the operator's choice; --skip-review then runs nothing new" {
+  counting_gates refute; work_on_02
+  export FAKE_ANSWER="$REFUTE_ONE"
+  window_gates; [ "$status" -ne 0 ]; wrid="$(window_run_id)"; [ -n "$wrid" ]
+  n0="$(calls)"; [ "$(ran)" = 1 ]
+  run as_prime bash "$PROMOTE" 02
+  refused "Window 02's own review of this exact tree REFUTED it (1 HIGH or MEDIUM finding; the review is at vault/evidence/$wrid-review.md); promote asked no new reviewer." 1
+  case "$output" in *"Review REFUTED — window 02's review of this exact tree, not repeated; one high finding."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"core/call-agent.sh --resume-review 02"*"promote 02 --skip-review --reason"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(calls)" = "$n0" ] || { echo "promote launched a reviewer"; return 1; }
+  [ "$(ran)" = 1 ] || { echo "promote re-ran the gates: the refuted run's gates passed"; return 1; }
+  [ "$(pj review.verdict)" = REFUTED ]; [ "$(pj review.reused.run_id)" = "$wrid" ]
+  refuted="$(pj review.call_id)"
+  shown_then_said "Promote it anyway." "Review REFUTED — window 02's review of this exact tree, not repeated; one high finding."
+  run as_prime bash "$PROMOTE" 02 --skip-review --reason "Promote it anyway"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(calls)" = "$n0" ]; [ "$(ran)" = 1 ] || { echo "--skip-review re-ran the gates"; return 1; }
+  case "$output" in *"review skipped by the operator (it sets aside review $refuted of run $wrid);"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "2026-10-21: trunk moved since window 02's review — the merged tree is new, so promote runs the gates and a fresh reviewer, as before" {
+  counting_gates refute; work_on_02
+  window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  n0="$(calls)"
+  trunk_moves b.txt "trunk moves on"
+  run --separate-stderr as_prime bash "$PROMOTE" 02
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(calls)" = "$((n0 + 1))" ] || { echo "no fresh reviewer on a new merged tree"; return 1; }
+  [ "$(ran)" = 2 ]
+  [ "${lines[3]}" = "Reviewer on the merged change: STANDS — no high findings." ]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["review"].get("reused"))' "$(prepared)")" = None ]
+  grep -q '^mode: promote$' "$DAEDALUS_HOME/vault/evidence/$(pj run_id)-review.md"
 }
