@@ -1865,3 +1865,28 @@ cc_lines() { printf '%s\n' "$output" | sed 's/^daedalus: //' | grep -E '^(OK|NOT
   case "$output" in *"MISSING  hot.md"*|*"hot.md"*"lines"*) echo "$output"; return 1 ;; esac
   [ "$(cat "$DAEDALUS_HOME/vault/hot.md")" = "$before" ]
 }
+
+@test "2026-10-21: gates without gates_rerun_failed commands are one NOTE, never a problem; a full list says nothing" {
+  write_cfg() {
+    { printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\nvault:\n  repo: https://example.com/thing-kb.git\n'
+      printf 'gates:\n  - true\n  - echo two\n%s\nproposals:\n  budget: 5\n' "$1"; } > "$DAEDALUS_HOME/config.yaml"
+  }
+  write_cfg ""
+  git init -q "$DAEDALUS_HOME/target/thing"
+  mkdir -p "$DAEDALUS_HOME/vault/.git"
+  for d in infrastructure specs plans proposals pitfalls exchange; do mkdir -p "$DAEDALUS_HOME/vault/$d"; done
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(printf '%s\n' "$output" | grep -c 'gates_rerun_failed')" -eq 1 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | grep -q 'NOTE  *config: gates_rerun_failed: gates 1, 2 have no rerun command' || { echo "$output"; return 1; }
+  write_cfg 'gates_rerun_failed:
+  - true
+  - ""'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  printf '%s\n' "$output" | grep -q 'NOTE  *config: gates_rerun_failed: gate 2 has no rerun command' || { echo "$output"; return 1; }
+  write_cfg 'gates_rerun_failed:
+  - true
+  - true'
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  ! printf '%s\n' "$output" | grep -q 'NOTE.*gates_rerun_failed' || { echo "$output"; return 1; }
+}

@@ -66,6 +66,26 @@ gates:
 # gates_setup:
 #   - cd engine && uv sync --frozen
 
+# Optional. One command per gate, in the gates' order ("" for a gate with
+# none): what to run ONCE when that gate fails, to re-run only its failures
+# instead of the whole suite. Same trust as gates:, run from the target root,
+# on the same tree (gates.sh re-checks the fingerprint first and does not
+# re-run on a tree that changed). Exit 0 makes the gate PASS after a rerun —
+# both logs kept in the evidence, and the summary says so; anything else and
+# the gate FAILs as before. For pytest, `--lf --lfnf=none`: --lf re-runs the
+# last failures, and --lfnf=none makes "no recorded failures" run nothing
+# (pytest then exits non-zero, so a gate that failed before any test ran
+# stays FAIL) rather than the full suite. Without this key a failed gate is
+# simply FAIL, as before; core/doctor.sh notes the gates that have none.
+# gates_rerun_failed:
+#   - cd engine && uv run pytest --lf --lfnf=none -q
+#
+# A tree that already passed is never tested again: when an earlier run's
+# tree fingerprint, config.yaml (config_sha) and core/ are all the same as
+# this run's and its gates passed, gates.sh records PASS by reuse
+# (reused_from: <run id>) and runs no setup step and no gate. Any edit to the
+# tree, to config.yaml or to core/ runs them in full.
+
 proposals:
   # Maximum open PROPOSED documents. Daedalus must retire one to raise
   # another — this forces prioritization onto Daedalus, not the operator.
