@@ -178,6 +178,33 @@ grep -c -- '-[0-9a-f]\\\\{6\\\\}-review.md\$' \"$DAEDALUS_HOME/vault/evidence/.m
   [ "$(cat "$STUB/verdict-manifested-criteria" 2>/dev/null)" -ge 2 ] 2>/dev/null || { echo "lens run: $(cat "$STUB/verdict-manifested-criteria" 2>&1) $output"; return 1; }
 }
 
+@test "review 2026-10-21 round 3 (M-A): a run that ends without a verdict records each pre-manifested path in state/evidence/<run>/unwritten.json — absent when its writer wrote nothing, its sha256 when it did" {
+  write_config; small_change
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nexit 3\n' > "$STUB/claude"; chmod +x "$STUB/claude"
+  gates
+  [ "$status" -ne 0 ]
+  id="$(ls "$DAEDALUS_HOME/state/evidence" | head -1)"
+  python3 - "$DAEDALUS_HOME/state/evidence/$id/unwritten.json" "$(cd "$DAEDALUS_HOME/vault/evidence" && pwd -P)/$id-review.md" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))["paths"]
+assert d == {sys.argv[2]: "absent"}, d
+PY
+  grep -qF "$DAEDALUS_HOME/state/evidence/$id/unwritten.json" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  # the lens case: the timed-out lens is absent, a finished lens's file is recorded by its sha
+  stub_claude; write_config "  refute_timeout: 2"; large_change; echo 30 > "$STUB/sleep-upgrade"
+  gates; [ "$status" -ne 0 ]
+  id2="$(ls "$DAEDALUS_HOME/state/evidence" | grep -v "^$id\$" | head -1)"
+  E="$(cd "$DAEDALUS_HOME/vault/evidence" && pwd -P)"
+  python3 - "$DAEDALUS_HOME/state/evidence/$id2/unwritten.json" "$E" "$id2" <<'PY'
+import hashlib, json, sys
+d = json.load(open(sys.argv[1]))["paths"]; e, rid = sys.argv[2], sys.argv[3]
+assert d[e + "/" + rid + "-lens-upgrade-review.md"] == "absent", d
+assert d[e + "/" + rid + "-review.md"] == "absent", d
+crit = e + "/" + rid + "-lens-criteria-review.md"
+assert d[crit] == hashlib.sha256(open(crit, "rb").read()).hexdigest(), d
+PY
+}
+
 @test "a lens whose review cannot be certified (an unlabelled finding) fails the run closed" {
   write_config; large_change
   printf '### F1 — big.txt:1 — HIGH\nWhat is wrong: x.\n\nVERDICT: STANDS\n' > "$STUB/out-criteria"

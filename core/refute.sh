@@ -624,6 +624,38 @@ cleanup_branch() {
   rm -f "$prompt" ${section:+"$section" "$section.json"} ${heads_now:+"$heads_now"}
   [ "$hunks_json" = "-" ] || rm -f "$hunks_json"
 }
+# A path manifested before its writer ran stands for that writer's output — so a run that ends without a verdict
+# (a launch that failed, a lens that timed out, a merge that could not be written) records each such path with the
+# sha256 its file has at that moment, or "absent", in state/evidence/<run-id>/unwritten.json (review 2026-10-21,
+# round 3, M-A). The boundary hook sanctions a listed path only while its file still has that sha: a failed lens's
+# genuine file stays quiet, and a file hand-written there later — at a path the manifest already names — does not.
+premanifested=()
+verdict_given=""
+record_unwritten() {
+  [ "${#premanifested[@]}" -gt 0 ] || return 0
+  python3 - "$DAEDALUS_HOME/state/evidence/$run_id/unwritten.json" "${premanifested[@]}" <<'PY' 2>/dev/null || true
+import hashlib, json, os, sys
+out, paths = sys.argv[1], sys.argv[2:]
+try:
+    d = json.load(open(out))
+except (OSError, ValueError):
+    d = {}
+recs = d.get("paths") if isinstance(d, dict) and isinstance(d.get("paths"), dict) else {}
+for p in paths:
+    try:
+        with open(p, "rb") as fh:
+            recs[os.path.realpath(p)] = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        recs[os.path.realpath(p)] = "absent"
+os.makedirs(os.path.dirname(out), exist_ok=True)
+with open(out + ".tmp", "w") as fh:
+    json.dump({"paths": recs}, fh, indent=1)
+os.replace(out + ".tmp", out)
+PY
+  # the record is the run's evidence too: manifested, so check_evidence does not call it stray
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$run_id/unwritten.json" 2>/dev/null || true
+}
+trap '[ -n "$verdict_given" ] || record_unwritten' EXIT
 # The run's own verdict path is manifested BEFORE any reviewer starts (v0.12.7, review 2026-10-21), as the lens paths
 # are below and as gates.sh manifests run.json up front: the launcher (or the merge) writes it under vault/evidence,
 # and an unmanifested file there, even for the length of a review, is what every other window's boundary hook flags.
@@ -634,6 +666,7 @@ python3 "$DAEDALUS_HOME/core/manifest-append.py" "$verdict_file" || {
   [ "$mode" != branch ] || cleanup_branch
   exit 2
 }
+premanifested+=("$verdict_file")
 if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0 ] && [ "$hunks_json" = "-" ]; then
   # One reviewer, no earlier findings to check and no new ground to mark: the launcher writes the review file
   # itself, as it always has. A later review goes through the merge, which labels findings outside the new ground.
@@ -682,6 +715,7 @@ else
     cleanup_branch
     exit 2
   }
+  for l in "${lenses[@]}"; do premanifested+=("$ev/$run_id-lens-$l-review.md"); done
   work="$(mktemp -d)"
   i=0
   for l in "${lenses[@]}"; do
@@ -772,5 +806,6 @@ if [ "$mode" = branch ]; then
   recorded=1
   cleanup_branch
 fi
+verdict_given=1
 printf '%s\n' "$word"
 exit "$rc"

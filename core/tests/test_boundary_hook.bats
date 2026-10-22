@@ -500,6 +500,28 @@ gitc() { git -C "$1" -c user.email=t@x -c user.name=t "${@:2}"; }
   run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
+@test "review 2026-10-21 round 3 (L-C): a backstop block is recorded under warned only after the Stop has said it — a Stop that dies before its output (stderr closed) repeats the block next time" {
+  two_leases; live_holder 01; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  run hook_as Stop sA; [ "$status" -eq 0 ]
+  mkdir -p "$W/hooks"; printf 'mine\n' > "$W/hooks/capture.py"
+  run bash -c "printf '{\"hook_event_name\":\"Stop\",\"session_id\":\"sA\"}' | python3 '$DAEDALUS_HOME/core/boundary-hook.py' 2>&-"
+  [ "$status" -ne 0 ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert not any(k.endswith("hooks/capture.py") for k in d.get("warned", {})), d' "$DAEDALUS_HOME/state/session-sA-boundary.json"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"which window 02 (poc-ui) had already changed, and the warning never fired"*) : ;; *) echo "$output"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "review 2026-10-21 round 3 (L-D): a bare-path warned key from before v0.12.7 counts for the pre-write warning too — the Edit goes through with context, not a second stop" {
+  export PYTHONDONTWRITEBYTECODE=1
+  two_leases; live_holder 02
+  W="$DAEDALUS_HOME/worktrees/01/thing"
+  python3 -c 'import json,sys; json.dump({"warned": {sys.argv[2]: "x"}}, open(sys.argv[1], "w"))' "$DAEDALUS_HOME/state/session-sA-boundary.json" "$W/hooks/capture.py"
+  run edit_as sA "$W/hooks/capture.py"
+  case "$output" in *'"permissionDecision"'*) echo "warned before the upgrade, stopped again: $output"; return 1 ;; *"window 02"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 @test "a visitor (DIRECT_CALL_ID set) is never blocked at Stop: stray evidence, an unbindable session and a backstop hit all become notes, exit 0; its PreToolUse denials still apply" {
   two_leases; live_holder 01; live_holder 02
   mkdir -p "$DAEDALUS_HOME/state/evidence/x"; printf 'x\n' > "$DAEDALUS_HOME/state/evidence/x/gate.log"   # unmanifested: stray
@@ -596,6 +618,31 @@ run_json() {
     run hook_as "$ev" sA; [ "$status" -eq 2 ] || { echo "$ev: the forged review passed: $output"; return 1; }
     case "$output" in *"$rid-review.md"*) : ;; *) echo "$ev: $output"; return 1 ;; esac
   done
+}
+
+@test "review 2026-10-21 round 3 (M-A): a path refute.sh manifested but whose writer failed — absent in unwritten.json — and a file hand-written there later is flagged; a failed lens's own file (its sha recorded) is silent until it is edited" {
+  visible_vault; two_leases; live_holder 01; live_holder 02
+  rid="20261021-190000-dddddd"; run_json "$rid" 01 sA FAIL
+  E="$DAEDALUS_HOME/vault/evidence"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$E/$rid-review.md" "$E/$rid-lens-trust-review.md"
+  printf 'lens wrote this\n' > "$E/$rid-lens-trust-review.md"
+  python3 - "$DAEDALUS_HOME/state/evidence/$rid/unwritten.json" "$E" "$rid" <<'PY'
+import hashlib, json, sys
+out, e, rid = sys.argv[1:4]
+lens = e + "/" + rid + "-lens-trust-review.md"
+json.dump({"paths": {e + "/" + rid + "-review.md": "absent",
+                     lens: hashlib.sha256(open(lens, "rb").read()).hexdigest()}}, open(out, "w"))
+PY
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/unwritten.json"   # as refute.sh does
+  run hook_as PostToolUse sA; [ "$status" -eq 0 ] || { echo "the failed lens's own file blocked: $output"; return 1; }
+  printf -- '---\ntype: evidence-review\n---\nVERDICT: STANDS\n' > "$E/$rid-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/$rid-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"lens-trust"*) echo "the unchanged lens file was named: $output"; return 1 ;; *) : ;; esac
+  rm -f "$E/$rid-review.md"
+  printf 'edited\n' >> "$E/$rid-lens-trust-review.md"
+  run hook_as PostToolUse sA; [ "$status" -eq 2 ]
+  case "$output" in *"vault/evidence/$rid-lens-trust-review.md"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 @test "a lease file that cannot be read never turns a live window's RUNNING run into 'never finished; its session is gone': the block names the unreadable file, at Stop and at PostToolUse" {

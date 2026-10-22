@@ -96,8 +96,26 @@ def _sanctioned_evidence(root: Path, rel: str, manifest: set) -> bool:
         return True
     if str((root / rel).resolve()) not in manifest:
         return False
-    rec = v.run_record(root, evidence_run_id(rel))
-    return bool(rec) and rec.get("source") == "state"
+    rid = evidence_run_id(rel)
+    rec = v.run_record(root, rid)
+    if not (bool(rec) and rec.get("source") == "state"):
+        return False
+    # A path refute.sh manifested before its writer ran, in a run that ended without a verdict, is listed in the
+    # run's unwritten.json with the sha its file had then, or "absent" (review 2026-10-21, round 3, M-A): it stands
+    # for that writer's output only while the file is still exactly that. An absent entry is never sanctioned — a
+    # file there now was written by someone else, at a path the manifest already names.
+    if RUN_ID_RE.fullmatch(rid or ""):
+        try:
+            listed = json.loads((root / "state" / "evidence" / rid / "unwritten.json").read_text()).get("paths") or {}
+        except (OSError, ValueError, AttributeError):
+            listed = {}
+        want = listed.get(str((root / rel).resolve())) if isinstance(listed, dict) else None
+        if want is not None:
+            return want != "absent" and want == v.sha256_file(root / rel)
+    return True
+
+
+RUN_ID_RE = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
 
 
 def check_protected(root: Path, marker: dict, reasons: List[str]) -> None:
@@ -537,6 +555,25 @@ def changed_after_merge(tree: Path, tip: str, rel: str) -> bool:
     return code != 0
 
 
+# `warned` keys the backstop has found to say this Stop: recorded only after the Stop's output is written (review
+# 2026-10-21, round 3, L-C), so an exception or a timeout before then repeats the block at the next Stop rather than
+# silencing a block nobody heard.
+PENDING_WARNED: dict = {}
+
+
+def record_pending_warned(root: Path, sid: object) -> None:
+    """Add PENDING_WARNED to the session's `warned`, after the Stop's output is written. A record that cannot be
+    written leaves the block to repeat, and one stderr line says why."""
+    if not PENDING_WARNED:
+        return
+    b = load_boundary(root, sid)
+    b.setdefault("warned", {}).update(PENDING_WARNED)
+    try:
+        save_boundary(root, sid, b)
+    except OSError as e:
+        print(RECORD_FAILED % e, file=sys.stderr)
+
+
 def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]) -> None:
     """§4.6: the Stop-time backstop for a pre-write warning that never fired. This
     session's own changed set is recomputed here (the one place git runs for the
@@ -607,7 +644,7 @@ def check_backstop(root: Path, sid: object, reasons: List[str], notes: List[str]
                         reasons.append(MERGED_AGAIN % (rel, nn, alias, nn))
                     else:
                         reasons.append(NEVER_FIRED % (rel, nn, alias))
-                    warned[warned_key(nn, key)] = stamp  # said once; saved with the snapshot below
+                    PENDING_WARNED[warned_key(nn, key)] = stamp   # recorded once the Stop has said it (main)
     b["seen"] = {nn: ctx["changed"].get(nn, {}) for nn in ctx["leases"]
                  if nn not in ("prime", mine_nn) and ctx["liveness"].get(nn) != "stale"
                  and not ctx["leases"][nn].get("released")}
@@ -674,7 +711,7 @@ def warned_key(nn: str, path: str) -> str:
     return "%s:%s" % (nn, path)
 
 
-def first_warning(root: Path, sid: object, key: str) -> bool:
+def first_warning(root: Path, sid: object, key: str, legacy: Optional[str] = None) -> bool:
     """True when this path has not been warned this session — and it is recorded now, so the
     next attempt goes through with context. When the record cannot be written the answer is
     still True: a stop that repeats is the safe failure, and one line on stderr says why. The
@@ -682,8 +719,8 @@ def first_warning(root: Path, sid: object, key: str) -> bool:
     attempt (Task 11 review)."""
     b = load_boundary(root, sid)
     warned = b.setdefault("warned", {})
-    if key in warned:
-        return False
+    if key in warned or (legacy is not None and legacy in warned):
+        return False                     # `legacy`: the bare-path key from before v0.12.7 (warned_key), honoured
     warned[key] = time.strftime("%Y-%m-%dT%H:%M:%S")
     try:
         save_boundary(root, sid, b)
@@ -889,7 +926,7 @@ def write_check(root: Path, ctx: dict, p: Path, sid: object, refused: Optional[s
     entries = ll.registry_by_session(str(lease.get("session_id"))) if lease.get("session_id") else []
     background = bool(lease.get("spawned")) or any(e.get("kind") == "bg" for e in entries)
     text = warning_text(nn, lease, rel, background, ll._ago(ll.seen_mtime(root, nn), time.time()))
-    if first_warning(root, sid, warned_key(nn, str(p.resolve()))):
+    if first_warning(root, sid, warned_key(nn, str(p.resolve())), legacy=str(p.resolve())):
         return text, None
     return None, text.replace(FIRST_STOP, "")
 
@@ -999,7 +1036,11 @@ def main() -> int:
         if reasons:
             reasons.append(v.WAY_BACK)
     if reasons:
-        v.block("\n".join(reasons + notes))
+        sys.stderr.write("\n".join(reasons + notes).rstrip() + "\n")       # verifylib.block, with the record between
+        sys.stderr.flush()
+        if event == "Stop":
+            record_pending_warned(root, sid)
+        sys.exit(2)
     if notes and event == "Stop":
         # hooks.md documents Stop's JSON output as a top-level `decision`
         # field only — hookSpecificOutput.additionalContext is not honored
@@ -1007,6 +1048,9 @@ def main() -> int:
         # plain stdout text instead; nothing consumes it structurally, but
         # nothing breaks either.
         print("\n".join(notes))
+    if event == "Stop":
+        sys.stdout.flush()
+        record_pending_warned(root, sid)    # a backstop reason said as a note (a re-fired Stop) counts as said
     return 0
 
 
