@@ -1582,7 +1582,7 @@ write_config_rerun() {
 
 @test "2026-10-21 (two flaky restarts): a gate that fails and passes its rerun is PASS after a rerun — both logs kept and manifested, the summary names it" {
   reuse_fixture
-  write_config_rerun "  - echo first-run; exit 1
+  write_config_rerun "  - ls first-run-no-such-file
   - true" "  - echo rerun >> $RAN; echo rerun-log
   - \"\""
   run bash "$DAEDALUS_HOME/core/gates.sh"
@@ -1592,7 +1592,7 @@ write_config_rerun() {
   [ "$(rj "$id" gates.0.rerun.first_exit)" = 1 ]
   first_log="$(rj "$id" gates.0.rerun.first_log)"; rerun_log="$(rj "$id" gates.0.log)"
   [ "$first_log" != "$rerun_log" ]
-  grep -q first-run "$first_log"; grep -q rerun-log "$rerun_log"
+  grep -q first-run-no-such-file "$first_log"; grep -q rerun-log "$rerun_log"
   grep -qxF "$first_log" "$DAEDALUS_HOME/vault/evidence/.manifest"
   grep -qxF "$rerun_log" "$DAEDALUS_HOME/vault/evidence/.manifest"
   grep -qF "gate 1 passed after re-running its failures (first run log: \`$first_log\`)" "$DAEDALUS_HOME/vault/evidence/$id.md"
@@ -1607,7 +1607,7 @@ write_config_rerun() {
   [ "$(rj "$id" result)" = FAIL ]; [ "$(rj "$id" gates.0.rerun.first_exit)" = 1 ]
   grep -qF "gate 1 failed again when its failures were re-run" "$DAEDALUS_HOME/vault/evidence/$id.md"
   # The failing gate leaves a file git can see; the next gate removes it, so the run ends on the tree it started on.
-  write_config_rerun "  - touch left-behind; exit 1
+  write_config_rerun "  - touch left-behind /no-such-dir/x
   - rm -f left-behind" "  - echo rerun >> $RAN"
   run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]; [ "$(ran)" = 1 ] || { echo "the rerun ran on a changed tree"; return 1; }
   id="$(failed_id)"
@@ -1629,4 +1629,66 @@ write_config_rerun() {
   run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
   case "$output" in *"gates_rerun_failed"*"tab"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls "$DAEDALUS_HOME/state/evidence")" ]
+}
+
+# --- v0.12.8 review revisions (2026-10-22): clean-copy runs, rerun only a whole gate --------------------------------
+
+@test "2026-10-22 (C2): a clean tree runs setup and gates in a fresh scratch checkout of HEAD — a git-ignored file in the worktree is not there; the record says clean-copy and names the commit; the scratch is removed, the logs kept" {
+  install_refuter
+  git_thing "secret.env"
+  printf 'only here\n' > "$DAEDALUS_HOME/target/thing/secret.env"
+  write_config_setup "  - pwd > $BATS_TEST_TMPDIR/setup-cwd" "  - pwd > $BATS_TEST_TMPDIR/gate-cwd; test ! -e secret.env"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  where="$(cat "$BATS_TEST_TMPDIR/gate-cwd")"
+  [ "$where" = "$(cat "$BATS_TEST_TMPDIR/setup-cwd")" ]
+  [ "$where" != "$(cd "$DAEDALUS_HOME/target/thing" && pwd -P)" ] || { echo "the gate ran in the worktree"; return 1; }
+  [ ! -e "$where" ] || { echo "the scratch was left behind: $where"; return 1; }
+  [ "$(git -C "$DAEDALUS_HOME/target/thing" worktree list | wc -l | tr -d ' ')" = 1 ]
+  [ -f "$DAEDALUS_HOME/state/evidence/$id/gate-1.log" ]
+  python3 - "$DAEDALUS_HOME/state/evidence/$id/run.json" "$(git -C "$DAEDALUS_HOME/target/thing" rev-parse HEAD)" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["tree"] == "clean-copy" and r["commit"] == sys.argv[2] and r["result"] == "PASS", r
+PY
+}
+
+@test "2026-10-22 (C2): a dirty tree runs in place as before (tree: worktree), and a later clean-copy run of the same content does not reuse it" {
+  install_refuter
+  git_thing
+  RAN="$BATS_TEST_TMPDIR/gate-ran"
+  write_config "  - echo ran >> $RAN; test -e marker.txt"
+  printf 'new\n' > "$DAEDALUS_HOME/target/thing/new.txt"          # untracked: the tree is dirty
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree"])' "$DAEDALUS_HOME/state/evidence/$id/run.json")" = worktree ]
+  git -C "$DAEDALUS_HOME/target/thing" add -A; git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m new
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(wc -l < "$RAN" | tr -d ' ')" = 2 ] || { echo "a clean-copy run reused a worktree run"; return 1; }
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree"])' "$DAEDALUS_HOME/state/evidence/$id/run.json")" = clean-copy ]
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]
+  [ "$(wc -l < "$RAN" | tr -d ' ')" = 2 ] || { echo "a clean-copy PASS was not reused by the next run"; return 1; }
+}
+
+@test "2026-10-22 (M1): a compound gate (&&, ||, ;, |) gets no rerun — a rerun could cover only part of it; a single leading cd is not compound" {
+  reuse_fixture
+  write_config_rerun "  - true && exit 1" "  - echo rerun >> $RAN"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  [ "$(ran)" = 0 ] || { echo "a compound gate was re-run"; return 1; }
+  case "$output" in *"compound"*) : ;; *) echo "$output"; return 1 ;; esac
+  write_config_rerun "  - cd . && exit 1" "  - echo rerun >> $RAN"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(ran)" = 1 ]
+}
+
+@test "2026-10-22 (L3): a run that reuses one whose gate passed after a rerun says so" {
+  reuse_fixture
+  write_config_rerun "  - exit 1" "  - true"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  first="$(last_id)"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  second="$(last_id)"; [ "$(rj "$second" reused_from)" = "$first" ]
+  grep -qF "gate 1 passed after re-running its failures in run $first" "$DAEDALUS_HOME/vault/evidence/$second.md"
 }

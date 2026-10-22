@@ -120,6 +120,13 @@ rerun_list_count="$(cfg_list gates_rerun_failed | wc -l | tr -d ' ')"
 if [ "$rerun_list_count" -gt "$gate_list_count" ]; then
   die "config gates_rerun_failed has $rerun_list_count commands but gates: has $gate_list_count — one rerun command per gate, in the same order (\"\" for a gate with none); refusing before any gate runs"
 fi
+# is_compound <command> — true when a gate is more than one command (&&, ||, ;, |), after one leading `cd <dir> &&`.
+is_compound() {
+  local c="$1"
+  c="$(printf '%s' "$c" | sed -E 's/^[[:space:]]*cd[[:space:]]+[^;&|[:space:]]+[[:space:]]*&&//')"
+  case "$c" in *'&&'*|*'||'*|*';'*|*'|'*) return 0 ;; esac
+  return 1
+}
 # rerun_of <n> — gate n's rerun command, or nothing.
 rerun_of() { cfg_list gates_rerun_failed | sed -n "${1}p"; }
 
@@ -155,6 +162,43 @@ esac
 # timeout line in config.yaml.
 if [ "$refute_on" -eq 1 ]; then
   refute_timeout >/dev/null || die "config verify.refute_timeout is invalid — refusing before any gate runs"
+fi
+
+# --- Where the gates run: the tree in place, or a clean copy of its commit (v0.12.8, spec 2026-10-22 revisions, C2) ---
+# A window's PASS can depend on what the fingerprint does not see: git-ignored files such as a .venv or a .env. Promote's
+# own run, in a scratch of tracked files only, was what caught that — and on 2026-10-22 the operator called running the
+# suite again "where the only change was me saying the word promote" pointless. So a window's run becomes the run
+# promote can use when its tree is committed: when every repository of the tree under test (the target and each
+# target.nested checkout) is clean — nothing modified, staged or untracked that git sees — the setup steps and gates
+# run in a fresh scratch checkout of exactly that commit, tracked files only, cut the way promote cuts its scratch
+# (git worktree add --detach per repository, nested inside the outer, target.scaffold directories created), under
+# state/clean-copy/<run-id>/. The record says tree: "clean-copy" and names the commit(s). A dirty tree runs in place,
+# tree: "worktree", exactly as before. A promotion's run is already in promote's scratch (tree: "promote-scratch").
+# The fingerprint is taken of the tree under test as always; the commit is read before and again after it, so the
+# scratch holds exactly what was fingerprinted. A status git cannot give is never "clean": that tree runs in place.
+tree_mode=worktree; clean_commit=""; clean_nested=""
+nested_rels="$(cfg_pairs target.nested 2>/dev/null | cut -f1)"
+# repo_heads — "<rel>\t<sha>" per repository of the tree under test ("." the target), or nothing when any is dirty,
+# is not a repository, or cannot be read.
+repo_heads() {
+  local rel dir sha st out=""
+  for rel in . $nested_rels; do
+    dir="$target"; [ "$rel" = . ] || dir="$target/$rel"
+    is_work_tree_root "$dir" 2>/dev/null || return 1
+    st="$(git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null)" || return 1
+    [ -z "$st" ] || return 1
+    sha="$(git -C "$dir" rev-parse --verify -q HEAD 2>/dev/null)" || return 1
+    out="$out$rel	$sha
+"
+  done
+  printf '%s' "$out"
+}
+if [ -z "$promote_id" ]; then
+  if heads_before="$(repo_heads)" && [ -n "$heads_before" ]; then
+    tree_mode=clean-copy
+  fi
+else
+  tree_mode=promote-scratch
 fi
 
 run_id="$(date +%Y%m%d-%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
@@ -227,10 +271,27 @@ fp_secs="$(sed -n 's/^fingerprint_secs=//p' "$ev_state/fingerprint.err" 2>/dev/n
 # Fast with many runs: run ids sort by time, so the newest are read first and the first match ends the search; a
 # run.json whose raw text does not contain this fingerprint is skipped before it is parsed; the manifest is read
 # once. Never fails the run: anything it cannot read is a run it does not reuse.
+# The commit read before the fingerprint must still be the tree's after it, still clean; otherwise the tree moved
+# while it was fingerprinted and the run stays in place.
+if [ "$tree_mode" = clean-copy ]; then
+  heads_after="$(repo_heads)" || heads_after=""
+  if [ "$heads_after" = "$heads_before" ]; then
+    clean_commit="$(printf '%s' "$heads_before" | awk -F'\t' '$1=="." {print $2}')"
+  else
+    tree_mode=worktree
+  fi
+fi
+
+# Which earlier runs may stand for this one (spec 2026-10-22 revisions): a promotion's run and a clean-copy run reuse
+# only a promote-grade run — one that ran in a clean copy or in promote's scratch, tracked files only — and a
+# promotion's run only one recorded under the deployment's own config.yaml (its config_sha is the current one's, never
+# merely equal to some earlier run's: a window can run gates under an in-home copy of the config). A window's
+# worktree run, which can depend on git-ignored files, is reused only by the same window's next run in place.
+home_config_sha="$(shasum -a 256 "$DAEDALUS_HOME/config.yaml" 2>/dev/null | awk '{print $1}')"
 core_tree="null"; reused_from=""; reused_gates="$(mktemp)" || die "cannot create a temp file for the reuse lookup"
 IFS= read -r -d '' reuse_script <<'PY'
 import json, os, re, sys
-home, fp, config_sha, own, out = sys.argv[1:6]
+home, fp, config_sha, own, out, mode, lease, home_config_sha = sys.argv[1:9]
 core_tree = None
 try:
     sys.dont_write_bytecode = True          # a new core/__pycache__ would itself be a modified core/
@@ -280,17 +341,26 @@ for name in names:
             or not isinstance(gates, list) or not gates
             or not all(isinstance(g, dict) and g.get("exit") == 0 for g in gates)):
         continue
+    grade = rec.get("tree") in ("clean-copy", "promote-scratch")
+    if mode == "promote-scratch" and not (grade and config_sha == home_config_sha):
+        continue
+    if mode == "clean-copy" and not grade:
+        continue
+    if mode == "worktree" and not grade and not (rec.get("tree") == "worktree" and (rec.get("lease") or "") == lease):
+        continue
     summary = os.path.join(ev_vault, name + ".md")
     fm = frontmatter(summary)
     if (os.path.realpath(summary) not in manifest or fm.get("fingerprint") != fp
             or fm.get("config-sha") != config_sha):
         continue
     with open(out, "w") as fh:
-        json.dump(gates, fh)
+        json.dump({"gates": gates, "tree": rec.get("tree"), "commit": rec.get("commit"),
+                   "nested_commits": rec.get("nested_commits")}, fh)
     print(name)
     break
 PY
-reuse_out="$(python3 -c "$reuse_script" "$DAEDALUS_HOME" "$fp_before" "$config_sha" "$run_id" "$reused_gates" 2>/dev/null)"
+reuse_out="$(python3 -c "$reuse_script" "$DAEDALUS_HOME" "$fp_before" "$config_sha" "$run_id" "$reused_gates" \
+  "$tree_mode" "$lease_nn" "$home_config_sha" 2>/dev/null)"
 core_tree="$(printf '%s\n' "$reuse_out" | sed -n 1p)"
 reused_from="$(printf '%s\n' "$reuse_out" | sed -n 2p)"
 [ -n "$core_tree" ] || core_tree="null"
@@ -298,6 +368,73 @@ case "$reused_from" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
   *) reused_from="" ;;
 esac
+
+# The clean copy (C2 above), cut only when something will run in it. Outer first, the nested repositories inside it,
+# each at the commit read before the fingerprint; then target.scaffold's directories, as promote's cut_scratch makes
+# them. Removed when the gates are done (the logs live under state/evidence, not here) and on any exit. A copy that
+# cannot be cut is said, and the run goes on in place as a worktree run — never promote-grade by accident.
+run_dir="$target"; clean_dir=""
+remove_clean_copy() {
+  [ -n "$clean_dir" ] || return 0
+  local rel
+  for rel in $(printf '%s\n' $nested_rels | awk '{print length, $0}' | sort -rn | cut -d' ' -f2-) .; do
+    if [ "$rel" = . ]; then
+      git -C "$target" worktree remove --force "$run_dir" >/dev/null 2>&1
+      git -C "$target" worktree prune >/dev/null 2>&1
+    else
+      git -C "$target/$rel" worktree remove --force "$run_dir/$rel" >/dev/null 2>&1
+      git -C "$target/$rel" worktree prune >/dev/null 2>&1
+    fi
+  done
+  rm -rf "$clean_dir"
+  clean_dir=""
+}
+trap remove_clean_copy EXIT
+if [ "$tree_mode" = clean-copy ] && [ -z "$reused_from" ]; then
+  clean_dir="$DAEDALUS_HOME/state/clean-copy/$run_id"
+  run_dir="$clean_dir/$(basename "$target")"
+  cut_ok=1
+  mkdir -p "$clean_dir" || cut_ok=0
+  while IFS="$(printf '\t')" read -r rel sha; do
+    [ -n "$rel" ] && [ "$cut_ok" -eq 1 ] || continue
+    if [ "$rel" = . ]; then
+      git -C "$target" worktree add -q --detach "$run_dir" "$sha" >/dev/null 2>&1 || cut_ok=0
+    else
+      clean_nested="$clean_nested$rel=$sha,"
+      git -C "$target/$rel" worktree add -q --detach "$run_dir/$rel" "$sha" >/dev/null 2>&1 || cut_ok=0
+    fi
+  done <<EOF
+$heads_before
+EOF
+  if [ "$cut_ok" -eq 1 ]; then
+    while IFS= read -r sc; do
+      [ -n "$sc" ] && mkdir -p "$run_dir/$sc"
+    done <<EOF
+$(cfg_pairs target.scaffold 2>/dev/null | cut -f1)
+EOF
+    log "clean tree: the gates run in a fresh copy of commit ${clean_commit:0:12} (tracked files only)"
+  else
+    log "the clean copy of commit ${clean_commit:0:12} could not be cut; the gates run in place (tree: worktree)"
+    remove_clean_copy
+    run_dir="$target"; tree_mode=worktree; clean_nested=""
+  fi
+fi
+# tree_moved — true when the tree under test is no longer the tree that was fingerprinted: in a clean copy, any
+# repository of it with something git sees changed (it holds exactly the fingerprinted commit, so that is the same
+# question, asked without fingerprinting a tree outside state/promote); in place, a fingerprint that differs.
+tree_moved() {
+  if [ -n "$clean_dir" ]; then
+    local rel dir st
+    for rel in . $nested_rels; do
+      dir="$run_dir"; [ "$rel" = . ] || dir="$run_dir/$rel"
+      st="$(git -C "$dir" status --porcelain --untracked-files=all 2>/dev/null)" || return 0
+      [ -z "$st" ] || return 0
+    done
+    return 1
+  fi
+  local now; now="$(fingerprint)"
+  [ "$now" = "null" ] || [ "$now" != "$fp_before" ]
+}
 
 # gates_setup (2026-10-14): commands that prepare the tree under test — a window's
 # worktree, or promote's scratch, which holds tracked files only — before any gate
@@ -312,7 +449,7 @@ while IFS= read -r step; do
   setup_count=$((setup_count + 1))
   log_file="$ev_state/setup-$setup_count.log"
   t0=$(date +%s)
-  ( cd "$target" && eval "$step" ) </dev/null >"$log_file" 2>&1
+  ( cd "$run_dir" && eval "$step" ) </dev/null >"$log_file" 2>&1
   code=$?
   dur=$(( $(date +%s) - t0 ))
   setup_rows="$setup_rows
@@ -330,9 +467,8 @@ done <<EOF
 $([ -n "$reused_from" ] || cfg_list gates_setup)
 EOF
 if [ "$setup_failed" -eq 0 ] && [ "$setup_count" -gt 0 ]; then
-  fp_setup="$(fingerprint)"
-  if [ "$fp_setup" != "$fp_before" ]; then
-    invalid_reason="gates_setup changed the tree under test (fingerprint ${fp_before:0:12} before, ${fp_setup:0:12} after), so no gate ran: what a setup step leaves behind must be ignored by git"
+  if tree_moved; then
+    invalid_reason="gates_setup changed the tree under test (git sees what a step left behind), so no gate ran: what a setup step leaves behind must be ignored by git"
   fi
 fi
 
@@ -347,7 +483,7 @@ while IFS= read -r gate; do
   t0=$(date +%s)
   # Operator-authored config, deliberately trusted — eval is intentional.
   # stdin from /dev/null so a gate that reads stdin cannot eat the list.
-  ( cd "$target" && eval "$gate" ) </dev/null >"$log_file" 2>&1
+  ( cd "$run_dir" && eval "$gate" ) </dev/null >"$log_file" 2>&1
   code=$?
   dur=$(( $(date +%s) - t0 ))
   # A failed gate with a gates_rerun_failed command (spec 2026-10-21 C): on 2026-10-21 two runs of an 11-minute
@@ -359,18 +495,26 @@ while IFS= read -r gate; do
   # rerun's log as its log (what still fails). No command for the gate: exactly as before this release.
   rerun_cmd=""
   [ "$code" -eq 0 ] || rerun_cmd="$(rerun_of "$gate_count")"
+  # M1 (review 2026-10-22): a rerun must cover the whole gate. A compound gate (&&, ||, ;, |) is several commands,
+  # and a rerun of the failures of one would PASS a gate whose other parts never ran again, or never ran at all, so it
+  # gets no rerun. One leading `cd <dir> &&` is not a second test, only where the gate runs, and is not compound.
+  if [ -n "$rerun_cmd" ] && is_compound "$gate"; then
+    rerun_rows="$rerun_rows
+$gate_count	$code	$dur	$log_file	compound	$rerun_cmd"
+    log "gate $gate_count is a compound command; its failures are not re-run (a rerun could cover only part of it)"
+    rerun_cmd=""
+  fi
   if [ -n "$rerun_cmd" ]; then
     first_code=$code; first_dur=$dur; first_log="$log_file"
-    fp_rerun="$(fingerprint)"
-    if [ "$fp_rerun" = "null" ] || [ "$fp_rerun" != "$fp_before" ]; then
+    if tree_moved; then
       rerun_rows="$rerun_rows
-$gate_count	$first_code	$first_dur	$first_log	tree-changed ${fp_before:0:12} ${fp_rerun:0:12}	$rerun_cmd"
+$gate_count	$first_code	$first_dur	$first_log	tree-changed	$rerun_cmd"
       log "gate $gate_count failed; its failures were not re-run: the tree changed after it failed"
     else
       log "FAIL  $gate — re-running its failures once: $rerun_cmd"
       log_file="$ev_state/gate-$gate_count-rerun.log"
       t0=$(date +%s)
-      ( cd "$target" && eval "$rerun_cmd" ) </dev/null >"$log_file" 2>&1
+      ( cd "$run_dir" && eval "$rerun_cmd" ) </dev/null >"$log_file" 2>&1
       code=$?
       dur=$(( first_dur + $(date +%s) - t0 ))
       rerun_outcome=failed
@@ -405,15 +549,26 @@ EOF
 if [ -n "$reused_from" ]; then
   IFS= read -r -d '' rows_script <<'PY'
 import json, sys
-for g in json.load(open(sys.argv[1])):
+for g in json.load(open(sys.argv[1]))["gates"]:
     print("\t".join(str(x) for x in (g["n"], g["exit"], g.get("duration_s") or 0, g["log"], g["command"])))
 PY
   rows="$(python3 -c "$rows_script" "$reused_gates")" || die "cannot read the gate rows of run $reused_from"
+  # L3 (review 2026-10-22): a reused gate that passed only after a rerun says so, so the reuse never hides it.
+  reused_notes="$(python3 -c 'import json, sys
+for g in json.load(open(sys.argv[1]))["gates"]:
+    if (g.get("rerun") or {}).get("outcome") == "passed":
+        print("gate %s passed after re-running its failures in run %s (first run log: `%s`)." % (g["n"], sys.argv[2], g["rerun"].get("first_log")))
+' "$reused_gates" "$reused_from" 2>/dev/null)"
   rows="
 $rows"
   gate_count="$(printf '%s\n' "$rows" | grep -c .)"
   log "PASS — reused from run $reused_from (same tree, same gates); nothing re-ran."
   fp_after="$fp_before"
+elif [ -n "$clean_dir" ]; then
+  # In a clean copy the worktree may change while the gates run without touching what was tested; what the gates
+  # must not have changed is the copy. Then the copy goes; the logs stay under state/evidence.
+  if tree_moved; then fp_after="changed"; else fp_after="$fp_before"; fi
+  remove_clean_copy
 else
   fp_after="$(fingerprint)"
 fi
@@ -458,6 +613,7 @@ write_summary() {   # write_summary <path> <result>
       done
     fi
     [ -z "$reused_from" ] || printf '\nPASS — reused from run %s (same tree, same gates); nothing re-ran.\n' "$reused_from"
+    [ -z "${reused_notes:-}" ] || printf '%s\n' "$reused_notes"
     if [ -n "$(printf '%s' "$rerun_rows" | tr -d '\n')" ]; then
       printf '\n'
       printf '%s\n' "$rerun_rows" | while IFS="$(printf '\t')" read -r n fcode fdur flog outcome cmd; do
@@ -465,8 +621,8 @@ write_summary() {   # write_summary <path> <result>
         case "$outcome" in
           passed) printf 'gate %s passed after re-running its failures (first run log: `%s`).\n' "$n" "$flog" ;;
           failed) printf 'gate %s failed again when its failures were re-run (first run log: `%s`).\n' "$n" "$flog" ;;
-          *) printf "gate %s's failures were not re-run: the tree changed after it failed (fingerprint %s before, %s after; first run log: \`%s\`).\n" \
-               "$n" "$(printf '%s' "$outcome" | cut -d' ' -f2)" "$(printf '%s' "$outcome" | cut -d' ' -f3)" "$flog" ;;
+          compound) printf "gate %s is a compound command, so its failures were not re-run: a rerun could cover only part of it (first run log: \`%s\`).\n" "$n" "$flog" ;;
+          *) printf "gate %s's failures were not re-run: the tree changed after it failed (first run log: \`%s\`).\n" "$n" "$flog" ;;
         esac
       done
     fi
@@ -557,7 +713,10 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
   # How the change was reviewed — one reviewer or several lenses, and why; how the earlier findings fared — shown
   # whatever the verdict, and kept out of the message a failure shows (review-lenses.py, refute.sh).
   printf '%s\n' "$refute_msg" | sed -n 's/^review-plan: //p' | while IFS= read -r ln; do log "review: $ln"; done
-  refute_msg="$(printf '%s\n' "$refute_msg" | grep -v '^review-plan: ')"
+  # C1 (review 2026-10-22): the verdict and every reviewer call id, as refute.sh read them, go into this run's
+  # state-side run.json — what promote later requires before it reuses this run's review.
+  review_json="$(printf '%s\n' "$refute_msg" | sed -n 's/^review-record: //p' | tail -1)"
+  refute_msg="$(printf '%s\n' "$refute_msg" | grep -v '^review-plan: ' | grep -v '^review-record: ')"
   if [ "$refute_code" -ne 0 ]; then
     result=FAIL; failed=1
     if [ "$refute_code" -eq 1 ]; then
@@ -607,10 +766,12 @@ printf '\n%s' "$setup_rows" >> "$rows_tmp"     # a blank line parts the gate row
 rerun_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rerun_rows" > "$rerun_tmp"
 python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" \
-    "$gates_result" "$core_tree" "$reused_from" "$reused_gates" "$rerun_tmp" <<'PY'
+    "$gates_result" "$core_tree" "$reused_from" "$reused_gates" "$rerun_tmp" \
+    "$tree_mode" "$clean_commit" "$clean_nested" "$refute_on" "${review_json:-}" <<'PY'
 import json, sys, time
 out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx, setup_failed, invalid = sys.argv[1:14]
 gates_result, core_tree, reused_from, reused_gates, rerun_path = sys.argv[14:19]
+tree_mode, commit, nested_commits, refute_on, review_json = sys.argv[19:24]
 gates, setup = [], []
 with open(rows_path) as fh:
     gate_part, _, setup_part = fh.read().partition("\n\n")
@@ -631,12 +792,27 @@ with open(rerun_path) as fh:
                 g["rerun"] = {"command": cmd, "outcome": outcome.split(" ", 1)[0], "first_exit": int(fcode),
                               "first_duration_s": int(fdur), "first_log": flog}
 # A reused run (spec 2026-10-21 A) carries the earlier run's gate rows exactly as that run recorded them.
+tree = {"tree": tree_mode}
+if tree_mode == "clean-copy":
+    tree["commit"] = commit
+    if nested_commits:
+        tree["nested_commits"] = dict(x.split("=", 1) for x in nested_commits.split(",") if "=" in x)
 if reused_from:
-    gates = json.load(open(reused_gates))
+    src = json.load(open(reused_gates))
+    gates = src["gates"]
+    # What ran is the reused run's tree (spec 2026-10-22 revisions): a worktree run is never relabelled clean-copy.
+    tree = {k: src.get(k) for k in ("tree", "commit", "nested_commits") if src.get(k) is not None}
 rec = {"run_id": run_id, "started": started, "fingerprint": fp, "fingerprint_secs": int(fp_secs or 0),
        "config_sha": config_sha, "core_tree": None if core_tree in ("", "null") else core_tree,
        "setup": setup, "gates": gates, "gates_result": gates_result, "result": result,
-       "lease": lease or None, "session_id": sid or None}
+       "lease": lease or None, "session_id": sid or None, "refuter": "on" if refute_on == "1" else "off"}
+rec.update(tree)
+try:
+    review = json.loads(review_json) if review_json else None
+except ValueError:
+    review = None
+if isinstance(review, dict):
+    rec["review"] = review
 if reused_from:
     rec["reused_from"] = reused_from
 if int(setup_failed or 0):
