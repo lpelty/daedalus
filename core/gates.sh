@@ -353,7 +353,20 @@ PY
 }
 
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
-  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "${GATES_CRITERIA:-}" "$summary_tmp" 2>&1 >/dev/null)"
+  # The review's criteria: GATES_CRITERIA when set; else the file this window named with
+  # `core/lease.sh update <NN> --criteria <file>` — the same file promote's review reads. Until
+  # v0.12.8 only promote read it, and a branch run told its reviewer "(none supplied)" (PROP-037).
+  criteria="${GATES_CRITERIA:-}"
+  if [ -z "$criteria" ] && [ -n "$lease_nn" ]; then
+    criteria="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-criteria 2>/dev/null || true)"
+    if [ -n "$criteria" ] && [ -f "$criteria" ]; then
+      log "review: criteria from window $lease_nn's file $criteria"
+    elif [ -n "$criteria" ]; then
+      log "review: window $lease_nn's criteria file $criteria is missing — the review judges the change by its evident intent"
+      criteria=""
+    fi
+  fi
+  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "$criteria" "$summary_tmp" 2>&1 >/dev/null)"
   refute_code=$?
   # How the change was reviewed — one reviewer or several lenses, and why; how the earlier findings fared — shown
   # whatever the verdict, and kept out of the message a failure shows (review-lenses.py, refute.sh).
