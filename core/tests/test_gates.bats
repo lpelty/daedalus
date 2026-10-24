@@ -1410,3 +1410,49 @@ PY
   case "$output" in *"gates_setup"*"tab"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls "$DAEDALUS_HOME/state/evidence")" ]
 }
+
+# PROP-037 (a field deployment, 2026-10-24): `core/lease.sh update <NN> --criteria <file>` was read only by
+# promote's review (refute.sh --mode promote, through review-inputs.py). A branch run handed refute.sh
+# only $GATES_CRITERIA, so a window that used the lease form had its review judged against "evident
+# intent" with a LOW finding for the missing Scope — every time, not intermittently.
+@test "a window's criteria file reaches the branch review: without GATES_CRITERIA the lease's file is rendered and named; GATES_CRITERIA still wins; a missing file is named once and the review runs without; an unleased session is unchanged" {
+  install_refuter
+  recording_stub "$BATS_TEST_TMPDIR/bin13"
+  git_target
+  # session sB is bound to window 02, so target_path resolves to its worktree: give it one, with an edit to review
+  git -C "$DAEDALUS_HOME/target/thing" worktree add -q "$DAEDALUS_HOME/worktrees/02/thing" -b lease/02
+  printf 'edited in the window\n' >> "$DAEDALUS_HOME/worktrees/02/thing/marker.txt"
+  mkdir -p "$DAEDALUS_HOME/state/leases" "$DAEDALUS_HOME/.claude/scratch"
+  printf 'AC-7: the window criteria must reach the review.\n' > "$DAEDALUS_HOME/.claude/scratch/crit.md"
+  # the path as lease.sh update stores it — relative, resolved against the home like promote's review does
+  printf '{"lease":"02","session_id":"sB","worktree":"worktrees/02","criteria":".claude/scratch/crit.md"}' > "$DAEDALUS_HOME/state/leases/02.json"
+  write_config "  - true" "  refute: true"
+  stdin="$BATS_TEST_TMPDIR/bin13/stdin"
+  H="$(cd "$DAEDALUS_HOME" && pwd -P)"   # leaselib resolves the home; the fixture lives under a symlinked /var
+  DAEDALUS_SESSION_ID=sB PATH="$BATS_TEST_TMPDIR/bin13:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -cF 'AC-7: the window criteria must reach the review.' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '(none supplied)' "$stdin")" -eq 0 ]
+  case "$output" in *"review: criteria from window 02's file $H/.claude/scratch/crit.md"*) : ;; *) echo "no criteria line: $output"; return 1 ;; esac
+  # An explicit GATES_CRITERIA still wins over the lease's file, and the lease's file is not mentioned.
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"
+  printf 'AC-8: the explicit file.\n' > "$BATS_TEST_TMPDIR/explicit.md"
+  DAEDALUS_SESSION_ID=sB GATES_CRITERIA="$BATS_TEST_TMPDIR/explicit.md" PATH="$BATS_TEST_TMPDIR/bin13:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -cF 'AC-8: the explicit file.' "$stdin")" -eq 1 ]
+  [ "$(grep -cF 'AC-7' "$stdin")" -eq 0 ]
+  case "$output" in *"criteria from window"*) echo "the lease's file was named although GATES_CRITERIA was set: $output"; return 1 ;; *) : ;; esac
+  # The lease names a file that is not there: said in one line, and the review runs against evident intent.
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence" "$DAEDALUS_HOME/.claude/scratch/crit.md"
+  DAEDALUS_SESSION_ID=sB PATH="$BATS_TEST_TMPDIR/bin13:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -cF '(none supplied)' "$stdin")" -eq 1 ]
+  case "$output" in *"window 02's criteria file $H/.claude/scratch/crit.md is missing"*) : ;; *) echo "no missing-file line: $output"; return 1 ;; esac
+  # Positive control: a deployment with no windows at all (no state/leases/) renders (none supplied) and
+  # says nothing about criteria. (With leases present, a session holding no window is refused outright.)
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence" "$DAEDALUS_HOME/state/leases"
+  PATH="$BATS_TEST_TMPDIR/bin13:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -cF '(none supplied)' "$stdin")" -eq 1 ]
+  case "$output" in *"criteria"*) echo "an unleased run spoke of criteria: $output"; return 1 ;; *) : ;; esac
+}

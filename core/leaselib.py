@@ -6366,6 +6366,24 @@ def main(argv: list) -> int:
         if nn:
             print(nn)
         return 0
+    if cmd == "my-criteria":
+        # gates.sh: the criteria file this session's window named with `core/lease.sh update <NN> --criteria
+        # <file>`, resolved against the home the way promote's review resolves it (review-inputs.py
+        # home_path), or nothing. Before v0.12.8 the file reached only promote's review; a branch run
+        # handed refute.sh $GATES_CRITERIA alone and told its reviewer "(none supplied)" (PROP-037).
+        sid = session_id_from_env()
+        crit = None
+        if sid and leases_dir(root).is_dir():
+            try:
+                with lock(root, shared=True):
+                    _, data = lease_of_session(read_all(root), sid)
+            except Refused as e:
+                sys.stderr.write("daedalus: %s\n" % e); return 1
+            crit = (data or {}).get("criteria")
+        if crit:
+            cp = Path(str(crit))
+            print(cp if cp.is_absolute() else root / cp)
+        return 0
     if cmd == "my-session":
         # vault-commit.sh: the caller's session id, or exit 1 for an operator shell.
         sid = session_id_from_env()
