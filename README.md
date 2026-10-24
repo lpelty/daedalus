@@ -1010,7 +1010,8 @@ at `core/agents/refuter.md` — a Claude Code subagent definition restricted to
 `Read`, `Grep` and `Glob` (no `Bash`, no `Edit`, no `Write`), a pinned model,
 bounded turns, and deliberately no memory: it never sees the author's
 reasoning and starts from nothing every run. It receives the acceptance
-criteria (`GATES_CRITERIA=<file>` when calling `core/gates.sh`), the evidence
+criteria (`GATES_CRITERIA=<file>` when calling `core/gates.sh`, else the file the
+window named with `core/lease.sh update <NN> --criteria <file>`), the evidence
 record, the pitfalls whose `applies-to: path:` matches a touched path (plus
 every pitfall with no `applies-to:`), and the diff — in that order — and is
 told the checkout's absolute path so it can read the touched files. A

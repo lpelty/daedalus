@@ -4,6 +4,40 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.8 — a window's criteria file reaches its branch review
+
+**In short.** A window that names its acceptance criteria with
+`core/lease.sh update <NN> --criteria <file>` now has them read by the review
+`core/gates.sh` runs on its branch, not only by promote's review.
+
+**What went wrong.** The criteria file set on a window was read only when
+promote reviewed the merge. A branch run of `core/gates.sh` handed its
+reviewer the `GATES_CRITERIA` variable alone. A window that used the lease
+form, as CLAUDE.md says it may, had every branch review judged against the
+change's evident intent, with a LOW finding for the missing Scope section,
+every time.
+
+**What changed.** When `GATES_CRITERIA` is not set, `core/gates.sh` passes the
+window's criteria file to the reviewer, the same file promote's review reads,
+resolved against the Daedalus home the same way. An explicit `GATES_CRITERIA`
+still wins. A session that holds no window is unchanged.
+
+**What you will see.** Before the review: "review: criteria from window 04's
+file <path>". If the window names a file that is not there: "review: window
+04's criteria file <path> is missing — the review judges the change by its
+evident intent", and the review runs as before.
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.8`. A branch run of
+`core/gates.sh` in a window with a criteria file prints the "review: criteria
+from window" line.
+
+**Not in this release.** A relative criteria path is resolved against the
+Daedalus home, as promote already does. A path meant relative to the window's
+worktree is reported missing; give an absolute path or one under the home.
+
 ## v0.12.7 — three checks stop misjudging what a window did, and sweep cleans up after itself
 
 **In short.** The suite question is asked for a large test run that names
