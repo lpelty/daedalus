@@ -1455,6 +1455,7 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(grep -cF '(none supplied)' "$stdin")" -eq 1 ]
   case "$output" in *"criteria"*) echo "an unleased run spoke of criteria: $output"; return 1 ;; *) : ;; esac
+}
 
 # --- v0.12.8 (2026-10-21): a gate PASS is reused for an identical tree; a flaky failure re-runs its failures ------
 
