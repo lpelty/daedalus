@@ -57,6 +57,16 @@ for k in ("merge_sha", "trunk_sha_at_prepare"):
 PY
 )" || die "--promote $promote_id: ${ctx_msg:-the promotion record cannot be checked} — only core/promote.sh writes it; run promote again"
 fi
+# Quick promote (v0.12.9, spec 2026-10-21 §E): under --promote only, GATES_QUICK=1 makes this run the targeted
+# command promote derived (GATES_QUICK_COMMAND: the deployment's gates_quick over the test files the window changed)
+# instead of the gates — or nothing, with GATES_QUICK_WHY saying why. The record says quick: it is never reused by
+# any later run, and the full suite follows in the background after the push. A promote-grade PASS already recorded
+# for this exact tree still wins below: then this is an ordinary PASS by reuse, and the quick flag is dropped.
+quick=0; quick_cmd=""; quick_why=""
+if [ -n "$promote_id" ] && [ "${GATES_QUICK:-}" = 1 ]; then
+  quick=1; quick_cmd="${GATES_QUICK_COMMAND:-}"; quick_why="${GATES_QUICK_WHY:-}"
+  case "$quick_cmd" in *"$(printf '\t')"*) die "GATES_QUICK_COMMAND contains a tab character — refusing (the evidence row format is tab-delimited)" ;; esac
+fi
 
 # The gate definition must live inside this deployment. A config elsewhere
 # is a gate the operator did not write.
@@ -338,6 +348,7 @@ for name in names:
     if (rec.get("run_id") != name or rec.get("fingerprint") != fp or rec.get("config_sha") != config_sha
             or rec.get("core_tree") != core_tree or rec.get("gates_result") != "PASS"
             or rec.get("result") not in ("PASS", "FAIL") or rec.get("invalid_reason") or rec.get("setup_failed")
+            or rec.get("quick")                                   # v0.12.9: a quick promote's run stands for nothing
             or not isinstance(gates, list) or not gates
             or not all(isinstance(g, dict) and g.get("exit") == 0 for g in gates)):
         continue
@@ -364,6 +375,7 @@ reuse_out="$(python3 -c "$reuse_script" "$DAEDALUS_HOME" "$fp_before" "$config_s
 core_tree="$(printf '%s\n' "$reuse_out" | sed -n 1p)"
 reused_from="$(printf '%s\n' "$reuse_out" | sed -n 2p)"
 [ -n "$core_tree" ] || core_tree="null"
+[ -z "$reused_from" ] || quick=0          # a full PASS of this tree is on record: an ordinary promote by reuse
 case "$reused_from" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
   *) reused_from="" ;;
@@ -501,7 +513,7 @@ while IFS= read -r gate; do
   # so both logs stay in the evidence and the summary names it. Anything else and the gate FAILs as before, with the
   # rerun's log as its log (what still fails). No command for the gate: exactly as before this release.
   rerun_cmd=""
-  [ "$code" -eq 0 ] || rerun_cmd="$(rerun_of "$gate_count")"
+  [ "$code" -eq 0 ] || [ "$quick" -eq 1 ] || rerun_cmd="$(rerun_of "$gate_count")"   # quick: one targeted command, no rerun
   # M1 (review 2026-10-22): a rerun must cover the whole gate. A compound gate (&&, ||, ;, |) is several commands,
   # and a rerun of the failures of one would PASS a gate whose other parts never ran again, or never ran at all, so it
   # gets no rerun. One leading `cd <dir> &&` is not a second test, only where the gate runs, and is not compound.
@@ -548,8 +560,15 @@ $gate_count	$first_code	$first_dur	$first_log	$rerun_outcome	$rerun_cmd"
   rows="$rows
 $gate_count	$code	$dur	$log_file	$gate"
 done <<EOF
-$([ -n "$invalid_reason" ] || [ -n "$reused_from" ] || cfg_list gates)
+$([ -n "$invalid_reason" ] || [ -n "$reused_from" ] || { [ "$quick" -eq 1 ] && { [ -z "$quick_cmd" ] || printf '%s\n' "$quick_cmd"; }; } || cfg_list gates)
 EOF
+if [ "$quick" -eq 1 ] && [ -z "$invalid_reason" ]; then
+  if [ -n "$quick_cmd" ]; then
+    log "quick promote: the targeted command above stood in for the gates; the full suite has not run on this commit yet"
+  else
+    log "quick promote: nothing ran (${quick_why:-no targeted command}); the full suite has not run on this commit yet"
+  fi
+fi
 
 # A reused run (A above): the earlier run's gate rows are this run's, as they were recorded — their logs are that
 # run's logs, already manifested — and nothing ran, so the tree cannot have moved under a gate.
@@ -620,6 +639,10 @@ write_summary() {   # write_summary <path> <result>
       done
     fi
     [ -z "$reused_from" ] || printf '\nPASS — reused from run %s (same tree, same gates); nothing re-ran.\n' "$reused_from"
+    if [ "$quick" -eq 1 ]; then
+      if [ -n "$quick_cmd" ]; then printf '\nQuick promote: the targeted command stood in for the gates; the full suite has not run on this commit yet.\n'
+      else printf '\nQuick promote: nothing ran (%s); the full suite has not run on this commit yet.\n' "${quick_why:-no targeted command}"; fi
+    fi
     [ -z "${reused_notes:-}" ] || printf '%s\n' "$reused_notes"
     if [ -n "$(printf '%s' "$rerun_rows" | tr -d '\n')" ]; then
       printf '\n'
@@ -774,11 +797,12 @@ rerun_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rerun_rows" > "$rerun_tmp"
 python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" \
     "$gates_result" "$core_tree" "$reused_from" "$reused_gates" "$rerun_tmp" \
-    "$tree_mode" "$clean_commit" "$clean_nested" "$refute_on" "${review_json:-}" <<'PY'
+    "$tree_mode" "$clean_commit" "$clean_nested" "$refute_on" "${review_json:-}" "$quick" "$quick_cmd" "$quick_why" <<'PY'
 import json, sys, time
 out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx, setup_failed, invalid = sys.argv[1:14]
 gates_result, core_tree, reused_from, reused_gates, rerun_path = sys.argv[14:19]
 tree_mode, commit, nested_commits, refute_on, review_json = sys.argv[19:24]
+quick, quick_cmd, quick_why = sys.argv[24:27]
 gates, setup = [], []
 with open(rows_path) as fh:
     gate_part, _, setup_part = fh.read().partition("\n\n")
@@ -822,6 +846,8 @@ if isinstance(review, dict):
     rec["review"] = review
 if reused_from:
     rec["reused_from"] = reused_from
+if quick == "1":
+    rec["quick"] = {"command": quick_cmd or None, "why": quick_why or None}
 if int(setup_failed or 0):
     rec["setup_failed"] = int(setup_failed)
 if invalid:

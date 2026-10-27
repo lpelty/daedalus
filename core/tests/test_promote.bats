@@ -1465,3 +1465,159 @@ PY
   run as_prime bash "$PROMOTE" 02 --skip-review; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(ran)" = 1 ]; [ "$(calls)" = "$n0" ]
 }
+
+# --- v0.12.9 (spec 2026-10-21 §E, plan 2026-10-27): quick promote, the background full run, commits_must_be_on ------
+
+bg_json() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2]))' "$DAEDALUS_HOME/state/promote/$1/background.json" "$2"; }
+# wait_bg <promote-id> — waits up to 90 s for the background full run to finish; prints its state
+wait_bg() {
+  local i=0
+  while [ "$i" -lt 900 ]; do
+    [ "$(bg_json "$1" state 2>/dev/null)" = running ] || { bg_json "$1" state; return 0; }
+    sleep 0.1; i=$((i + 1))
+  done
+  echo "the background run of $1 never finished:"; cat "$DAEDALUS_HOME/state/promote/$1/background.log" 2>/dev/null; return 1
+}
+rj() { python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): d = d.get(k) if isinstance(d, dict) else None
+print(d)' "$DAEDALUS_HOME/state/evidence/$1/run.json" "$2"; }
+
+@test "quick promote (v0.12.9): --quick with the operator's words prepares, confirms and pushes in one call — the test file the window changed runs through gates_quick, no gate and no reviewer run, the block and the ledger say the full suite is pending; the full suite then runs in the background on the pushed scratch, records PASS in background.json and on the ledger, the scratch goes, doctor says so, and a second confirm is refused" {
+  counting_gates refute; work_on_02
+  printf 'gates_quick: echo quick {files} >> %s\n' "$RAN" >> "$DAEDALUS_HOME/config.yaml"
+  mkdir -p "$W2/tests"; printf 't\n' > "$W2/tests/test_c.bats"; git -C "$W2" add -A; git -C "$W2" commit -q -m "test: c"
+  n0="$(calls)"
+  tx "$TXP" operator "This is tiny — push it, skip the full run." "$(now)" >/dev/null
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --quick --reason "skip the full run"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "$(calls)" = "$n0" ] || { echo "a reviewer was launched"; return 1; }
+  m="$(pj merge_sha)"; rid="$(pj run_id)"; pid="$(pj promote_id)"
+  [ "${lines[2]}" = "Tests on the merged result: quick promote — the one test file the window changed ran and passed (echo quick tests/test_c.bats >> $RAN); the full suite has not run on this commit yet." ] || { echo "$output"; return 1; }
+  [ "${lines[3]}" = "Reviewer: none — quick promote at the operator's word: This is tiny — push it, skip the full run." ] || { echo "$output"; return 1; }
+  [ "${lines[4]}" = "Nothing has been pushed yet; pushing now at the operator's word. The full suite runs in the background after the push." ] || { echo "$output"; return 1; }
+  case "$output" in *"review: none (quick promote);"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"Promoted window 02's work to main (merge commit ${m:0:7}; evidence $rid)."*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"The full suite is now running in the background on merge commit ${m:0:7} (promotion $pid); core/doctor.sh says PASS or FAIL when it finishes."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(origin_main)" = "$m" ]
+  grep -qxF "quick tests/test_c.bats" "$RAN"; [ "$(grep -c '^ran$' "$RAN")" = 0 ]
+  [ "$(rj "$rid" quick.command)" = "echo quick tests/test_c.bats >> $RAN" ]; [ "$(rj "$rid" quick.why)" = None ]
+  [ "$(rj "$rid" result)" = PASS ]; [ "$(rj "$rid" promotion.quick)" = True ]; [ "$(rj "$rid" refuter)" = deferred-to-promote ]
+  [ "$(pj quick.reused)" = False ]; [ "$(pj quick.files.0)" = tests/test_c.bats ]
+  grep -qF "Quick promote: the targeted command stood in for the gates; the full suite has not run on this commit yet." "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  grep -qF "Quick promote at the operator's word: This is tiny — push it, skip the full run." "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  L="$DAEDALUS_HOME/vault/evidence/promotions.log"
+  grep -qF "quick promote: This is tiny — push it, skip the full run." "$L"; grep -qF "full suite: pending (runs in the background after the push)" "$L"
+  # the background full run: the real gate, once, on the pushed scratch; then the scratch goes
+  [ "$(wait_bg "$pid")" = PASS ] || { cat "$DAEDALUS_HOME/state/promote/$pid/background.log"; return 1; }
+  brid="$(bg_json "$pid" run_id)"; [ "$brid" != "$rid" ]; [ "$(bg_json "$pid" reused_from)" = None ]
+  [ "$(grep -c '^ran$' "$RAN")" = 1 ] || { echo "the full gate ran $(grep -c '^ran$' "$RAN") times"; return 1; }
+  [ "$(rj "$brid" promote_id)" = "$pid" ]; [ "$(rj "$brid" quick)" = None ]; [ "$(rj "$brid" result)" = PASS ]; [ "$(rj "$brid" tree)" = promote-scratch ]
+  [ "$(rj "$brid" merge_sha)" = "$m" ]
+  grep -qF "background full run: PASS" "$L"; [ "$(wc -l < "$L" | tr -d ' ')" = 2 ]
+  [ ! -e "$DAEDALUS_HOME/state/promote/$pid/thing" ]; ! scratch_listed "$pid"
+  [ -f "$DAEDALUS_HOME/state/promote/$pid/background.json" ]; [ -f "$DAEDALUS_HOME/state/promote/$pid/background.log" ]
+  run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
+  case "$output" in *"OK       promote: window 02's quick promote $pid passed its full suite in the background (run $brid)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"promote scratch:"*) echo "a leftover-scratch note after the background run: $output"; return 1 ;; *) : ;; esac
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; refused "was already pushed"
+}
+
+@test "quick promote: refused with nothing typed since the session started, from a window session, and beside --skip-review; with no gates_quick in config.yaml nothing runs and the block says why; with gates_quick but no test file changed, nothing runs and the block says that; the background full suite runs each time" {
+  counting_gates; work_on_02
+  run as_prime bash "$PROMOTE" 02 --quick; refused "The operator has typed nothing in this session"
+  [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
+  run as_prime bash "$PROMOTE" 02 --quick --skip-review; refused "two different promotes"
+  run env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sC bash "$PROMOTE" 02 --quick; refused "Only the prime window runs promote"
+  run as_prime bash "$PROMOTE" 02 --reason "x"; refused "goes with --skip-review or --quick"
+  tx "$TXP" operator "push it, skip the suite" "$(now)" >/dev/null
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --quick
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "${lines[2]}" = "Tests on the merged result: quick promote — nothing ran (no gates_quick command in config.yaml); the full suite has not run on this commit yet." ] || { echo "$output"; return 1; }
+  [ "$(ran)" = 0 ]; pid="$(pj promote_id)"; [ "$(origin_main)" = "$(pj merge_sha)" ]
+  [ "$(rj "$(pj run_id)" quick.why)" = "no gates_quick command in config.yaml" ]
+  grep -qF "Quick promote: nothing ran (no gates_quick command in config.yaml); the full suite has not run on this commit yet." "$DAEDALUS_HOME/vault/evidence/$(pj run_id).md"
+  [ "$(wait_bg "$pid")" = PASS ]; [ "$(ran)" = 1 ]
+  # a second tiny change, this time with gates_quick but no test file among the commits
+  printf 'gates_quick: echo quick {files} >> %s\n' "$RAN" >> "$DAEDALUS_HOME/config.yaml"
+  printf 'w3\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "docs: w3"
+  tx "$TXP" operator "same again, push it without the suite" "$(now)" >/dev/null
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --quick
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "${lines[2]}" = "Tests on the merged result: quick promote — nothing ran (no test file changed); the full suite has not run on this commit yet." ] || { echo "$output"; return 1; }
+  pid2="$(pj promote_id)"; [ "$pid2" != "$pid" ]
+  [ "$(wait_bg "$pid2")" = PASS ]; [ "$(ran)" = 2 ]; ! grep -q '^quick' "$RAN"
+}
+
+@test "quick promote on a tree that already passed: the window's clean-copy PASS is reused, the run is an ordinary promote by reuse (no quick record), and the background run reuses it too — nothing runs twice" {
+  counting_gates; work_on_02
+  printf 'gates_quick: echo quick {files} >> %s\n' "$RAN" >> "$DAEDALUS_HOME/config.yaml"
+  window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  wrid="$(printf '%s\n' "$output" | tail -1)"; [ "$(ran)" = 1 ]
+  tx "$TXP" operator "push it, it passed already" "$(now)" >/dev/null
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --quick
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "${lines[2]}" = "Tests on the merged result: PASS (1 gate; this exact tree already passed them, nothing re-ran)." ] || { echo "$output"; return 1; }
+  rid="$(pj run_id)"; pid="$(pj promote_id)"
+  [ "$(rj "$rid" reused_from)" = "$wrid" ]; [ "$(rj "$rid" quick)" = None ]; [ "$(pj quick.reused)" = True ]
+  st="$(wait_bg "$pid")"; [ "$st" = PASS ] || { echo "background: $st"; cat "$DAEDALUS_HOME/state/promote/$pid/background.log"; return 1; }
+  # the background run reuses the newest promote-grade PASS of the tree: the window's run or the prepare's record of it
+  case "$(bg_json "$pid" reused_from)" in "$wrid"|"$rid") : ;; *) echo "reused_from: $(bg_json "$pid" reused_from)"; return 1 ;; esac
+  [ "$(ran)" = 1 ] || { echo "something ran: $(cat "$RAN")"; return 1; }
+  grep -qF "background full run: PASS (reused from run " "$DAEDALUS_HOME/vault/evidence/promotions.log"
+}
+
+@test "quick promote whose background full suite FAILS: the push stands, background.json and the ledger say FAIL with the run, the scratch goes, and doctor says MISSING naming the trunk and the merge" {
+  counting_gates; work_on_02
+  sed -i '' "s|^  - echo ran >> $RAN|  - echo ran >> $RAN \&\& test ! -e $BATS_TEST_TMPDIR/boom|" "$DAEDALUS_HOME/config.yaml"
+  grep -q 'boom' "$DAEDALUS_HOME/config.yaml"
+  touch "$BATS_TEST_TMPDIR/boom"
+  tx "$TXP" operator "push it, no suite" "$(now)" >/dev/null
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --quick
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  pid="$(pj promote_id)"; m="$(pj merge_sha)"; [ "$(origin_main)" = "$m" ]
+  [ "$(wait_bg "$pid")" = FAIL ]; brid="$(bg_json "$pid" run_id)"; [ "$(rj "$brid" result)" = FAIL ]
+  [ "$(ran)" = 1 ]; ! scratch_listed "$pid"
+  grep -qF "background full run: FAIL" "$DAEDALUS_HOME/vault/evidence/promotions.log"
+  run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
+  case "$output" in *"MISSING  promote: window 02's quick promote $pid FAILED its full suite in the background (run $brid"*"main carries merge ${m:0:7}; fix forward in a window and promote again"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "--clean and the leftover-scratch doctor line keep a promotion whose background full run is alive, and remove it once its process is gone (doctor then says the run was recorded as running but its process is gone)" {
+  counting_gates; work_on_02
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  pid="$(pj promote_id)"; scratch_listed "$pid"
+  sleep 300 & SL=$!; printf '%s\n' "$SL" >> "$BATS_TEST_TMPDIR/live-pids"
+  python3 - "$DAEDALUS_HOME/state/promote/$pid" "$SL" <<'PY'
+import json, sys
+d, pid = sys.argv[1], int(sys.argv[2])
+json.dump({"at": "2026-01-01T00:00:00", "merge_sha": "x"}, open(d + "/pushed", "w"))
+json.dump({"state": "running", "pid": pid, "started": "2026-01-01T00:00:00", "run_id": None}, open(d + "/background.json", "w"))
+PY
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ]
+  [ "$output" = "Kept $pid: its background full run is still running." ] || { echo "$output"; return 1; }
+  scratch_listed "$pid"
+  run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
+  case "$output" in *"NOTE     promote: window 02's quick promote $pid — the full suite is running in the background (started 00:00)"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"promote scratch:"*) echo "a leftover note for a live background run: $output"; return 1 ;; *) : ;; esac
+  kill "$SL" 2>/dev/null; wait "$SL" 2>/dev/null || true
+  run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
+  case "$output" in *"NOTE     promote: window 02's quick promote $pid — the full suite was recorded as running in the background (started 00:00) but its process is gone; run \`core/gates.sh\` on main yourself, then \`core/promote.sh 02 --clean\`"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"NOTE     promote scratch: 1 pushed promotion still holds scratch ($pid)"*) : ;; *) echo "$output"; return 1 ;; esac
+  run as_prime bash "$PROMOTE" 02 --clean; [ "$status" -eq 0 ]
+  case "$output" in *"Removed the promote scratch of window 02 ($pid)"*) : ;; *) echo "$output"; return 1 ;; esac
+  ! scratch_listed "$pid"
+}
+
+@test "promote.commits_must_be_on (v0.12.9): a branch origin lacks is refused naming the config; a window with a commit not on that branch is refused before any scratch is cut, naming the commit and the push to make; once lease/02 is on the branch the prepare goes" {
+  work_on_02
+  printf 'promote:\n  commits_must_be_on: next\n' >> "$DAEDALUS_HOME/config.yaml"
+  run as_prime bash "$PROMOTE" 02; refused "config promote.commits_must_be_on names next, but origin has no such branch"
+  git -C "$W2" push -q origin "lease/02~1:refs/heads/next"
+  run as_prime bash "$PROMOTE" 02
+  refused "Window 02 has one commit not yet on origin/next (config promote.commits_must_be_on): \"$(git -C "$W2" log -1 --format=%h) test: error field fallback\". Push the window's branch to next first — the deployment checks its changes there — then run promote again."
+  [ -z "$(ls "$DAEDALUS_HOME/state/promote" 2>/dev/null)" ]
+  git -C "$W2" push -q origin lease/02:refs/heads/next
+  run --separate-stderr as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  [ "${lines[0]}" = "Ready to promote window 02's work onto main." ]
+}
