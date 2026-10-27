@@ -4,6 +4,90 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.9 — quick promote, the full suite in the background, and the AMI's suite question acting
+
+**In short.** One tiny change no longer costs two full test runs. The
+operator can say "push it, skip the full run" and promote does: targeted
+tests or nothing, no reviewer, pushed in one call, the full suite running
+in the background afterwards. And the AMI's suite question — "would a
+targeted run do?" — may now act when the deployment names it, denying a
+full run once and naming the targeted command instead.
+
+**What went wrong.** On one deployment the full gate suite, eleven to
+thirteen minutes, ran eighteen times in a day. Several runs were for
+changes no full run could inform; the last was a two-line wording change
+right after a full PASS on the same tree. Promote re-ran the suite on every
+merge, and the AMI, which would have shortened most of those runs, was
+allowed only to watch. Moving a trunk to the exact tree already checked on
+a staging branch still cost a full run, so the operator pushed by hand, and
+nothing recorded it.
+
+**What changed.**
+
+- `core/promote.sh <NN> --quick [--reason "…"]` prepares, confirms and
+  pushes in one call, at the operator's words (any wording, typed since the
+  window's last promote; a window can never start it). It runs the
+  deployment's new `gates_quick` command over the test files the window's
+  commits add or change, or nothing when there is no such command or file,
+  and no reviewer. A promote-grade PASS already on record for the merged
+  tree still wins, as an ordinary promote by reuse. The quick run's record is
+  never reused by anything.
+- After the push the full suite runs in the background on the pushed
+  scratch. Its result is in `background.json` under the promotion, on the
+  ledger (`vault/evidence/promotions.log`, "background full run: PASS"), and
+  in doctor: a NOTE while it runs, OK when it passed, MISSING when it failed.
+  `--clean` keeps a scratch whose background run is alive.
+- `promote.commits_must_be_on: <branch>` (optional) makes promote refuse a
+  window with a commit origin's branch lacks, naming the commits, for a
+  deployment whose changes go to a staging branch first.
+- The AMI's suite question is certified. Named under `ami.enforce`, a
+  full-suite run it judges unnecessary for the files edited since the last
+  full run is denied once; the reason names the targeted command (an edited
+  test file is itself; an edited source file is the test files named after
+  it). The same command re-issued unchanged goes through. A file nothing
+  matches, more than eight files, or no edits is never a deny. The evidence
+  run, `core/gates.sh`, is never gated, and promote's own gates still run.
+  `frame-jack status` says "enforce mode" and counts what was shortened and
+  re-issued; doctor says what acting means. The destructive question is not
+  certified.
+- The certification is the operator's decision on seven days of one
+  deployment's shadow log — 36 runs the AMI would have shortened all passed,
+  none then failed, and the week's two failures were on runs it said needed
+  the full suite — not the lab bar the design fixed. With 0 misses in 36 the
+  unsafe rate is bounded near 8 %, above the 5 % the bar asked. It is said
+  here so the next measurement is judged against the bar, not this release.
+- A window's gate run on a committed tree runs in a fresh copy of that
+  commit and is what promote reuses; promote reuses only such runs, and a
+  review only as its own gate run's. A failed gate with a rerun command
+  re-runs its failures once. (Built on the branch this release ships from;
+  described in full under "Promote" in README.)
+
+**What you will see.** From `--quick`: "Tests on the merged result: quick
+promote — the one test file the window changed ran and passed (…); the full
+suite has not run on this commit yet." then "Pushing now at the operator's
+word." and, after the push, "The full suite is now running in the background
+on merge commit …; core/doctor.sh says PASS or FAIL when it finishes." From a
+denied test run: "The AMI judges a targeted run sufficient for the files
+edited since the last run (…): run those first — bats …. Re-issue the full
+run unchanged to run it anyway; the evidence run (core/gates.sh) is never
+gated."
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. Then, to let the AMI act, add `suite` under `ami.enforce` in
+`config.yaml` and say `/frame-jack off` then `/frame-jack on`; to let quick
+promotes run targeted tests, add a `gates_quick:` line (config.example.yaml
+shows both). Neither is on until you add it.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.9`.
+`core/promote.sh 02 --quick` is accepted (refused only for the operator's
+missing words), and with `suite` under `ami.enforce` doctor prints "OK
+frame-jack enforce: the suite question acts".
+
+**Not in this release.** Targeted test rounds between review rounds (the
+design's option D2): a window still runs the suite it chooses. The AMI's
+destructive question stays in shadow. Any rule about a staging branch beyond
+`commits_must_be_on`: a deployment's own step reads the background result.
+
 ## v0.12.8 — a window's criteria file reaches its branch review
 
 **In short.** A window that names its acceptance criteria with

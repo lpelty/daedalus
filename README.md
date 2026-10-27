@@ -751,6 +751,30 @@ words are checked like a yes and recorded beside the verdict it sets aside
 (`vault/evidence/promotions.log` names the overridden review). Gates are
 never skipped. `core/promote.sh 02 --clean` removes a window's scratch trees.
 
+**Quick promote (v0.12.9).** One tiny change, one window, and the operator
+says, in any words, that it is tiny and should go without the full suite:
+`core/promote.sh 02 --quick [--reason "<a few of their words>"]` prepares,
+confirms and pushes in one call. Their words are read the way `--skip-review`
+reads them (typed since the window's last promote; a window can never start
+it) and recorded as both the reason and the yes. What runs instead of the
+gates: the deployment's `gates_quick` command (config.yaml, `{files}` standing
+for the test files the window's commits add or change), or nothing when there
+is no such command or no such file — the block says which. No reviewer. A
+promote-grade PASS already on record for the merged tree still wins: then it
+is an ordinary promote by reuse. The record carries `quick` and is never
+reused by anything. After the push the full suite runs in the background on
+the pushed scratch (`--background-run`, detached): `background.json` under the
+promotion says running, then PASS, FAIL or INVALID with the run id; the ledger
+gets a `background full run` line; doctor says NOTE while it runs, OK when it
+passed, MISSING when it failed (trunk carries the merge; fix forward in a
+window). `--clean` keeps a scratch whose background run is alive.
+
+**`promote.commits_must_be_on` (v0.12.9, optional).** A deployment whose
+changes go to a staging branch first and are checked there names it here;
+promote then refuses a window with a commit origin's branch lacks, before any
+scratch is cut, naming the commits and the push to make. Nothing else in
+Daedalus reads the branch.
+
 **The pre-push hook.** `core/prepush.py` installs a pre-push hook in each
 target repo's shared `.git/hooks/` (lease allocation, `core/sync-target.sh`
 and so `core/setup.sh`, and promote itself; `core.hooksPath` is never
@@ -1518,9 +1542,8 @@ once per session.
 Shadow mode asks the question, writes the answer, its confidence and its
 latency to `state/ami/decisions.jsonl`, and acts on nothing. The real
 outcome of the command is written beside it. The AMI never grants a call,
-never replaces a deny, never asks you, and never shortens a test run in
-this release. Acting (enforce mode) was offered only if the AMI met a bar
-fixed before it was measured:
+never replaces a deny, and never asks you. Acting (enforce mode) was offered
+only if the AMI met a bar fixed before it was measured:
 
 | Question | Bar | Measured (in-sample, MPS) |
 |---|---|---|
@@ -1528,9 +1551,33 @@ fixed before it was measured:
 | Would a targeted run do | accuracy ≥ 0.85, "targeted" when full was needed ≤ 0.05 | 0.78 / 0.068 |
 | Latency | median ≤ 400 ms per question | 245 ms on MPS, 60 ms on MLX |
 
-Neither question met its bar, so both ship in shadow mode only. Naming a
-question under `ami.enforce` is a doctor MISSING, and the question stays in
-shadow mode. The shadow log is what the next measurement is built from.
+Neither question met its bar in the lab, so both shipped in shadow mode.
+**Since v0.12.9 the suite question is certified**, by the operator's
+decision, on seven days of one deployment's shadow log: 36 runs the AMI
+would have shortened all passed, none of them then failed, and both
+failures of that week were on runs it said needed the full suite. That is
+still under the lab bar (0 of 36 bounds the unsafe rate near 8 %, not 5 %),
+so it is said here rather than claimed met; the blast radius is bounded, as
+below. The destructive question is not certified: naming it under
+`ami.enforce` is a doctor MISSING, and it stays in shadow mode.
+
+### Turning the suite question on
+
+Add `suite` under `ami.enforce` in `config.yaml` (`enforce:` then
+`  - suite`), then `/frame-jack off` and `/frame-jack on` so the daemon
+copies it. From then on a full-suite run (`bats core/tests`, `pytest` over a
+directory) that the AMI judges unnecessary for the files edited since the
+last full run is **denied once**, with the reason naming the targeted
+command — "run those first — bats core/tests/test_lease.bats. Re-issue the
+full run unchanged to run it anyway". The same command re-issued on the same
+edits goes through, and its row says `overridden`. The targeted set is
+derived: an edited test file is itself; an edited source file is the test
+files whose name, less `test_`/`_test`, is its stem; a file nothing matches,
+more than eight files, or no edits makes the full run go with no deny. The
+evidence run (`core/gates.sh`) is never gated, promote's gates still run,
+and `frame-jack status` says "enforce mode" and counts what was shortened
+and re-issued. To return to shadow: remove `suite` from `ami.enforce`, or
+`/frame-jack off`.
 
 Numbers. Concurrent questions: two at once crashed the MPS daemon (a Metal
 assertion), while MLX queued four callers at a 149 ms p99. The client

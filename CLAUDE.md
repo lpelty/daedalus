@@ -635,14 +635,15 @@ candidates to the operator as rows to file. Promote's review is one fresh
 reviewer that is told none of this.
 
 The AMI (the small local decision model behind `/frame-jack`) may be on.
-In this release it is a logged opinion and changes nothing you do: before a
-full suite run it answers "would a targeted run do?" (and, only where the
-operator set `ami.ask_destructive: true`, "is this destructive?" before a
-Bash call), and it only writes the answer down. It never
-asks the operator, never shortens a run, and never touches `core/gates.sh` —
-what the evidence run runs is gates.sh's decision alone (in full, unless that
-exact tree already passed, or a gate re-runs only its failures: see above).
-Run the suite as you would without it.
+Before a full suite run it answers "would a targeted run do?" (and, only
+where the operator set `ami.ask_destructive: true`, "is this destructive?"
+before a Bash call) and writes the answer down. Where the operator has named
+`suite` under `ami.enforce` (v0.12.9), that one answer can act: a full-suite
+run it judges unnecessary is denied once, with the targeted command to run
+instead — see "Promote" below for what to do. It never asks the operator,
+never grants a call, and never touches `core/gates.sh` — what the evidence
+run runs is gates.sh's decision alone (in full, unless that exact tree
+already passed, or a gate re-runs only its failures: see above).
 `state/ami/` is the AMI's record and is not yours to write: the guard denies
 writes and removals there, and `/frame-jack off` is the switch, only on the
 operator's word.
@@ -753,6 +754,26 @@ recorded as the reason beside the verdict it sets aside, checked the same
 way as the confirm. `--skip-review` runs no reviewer; the gates run only if
 that merged tree has not already passed them, so after a prepare on the same
 merge nothing re-runs.
+
+When the operator says, in any words, that a change is tiny and should go
+without the full suite ("skip the tests, push it", "this is a two-line
+wording change — promote it without the suite"), run `core/promote.sh 02
+--quick --reason "<a few of their words>"`: one call prepares, confirms and
+pushes. It runs the deployment's `gates_quick` command over the test files
+the window changed, or nothing, and no reviewer; the block says which, and
+that the full suite has not run yet. The full suite then runs in the
+background on what was pushed; its result reaches doctor and the ledger,
+never your turn — do not wait for it, and do not run the suite yourself on
+trunk. Never start a quick promote on your own judgment: with no such words
+from the operator it is refused, and a window cannot run it at all. If
+doctor later says the background suite FAILED, tell the operator and fix
+forward in a window.
+
+When a full-suite test run you issue comes back denied with "The AMI judges
+a targeted run sufficient … run those first — <command>", run that command.
+Re-issue the full run unchanged only when the targeted run fails, when the
+operator asks for the full suite, or when you changed something the targeted
+set cannot cover; the evidence run (`core/gates.sh`) is never denied.
 
 If promote says a gate could not run (exit 127, "command not found"), that
 is not a merge problem: the scratch holds tracked files only. Say so: the
