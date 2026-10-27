@@ -126,16 +126,23 @@ function amiText(a, nowMs) {
       // a question switched off (board-json's `questions`) reads as off, never as a zero count that looks
       // measured; an older board-json without the key keeps the counts
       const q = a.questions && typeof a.questions === 'object' ? a.questions : {}
+      // v0.12.10: the mode is board-json's word, never a literal — the band said "shadow" with the suite question
+      // acting (a deployment reported it, 2026-10-27). In enforce the suite meter is what the deny-once did (runs
+      // shortened, re-issued), not what it would have done; the only certified question is the suite one.
+      const enforce = a.mode === 'enforce'
+      const suiteOff = q.suite === false && count(a.would_shorten) === 0 && count(a.shortened) === 0
       const parts = [
         'AMI on',
-        'shadow (logs, never acts)',
+        enforce ? 'enforce (suite question acts)' : 'shadow (logs, never acts)',
         count(a.asked) + ' asked',
         q.destructive === false && count(a.would_ask) === 0
           ? 'destructive question off'
           : 'would have asked you ' + count(a.would_ask) + (count(a.would_ask) === 1 ? ' time' : ' times'),
-        q.suite === false && count(a.would_shorten) === 0
+        suiteOff
           ? 'suite question off'
-          : 'would have shortened ' + count(a.would_shorten),
+          : enforce
+            ? 'shortened ' + count(a.shortened) + (count(a.reissued) > 0 ? ', ' + count(a.reissued) + ' re-issued' : '')
+            : 'would have shortened ' + count(a.would_shorten),
       ]
       if (typeof a.median_ms === 'number') parts.push(a.median_ms + ' ms')
       if (count(a.overrides) > 0) parts.push(a.overrides + ' overruled')

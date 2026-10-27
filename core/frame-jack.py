@@ -865,7 +865,13 @@ def cmd_status(root):
         else:
             out.append("latency this session: no answers yet")
         asks, ov = int(c.get("asks") or 0), int(c.get("overrides") or 0)
-        if not asks:
+        if not asks and any(q in amilib.CERTIFIED for q in amilib.enforce_requested(root)):
+            # v0.12.10: under an enforce header the line said "shadow mode" (a deployment reported it, 2026-10-27); the one
+            # certified question denies once and never asks, so there is nothing to overrule
+            out.append("overrides: none — the suite question denies once rather than asking, so nothing is overruled; "
+                       "its re-issued runs are counted on the shortened line above (an ask the operator approves would "
+                       "count here, inferred from the outcome rows)")
+        elif not asks:
             out.append("overrides: none — shadow mode asks nothing; when a question is certified to act, an ask the "
                        "operator then approves counts here (inferred from the outcome rows)")
         else:

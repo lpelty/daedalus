@@ -609,6 +609,9 @@ PY
   has "$output" "frame-jack: on since 09:12 (this session, by the operator), enforce mode — the suite question acts: a full-suite run the AMI judges unnecessary is denied once, naming the targeted command; re-issued unchanged, it runs"
   has "$output" "  would have shortened 2 of the 6 suite runs — 0 of those then failed"
   has "$output" "  shortened 3 full runs this session (denied once, the targeted command named); 1 re-issued and ran in full"
+  # v0.12.10: the overrides line no longer says "shadow mode" under an enforce header (a deployment reported it 2026-10-27)
+  lacks "$output" "shadow mode"
+  has "$output" "overrides: none — the suite question denies once rather than asking, so nothing is overruled; its re-issued runs are counted on the shortened line above (an ask the operator approves would count here, inferred from the outcome rows)"
   python3 - "$AMI" <<'PY'
 import json, sys
 ami = sys.argv[1]

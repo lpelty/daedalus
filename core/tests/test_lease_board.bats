@@ -377,7 +377,7 @@ set_lease() {  # set_lease <NN> <python dict literal> — merge fields into a le
 # --- board-json: the ami key (frame-jack spec §9.1) ---------------------------------------------------------------
 # One more top-level key, always present with every sub-key: the switch's word and this session's counts. Read from
 # state/ami/ only — the sentinel, daemon.json, the counters file and one bounded port probe; no config, no bash, no git.
-AMI_KEYS='["asked", "asks", "device", "median_ms", "mode", "overrides", "port_alive", "questions", "retry_epoch", "since_epoch", "state", "unanswered", "would_ask", "would_shorten"]'
+AMI_KEYS='["asked", "asks", "device", "median_ms", "mode", "overrides", "port_alive", "questions", "reissued", "retry_epoch", "shortened", "since_epoch", "state", "unanswered", "would_ask", "would_shorten"]'
 # ami_state_files <sid> <port> <daemon state> [heartbeat age s] — the sentinel, a daemon.json naming an executable
 # command, and a counters file for <sid> (6 asked, 2 would ask, 1 would shorten, 1 unanswered, 3 overruled)
 ami_state_files() {
@@ -388,7 +388,8 @@ now = time.time()
 json.dump({"command": sys.argv[2], "port": int(sys.argv[3]), "device": "mps", "state": sys.argv[4], "terminal": False,
            "since": now - 12, "heartbeat": now - float(sys.argv[5])}, open(sys.argv[1] + "/daemon.json", "w"))
 json.dump({"asked": {"destructive": 5, "suite": 1}, "would_ask": 2, "would_shorten": 1, "unanswered": {"down": 1},
-           "latency_recent": [100, 180, 140], "asks": 0, "overrides": 3}, open(sys.argv[1] + "/session-" + sys.argv[6] + ".json", "w"))' \
+           "latency_recent": [100, 180, 140], "asks": 0, "overrides": 3, "shortened": 3, "reissued": 1},
+          open(sys.argv[1] + "/session-" + sys.argv[6] + ".json", "w"))' \
     "$A" "$BATS_TEST_DIRNAME/fixtures/ami/fake-decider" "$2" "$3" "${4:-1}" "$1"
 }
 
@@ -410,6 +411,7 @@ json.dump({"asked": {"destructive": 5, "suite": 1}, "would_ask": 2, "would_short
   bj_check 'o["ami"]["state"] == "on" and o["ami"]["port_alive"] is True and o["ami"]["mode"] == "shadow" and o["ami"]["device"] == "mps"'
   bj_check 'o["ami"]["asked"] == 6 and o["ami"]["would_ask"] == 2 and o["ami"]["would_shorten"] == 1 and o["ami"]["unanswered"] == 1'
   bj_check 'o["ami"]["median_ms"] == 140 and o["ami"]["asks"] == 0 and o["ami"]["overrides"] == 3 and o["ami"]["retry_epoch"] is None'
+  bj_check 'o["ami"]["shortened"] == 3 and o["ami"]["reissued"] == 1'
   bj_check 'isinstance(o["ami"]["since_epoch"], float) and o["ami"]["since_epoch"] > 1.7e9'
   bj_check 'o["ami"]["questions"] == {"destructive": False, "suite": True}'       # the record's, defaults for keys it lacks
   run --separate-stderr BJ --session sNobody; [ "$status" -eq 0 ]      # no counters file for this session: counts null
@@ -426,6 +428,25 @@ json.dump({"asked": {"destructive": 5, "suite": 1}, "would_ask": 2, "would_short
   run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; echo "$stderr"; return 1; }
   bj_check "sorted(o['ami']) == $AMI_KEYS and o['ami']['asked'] is None and o['ami']['overrides'] is None"
   bj_check '[w["nn"] for w in o["windows"]] == ["01"]'
+}
+
+@test "board-json (v0.12.10): ami.mode says enforce when daemon.json's enforce names a certified question (suite), shadow otherwise — an uncertified name alone stays shadow; the counts are the same either way (the band was hardcoded to shadow; a deployment reported it 2026-10-27)" {
+  LS create >/dev/null; bind_live 01 sA
+  AMI_FIX="$BATS_TEST_TMPDIR/fix/ami"; mkdir -p "$AMI_FIX"
+  cp "$BATS_TEST_DIRNAME/fixtures/ami/fake-decider" "$AMI_FIX/"; chmod +x "$AMI_FIX/fake-decider"
+  start_fake StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+  ami_state_files sA "$FAKE_PORT" up
+  set_enforce() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["enforce"]=json.loads(sys.argv[2]); json.dump(d, open(p,"w"))' "$DAEDALUS_HOME/state/ami/daemon.json" "$1"; }
+  set_enforce '["suite"]'
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  bj_check 'o["ami"]["mode"] == "enforce" and o["ami"]["shortened"] == 3 and o["ami"]["reissued"] == 1'
+  bj_check "sorted(o['ami']) == $AMI_KEYS"
+  set_enforce '["destructive"]'
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check 'o["ami"]["mode"] == "shadow"'
+  set_enforce '[]'
+  run --separate-stderr BJ --session sA; [ "$status" -eq 0 ]
+  bj_check 'o["ami"]["mode"] == "shadow"'
 }
 
 @test "board-json: the ami key falls back to absent with every sub-key null when amilib cannot be loaded — the band never goes blank over the AMI" {

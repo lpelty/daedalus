@@ -46,6 +46,7 @@ git, no question asked of the model.
 AMI on · shadow (logs, never acts) · 6 asked · destructive question off · would have shortened 2 · 171 ms
 AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms
 AMI on · shadow (logs, never acts) · 212 asked · would have asked you 7 times · would have shortened 2 · 171 ms · 3 overruled
+AMI on · enforce (suite question acts) · 212 asked · would have asked you 7 times · shortened 3, 1 re-issued · 171 ms
 AMI off
 AMI on but the daemon is down — /frame-jack on
 AMI on but its supervisor is gone — /frame-jack off, then on
@@ -84,8 +85,14 @@ n = lambda k: a.get(k) or 0
 if s == "on":
     q = a.get("questions") or {}
     wa = "destructive question off" if q.get("destructive") is False and not n("would_ask") else "would have asked you %d times" % n("would_ask")
-    ws = "suite question off" if q.get("suite") is False and not n("would_shorten") else "would have shortened %d" % n("would_shorten")
-    line = "AMI on · shadow (logs, never acts) · %d asked · %s · %s" % (n("asked"), wa, ws)
+    enforce = a.get("mode") == "enforce"          # v0.12.10: the word is board-json's, never a constant
+    if q.get("suite") is False and not n("would_shorten") and not n("shortened"):
+        ws = "suite question off"
+    elif enforce:
+        ws = "shortened %d" % n("shortened") + (", %d re-issued" % n("reissued") if n("reissued") else "")
+    else:
+        ws = "would have shortened %d" % n("would_shorten")
+    line = "AMI on · %s · %d asked · %s · %s" % ("enforce (suite question acts)" if enforce else "shadow (logs, never acts)", n("asked"), wa, ws)
     line += " · %d ms" % a["median_ms"] if a.get("median_ms") is not None else ""
     line += " · %d overruled" % n("overrides") if n("overrides") else ""
     print(line)

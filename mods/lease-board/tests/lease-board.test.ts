@@ -515,6 +515,23 @@ test('the AMI line when on: the counts in words, plain colour, after the window 
   expect(await ui.find({ type: 'Text', text: AMI_ON + ' · 3 overruled' })).toBeDefined()
 })
 
+test('the AMI line in enforce mode (v0.12.10): the mode word is read from board-json, never hardcoded — enforce says the suite question acts and shows the runs actually shortened and re-issued instead of "would have shortened"; suite off with nothing shortened still reads off; a board-json without mode reads as shadow', async ($, on) => {
+  let ami: Record<string, unknown> = { mode: 'enforce', shortened: 3, reissued: 1 }
+  const { clock } = stubs(on, () => ok(withAmi(ami)), { type: 'Box', props: {}, children: [] })
+  await start($)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'AMI on · enforce (suite question acts) · 212 asked · would have asked you 7 times · shortened 3, 1 re-issued · 171 ms' })).toBeDefined()
+  ami = { mode: 'enforce', shortened: 0, reissued: 0 }
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: 'AMI on · enforce (suite question acts) · 212 asked · would have asked you 7 times · shortened 0 · 171 ms' })).toBeDefined()
+  ami = { mode: 'enforce', shortened: 0, reissued: 0, questions: { destructive: true, suite: false }, would_shorten: 0 }
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: 'AMI on · enforce (suite question acts) · 212 asked · would have asked you 7 times · suite question off · 171 ms' })).toBeDefined()
+  ami = { mode: undefined }
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: AMI_ON })).toBeDefined()
+})
+
 test('a question switched off reads as off on the AMI line, never as a zero count: destructive off with no would-ask says "destructive question off"; suite off with nothing shortened says "suite question off"; an older board-json without questions keeps the counts', async ($, on) => {
   let ami: Record<string, unknown> = { questions: { destructive: false, suite: true }, would_ask: 0 }
   const { clock } = stubs(on, () => ok(withAmi(ami)), { type: 'Box', props: {}, children: [] })
