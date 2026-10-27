@@ -674,7 +674,29 @@ tree, runs the gates (`core/gates.sh --no-refute --promote <id>`) and the
 fresh-context reviewer (`core/refute.sh --mode promote`) on exactly that
 merge, and prints two paragraphs: the decision, in plain words, and the
 record (merge commit, trunk, evidence run, review, fingerprint, promotion
-id). Nothing is pushed. `core/promote.sh 02 --confirm` then re-derives every
+id). Nothing is pushed.
+
+What already passed is not repeated (v0.12.8). When the merged tree is
+byte-identical to a tree that already passed its gates in a clean copy of a
+commit or in a promote scratch, under this `config.yaml` — trunk had not
+moved and the window ran its gates after its last commit — the promotion's
+gate run is PASS by reuse and runs nothing (the block says "this exact tree
+already passed them, nothing re-ran"; the record names the run it reused).
+A window's run in a worktree with uncommitted work never counts: it can lean
+on git-ignored files the scratch does not have. When the newest review of
+exactly that tree is the window's own gate run's review — the reviewer on
+under this `config.yaml`, its verdict, reviewer call ids and file recorded in
+that run's run.json by refute.sh — promote launches no reviewer: "Review
+STANDS — window 02's review of this exact tree, not repeated", or, for a
+refuted one, the refutation and your choice, as for any REFUTED. A review
+called and manifested any other way is never reused. `--skip-review` then
+re-runs nothing either. Only a merged tree no such run or review has judged
+gets the gates and a fresh reviewer. The confirm re-derives a reused review
+from its own files as it does a fresh one: the run must still record it as
+its own, the review and each reviewer's receipt must name exactly the
+fingerprint of what will be pushed, and the distribution code that ran it
+must be today's. The environment the window's run inherited is not
+re-checked — nor was it before: promote's own run inherits the session's. `core/promote.sh 02 --confirm` then re-derives every
 piece of evidence from its own file, records the operator's yes, and pushes
 exactly the merge commit the evidence names; the prime's checkout is
 fast-forwarded when it is on trunk and clean, and the window's worktree stays
@@ -728,6 +750,30 @@ operator says to in any words, promote with `--skip-review --reason "…"`: thei
 words are checked like a yes and recorded beside the verdict it sets aside
 (`vault/evidence/promotions.log` names the overridden review). Gates are
 never skipped. `core/promote.sh 02 --clean` removes a window's scratch trees.
+
+**Quick promote (v0.12.9).** One tiny change, one window, and the operator
+says, in any words, that it is tiny and should go without the full suite:
+`core/promote.sh 02 --quick [--reason "<a few of their words>"]` prepares,
+confirms and pushes in one call. Their words are read the way `--skip-review`
+reads them (typed since the window's last promote; a window can never start
+it) and recorded as both the reason and the yes. What runs instead of the
+gates: the deployment's `gates_quick` command (config.yaml, `{files}` standing
+for the test files the window's commits add or change), or nothing when there
+is no such command or no such file — the block says which. No reviewer. A
+promote-grade PASS already on record for the merged tree still wins: then it
+is an ordinary promote by reuse. The record carries `quick` and is never
+reused by anything. After the push the full suite runs in the background on
+the pushed scratch (`--background-run`, detached): `background.json` under the
+promotion says running, then PASS, FAIL or INVALID with the run id; the ledger
+gets a `background full run` line; doctor says NOTE while it runs, OK when it
+passed, MISSING when it failed (trunk carries the merge; fix forward in a
+window). `--clean` keeps a scratch whose background run is alive.
+
+**`promote.commits_must_be_on` (v0.12.9, optional).** A deployment whose
+changes go to a staging branch first and are checked there names it here;
+promote then refuses a window with a commit origin's branch lacks, before any
+scratch is cut, naming the commits and the push to make. Nothing else in
+Daedalus reads the branch.
 
 **The pre-push hook.** `core/prepush.py` installs a pre-push hook in each
 target repo's shared `.git/hooks/` (lease allocation, `core/sync-target.sh`
@@ -992,7 +1038,24 @@ test — a window's worktree or promote's scratch, which holds tracked files
 only — to build what the gates need, such as a virtual environment; a
 setup step that fails, or one whose output git can see, makes the run
 INVALID before any gate, and a gate that exits 127 is reported as unable
-to start rather than as a failing merge. The
+to start rather than as a failing merge. When the tree under test is
+committed — nothing modified or untracked that git sees — the setup steps
+and gates run in a fresh copy of that commit, tracked files only, cut the
+way promote cuts its scratch (`tree: clean-copy` in run.json, with the
+commit); a tree with uncommitted work runs in place (`tree: worktree`). A
+tree that already passed is not tested again (v0.12.8): an earlier run with
+the same tree fingerprint, the same `config.yaml` and the same `core/`, whose
+gates passed, makes the run PASS by reuse — no setup step or gate runs, and
+the record says `reused_from: <run id>`. Never a null fingerprint, a gates
+FAIL, an INVALID or unfinished run, or a run the evidence manifest does not
+list; a clean-copy run or a promotion reuses only a clean-copy or promote
+run, and a worktree run only its own window's. An optional
+`gates_rerun_failed:` list (one command per gate, in order) runs once when its
+gate fails, on the same tree, to re-run only the failures (for pytest,
+`--lf --lfnf=none`); exit 0 makes the gate PASS after a rerun, both logs kept
+and named in the summary. A rerun must cover its whole gate: never with a
+gate that stops at its first failure (`-x`, `--maxfail`), and a compound gate
+(`&&`, `||`, `;`, `|`, beyond one leading `cd <dir> &&`) gets none. The
 `Stop` hook checks any `IMPLEMENTED`/`completion` document changed this
 session against it; the boundary hook blocks edits to Daedalus's own code,
 the gate definition, and the evidence. Everything is snapshotted at session
@@ -1088,7 +1151,10 @@ diff to hunt. The run says how the earlier findings fared:
 
 **Promote's review takes neither.** It is the last gate: one fresh reviewer,
 not told what earlier reviews found — so it cannot inherit their blind spots
-— whose prompt is re-rendered byte for byte at confirm.
+— whose prompt is re-rendered byte for byte at confirm. When the merged tree
+is exactly one the window's own review already judged, that review is
+promote's (v0.12.8), and the confirm checks its receipts' fingerprints
+instead of a re-render.
 
 The diff is assembled per repository: the target checkout against
 `origin/<target.branch>`, then each `target.nested` checkout against its
@@ -1380,7 +1446,8 @@ knows two questions and **only writes its answers down** (shadow mode):
 
 - before a full-suite run during a build: "given the files edited since the
   last run, would a targeted run do?". The evidence run, `core/gates.sh`,
-  is never asked; it always runs in full. Asked by default
+  is never asked; what it runs is its own rule (in full, unless that exact
+  tree already passed or a gate re-runs only its failures). Asked by default
   (`ask_suite: true`).
 - before every Bash call the guard did not deny: "is this command
   destructive or irreversible?". **Off by default** (`ask_destructive:
@@ -1475,9 +1542,8 @@ once per session.
 Shadow mode asks the question, writes the answer, its confidence and its
 latency to `state/ami/decisions.jsonl`, and acts on nothing. The real
 outcome of the command is written beside it. The AMI never grants a call,
-never replaces a deny, never asks you, and never shortens a test run in
-this release. Acting (enforce mode) was offered only if the AMI met a bar
-fixed before it was measured:
+never replaces a deny, and never asks you. Acting (enforce mode) was offered
+only if the AMI met a bar fixed before it was measured:
 
 | Question | Bar | Measured (in-sample, MPS) |
 |---|---|---|
@@ -1485,9 +1551,35 @@ fixed before it was measured:
 | Would a targeted run do | accuracy ≥ 0.85, "targeted" when full was needed ≤ 0.05 | 0.78 / 0.068 |
 | Latency | median ≤ 400 ms per question | 245 ms on MPS, 60 ms on MLX |
 
-Neither question met its bar, so both ship in shadow mode only. Naming a
-question under `ami.enforce` is a doctor MISSING, and the question stays in
-shadow mode. The shadow log is what the next measurement is built from.
+Neither question met its bar in the lab, so both shipped in shadow mode.
+**Since v0.12.9 the suite question is certified**, by the operator's
+decision, on seven days of one deployment's shadow log: 36 runs the AMI
+would have shortened all passed, none of them then failed, and both
+failures of that week were on runs it said needed the full suite. That is
+still under the lab bar (0 of 36 bounds the unsafe rate near 8 %, not 5 %),
+so it is said here rather than claimed met; the blast radius is bounded, as
+below. The destructive question is not certified: naming it under
+`ami.enforce` is a doctor MISSING, and it stays in shadow mode.
+
+### Turning the suite question on
+
+Add `suite` under `ami.enforce` in `config.yaml` (`enforce:` then
+`  - suite`), then `/frame-jack off` and `/frame-jack on` so the daemon
+copies it. From then on a full-suite run (`bats core/tests`, `pytest` over a
+directory) that the AMI judges unnecessary for the files edited since the
+last full run is **denied once**, with the reason naming the targeted
+command — "run those first — bats core/tests/test_lease.bats. Re-issue the
+full run unchanged to run it anyway". The same command re-issued on the same
+edits goes through, and its row says `overridden`. The targeted set is
+derived: an edited test file is itself; an edited source file is the test
+files whose name, less `test_`/`_test`, is its stem; a file nothing matches,
+more than three files, a mix of bats and pytest files, or no edits makes the
+full run go with no deny. Another checkout inside the tree (`target/`, a
+lease worktree) is never searched. The
+evidence run (`core/gates.sh`) is never gated, promote's gates still run,
+and `frame-jack status` says "enforce mode" and counts what was shortened
+and re-issued. To return to shadow: remove `suite` from `ami.enforce`, or
+`/frame-jack off`.
 
 Numbers. Concurrent questions: two at once crashed the MPS daemon (a Metal
 assertion), while MLX queued four callers at a 149 ms p99. The client

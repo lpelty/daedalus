@@ -69,6 +69,8 @@ def unverified(root: Path, marker: dict) -> list:
             out.append("%s: evidence-run %s not found" % (p, rid))
         elif rec.get("result") != "PASS":
             out.append("%s: evidence-run %s is %s" % (p, rid, rec.get("result")))
+        elif rec.get("quick"):
+            out.append("%s: evidence-run %s is a quick promote's run, not the full suite" % (p, rid))
     return out
 
 

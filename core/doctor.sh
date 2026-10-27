@@ -44,6 +44,27 @@ fi
 if [ -n "$(cfg_list gates_setup)" ]; then
   log "OK       config: gates_setup ($(cfg_list gates_setup | wc -l | tr -d ' ') step(s) run before the gates)"
 fi
+# gates_rerun_failed (v0.12.8, spec 2026-10-21 C): a gate with no rerun command re-runs its whole suite after a
+# flaky failure — on 2026-10-21, twice, 11 minutes each, to fail on one test. Optional, so one NOTE naming every
+# such gate, never a problem; a deployment that has given every gate one hears nothing.
+no_rerun="$(
+  n=0
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    n=$((n + 1))
+    [ -n "$(cfg_list gates_rerun_failed | sed -n "${n}p")" ] || printf '%s\n' "$n"
+  done <<EOF
+$(cfg_list gates)
+EOF
+)"
+if [ -n "$no_rerun" ]; then
+  if [ "$(printf '%s\n' "$no_rerun" | wc -l | tr -d ' ')" -eq 1 ]; then
+    which_gates="gate $no_rerun has"
+  else
+    which_gates="gates $(printf '%s\n' "$no_rerun" | paste -sd, - | sed 's/,/, /g') have"
+  fi
+  log "NOTE     config: gates_rerun_failed: $which_gates no rerun command, so a flaky failure re-runs the whole gate — a command that re-runs only the failures (pytest: --lf --lfnf=none) turns it into one quick rerun (config.example.yaml)"
+fi
 
 # target_path() dies (hard exit) if target.repo is unset. Only call it once
 # we've confirmed the key is actually present above — otherwise it would

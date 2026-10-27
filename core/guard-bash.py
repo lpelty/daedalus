@@ -3136,6 +3136,12 @@ def main() -> int:
     if reason:
         deny(reason)
         return 0
+    if ami_out and ami_out.get("emit"):
+        # v0.12.9, frame-jack §6.2 enforce: the AMI's deny-once for a full-suite run it judges unnecessary, naming
+        # the targeted command. The only decision the tier may emit on its own; `allow` is never written. The
+        # guard's own warnings for this call go unsaid: the command is not running.
+        v.emit(ami_out["emit"])
+        return 0
     # The one emit: the guard's own warning(s) as context with the write (§4.6), the AMI's once sentence beside
     # them and, at the top level, as systemMessage — the operator's copy.
     out: Dict[str, object] = {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}

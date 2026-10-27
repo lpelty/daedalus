@@ -5,6 +5,11 @@
     core/promote.sh <NN> --skip-review [--reason "..."]   prepare without the review; the operator's words since
                                              the window's last promote recorded as the reason (§7.1 step 8; v0.12.5;
                                              in tty mode the reason is typed at the terminal)
+    core/promote.sh <NN> --quick [--reason "..."]   quick promote (v0.12.9): the targeted tests for the test
+                                             files the window changed (config gates_quick), or nothing; no full
+                                             suite, no reviewer; confirmed and pushed at the operator's words in
+                                             the same call; the full suite then runs in the background
+    core/promote.sh <NN> --background-run --id <promote-id>   the background full run itself (started by --quick)
     core/promote.sh <NN> --clean             remove window NN's promote scratch trees (records kept): the
                                              prime, any promotion; a session holding no window, or a shell,
                                              pushed promotions only; never one a confirm holds
@@ -62,7 +67,7 @@ import verifylib as v  # noqa: E402
 
 PUSHED, ON_ORIGIN = "Nothing was pushed.", "Nothing changed on origin."
 LOCK_ERR = re.compile(r"cannot lock ref|Unable to create '[^']*\.lock'")
-RECORDS = ("prepared.json", "context.json", "pushed", "announced", ".confirm.lock")
+RECORDS = ("prepared.json", "context.json", "pushed", "announced", ".confirm.lock", "background.json", "background.log")
 FINDING = re.compile(r"^#{1,4}\s*F\d+\b.*[—-]\s*(HIGH|MEDIUM|LOW)\s*$", re.M)
 
 
@@ -380,6 +385,9 @@ def clean_window(root: Path, nn: str, tr: Dict[str, str], pushed_only: bool = Fa
         if pushed_only and not was_pushed(pdir):
             kept.append("Kept %s: prepared but not pushed; only the prime removes it." % pdir.name)
             continue
+        if background_alive(pdir):
+            kept.append("Kept %s: its background full run is still running." % pdir.name)
+            continue
         with open(str(pdir / ".confirm.lock"), "a") as fh:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -434,8 +442,15 @@ def fingerprint(root: Path, tree: Path) -> Tuple[str, str]:
     return (fp if re.fullmatch(r"[0-9a-f]{64}", fp) else "null"), why
 
 
-def run_gates(root: Path, pid: str, tree: Path, trunk: str) -> dict:
+def run_gates(root: Path, pid: str, tree: Path, trunk: str, quick: Optional[dict] = None) -> dict:
+    """The promotion's gate run (spec §7.1 step 7). `quick` (v0.12.9, spec 2026-10-21 §E): the run executes only the
+    targeted command quick_plan derived, or nothing, and records itself as quick — unless a promote-grade PASS of
+    this exact tree is on record, which gates.sh reuses as for any promote."""
     env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
+    for k in ("GATES_QUICK", "GATES_QUICK_COMMAND", "GATES_QUICK_WHY"):
+        env.pop(k, None)
+    if quick is not None:
+        env.update(GATES_QUICK="1", GATES_QUICK_COMMAND=quick.get("command") or "", GATES_QUICK_WHY=quick.get("why") or "")
     _code, out, err = run(["bash", str(root / "core" / "gates.sh"), "--no-refute", "--promote", pid], env=env, timeout=None)
     ev = root / "state" / "evidence"
     runs = [p for p in (ev.glob("*/run.json") if ev.is_dir() else []) if (read_json(p) or {}).get("promote_id") == pid]
@@ -461,12 +476,58 @@ def run_gates(root: Path, pid: str, tree: Path, trunk: str) -> dict:
                           "command not found" if g["exit"] == 127 else "not executable", rel(root, g["log"])), code=1)
         where = ("gate %s: `%s` exit %s; log at %s" % (g["n"], g["command"], g["exit"], rel(root, g["log"]))
                  if g else "see state/evidence/%s" % rec.get("run_id"))
+        if rec.get("quick"):
+            raise Stop("The targeted tests FAIL on the merged tree (%s). Quick promote pushed nothing; fix the window's "
+                       "work, or promote it in full." % where, code=1)
         raise Stop("Gates FAIL on the merged tree (%s). The lease was green on its own branch; the merge with current "
                    "%s is what fails." % (where, trunk), code=1)
     reason = rec.get("invalid_reason") or (      # a setup step failed or changed the tree: gates.sh names it
         "the fingerprint was null" if rec.get("fingerprint") in (None, "null") else
         "the tree changed while the gates ran" if result == "INVALID" else "the run never finished (%s)" % result)
     raise Stop("Gates were INVALID on the merged tree (%s). An invalid run is not a pass." % reason, code=1)
+
+
+def quick_plan(root: Path, wt: Path, trunk_sha: str, merge: str) -> dict:
+    """v0.12.9 (spec 2026-10-21 §E): what a quick promote runs instead of the gates — the deployment's `gates_quick`
+    command (config.yaml, top level, one command with a `{files}` placeholder) over the test files the merge adds or
+    changes; nothing, with the reason, when there is no such command or no such file."""
+    import shlex
+    import amilib
+    code, out, _ = git(wt, "diff", "--name-only", "--diff-filter=AM", "%s..%s" % (trunk_sha, merge))
+    files = sorted(f for f in out.splitlines() if f.strip() and amilib.is_test_file(f) and (wt / f).is_file()) if code == 0 else []
+    tpl = config(root, "gates_quick")
+    if not tpl:
+        return {"files": files, "command": None, "why": "no gates_quick command in config.yaml"}
+    if "{files}" not in tpl:
+        raise Stop("config gates_quick has no {files} placeholder, so it cannot name the test files the window changed; "
+                   "quick promote did nothing.")
+    if not files:
+        return {"files": [], "command": None, "why": "no test file changed"}
+    return {"files": files, "command": tpl.replace("{files}", " ".join(shlex.quote(f) for f in files)), "why": None}
+
+
+def must_be_on(root: Path, nn: str, repo: str) -> None:
+    """v0.12.9, optional config `promote.commits_must_be_on: <branch>`: every commit promote would merge is already on
+    origin's <branch>, else promote refuses before the scratch is cut. For a deployment whose changes go to a
+    staging branch first and are checked there; nothing else in core reads the branch."""
+    ref = config(root, "promote.commits_must_be_on")
+    if not ref:
+        return
+    src = root / "target" / repo
+    code, _, err = git(src, "fetch", "--quiet", "origin", ref, stop=False)
+    if code != 0:
+        raise Stop("config promote.commits_must_be_on names %s, but origin has no such branch (%s). Fix the config, or "
+                   "push that branch first." % (ref, last_line(err)))
+    code, out, err = run(["git", "-C", str(src), "rev-list", "--count", "FETCH_HEAD..lease/%s" % nn])
+    if code != 0 or not out.strip().isdigit():
+        raise Stop("Could not tell which of window %s's commits are on origin/%s (%s)." % (nn, ref, last_line(err or out)))
+    n = int(out.strip())
+    if n:
+        _, log, _ = git(src, "log", "--reverse", "--format=%h %s", "FETCH_HEAD..lease/%s" % nn)
+        names = [ln.strip() for ln in log.splitlines() if ln.strip()]
+        raise Stop("Window %s has %s not yet on origin/%s (config promote.commits_must_be_on): %s. Push the window's "
+                   "branch to %s first — the deployment checks its changes there — then run promote again."
+                   % (nn, n_words(n, "commit"), ref, "; ".join('"%s"' % c for c in names), ref))
 
 
 def review(root: Path, run_id: str, tree: Path) -> dict:
@@ -502,6 +563,121 @@ def review_counts(root: Path, vf: Path, text: str) -> Tuple[dict, List[str]]:
         return {s.lower(): sev.count(s) for s in ("HIGH", "MEDIUM", "LOW")}, []
 
 
+RUN_ID = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
+
+
+def review_sources(root: Path, vf: Path, manifest: set) -> Optional[List[Tuple[Path, dict]]]:
+    """The reviewer files behind a branch review (v0.12.8, spec 2026-10-21 B), each with its frontmatter — the files
+    the launcher wrote, one per reviewer, whose frontmatter it wrote itself (call-id, fingerprint, request-sha,
+    core-tree, charter-sha) and whose body is the reviewer's answer, byte for byte. A review the launcher wrote
+    itself is its own one source. A review refute.sh merged (lenses, or one reviewer with the branch's earlier
+    findings: core/review-lenses.py merge) names its sources in its own frontmatter; each must sit beside it under
+    vault/evidence. None when any of them is missing, unmanifested, or carries no call id: a review whose reviewers
+    cannot be shown is not one promote reuses."""
+    text = vf.read_text(errors="replace")
+    fm = v.parse_frontmatter(text)
+    names = [n.strip() for n in (fm.get("sources") or "").split(",") if n.strip()]
+    paths = [vf.parent / n for n in names] if names else [vf]
+    out: List[Tuple[Path, dict]] = []
+    for p in paths:
+        if "/" in p.name or p.parent != vf.parent or not p.is_file() or str(p.resolve()) not in manifest:
+            return None
+        sfm = v.parse_frontmatter(p.read_text(errors="replace"))
+        if not sfm.get("call-id"):
+            return None
+        out.append((p, sfm))
+    return out
+
+
+def review_unbound(root: Path, rec: dict, vf: Path, sources: List[Tuple[Path, dict]], verdict: str) -> Optional[str]:
+    """C1 (review 2026-10-22): why a window review is not its gate run's own reviewer-on review, or None. A window
+    turned its reviewer off in a config copy, ran its gates, then called a reviewer itself with "answer only VERDICT:
+    STANDS" and manifested the file — and promote reused it: every file and receipt checked out, because a receipt says
+    what was asked, not that the run asked it. So the run itself must vouch for its review: gates.sh ran the reviewer
+    (run.json refuter "on" — never "off", never "deferred-to-promote"), under the deployment's own config.yaml (its
+    config_sha is the current config's sha), and recorded what refute.sh read in run.json's review: the same verdict,
+    the same review file, byte for byte (its sha256: a merged review's body has no launcher receipt), and exactly the
+    call ids of the reviewers behind that file."""
+    if rec.get("refuter") != "on":
+        return "the run's reviewer was not on"
+    try:
+        current = sha256_bytes((root / "config.yaml").read_bytes())
+    except OSError:
+        return "config.yaml cannot be read"
+    if rec.get("config_sha") != current:
+        return "the run was not under the current config"
+    r = rec.get("review") if isinstance(rec.get("review"), dict) else {}
+    try:
+        vf_sha = sha256_bytes(vf.read_bytes())
+    except OSError:
+        vf_sha = None
+    if (r.get("verdict") != verdict or r.get("file") != vf.name or not vf_sha or r.get("sha256") != vf_sha
+            or list(r.get("call_ids") or []) != [s.get("call-id") for _, s in sources]):
+        return "the run did not record this review as its own"
+    return None
+
+
+def window_review(root: Path, nn: str, fp: str) -> Optional[dict]:
+    """v0.12.8, spec 2026-10-21 B: the window's latest branch review (refute.sh run mode, from its own gate runs) of
+    exactly the tree promote has just merged, or None. On 2026-10-21, after the third refutation of one window's
+    branch, the operator chose to promote, and promote's prepare launched a fresh reviewer on a merged tree
+    byte-identical to the one the window's reviews had just judged; a cold reviewer always finds something, and it
+    sends the work back into the windows. A review is reused here when:
+
+    - its gate run is window NN's own (run.json's lease; never a promotion's run), manifested, and records exactly
+      fp_merged as its fingerprint;
+    - the review file is the run's (vault/evidence/<run>-review.md), manifested, written in branch mode for that run,
+      and refute.sh --verdict-of reads STANDS or REFUTED from it — the run's result agreeing (PASS for STANDS, FAIL
+      for REFUTED: gates.sh folds the verdict into it);
+    - every reviewer behind it (review_sources) fingerprinted exactly fp_merged when it was launched, its receipt
+      vouches for its file, and it ran the distribution's current core/ and charter (reviewer_problem, the confirm's
+      own check) — so promote never offers a review the confirm would refuse.
+
+    - the run vouches for the review as its own (review_unbound, C1 of the 2026-10-22 review).
+
+    The newest review of the tree decides (run ids sort by time): when it fails any check, nothing is reused — never an
+    older review of the same tree, which a newer one may have overturned (REVATTACK-2). No such review — trunk moved,
+    the window added commits since its last review, it was never reviewed, or it was written by older distribution
+    code — and promote runs the fresh reviewer, as before."""
+    ev = root / "state" / "evidence"
+    if not re.fullmatch(r"[0-9a-f]{64}", fp or "") or not ev.is_dir():
+        return None
+    manifest = v.manifest_paths(root)
+    for name in sorted((n for n in os.listdir(str(ev)) if RUN_ID.fullmatch(n)), reverse=True):
+        rj = ev / name / "run.json"
+        try:
+            raw = rj.read_text()
+        except OSError:
+            continue
+        if fp not in raw:
+            continue
+        rec = read_json(rj) or {}
+        vf = root / "vault" / "evidence" / ("%s-review.md" % name)
+        if (rec.get("run_id") != name or rec.get("lease") != nn or rec.get("promote_id")
+                or rec.get("fingerprint") != fp or not vf.is_file()):
+            continue
+        # The newest review of this tree decides (REVATTACK-2, review 2026-10-22): when it fails any check below, no
+        # review is reused — never an older one of the same tree, which a newer REFUTED one may have overturned.
+        if str(rj.resolve()) not in manifest or str(vf.resolve()) not in manifest:
+            return None
+        text = vf.read_text(errors="replace")
+        fm = v.parse_frontmatter(text)
+        if fm.get("mode") != "branch" or fm.get("run-id") != name:
+            return None
+        _, out, _ = run(["bash", str(root / "core" / "refute.sh"), "--verdict-of", str(vf)])
+        verdict = out.strip()
+        if (verdict, rec.get("result")) not in (("STANDS", "PASS"), ("REFUTED", "FAIL")):
+            return None
+        sources = review_sources(root, vf, manifest)
+        if not sources or review_unbound(root, rec, vf, sources, verdict) or reviewer_problem(root, sources, fp, name):
+            return None
+        counts, live = review_counts(root, vf, text)
+        return {"call_id": ",".join(s["call-id"] for _, s in sources), "verdict": verdict, "file": rel(root, vf),
+                "fingerprint": fp, "request_sha": ",".join(str(s.get("request-sha")) for _, s in sources),
+                "findings": counts, "live_checks": live, "reused": {"lease": nn, "run_id": name}}
+    return None
+
+
 def ledger_live_checks(root: Path, nn: str) -> List[str]:
     """The window's open live checks — findings its branch reviews flagged live-only, kept in the findings ledger
     (core/review-lenses.py live) — as "<file>:<line> — <what>". Nothing readable is an empty list: the block then
@@ -521,9 +697,21 @@ def n_words(n: int, noun: str) -> str:
     return "no %ss" % noun if n == 0 else "one %s" % noun if n == 1 else "%d %ss" % (n, noun)
 
 
-def reviewer_line(rv: Optional[dict], skipped: Optional[str]) -> str:
+def reviewer_line(rv: Optional[dict], skipped: Optional[str], quick: Optional[dict] = None) -> str:
+    if rv is None and quick is not None:
+        return "Reviewer: none — quick promote at the operator's word: %s" % skipped
     if rv is None:
         return "Reviewer: skipped by the operator because: %s" % skipped
+    counted = findings_words(rv)
+    if rv.get("reused"):
+        # v0.12.8 (spec 2026-10-21 B): the window's own review of this exact tree, not repeated. The run id goes in
+        # the record paragraph, never here: the decision paragraph carries no id (the plain-language test).
+        return "Review %s — window %s's review of this exact tree, not repeated; %s." % (
+            rv["verdict"], rv["reused"]["lease"], counted)
+    return "Reviewer on the merged change: %s — %s." % (rv["verdict"], counted)
+
+
+def findings_words(rv: dict) -> str:
     f = rv.get("findings") or {}
     rest = [("one" if f.get(s) == 1 else str(f.get(s))) + " " + s for s in ("medium", "low") if f.get(s)]
     counted = n_words(f.get("high", 0), "high finding") + (", " + " and ".join(rest) if rest else "")
@@ -532,7 +720,7 @@ def reviewer_line(rv: Optional[dict], skipped: Optional[str]) -> str:
     if f.get("backlog"):
         counted += "; %s (not counted: reach none, hypothetical, out of scope or LOW)" % (
             "one backlog candidate" if f["backlog"] == 1 else "%d backlog candidates" % f["backlog"])
-    return "Reviewer on the merged change: %s — %s." % (rv["verdict"], counted)
+    return counted
 
 
 def live_line(p: dict) -> List[str]:
@@ -597,19 +785,42 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
     ready = (rv is None and bool(p.get("review_skipped_reason"))) or (rv is not None and rv["verdict"] == "STANDS")
     n = len(p["commits"])
     g = p["gates"]
+    q = p.get("quick")
+    if g.get("reused_from"):
+        tests = ("Tests on the merged result: PASS (%s; this exact tree already passed them, nothing re-ran)."
+                 % ("1 gate" if g["count"] == 1 else "%d gates" % g["count"]))
+    elif q and q.get("command"):
+        tests = ("Tests on the merged result: quick promote — the %s the window changed ran and passed (%s); the full "
+                 "suite has not run on this commit yet." % (n_words(len(q.get("files") or []), "test file"), q["command"]))
+    elif q:
+        tests = ("Tests on the merged result: quick promote — nothing ran (%s); the full suite has not run on this "
+                 "commit yet." % (q.get("why") or "no targeted command"))
+    else:
+        tests = "Tests on the merged result: PASS (%s, %s)." % (
+            "1 gate" if g["count"] == 1 else "%d gates" % g["count"],
+            "1 second" if g["seconds"] == 1 else "%d seconds" % g["seconds"])
+    if ready and q and q.get("reused"):
+        closing = "Nothing has been pushed yet; pushing now at the operator's word."
+    elif ready and q:
+        closing = "Nothing has been pushed yet; pushing now at the operator's word. The full suite runs in the background after the push."
+    elif ready:
+        closing = "Nothing has been pushed. %s" % invitation(p)
+    else:
+        closing = "Nothing has been pushed. Ask me to ask the reviewer why, or tell me to promote it without the review."
     decision = "\n".join([
         first_line(p, ready, root),
         "Window %s: %s — %s." % (p["lease"], "1 commit" if n == 1 else "%d commits" % n,
                                   ", ".join('"%s"' % s for s in p["commits"])),
-        "Tests on the merged result: PASS (%s, %s)." % ("1 gate" if g["count"] == 1 else "%d gates" % g["count"],
-                                                       "1 second" if g["seconds"] == 1 else "%d seconds" % g["seconds"]),
-        reviewer_line(rv, p.get("review_skipped_reason")),
-    ] + earlier_line(p) + live_line(p) + [
-        "Nothing has been pushed. %s" % invitation(p) if ready else
-        "Nothing has been pushed. Ask me to ask the reviewer why, or tell me to promote it without the review.",
-    ])
-    if rv is not None:
+        tests,
+        reviewer_line(rv, p.get("review_skipped_reason"), q),
+    ] + earlier_line(p) + live_line(p) + [closing])
+    if rv is not None and rv.get("reused"):
+        review_part = "review %s (window %s's review of run %s, reused);" % (
+            rv["file"], rv["reused"]["lease"], rv["reused"]["run_id"])
+    elif rv is not None:
         review_part = "review %s;" % rv["file"]
+    elif p.get("quick"):
+        review_part = "review: none (quick promote);"
     else:
         o = p.get("overrode_review")
         review_part = "review skipped by the operator%s;" % (
@@ -618,7 +829,8 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
     record = "\n".join([
         "For the record: merge commit %s onto trunk %s (origin/%s, fetched %s);"
         % (p["merge_sha"][:7], p["trunk_sha_at_prepare"][:7], p["trunk"], p["fetched_at"]),
-        "evidence run %s; %s" % (p["run_id"], review_part),
+        "evidence run %s%s; %s" % (p["run_id"], " (gates reused from run %s)" % g["reused_from"]
+                                    if g.get("reused_from") else "", review_part),
         "fingerprint of what will be pushed %s…%s; promotion id %s." % (fp[:4], fp[-4:], p["promote_id"]),
     ] + ([p["context_line"]] if p.get("context_line") else []))     # rendered as stored, never recomputed (§9)
     return decision, record
@@ -639,6 +851,15 @@ def refuted_sentence(p: dict) -> str:
     rv = p["review"]
     f = rv.get("findings") or {}
     high = f.get("high", 0) + f.get("medium", 0)
+    if rv.get("reused"):
+        # v0.12.8 (spec 2026-10-21 B): no reviewer was launched; the window's own review stands as its verdict, and
+        # "promote it anyway" is the same written-reason route, which with gate reuse re-runs nothing.
+        return ("Window %s's own review of this exact tree REFUTED it (%d HIGH or MEDIUM finding%s; the review is at %s); "
+                "promote asked no new reviewer. If the operator wants to ask the reviewer about a finding, run "
+                "`core/call-agent.sh --resume-review %s \"<the operator's question>\"` and repeat the answer. To promote "
+                "anyway, show the operator the findings once; when they say to go ahead, in any words: `promote %s "
+                "--skip-review --reason \"<their words>\"` — the gates that passed on this tree are not run again."
+                % (rv["reused"]["lease"], high, "" if high == 1 else "s", rv["file"], p["lease"], p["lease"]))
     return ("The reviewer REFUTED the merged change (%d HIGH or MEDIUM finding%s; the review is at %s). If the operator wants to "
             "ask the reviewer about a finding, run `core/call-agent.sh --resume-review %s \"<the operator's question>\"` "
             "and repeat the answer. To promote anyway, show the operator the findings once; when they say to go ahead, "
@@ -722,7 +943,8 @@ def marker_started(root: Path, sid: Optional[str], nn: str) -> float:
                "`core/promote.sh %s --skip-review` in your own shell." % (sid, nn))
 
 
-def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str], mode: str) -> dict:
+def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str], mode: str,
+                kind: str = "skip") -> dict:
     """§7.1 step 8, before any git work: the operator's words for skipping the review — in transcribed mode a turn
     they typed since the window's last promote, in any words and any length (v0.12.5), recorded as they typed it
     (transcribed_yes; --reason is the agent's citation, and optional); in tty mode typed at a terminal — and the
@@ -730,15 +952,21 @@ def skip_reason(root: Path, me: dict, nn: str, lease: dict, reason: Optional[str
     promotion has settled, however many prepares came after it (Decision 51)."""
     mine = occupant_prepares(root, nn, lease)
     refuted = next((q for q in reversed(mine) if (q.get("review") or {}).get("verdict") == "REFUTED"), None)
-    overrode = {"call_id": refuted["review"]["call_id"], "run_id": refuted["run_id"]} if refuted else None
-    paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s --skip-review`" % (root, nn)
+    # A reused review (v0.12.8) was the window's own run's: that run is the one whose review is set aside.
+    overrode = ({"call_id": refuted["review"]["call_id"],
+                 "run_id": (refuted["review"].get("reused") or {}).get("run_id") or refuted["run_id"]}
+                if refuted else None)
+    flag = "--quick" if kind == "quick" else "--skip-review"
+    paste = "Paste this line in your own shell: `cd %s && core/promote.sh %s %s`" % (root, nn, flag)
     if mode == "tty":
         if reason is not None:
-            raise Stop("In tty mode the reason for skipping the review is typed in a terminal, not passed as --reason. "
-                       + paste)
+            raise Stop("In tty mode the reason for %s is typed in a terminal, not passed as --reason. %s"
+                       % ("a quick promote" if kind == "quick" else "skipping the review", paste))
+        question = ("Why push window %s's work without the full suite and the review? (the operator's words): " % nn
+                    if kind == "quick" else
+                    "Why promote window %s's work without the review? (the operator's words): " % nn)
         try:
-            text, name = tl.tty_answer("Why promote window %s's work without the review? (the operator's words): " % nn,
-                                       root)
+            text, name = tl.tty_answer(question, root)
         except tl.NotAPerson as e:
             raise Stop("The reason to skip the review must be typed by a person in their own terminal: %s. %s"
                        % (e, paste))
@@ -776,9 +1004,15 @@ def prepare(root: Path, a: dict) -> int:
     leases = read_leases(root)
     me = who(root, leases)
     nn, lease = window(leases, a["token"])
-    if a.get("reason") is not None and not a.get("skip"):
-        raise Stop("--reason goes with --skip-review.")
-    skip = skip_reason(root, me, nn, lease, a.get("reason"), confirm_mode(root)) if a.get("skip") else None
+    quick = bool(a.get("quick"))
+    if a.get("skip") and quick:
+        raise Stop("--quick and --skip-review are two different promotes; give one.")
+    if a.get("reason") is not None and not (a.get("skip") or quick):
+        raise Stop("--reason goes with --skip-review or --quick.")
+    skip = (skip_reason(root, me, nn, lease, a.get("reason"), confirm_mode(root), kind="quick" if quick else "skip")
+            if (a.get("skip") or quick) else None)
+    if quick and skip and skip.get("typed"):
+        a["_typed"] = skip["typed"]            # tty mode: the words typed once are the yes as well
     tr = trunks(root, nn, lease)
     dirty(root, nn, tr)
     shas = fetch_trunks(root, tr)
@@ -795,6 +1029,7 @@ def prepare(root: Path, a: dict) -> int:
                    "one at a time." % (nn, " and ".join(names), nn, nested[0], nn, nested[0].split("/", 1)[1]))
     repo = next(iter(by_repo))
     trunk = tr[repo]
+    must_be_on(root, nn, repo)                 # v0.12.9: optional, before any scratch is cut
     clean_window(root, nn, tr)                 # the prime: every earlier scratch of the window but one mid-confirm
     pid = "%s-%s-%s" % (nn, time.strftime("%Y%m%d-%H%M%S"), secrets.token_hex(2)[:3])
     pdir = promote_root(root) / pid
@@ -821,9 +1056,16 @@ def prepare(root: Path, a: dict) -> int:
         "promote_id": pid, "lease": nn, "repo": repo, "nested": nested,
         "trunk_sha_at_prepare": trunk_sha if repo == outer else shas[outer],
         "merge_sha": merge if repo == outer else shas[outer]})
-    run_rec = run_gates(root, pid, tree, trunk)
+    quick_rec = quick_plan(root, pdir / repo, trunk_sha, merge) if quick else None
+    run_rec = run_gates(root, pid, tree, trunk, quick=quick_rec)
     run_id = run_rec["run_id"]
-    rv = review(root, run_id, tree) if skip is None else None
+    if quick_rec is not None and run_rec.get("reused_from"):
+        quick_rec = dict(quick_rec, reused=True)       # a full PASS was on record: nothing quick about this promote
+    elif quick_rec is not None:
+        quick_rec = dict(quick_rec, reused=False)
+    # v0.12.8 (spec 2026-10-21 B): the window's own review of exactly this tree is promote's review, STANDS or
+    # REFUTED; only a tree no review of the window has judged gets a fresh reviewer (window_review says when).
+    rv = (window_review(root, nn, fp) or review(root, run_id, tree)) if skip is None else None
     fp_after, _ = fingerprint(root, tree)
     seen = [fp, fp_after, run_rec.get("fingerprint")] + ([rv["fingerprint"]] if rv else [])
     if len(set(seen)) != 1:
@@ -838,8 +1080,8 @@ def prepare(root: Path, a: dict) -> int:
     p = {"promote_id": pid, "lease": nn, "lease_created": lease.get("created"), "alias": lease.get("alias"),
          "repo": repo, "trunk": trunk,
          "merge_sha": merge, "trunk_sha_at_prepare": trunk_sha, "lease_tip": tip, "fp_merged": fp, "run_id": run_id,
-         "review": ({k: rv[k] for k in ("call_id", "verdict", "file", "fingerprint", "request_sha", "findings")}
-                    if rv else None),
+         "review": ({k: rv[k] for k in ("call_id", "verdict", "file", "fingerprint", "request_sha", "findings", "reused")
+                     if k in rv} if rv else None),
          "review_skipped_reason": skip["reason"] if skip else None,
          "skip_transcript_ref": skip["transcript_ref"] if skip else None,
          "skip_transcript_session_id": skip["session_id"] if skip else None,
@@ -847,7 +1089,9 @@ def prepare(root: Path, a: dict) -> int:
          "overrode_review": skip["overrode"] if skip else None, "earlier_refuted": er,
          "live_checks": list(dict.fromkeys(ledger_live_checks(root, nn) + list((rv or {}).get("live_checks") or []))),
          "core_tree": dist.get("core_tree"), "charter_sha": dist.get("charter_sha"), "commits": commits,
-         "gates": {"count": len(run_rec.get("gates") or []), "seconds": secs}, "fetched_at": fetched_at,
+         "quick": quick_rec,
+         "gates": {"count": len(run_rec.get("gates") or []), "seconds": secs,
+                   "reused_from": run_rec.get("reused_from")}, "fetched_at": fetched_at,
          "prepared_at": at, "prepared_ts": ts,
          "prepared_by": {"session_id": me["session_id"], "lease": me["lease"], "pid": me["pid"], "user": me["user"]},
          "context_line": ctx_line, "context_misses": ctx_misses}
@@ -859,12 +1103,15 @@ def prepare(root: Path, a: dict) -> int:
                             "skip_transcript_ref": p["skip_transcript_ref"],
                             "skip_transcript_session_id": p["skip_transcript_session_id"],
                             "overrode_review": p["overrode_review"]}
+        if quick_rec is not None and not quick_rec.get("reused"):
+            rec["promotion"]["quick"] = True
         if p["skip_typed"]:
             rec["promotion"]["skip_typed"] = p["skip_typed"]
     update_run(root, run_id, record)
     if skip:
         with open(str(root / "vault" / "evidence" / ("%s.md" % run_id)), "a") as fh:
-            fh.write("\nReview skipped by the operator because: %s\n" % one_line(skip["reason"]))
+            fh.write("\n%s: %s\n" % ("Quick promote at the operator's word" if quick else
+                                      "Review skipped by the operator because", one_line(skip["reason"])))
     decision, rec_text = decision_block(root, p)
     print(decision + "\n\n" + rec_text)
     sys.stdout.flush()
@@ -1072,6 +1319,8 @@ def check_review(root: Path, p: dict, run_rec: dict, tree: Path) -> str:
     against the others; nothing taken from prepared.json that a primary can
     contradict. Returns the review's call id, read from its own frontmatter
     (Decision 48)."""
+    if (p.get("review") or {}).get("reused") is not None:
+        return check_reused_review(root, p, run_rec)
     vf = root / "vault" / "evidence" / ("%s-review.md" % p["run_id"])
     _, verdict, _ = run(["bash", str(root / "core" / "refute.sh"), "--verdict-of", str(vf)])
     if verdict.strip() != "STANDS" or (p.get("review") or {}).get("verdict") != "STANDS":
@@ -1102,6 +1351,84 @@ def check_review(root: Path, p: dict, run_rec: dict, tree: Path) -> str:
             or sha256_bytes(answer) != sha256_bytes(body.encode())):
         raise Stop("Evidence disagrees with the prepared promotion (the review's receipt and the review).")
     return str(fm["call-id"])
+
+
+def reviewer_problem(root: Path, sources: List[Tuple[Path, dict]], fp: str, wrid: str) -> Optional[str]:
+    """The confirm's sentence for the first reviewer file behind a reused review (review_sources) that its receipt
+    does not vouch for, or None when every one holds: the gate run's fingerprint in its frontmatter and in its
+    receipt (launch.json, which the launcher wrote before the call), its request-sha equal to the receipt's, the
+    receipt naming the window's run, a clean first attempt, its answer the file's body byte for byte, and the
+    distribution's current core/ and charter. prepare (window_review) asks the same question before it offers a review,
+    so a review the confirm would refuse is never offered — a prepare that offered one would offer it again on every
+    run, and the confirm would refuse every time."""
+    head = dc.committed_dist(root)
+    for path, sfm in sources:
+        if sfm.get("fingerprint") != fp:
+            return "Evidence disagrees with the prepared promotion (the review's fingerprint and the gate run's)."
+        launch = read_json(root / "state" / "direct-calls" / str(sfm["call-id"]) / "launch.json") or {}
+        if (launch.get("fingerprint") != fp or not sfm.get("request-sha")
+                or sfm.get("request-sha") != launch.get("request_sha256")
+                or str(launch.get("tag") or "") != sfm.get("run-id") or not str(sfm.get("run-id")).startswith(wrid)):
+            return "The review did not see the change that will be pushed."
+        if sfm.get("core-tree") != head.get("core_tree") or sfm.get("charter-sha") != head.get("charter_sha"):
+            return "Distribution code changed since the review."
+        text = path.read_text()
+        first = (launch.get("attempts") or [{}])[0]
+        body = text.split("---\n", 2)[2] if text.startswith("---\n") and text.count("---\n") >= 2 else ""
+        try:
+            answer = Path(first.get("answer") or "").read_bytes()
+        except OSError:
+            answer = b""
+        if (first.get("exit_code") != 0 or first.get("advisory") or launch.get("core_tree") != sfm.get("core-tree")
+                or sha256_bytes(answer) != sha256_bytes(body.encode())):
+            return "Evidence disagrees with the prepared promotion (the review's receipt and the review)."
+    return None
+
+
+def check_reused_review(root: Path, p: dict, run_rec: dict) -> str:
+    """§7.2 step 3 for a reused review (v0.12.8, spec 2026-10-21 B): the window's own branch review of exactly the
+    tree that will be pushed, re-derived from its primaries as a fresh review is. A fresh review's prompt is
+    re-rendered and its sha compared with the receipt's; a branch review's prompt cannot be rendered again — it was
+    built from the window's worktree, its earlier findings and its lenses at that moment — so what stands in for it is
+    what that comparison proves: that the reviewer saw this tree. Each reviewer's receipt (launch.json) recorded the
+    fingerprint the launcher took of the tree under review before the call, and it must be the gate run's, which
+    rederive then checks against the scratch itself. Everything else is checked as for a fresh review:
+    - the review file is the window run's, manifested, branch mode, and refute.sh --verdict-of still reads STANDS;
+    - the window's run.json is manifested, window NN's, not a promotion's, PASS, with the same fingerprint;
+    - each reviewer file (review_sources) is manifested, carries the recorded call id (in order), the gate run's
+      fingerprint, and a request-sha equal to its receipt's; its receipt names the same run, the same fingerprint,
+      a clean first attempt and the same core tree, and its answer is the file's body byte for byte;
+    - the distribution's core/ and charter are the ones every reviewer ran."""
+    rv = p.get("review") or {}
+    reused = rv.get("reused") or {}
+    wrid = str(reused.get("run_id") or "")
+    if not RUN_ID.fullmatch(wrid) or reused.get("lease") != p.get("lease"):
+        raise Stop("Evidence disagrees with the prepared promotion (the reused review's run).")
+    manifest = v.manifest_paths(root)
+    vf = root / "vault" / "evidence" / ("%s-review.md" % wrid)
+    if rv.get("file") != rel(root, vf) or not vf.is_file() or str(vf.resolve()) not in manifest:
+        raise Stop("Evidence disagrees with the prepared promotion (the reused review's file).")
+    _, verdict, _ = run(["bash", str(root / "core" / "refute.sh"), "--verdict-of", str(vf)])
+    if verdict.strip() != "STANDS" or rv.get("verdict") != "STANDS":
+        raise Stop("Evidence disagrees with the prepared promotion (review verdict).")
+    fm = v.parse_frontmatter(vf.read_text(errors="replace"))
+    if fm.get("mode") != "branch" or fm.get("run-id") != wrid:
+        raise Stop("Evidence disagrees with the prepared promotion (the reused review's mode or run).")
+    fp = run_rec.get("fingerprint")
+    wj = root / "state" / "evidence" / wrid / "run.json"
+    wrec = read_json(wj) or {}
+    if (str(wj.resolve()) not in manifest or wrec.get("run_id") != wrid or wrec.get("lease") != p.get("lease")
+            or wrec.get("promote_id") or wrec.get("result") != "PASS" or wrec.get("fingerprint") != fp):
+        raise Stop("Evidence disagrees with the prepared promotion (the reused review's gate run).")
+    sources = review_sources(root, vf, manifest)
+    if not sources or ",".join(s["call-id"] for _, s in sources) != rv.get("call_id"):
+        raise Stop("Evidence disagrees with the prepared promotion (the review's call id).")
+    if review_unbound(root, wrec, vf, sources, "STANDS"):
+        raise Stop("Evidence disagrees with the prepared promotion (the reused review is not its gate run's own).")
+    problem = reviewer_problem(root, sources, fp, wrid)
+    if problem:
+        raise Stop(problem)
+    return str(rv["call_id"])
 
 
 def check_skip(root: Path, p: dict, promo: dict) -> None:
@@ -1214,19 +1541,26 @@ def record_yes(root: Path, p: dict, pdir: Path, me: dict, mode: str, yes: dict, 
     o = ev.get("overrode")
     fields = [at, "window %s" % p["lease"], "merge %s" % p["merge_sha"], "run %s" % p["run_id"],
               ("STANDS (review %s)" % ev["call_id"]) if ev.get("call_id") else
-              "skipped: %s" % p.get("review_skipped_reason"),
+              ("quick promote: %s" if p.get("quick") else "skipped: %s") % p.get("review_skipped_reason"),
               'operator: "%s"' % words, "confirm: %s" % mode] + \
              (["overrode: %s" % (o.get("call_id") if isinstance(o, dict) else o)] if o else []) + \
              (["earlier refuted: %s" % ",".join(str(e.get("call_id")) for e in ev["earlier_refuted"])]
-              if ev.get("earlier_refuted") else [])
-    log = ev_dir / "promotions.log"
+              if ev.get("earlier_refuted") else []) + \
+             (["full suite: pending (runs in the background after the push)"]
+              if p.get("quick") and not p["quick"].get("reused") else [])
+    ledger_append(root, fields)
+    p["confirmed_at"] = at
+    write_json(pdir / "prepared.json", p)
+
+
+def ledger_append(root: Path, fields: List[object]) -> None:
+    """One tab-separated line on vault/evidence/promotions.log (append-only; manifested when first created)."""
+    log = root / "vault" / "evidence" / "promotions.log"
     new = not log.exists()
     with open(str(log), "a") as fh:
         fh.write("\t".join(one_line(f) for f in fields) + "\n")
     if new:
         run(["python3", str(root / "core" / "manifest-append.py"), str(log)])
-    p["confirmed_at"] = at
-    write_json(pdir / "prepared.json", p)
 
 
 def push(root: Path, p: dict, pdir: Path) -> None:
@@ -1332,7 +1666,8 @@ def tell_marker(root: Path, p: dict, tr: Dict[str, str]) -> List[str]:
     return []
 
 
-def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, yes: dict) -> List[str]:
+def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, yes: dict,
+               keep_scratch: bool = False) -> List[str]:
     """Everything after a push that landed (Decision 47): the pushed stamp and the
     lease's promoted entry first — they are what a second confirm and the board
     read — then the checkout and the marker. Each step is best-effort: a failure
@@ -1363,9 +1698,10 @@ def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, y
     # Decision 7 (update-command design): the scratch is detached at the merge commit just pushed, so it holds
     # nothing trunk lacks; left behind, it is copied into every later safety copy. This confirm holds the
     # promotion's .confirm.lock, so no clean is removing it too. The records stay: a second confirm is refused.
-    step(lambda: remove_scratch(root, pdir, tr, strict=True) or True,
-         "The promote scratch of promotion " + p["promote_id"] + " could not be removed (%s); `core/promote.sh "
-         + nn + " --clean` removes it.")
+    if not keep_scratch:               # v0.12.9: a quick promote's scratch stays for the background full run
+        step(lambda: remove_scratch(root, pdir, tr, strict=True) or True,
+             "The promote scratch of promotion " + p["promote_id"] + " could not be removed (%s); `core/promote.sh "
+             + nn + " --clean` removes it.")
     if stamped:
         # The stamp is rewritten with how the follow-ups went: the prime's announcement (§4.3) waits for
         # finished_at and repeats these notes, so it never says "brought forward" before or instead of it.
@@ -1399,6 +1735,7 @@ def confirm(root: Path, a: dict) -> int:
     pdir, _ = latest_prepared(root, nn, a.get("id"))
     with confirm_lock(pdir, nn):
         p = read_json(pdir / "prepared.json") or {}   # re-read under the lock
+        quick = bool(p.get("quick")) and not (p.get("quick") or {}).get("reused")   # a quick prepare gets its background full run; one that reused a full PASS needs none
         if (pdir / "pushed").exists() or (pdir / "announced").exists():
             raise Stop("Promotion %s of window %s was already pushed. Run `promote %s` for anything newer."
                        % (pdir.name, nn, nn))
@@ -1418,11 +1755,21 @@ def confirm(root: Path, a: dict) -> int:
             if a.get("said") is not None:
                 raise Stop("In tty mode the operator types the yes in a terminal; --operator-said is not accepted. "
                            "Paste this line in your own shell: `cd %s && core/promote.sh %s --confirm`" % (root, nn))
-            yes = tty_yes(root, p)
+            yes = {"typed": a["_typed"]} if quick and a.get("_typed") else tty_yes(root, p)
         ev = rederive(root, p, pdir, tr)
         record_yes(root, p, pdir, me, mode, yes, a.get("said"), ev)
         push(root, p, pdir)
-        notes = after_push(root, p, pdir, tr, mode, yes)
+        notes = after_push(root, p, pdir, tr, mode, yes, keep_scratch=quick)
+        if p.get("quick") and not quick:
+            notes.append("This exact tree had already passed the full suite; nothing runs in the background.")
+        if quick:
+            try:
+                spawn_background(root, p, pdir)
+                notes.append("The full suite is now running in the background on merge commit %s (promotion %s); "
+                             "core/doctor.sh says PASS or FAIL when it finishes." % (p["merge_sha"][:7], p["promote_id"]))
+            except Exception as e:             # noqa: BLE001 — the push landed; say what did not follow it
+                notes.append("The background full run could not be started (%s); run `core/gates.sh` on the trunk "
+                             "yourself." % reason(e))
     alias = " (%s)" % p["alias"] if p.get("alias") else ""
     lines = notes + ["Promoted window %s's work%s to %s (merge commit %s; evidence %s). The window's worktree is still "
                      "there; say \"release window %d\" when you are done with it, or keep working — the next promote "
@@ -1436,6 +1783,138 @@ def confirm(root: Path, a: dict) -> int:
     print("\n".join(lines))
     return 0
 
+# --- quick promote and its background full run (v0.12.9, spec 2026-10-21 §E) -------------------------
+
+def quick(root: Path, a: dict) -> int:
+    """`promote <NN> --quick [--reason "…"]`: prepare without the gates and the reviewer (the targeted command, or
+    nothing), then confirm and push at the operator's word — the same words, read the way --skip-review reads
+    them — and start the full suite in the background on what was pushed. One command for one tiny change."""
+    a = dict(a, quick=True)
+    code = prepare(root, a)
+    if code != 0:
+        return code
+    return confirm(root, dict(a, confirm=True, said=a.get("reason")))
+
+
+def spawn_background(root: Path, p: dict, pdir: Path) -> int:
+    """Start the background full run of a pushed quick promotion, detached from this process and its session.
+    background.json says running until the run writes its result."""
+    started = tl.iso_utc(time.time())
+    write_json(pdir / "background.json", {"state": "running", "pid": None, "started": started, "run_id": None})
+    env = dict(os.environ)
+    for k in ("DIRECT_CALL_ID", "GATES_QUICK", "GATES_QUICK_COMMAND", "GATES_QUICK_WHY"):
+        env.pop(k, None)
+    with open(str(pdir / "background.log"), "ab") as log:
+        child = subprocess.Popen(["bash", str(root / "core" / "promote.sh"), p["lease"], "--background-run", "--id",
+                                  p["promote_id"]], cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 start_new_session=True, env=env)
+    write_json(pdir / "background.json", {"state": "running", "pid": child.pid, "started": started, "run_id": None})
+    return child.pid
+
+
+def background_run(root: Path, a: dict) -> int:
+    """`promote <NN> --background-run --id <promotion>`, started by spawn_background: the promotion's ordinary gate
+    run (gates.sh --no-refute --promote, in the scratch that was pushed; a full PASS of the tree on record is reused),
+    its result in background.json and on the ledger, then the scratch goes. Not a promote: nothing is pushed."""
+    pid = a.get("id") or ""
+    if not re.fullmatch(r"[0-9A-Za-z-]+", pid):
+        raise Stop("--background-run needs --id <promotion id>.")
+    pdir = promote_root(root) / pid
+    p = read_json(pdir / "prepared.json") or {}
+    if not p or p.get("promote_id") != pid:
+        raise Stop("No promotion %s." % pid)
+    if not was_pushed(pdir):
+        raise Stop("Promotion %s was not pushed; the background full run follows a push." % pid)
+    bg = read_json(pdir / "background.json") or {}
+    if bg.get("state") not in (None, "running"):
+        raise Stop("Promotion %s's background full run already finished (%s)." % (pid, bg.get("state")))
+    outer = p["repo"].split("/", 1)[0]
+    tree = pdir / outer
+    started = bg.get("started") or tl.iso_utc(time.time())
+    if not tree.is_dir():
+        write_json(pdir / "background.json", {"state": "INVALID", "pid": os.getpid(), "started": started,
+                                              "finished": tl.iso_utc(time.time()), "run_id": None,
+                                              "detail": "the promote scratch was gone before the full run started"})
+        raise Stop("Promotion %s's scratch is gone; the full suite did not run." % pid)
+    write_json(pdir / "background.json", {"state": "running", "pid": os.getpid(), "started": started, "run_id": None})
+    env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
+    for k in ("GATES_QUICK", "GATES_QUICK_COMMAND", "GATES_QUICK_WHY"):
+        env.pop(k, None)
+    _code, out, err = run(["bash", str(root / "core" / "gates.sh"), "--no-refute", "--promote", pid], env=env, timeout=None)
+    ev = root / "state" / "evidence"
+    runs = [(f.stat().st_mtime, read_json(f) or {}) for f in (ev.glob("*/run.json") if ev.is_dir() else [])]
+    runs = [r for _, r in sorted(runs, key=lambda x: x[0]) if r.get("promote_id") == pid and not r.get("quick")
+            and r.get("run_id") != p.get("run_id")]
+    rec = runs[-1] if runs else {}
+    result = rec.get("result") or "INVALID"
+    detail = None if result == "PASS" else (rec.get("invalid_reason") or last_line(err or out) or None)
+    write_json(pdir / "background.json", {"state": result, "pid": os.getpid(), "started": started,
+                                          "finished": tl.iso_utc(time.time()), "run_id": rec.get("run_id"),
+                                          "reused_from": rec.get("reused_from"), "detail": detail})
+    ledger_append(root, [tl.iso_utc(time.time()), "window %s" % p["lease"], "merge %s" % p["merge_sha"],
+                         "run %s" % (rec.get("run_id") or "none"), "background full run: %s%s" % (
+                             result, " (reused from run %s)" % rec["reused_from"] if rec.get("reused_from") else "")]
+                 + (["detail: %s" % detail] if detail else []))
+    lease = read_leases(root).get(p["lease"]) or {}
+    tr = lease.get("trunks") or current_trunks(root)
+    remove_scratch(root, pdir, tr)
+    print("background full run of promotion %s: %s%s" % (pid, result, " (run %s)" % rec["run_id"] if rec.get("run_id") else ""))
+    return 0 if result == "PASS" else 1
+
+
+def background_alive(pdir: Path) -> bool:
+    """A background full run that is still running: background.json says so and its pid answers."""
+    bg = read_json(pdir / "background.json") or {}
+    if bg.get("state") != "running":
+        return False
+    pid = bg.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return True                            # spawned, pid not yet written: treat as alive
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def background_lines(root: Path) -> List[str]:
+    """Doctor: each window's newest pushed quick promotion and how its background full run went."""
+    base = root / "state" / "promote"
+    newest: Dict[str, Tuple[float, Path, dict]] = {}
+    for f in (base.glob("*/prepared.json") if base.is_dir() else []):
+        pdir = f.parent
+        p = read_json(f) or {}
+        if not p.get("lease") or not was_pushed(pdir):
+            continue
+        ts = float(p.get("prepared_ts") or 0)
+        if p["lease"] not in newest or ts > newest[p["lease"]][0]:
+            newest[p["lease"]] = (ts, pdir, p)
+    out = []
+    for nn, (_, pdir, p) in sorted(newest.items()):
+        bg = read_json(pdir / "background.json")       # an ordinary promote after a quick one settles the window
+        if not bg:
+            continue
+        state, rid = bg.get("state"), bg.get("run_id")
+        if state == "running":
+            hhmm = str(bg.get("started") or "?")[11:16]
+            if background_alive(pdir):
+                out.append("NOTE     promote: window %s's quick promote %s — the full suite is running in the background "
+                           "(started %s)" % (nn, pdir.name, hhmm))
+            else:
+                out.append("NOTE     promote: window %s's quick promote %s — the full suite was recorded as running in the "
+                           "background (started %s) but its process is gone; run `core/gates.sh` on %s yourself, then "
+                           "`core/promote.sh %s --clean`" % (nn, pdir.name, hhmm, p.get("trunk"), nn))
+        elif state == "PASS":
+            out.append("OK       promote: window %s's quick promote %s passed its full suite in the background (run %s)"
+                       % (nn, pdir.name, rid))
+        elif state:
+            out.append("MISSING  promote: window %s's quick promote %s %s its full suite in the background (run %s%s) — %s "
+                       "carries merge %s; fix forward in a window and promote again"
+                       % (nn, pdir.name, "FAILED" if state == "FAIL" else "did not finish (%s)" % state, rid or "none",
+                          "; " + str(bg["detail"]) if bg.get("detail") else "", p.get("trunk"), str(p.get("merge_sha"))[:7]))
+    return out
+
+
 # --- doctor (§15) -----------------------------------------------------------------------------------
 
 def leftover_scratch(root: Path) -> List[str]:
@@ -1446,7 +1925,7 @@ def leftover_scratch(root: Path) -> List[str]:
     held: List[str] = []
     try:
         for pdir in sorted(base.iterdir()) if base.is_dir() else []:
-            if pdir.is_dir() and not pdir.is_symlink() and was_pushed(pdir) \
+            if pdir.is_dir() and not pdir.is_symlink() and was_pushed(pdir) and not background_alive(pdir) \
                     and any(c.name not in RECORDS for c in pdir.iterdir()):
                 held.append(pdir.name)
     except OSError:
@@ -1462,6 +1941,11 @@ def doctor(root: Path) -> int:
         print("NOTE     promote scratch: %d pushed promotion%s still hold%s scratch (%s) — core/promote.sh NN --clean "
               "removes it (NN its window: %s)" % (len(held), "" if len(held) == 1 else "s", "s" if len(held) == 1 else "",
                                                   ", ".join(held), ", ".join(sorted({h[:2] for h in held}))))
+    try:
+        for line in background_lines(root):
+            print(line)
+    except Exception:               # a line doctor cannot compute is not printed
+        pass
     try:
         mode = tl.confirm_mode(root)
         print("OK       promote: the operator's yes is transcribed and checked against the session transcript"
@@ -1552,12 +2036,13 @@ def doctor(root: Path) -> int:
 
 # --- the command line -----------------------------------------------------------------------------
 
-USAGE = ("Usage: core/promote.sh <NN> [--skip-review [--reason \"...\"]] | <NN> --confirm [--operator-said \"...\"] "
-         "[--id <promote-id>] | <NN> --clean (the prime: any promotion; a session holding no window, or a shell: "
-         "pushed promotions only)")
+USAGE = ("Usage: core/promote.sh <NN> [--skip-review [--reason \"...\"]] | <NN> --quick [--reason \"...\"] | "
+         "<NN> --confirm [--operator-said \"...\"] [--id <promote-id>] | <NN> --clean (the prime: any promotion; a "
+         "session holding no window, or a shell: pushed promotions only)")
 VALUE_FLAGS: Dict[str, str] = {"--operator-said": "said", "--id": "id", "--reason": "reason"}   # flags with a value
 SWITCHES: Dict[str, str] = {"--clean": "clean", "--confirm": "confirm", "--skip-review": "skip",
-                            "--doctor": "doctor"}   # flags without one
+                            "--doctor": "doctor", "--quick": "quick",
+                            "--background-run": "background"}   # flags without one
 
 
 def parse(argv: List[str]) -> dict:
@@ -1588,10 +2073,14 @@ def dispatch(root: Path, a: dict) -> int:
         return doctor(root)
     if not a["token"]:
         raise Stop(USAGE)
+    if a.get("background"):
+        return background_run(root, a)
     if a.get("confirm"):
         return confirm(root, a)
     if a.get("clean"):
         return clean(root, a)
+    if a.get("quick"):
+        return quick(root, a)
     return prepare(root, a)
 
 

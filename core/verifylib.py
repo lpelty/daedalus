@@ -850,6 +850,9 @@ def vault_claim_report(root: Path) -> List[dict]:
             problem = "%s cites evidence-run %s, which does not exist." % (p.name, rid)
         elif rec.get("result") != "PASS":
             problem = "%s cites evidence-run %s, whose result is %s." % (p.name, rid, rec.get("result"))
+        elif rec.get("quick"):
+            problem = ("%s cites evidence-run %s, a quick promote's run (targeted tests or nothing, not the full "
+                       "suite); cite a full run." % (p.name, rid))
         lease = doc_lease(fm)
         out.append({"path": str(p), "lease": lease,
                     "live": ctx["liveness"].get(lease) in ("live", "quiet", "resumed"),

@@ -1456,3 +1456,298 @@ PY
   [ "$(grep -cF '(none supplied)' "$stdin")" -eq 1 ]
   case "$output" in *"criteria"*) echo "an unleased run spoke of criteria: $output"; return 1 ;; *) : ;; esac
 }
+
+# --- v0.12.8 (2026-10-21): a gate PASS is reused for an identical tree; a flaky failure re-runs its failures ------
+
+# reuse_fixture — what reuse needs: a real fingerprint (a git target, fingerprint.sh) and a recorded core/ tree (a
+# home that is a git checkout with core/ committed and distcheck.py beside gates.sh). install_refuter provides both;
+# the fixture config keeps the reviewer off. Every gate below appends to $RAN, outside the target, so counting its
+# lines counts the gate commands that really ran without touching the fingerprinted tree.
+reuse_fixture() {
+  install_refuter
+  git_target
+  RAN="$BATS_TEST_TMPDIR/gate-ran"
+}
+ran() { if [ -f "$RAN" ]; then wc -l < "$RAN" | tr -d ' '; else printf '0\n'; fi; }
+last_id() { printf '%s\n' "$output" | tail -1; }
+failed_id() { printf '%s\n' "$output" | sed -n 's/^.*run-id: //p' | tail -1; }
+rj() { python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): d = d.get(k) if isinstance(d, dict) else d[int(k)]
+print(d)' "$DAEDALUS_HOME/state/evidence/$1/run.json" "$2"; }
+
+@test "2026-10-21 (the seventh full run): an identical tree and gate definition is PASS by reuse — no setup or gate command runs (a gate that would now fail proves it), the record and summary are written and manifested, reused_from names the earlier run" {
+  reuse_fixture
+  write_config "  - echo ran >> $RAN; test ! -e $BATS_TEST_TMPDIR/now-failing"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  first="$(last_id)"; [ "$(ran)" = 1 ]
+  [ "$(rj "$first" core_tree)" != None ] || { echo "the run records no core tree"; return 1; }
+  touch "$BATS_TEST_TMPDIR/now-failing"         # the gate would FAIL if it ran again
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  second="$(last_id)"
+  [ "$second" != "$first" ]; [ "$(ran)" = 1 ] || { echo "a gate ran on a tree that already passed"; return 1; }
+  case "$output" in *"PASS — reused from run $first (same tree, same gates); nothing re-ran."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(rj "$second" result)" = PASS ]; [ "$(rj "$second" reused_from)" = "$first" ]
+  [ "$(rj "$second" fingerprint)" = "$(rj "$first" fingerprint)" ]
+  [ "$(rj "$second" gates.0.command)" = "$(rj "$first" gates.0.command)" ]
+  [ ! -e "$DAEDALUS_HOME/state/evidence/$second/gate-1.log" ]
+  grep -qxF "$DAEDALUS_HOME/state/evidence/$second/run.json" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -qxF "$DAEDALUS_HOME/vault/evidence/$second.md" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -qF "PASS — reused from run $first (same tree, same gates); nothing re-ran." "$DAEDALUS_HOME/vault/evidence/$second.md"
+  grep -q '^result: PASS$' "$DAEDALUS_HOME/vault/evidence/$second.md"
+}
+
+@test "2026-10-21: a changed file, a changed config, a changed or modified core/, and a null fingerprint each run the gates in full" {
+  reuse_fixture
+  write_config "  - echo ran >> $RAN"
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 1 ]
+  printf 'one more line\n' >> "$DAEDALUS_HOME/target/thing/marker.txt"
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 2 ] || { echo "a changed file reused"; return 1; }
+  printf '# a comment\n' >> "$DAEDALUS_HOME/config.yaml"
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 3 ] || { echo "a changed config reused"; return 1; }
+  printf 'x\n' > "$DAEDALUS_HOME/core/extra.txt"; commit_core
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 4 ] || { echo "a changed core/ tree reused"; return 1; }
+  printf 'y\n' >> "$DAEDALUS_HOME/core/extra.txt"           # modified on disk, not committed: no core tree to match
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 5 ] || { echo "a modified core/ reused"; return 1; }
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 6 ] || { echo "a modified core/ matched itself"; return 1; }
+  git -C "$DAEDALUS_HOME" checkout -q -- core/extra.txt
+  python3 - "$DAEDALUS_HOME/config.yaml" <<'PY'
+import sys; p = sys.argv[1]; s = open(p).read()
+open(p, "w").write(s.replace("  branch: main\n", "  branch: main\n  fingerprint_exclude: ../x\n", 1))
+PY
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1
+  [ "$(ran)" = 8 ] || { echo "a null fingerprint matched: $(ran)"; return 1; }
+}
+
+@test "2026-10-21: an earlier FAIL, INVALID or RUNNING run is never reused, nor a hand-written run.json the manifest does not list" {
+  reuse_fixture
+  write_config "  - echo ran >> $RAN; test -e $BATS_TEST_TMPDIR/ok"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  [ "$(ran)" = 2 ] || { echo "a FAIL was reused"; return 1; }
+  touch "$BATS_TEST_TMPDIR/ok"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]; pass="$(last_id)"; [ "$(ran)" = 3 ]
+  for state in INVALID RUNNING; do
+    python3 - "$DAEDALUS_HOME/state/evidence/$pass/run.json" "$state" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["result"] = sys.argv[2]; d["gates_result"] = sys.argv[2]
+json.dump(d, open(sys.argv[1], "w"))
+PY
+    run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]; pass="$(last_id)"
+  done
+  [ "$(ran)" = 5 ] || { echo "an INVALID or RUNNING run was reused: $(ran)"; return 1; }
+  # A copy of the last PASS under a run id the manifest never named: not evidence gates.sh wrote.
+  forged=20990101-000000-abcdef
+  mkdir -p "$DAEDALUS_HOME/state/evidence/$forged"
+  python3 - "$DAEDALUS_HOME/state/evidence/$pass/run.json" "$DAEDALUS_HOME/state/evidence/$forged/run.json" "$forged" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["run_id"] = sys.argv[3]; json.dump(d, open(sys.argv[2], "w"))
+e = json.load(open(sys.argv[1])); e["result"] = e["gates_result"] = "INVALID"; json.dump(e, open(sys.argv[1], "w"))
+PY
+  cp "$DAEDALUS_HOME/vault/evidence/$pass.md" "$DAEDALUS_HOME/vault/evidence/$forged.md"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]
+  [ "$(ran)" = 6 ] || { echo "an unmanifested run.json was reused"; return 1; }
+  [ "$(rj "$(last_id)" reused_from)" = None ]
+}
+
+@test "2026-10-21: a run whose review REFUTED it still passed its gates — the same tree reuses them and the reviewer runs again" {
+  reuse_fixture
+  bin="$BATS_TEST_TMPDIR/binx"; mkdir -p "$bin"
+  cat > "$bin/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+echo x >> "$REVIEWS"
+printf '### F1 — marker.txt:1 — observed — in scope — HIGH — reach: user\nWhat is wrong: x.\n\nVERDICT: REFUTED\n'
+STUB
+  chmod +x "$bin/claude"
+  export REVIEWS="$BATS_TEST_TMPDIR/reviews"
+  write_config "  - echo ran >> $RAN" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  first="$(failed_id)"
+  [ "$(rj "$first" result)" = FAIL ]; [ "$(rj "$first" gates_result)" = PASS ]
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  second="$(failed_id)"
+  [ "$(ran)" = 1 ] || { echo "the gates ran again on the refuted tree"; return 1; }
+  [ "$(rj "$second" reused_from)" = "$first" ]
+  [ "$(wc -l < "$REVIEWS" | tr -d ' ')" = 2 ] || { echo "the reviewer did not run on the reused run"; return 1; }
+}
+
+# write_config_rerun <gate-lines> <rerun-lines> — gates and their gates_rerun_failed commands; the reviewer off.
+write_config_rerun() {
+  { printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\ngates:\n%s\ngates_rerun_failed:\n%s\n' "$1" "$2"
+    printf 'verify:\n  refute: false\n  refute_off_reason: bats fixture — a real claude must never be invoked in tests\n'
+  } > "$DAEDALUS_HOME/config.yaml"
+}
+
+@test "2026-10-21 (two flaky restarts): a gate that fails and passes its rerun is PASS after a rerun — both logs kept and manifested, the summary names it" {
+  reuse_fixture
+  write_config_rerun "  - ls first-run-no-such-file
+  - true" "  - echo rerun >> $RAN; echo rerun-log
+  - \"\""
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(last_id)"; [ "$(ran)" = 1 ]
+  [ "$(rj "$id" result)" = PASS ]; [ "$(rj "$id" gates.0.exit)" = 0 ]
+  [ "$(rj "$id" gates.0.rerun.first_exit)" = 1 ]
+  first_log="$(rj "$id" gates.0.rerun.first_log)"; rerun_log="$(rj "$id" gates.0.log)"
+  [ "$first_log" != "$rerun_log" ]
+  grep -q first-run-no-such-file "$first_log"; grep -q rerun-log "$rerun_log"
+  grep -qxF "$first_log" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -qxF "$rerun_log" "$DAEDALUS_HOME/vault/evidence/.manifest"
+  grep -qF "gate 1 passed after re-running its failures (first run log: \`$first_log\`)" "$DAEDALUS_HOME/vault/evidence/$id.md"
+  case "$output" in *"gate 1 passed after re-running its failures"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "2026-10-21: a rerun that fails leaves the gate FAIL; a tree changed between the gate and its rerun is FAIL with the reason, the rerun never started; no gates_rerun_failed key changes nothing" {
+  reuse_fixture
+  write_config_rerun "  - exit 1" "  - echo rerun >> $RAN; exit 1"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]; [ "$(ran)" = 1 ]
+  id="$(failed_id)"
+  [ "$(rj "$id" result)" = FAIL ]; [ "$(rj "$id" gates.0.rerun.first_exit)" = 1 ]
+  grep -qF "gate 1 failed again when its failures were re-run" "$DAEDALUS_HOME/vault/evidence/$id.md"
+  # The failing gate leaves a file git can see; the next gate removes it, so the run ends on the tree it started on.
+  write_config_rerun "  - touch left-behind /no-such-dir/x
+  - rm -f left-behind" "  - echo rerun >> $RAN"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]; [ "$(ran)" = 1 ] || { echo "the rerun ran on a changed tree"; return 1; }
+  id="$(failed_id)"
+  [ "$(rj "$id" result)" = FAIL ] || { echo "$output"; return 1; }
+  grep -qF "gate 1's failures were not re-run: the tree changed after it failed" "$DAEDALUS_HOME/vault/evidence/$id.md"
+  write_config "  - exit 1"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  id="$(failed_id)"
+  [ "$(rj "$id" gates.0.exit)" = 1 ]; ! grep -q '"rerun"' "$DAEDALUS_HOME/state/evidence/$id/run.json"
+  [ -z "$(ls "$DAEDALUS_HOME/state/evidence/$id" | grep rerun)" ]
+}
+
+@test "2026-10-21: gates_rerun_failed with more commands than gates, or a tab in one, dies before creating a run directory" {
+  write_config_rerun "  - true" "  - true
+  - true"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"gates_rerun_failed"*"2"*"1"*) : ;; *) echo "$output"; return 1 ;; esac
+  write_config_rerun "  - true" "  - printf 'a	b'"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  case "$output" in *"gates_rerun_failed"*"tab"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls "$DAEDALUS_HOME/state/evidence")" ]
+}
+
+# --- v0.12.8 review revisions (2026-10-22): clean-copy runs, rerun only a whole gate --------------------------------
+
+@test "2026-10-22 (C2): a clean tree runs setup and gates in a fresh scratch checkout of HEAD — a git-ignored file in the worktree is not there; the record says clean-copy and names the commit; the scratch is removed, the logs kept" {
+  install_refuter
+  git_thing "secret.env"
+  printf 'only here\n' > "$DAEDALUS_HOME/target/thing/secret.env"
+  write_config_setup "  - pwd > $BATS_TEST_TMPDIR/setup-cwd" "  - pwd > $BATS_TEST_TMPDIR/gate-cwd; test ! -e secret.env"
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  where="$(cat "$BATS_TEST_TMPDIR/gate-cwd")"
+  [ "$where" = "$(cat "$BATS_TEST_TMPDIR/setup-cwd")" ]
+  [ "$where" != "$(cd "$DAEDALUS_HOME/target/thing" && pwd -P)" ] || { echo "the gate ran in the worktree"; return 1; }
+  [ ! -e "$where" ] || { echo "the scratch was left behind: $where"; return 1; }
+  [ "$(git -C "$DAEDALUS_HOME/target/thing" worktree list | wc -l | tr -d ' ')" = 1 ]
+  [ -f "$DAEDALUS_HOME/state/evidence/$id/gate-1.log" ]
+  python3 - "$DAEDALUS_HOME/state/evidence/$id/run.json" "$(git -C "$DAEDALUS_HOME/target/thing" rev-parse HEAD)" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["tree"] == "clean-copy" and r["commit"] == sys.argv[2] and r["result"] == "PASS", r
+PY
+}
+
+@test "2026-10-22 (C2): a dirty tree runs in place as before (tree: worktree), and a later clean-copy run of the same content does not reuse it" {
+  install_refuter
+  git_thing
+  RAN="$BATS_TEST_TMPDIR/gate-ran"
+  write_config "  - echo ran >> $RAN; test -e marker.txt"
+  printf 'new\n' > "$DAEDALUS_HOME/target/thing/new.txt"          # untracked: the tree is dirty
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree"])' "$DAEDALUS_HOME/state/evidence/$id/run.json")" = worktree ]
+  git -C "$DAEDALUS_HOME/target/thing" add -A; git -C "$DAEDALUS_HOME/target/thing" -c user.email=t@x -c user.name=t commit -q -m new
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(wc -l < "$RAN" | tr -d ' ')" = 2 ] || { echo "a clean-copy run reused a worktree run"; return 1; }
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree"])' "$DAEDALUS_HOME/state/evidence/$id/run.json")" = clean-copy ]
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ]
+  [ "$(wc -l < "$RAN" | tr -d ' ')" = 2 ] || { echo "a clean-copy PASS was not reused by the next run"; return 1; }
+}
+
+@test "2026-10-22 (M1): a compound gate (&&, ||, ;, |) gets no rerun — a rerun could cover only part of it; a single leading cd is not compound" {
+  reuse_fixture
+  write_config_rerun "  - true && exit 1" "  - echo rerun >> $RAN"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -ne 0 ]
+  [ "$(ran)" = 0 ] || { echo "a compound gate was re-run"; return 1; }
+  case "$output" in *"compound"*) : ;; *) echo "$output"; return 1 ;; esac
+  write_config_rerun "  - cd . && exit 1" "  - echo rerun >> $RAN"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(ran)" = 1 ]
+}
+
+@test "2026-10-22 (L3): a run that reuses one whose gate passed after a rerun says so" {
+  reuse_fixture
+  write_config_rerun "  - exit 1" "  - true"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  first="$(last_id)"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  second="$(last_id)"; [ "$(rj "$second" reused_from)" = "$first" ]
+  grep -qF "gate 1 passed after re-running its failures in run $first" "$DAEDALUS_HOME/vault/evidence/$second.md"
+}
+
+# --- v0.12.9 (spec 2026-10-21 §E): quick mode under --promote -------------------------------------------------------
+@test "quick mode (v0.12.9): under --promote, GATES_QUICK=1 runs the one targeted command instead of the gates (gates_setup still runs), the record says quick with the command, the summary says the full suite has not run; a later promote run of the same tree does not reuse it; with no command nothing runs and the reason is recorded; without --promote GATES_QUICK is ignored; a tab in the command dies before any run" {
+  write_config "  - echo gate-ran >> $BATS_TEST_TMPDIR/ran"
+  printf 'gates_setup:\n  - echo setup-ran >> %s\n' "$BATS_TEST_TMPDIR/ran" >> "$DAEDALUS_HOME/config.yaml"
+  install_refuter; git_target          # a home that is a git checkout with core/ committed (reuse needs a recorded core tree); a fingerprintable target for the plain run below
+  promote_run_fixture                  # copies files install_refuter already committed; state/ is ignored
+  GATES_QUICK=1 GATES_QUICK_COMMAND="echo quick-ran >> $BATS_TEST_TMPDIR/ran" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  q="$(printf '%s\n' "$output" | tail -1)"
+  case "$output" in *"quick promote: the targeted command above stood in for the gates; the full suite has not run on this commit yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$BATS_TEST_TMPDIR/ran")" = "setup-ran
+quick-ran" ] || { cat "$BATS_TEST_TMPDIR/ran"; return 1; }
+  python3 - "$DAEDALUS_HOME/state/evidence/$q/run.json" "$BATS_TEST_TMPDIR/ran" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["quick"] == {"command": "echo quick-ran >> %s" % sys.argv[2], "why": None}, r["quick"]
+assert r["result"] == "PASS" and r["gates_result"] == "PASS" and r["tree"] == "promote-scratch", r
+assert [g["command"] for g in r["gates"]] == ["echo quick-ran >> %s" % sys.argv[2]], r["gates"]
+assert "reused_from" not in r and "rerun" not in r["gates"][0], r
+PY
+  grep -qF "Quick promote: the targeted command stood in for the gates; the full suite has not run on this commit yet." "$DAEDALUS_HOME/vault/evidence/$q.md"
+  # the same tree, an ordinary promote run: the quick record stands for nothing, the gate runs
+  DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  f="$(printf '%s\n' "$output" | tail -1)"; [ "$f" != "$q" ]
+  grep -qxF gate-ran "$BATS_TEST_TMPDIR/ran"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reused_from"))' "$DAEDALUS_HOME/state/evidence/$f/run.json")" = None ]
+  # a quick run with no command: nothing runs, the reason is on record; a full PASS on record is reused instead (quick dropped)
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"; : > "$BATS_TEST_TMPDIR/ran"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="" GATES_QUICK_WHY="no test file changed" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  q2="$(printf '%s\n' "$output" | tail -1)"
+  case "$output" in *"quick promote: nothing ran (no test file changed); the full suite has not run on this commit yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$BATS_TEST_TMPDIR/ran")" = "setup-ran" ]
+  [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["quick"]["why"], len(r["gates"]), r["result"])' "$DAEDALUS_HOME/state/evidence/$q2/run.json")" = "no test file changed 0 PASS" ]
+  grep -qF "Quick promote: nothing ran (no test file changed); the full suite has not run on this commit yet." "$DAEDALUS_HOME/vault/evidence/$q2.md"
+  # a full run, then quick again on the same tree: PASS by reuse, no quick key
+  DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"; [ "$status" -eq 0 ]
+  full="$(printf '%s\n' "$output" | tail -1)"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="echo quick-ran >> $BATS_TEST_TMPDIR/ran" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  q3="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r.get("reused_from"), r.get("quick"))' "$DAEDALUS_HOME/state/evidence/$q3/run.json")" = "$full None" ]
+  ! grep -q quick-ran "$BATS_TEST_TMPDIR/ran"
+  # without --promote the variable means nothing
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="echo quick-ran >> $BATS_TEST_TMPDIR/ran" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  p="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("quick"))' "$DAEDALUS_HOME/state/evidence/$p/run.json")" = None ]
+  ! grep -q quick-ran "$BATS_TEST_TMPDIR/ran"; grep -qxF gate-ran "$BATS_TEST_TMPDIR/ran"
+  # a tab in the command: refused before any run exists
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="$(printf 'echo a\tb')" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -ne 0 ]; case "$output" in *"GATES_QUICK_COMMAND contains a tab character"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/evidence")" ]
+}

@@ -66,6 +66,46 @@ gates:
 # gates_setup:
 #   - cd engine && uv sync --frozen
 
+# Optional. One command per gate, in the gates' order ("" for a gate with
+# none): what to run ONCE when that gate fails, to re-run only its failures
+# instead of the whole suite. Same trust as gates:, run where the gate ran,
+# on the same tree (gates.sh checks the tree is unchanged first and does not
+# re-run on one that changed). Exit 0 makes the gate PASS after a rerun —
+# both logs kept in the evidence, and the summary says so; anything else and
+# the gate FAILs as before. A rerun stands in for the whole gate, so it must
+# cover everything the gate covers: a gate that stops at its first failure
+# (pytest -x or --maxfail) never ran the rest, and re-running only what
+# failed would pass tests that never ran — never use those in a gate that
+# has a rerun. A compound gate (&&, ||, ;, |, beyond one leading `cd <dir>
+# &&`) gets no rerun. For pytest, `--lf --lfnf=none`: --lf re-runs the tests
+# that failed last; --lfnf=none makes "no recorded failures" run no tests
+# (pytest exits non-zero) instead of the full suite. A clean copy or a
+# promote scratch starts with no pytest cache, so there --lf re-runs only
+# that run's own failures. Without this key a failed gate is simply FAIL, as
+# before; core/doctor.sh notes the gates that have none.
+# gates:
+#   - cd engine && uv run pytest -q
+# gates_rerun_failed:
+#   - cd engine && uv run pytest --lf --lfnf=none -q
+#
+# Where the gates run: when the tree under test is committed (nothing
+# modified or untracked that git sees), gates.sh runs gates_setup and the
+# gates in a fresh copy of that commit, tracked files only, the way promote
+# does (tree: clean-copy in run.json); a tree with uncommitted work runs in
+# place (tree: worktree). A tree that already passed is not tested again:
+# an earlier run with the same tree fingerprint, config.yaml and core/ whose
+# gates passed makes the run PASS by reuse (reused_from: <run id>); promote
+# reuses only a clean-copy or promote run under this config.yaml, so a PASS
+# that leaned on git-ignored files (a .venv, a .env) is never promoted.
+#
+# Optional. What a quick promote runs instead of the gates (core/promote.sh
+# <NN> --quick, at the operator's word): this one command over the test
+# files the window's commits add or change, {files} standing for them,
+# shell-quoted. Without it, or when no test file changed, a quick promote
+# runs nothing and says so; the full suite always runs in the background
+# after the push, and its result is in doctor and vault/evidence/promotions.log.
+# gates_quick: cd engine && uv run pytest -q {files}
+
 proposals:
   # Maximum open PROPOSED documents. Daedalus must retire one to raise
   # another — this forces prioritization onto Daedalus, not the operator.
@@ -259,6 +299,11 @@ promote:
   # terminal); several are separated by commas. The typed yes is refused from
   # anything else (plan 4 Decision 32).
   # tty_parents: 'Code Helper'
+  # Optional. A branch every commit must already be on (at origin) before
+  # promote merges it — for a deployment whose changes go to a staging
+  # branch first and are checked there. Promote refuses otherwise, naming the
+  # commits. Nothing else reads it.
+  # commits_must_be_on: next
 
 # memory:
 #   # Optional — episodic capture into a Hindsight bank. THE source for
@@ -319,6 +364,12 @@ promote:
 #   ask_destructive: false
 #   # "Would a targeted test run do", before a full-suite run. Default true.
 #   ask_suite: true
-#   # Questions allowed to act. NONE is certified in this release; naming one
-#   # here is a doctor MISSING and the question stays in shadow mode.
+#   # Questions allowed to act. suite is certified (since v0.12.9): named
+#   # here, a full-suite run the AMI judges unnecessary is denied once with
+#   # the targeted command, and re-issued unchanged it runs; the evidence run
+#   # (core/gates.sh) is never gated. Remove it to return to shadow mode.
+#   # destructive is not certified: naming it is a doctor MISSING and it
+#   # stays in shadow mode. The daemon copies this list when it starts:
+#   # /frame-jack off, then on, applies a change.
 #   # enforce:
+#   #   - suite
