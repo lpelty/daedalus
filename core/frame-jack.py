@@ -785,10 +785,18 @@ def cmd_status(root):
             by = "session %s" % who
         else:
             by = "from a shell"
-        mode = "shadow mode — the AMI logs, never acts"
         asked_for = amilib.enforce_requested(root)
-        if asked_for:
-            mode += " (ami.enforce names %s, which no release has certified to act)" % ", ".join(asked_for)
+        acting = [q for q in asked_for if q in amilib.CERTIFIED]
+        uncertified = [q for q in asked_for if q not in amilib.CERTIFIED]
+        if acting:
+            # v0.12.9: the suite question is the one certified; it is the only one that can be here
+            mode = ("enforce mode — the suite question acts: a full-suite run the AMI judges unnecessary is denied "
+                    "once, naming the targeted command; re-issued unchanged, it runs")
+        else:
+            mode = "shadow mode — the AMI logs, never acts"
+        if uncertified:
+            mode += " (ami.enforce %snames %s, which no release has certified to act)" % (
+                "also " if acting else "", ", ".join(uncertified))
         out.append("frame-jack: %s (%s), %s" % (since, by, mode))
         out.append(questions_line(cfg, d))
         if sw["state"] == "unconfigured":
@@ -833,6 +841,11 @@ def cmd_status(root):
         else:
             out.append("  would have shortened %s of the %s suite runs — %s of those then failed" % (
                 _n(c.get("would_shorten") or 0), _n(asked.get("suite") or 0), _n(c.get("shortened_then_failed") or 0)))
+        if "suite" in amilib.enforce_requested(root) and "suite" in amilib.CERTIFIED:
+            # v0.12.9: what the deny-once did this session — a full run denied once, and the re-issues that ran it
+            out.append("  shortened %s full run%s this session (denied once, the targeted command named); %s re-issued "
+                       "and ran in full" % (_n(c.get("shortened") or 0), "" if int(c.get("shortened") or 0) == 1 else "s",
+                                            _n(c.get("reissued") or 0)))
         un = {k: int(v or 0) for k, v in (c.get("unanswered") or {}).items() if int(v or 0)}
         if un:
             out.append("unanswered this session: %s (%s)" % (_n(sum(un.values())), ", ".join(
@@ -1010,6 +1023,11 @@ def doctor_lines(root):
                                 "question stays in shadow mode" % q)
         for p in problems:
             lines.append("MISSING  frame-jack: %s" % p)
+        if "suite" in cfg["enforce"] and "suite" in amilib.CERTIFIED:
+            lines.append("OK       frame-jack enforce: the suite question acts — a full-suite run the AMI judges "
+                         "unnecessary is denied once, naming the targeted command (re-issued unchanged, it runs; the "
+                         "evidence run core/gates.sh is never gated); remove suite from ami.enforce to return it to "
+                         "shadow")
         if not problems:
             lines.append("OK       frame-jack: strands-decider at %s, model %s, device %s, port %s, %s" % (
                 cfg["command"], cfg["model"], cfg["device"], cfg["port"], "offline" if cfg["offline"] else "online"))

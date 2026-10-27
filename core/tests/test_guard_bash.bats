@@ -1748,6 +1748,76 @@ AMI_STATE_SENTENCE="state/ami/ is the AMI's record; /frame-jack off is the switc
   run guard_ami sD 'python3 core/frame-jack.py on'; allowed
 }
 
+# v0.12.9 (2026-10-27): the suite question is certified (amilib.CERTIFIED). With ami.enforce naming it, a full run the
+# AMI judges unnecessary is denied ONCE with the targeted command; the same command re-issued on the same edits goes
+# through and its row says overridden. The session's last run is not moved by a denied run.
+ami_enforce() {  # ami_enforce <question ...> — daemon.json's enforce list, as the supervisor copies it from config
+  python3 - "$(AMI_DIR_OF)/daemon.json" "$@" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["enforce"] = sys.argv[2:]; open(p, "w").write(json.dumps(d))
+PY
+}
+
+@test "suite gate enforce (v0.12.9): ami.enforce suite — an edited test file makes the next full run a deny-once naming it (bats core/tests/test_a.bats), the row says enforce / deny-once / targeted, the counters count shortened and keep the baseline run; the same command re-issued goes through with overridden true and becomes the last run; a run after an edit nothing matches (core/zz.py) is asked and goes through; destructive is still shadow" {
+  suite_repo; suite_transcript sA fix/suite
+  ami_on_with_fake FAKE_P=0.8; ami_enforce suite
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed        # the baseline: not asked
+  [ "$(ami_rows_count)" -eq 0 ]
+  printf 'b2\n' > "$R/core/tests/test_a.bats"
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; denied
+  run python3 -c 'import json, sys; print(json.loads(sys.argv[1])["hookSpecificOutput"]["permissionDecisionReason"])' "$output"
+  [ "$output" = "The AMI judges a targeted run sufficient for the files edited since the last run (core/tests/test_a.bats): run those first — bats core/tests/test_a.bats. Re-issue the full run unchanged to run it anyway; the evidence run (core/gates.sh) is never gated." ] || { echo "$output"; return 1; }
+  run ami_row 1 '(r["question"], r["would_shorten"], r["mode"], r["acted"], r["targeted"], r["overridden"], r["edited_since_run"])'
+  [ "$output" = "('suite', True, 'enforce', 'deny-once', ['core/tests/test_a.bats'], False, ['core/tests/test_a.bats'])" ] || { echo "$output"; return 1; }
+  run ami_counters sA '(c["shortened"], c["reissued"], c["would_shorten"], c["suite"]["last_run"]["snapshot"], c["suite"]["last_deny"]["targeted"], c["suite"]["bash_calls_since_run"])'
+  [ "$output" = "(1, 0, 1, {}, ['core/tests/test_a.bats'], 0)" ] || { echo "$output"; return 1; }
+  # the targeted run itself is classified none: no row, no request; it counts as a call since the last run
+  run guard_ami sA 'bats core/tests/test_a.bats' "$R"; allowed
+  [ "$(ami_rows_count)" -eq 1 ]
+  # re-issued unchanged on the same edits: it goes, says overridden, and is now the last run
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed
+  run ami_row 2 '(r["acted"], r["overridden"], r["would_shorten"], r["mode"])'
+  [ "$output" = "(None, True, True, 'enforce')" ] || { echo "$output"; return 1; }
+  run ami_counters sA '(c["shortened"], c["reissued"], list(c["suite"]["last_run"]["snapshot"]), "last_deny" in c["suite"])'
+  [ "$output" = "(1, 1, ['core/tests/test_a.bats'], False)" ] || { echo "$output"; return 1; }
+  # an edit nothing matches: asked, would shorten, but nothing to shorten to — the full run goes, no deny
+  printf 'z\n' > "$R/core/zz.py"
+  run guard_ami sA 'bats core/tests' "$R"; [ "$status" -eq 0 ]; allowed
+  run ami_row 3 '(r["acted"], r["would_shorten"], r["targeted"], r["overridden"])'
+  [ "$output" = "(None, True, [], False)" ] || { echo "$output"; return 1; }
+  # the AMI says the full run is needed: no deny whatever was edited
+  FAKE_LOG="$BATS_TEST_TMPDIR/low.log" ami_on_with_fake FAKE_P=0.2; ami_enforce suite
+  printf 'b3\n' > "$R/core/tests/test_a.bats"
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  run ami_row 4 '(r["acted"], r["would_shorten"], r["targeted"])'
+  [ "$output" = "(None, False, ['core/tests/test_a.bats'])" ] || { echo "$output"; return 1; }
+  # destructive is not certified: enforce naming it is still shadow (the next test covers the daemon.json form)
+  run guard_ami sA 'rm -rf x' "$R"; allowed
+  run ami_row -1 '(r["question"], r["mode"], r["acted"])'
+  [ "$output" = "('destructive', 'shadow', None)" ] || { echo "$output"; return 1; }
+}
+
+@test "suite gate enforce (v0.12.9): without ami.enforce naming suite nothing is denied — would_shorten true, mode shadow, the full run goes; and a deny-once is not re-issued by a different command or after a further edit (asked again, denied again)" {
+  suite_repo; suite_transcript sA fix/suite
+  ami_on_with_fake FAKE_P=0.8
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  printf 'b2\n' > "$R/core/tests/test_a.bats"
+  run guard_ami sA 'bats core/tests' "$R"; allowed
+  run ami_row 1 '(r["mode"], r["acted"], r["would_shorten"], r["targeted"])'
+  [ "$output" = "('shadow', None, True, None)" ] || { echo "$output"; return 1; }
+  ami_enforce suite
+  printf 'b3\n' > "$R/core/tests/test_a.bats"
+  run guard_ami sA 'bats core/tests' "$R"; denied
+  printf 'b4\n' > "$R/core/tests/test_a.bats"                     # a further edit: a new snapshot, not a re-issue
+  run guard_ami sA 'bats core/tests' "$R"; denied
+  run guard_ami sA 'bats core/tests -j 4' "$R"; denied             # a different command: not a re-issue either
+  run ami_counters sA '(c["shortened"], c["reissued"])'
+  [ "$output" = "(3, 0)" ] || { echo "$output"; return 1; }
+  run guard_ami sA 'bats core/tests -j 4' "$R"; allowed            # the same, unchanged: through
+  run ami_counters sA '(c["shortened"], c["reissued"])'
+  [ "$output" = "(3, 1)" ] || { echo "$output"; return 1; }
+}
+
 @test "enforce stays behind the gate through the live hook: ami.enforce naming destructive in daemon.json with a p above the cut still writes mode shadow, acted null, and emits nothing" {
   ami_on_with_fake FAKE_P=0.9
   python3 - "$(AMI_DIR_OF)/daemon.json" <<'PY'
@@ -1756,7 +1826,7 @@ d = json.load(open(sys.argv[1])); d["enforce"] = ["destructive", "suite"]; open(
 PY
   run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import amilib as a, pathlib
 print(a.enforce_requested(pathlib.Path(sys.argv[1]).parent), a.CERTIFIED)' "$DAEDALUS_HOME/core"
-  [ "$output" = "['destructive', 'suite'] ()" ] || { echo "$output"; return 1; }
+  [ "$output" = "['destructive', 'suite'] ('suite',)" ] || { echo "$output"; return 1; }   # v0.12.9: suite is certified, destructive is not
   run guard_ami sA 'rm -rf x'; [ "$status" -eq 0 ]; allowed
   run ami_row 1 '(r["question"], r["p"], r["would_ask"], r["mode"], r["acted"])'
   [ "$output" = "('destructive', 0.9, True, 'shadow', None)" ] || { echo "$output"; return 1; }

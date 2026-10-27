@@ -1631,6 +1631,11 @@ PY
   run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -ne 0 ]
   case "$output" in *"MISSING  frame-jack: ami.enforce names destructive, which no release has certified to act — remove it; the question stays in shadow mode"*) : ;; *) echo "$output"; return 1 ;; esac
   case "$output" in *"1 problem(s) found"*) : ;; *) echo "not counted: $output"; return 1 ;; esac
+  # v0.12.9: the suite question is certified — naming it is an OK line that says what acting means and how to undo it
+  fj_config "$P" mlx false "enforce: suite"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"OK       frame-jack enforce: the suite question acts — a full-suite run the AMI judges unnecessary is denied once, naming the targeted command (re-issued unchanged, it runs; the evidence run core/gates.sh is never gated); remove suite from ami.enforce to return it to shadow"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"MISSING  frame-jack"*) echo "a MISSING for a certified question: $output"; return 1 ;; *) : ;; esac
 }
 
 @test "doctor frame-jack weights: both snapshots present is OK with the size; a missing snapshot is a NOTE whose remedy differs by ami.offline; a snapshot whose symlinks point into a missing blob store is the copied-without-blobs NOTE; regular files in blobs/ are OK" {

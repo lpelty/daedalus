@@ -596,6 +596,28 @@ PY
   has "$output" "this session: run from a shell, so there are no session counts"
 }
 
+@test "status (v0.12.9): with ami.enforce naming suite in daemon.json the first line says enforce mode for the suite question, the shortened meter gains the acted line from the counters (shortened, re-issued), and an uncertified question beside it is named as such" {
+  status_home
+  python3 - "$AMI" <<'PY'
+import json, sys
+ami = sys.argv[1]
+d = json.load(open(ami + "/daemon.json")); d["enforce"] = ["suite"]; json.dump(d, open(ami + "/daemon.json", "w"))
+c = json.load(open(ami + "/session-sA.json")); c["shortened"] = 3; c["reissued"] = 1; json.dump(c, open(ami + "/session-sA.json", "w"))
+PY
+  run FJ status
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  has "$output" "frame-jack: on since 09:12 (this session, by the operator), enforce mode — the suite question acts: a full-suite run the AMI judges unnecessary is denied once, naming the targeted command; re-issued unchanged, it runs"
+  has "$output" "  would have shortened 2 of the 6 suite runs — 0 of those then failed"
+  has "$output" "  shortened 3 full runs this session (denied once, the targeted command named); 1 re-issued and ran in full"
+  python3 - "$AMI" <<'PY'
+import json, sys
+ami = sys.argv[1]
+d = json.load(open(ami + "/daemon.json")); d["enforce"] = ["suite", "destructive"]; json.dump(d, open(ami + "/daemon.json", "w"))
+PY
+  run FJ status
+  has "$output" "re-issued unchanged, it runs (ami.enforce also names destructive, which no release has certified to act)"
+}
+
 @test "status: a question switched off reads as not asked, never as a zero meter — the destructive question off (the default) with none asked gives 'destructive not asked' and 'would have asked you: not asked'; the suite question off gives 'would have shortened: not asked'; a count already logged is still shown" {
   status_home
   set_counts() {

@@ -72,7 +72,13 @@ QUESTIONS = {
 # cases are already denied by guard-bash's deterministic rules, and an inference on every Bash call costs battery
 # and heat for nearly nothing. Off means no inference and no row for that question.
 ASKED_DEFAULT = {"destructive": False, "suite": True}
-CERTIFIED = ()   # questions whose bar was met on held-out data by a fresh agent; empty at this release (§7). No environment variable, flag or file widens it.
+# v0.12.9 (2026-10-27): the suite question is certified, by the operator's decision, on seven days of one deployment's
+# shadow log — 36 runs the AMI would have shortened all passed, 0 shortened-then-failed, both failures on runs it said
+# needed the full suite. That is under the §7 lab bar (0/36 bounds the unsafe rate near 8 %, not 5 %); the CHANGELOG
+# says so. Acting is still a config request (ami.enforce), deny-once, and the evidence run is never gated. The
+# destructive question stays in shadow. No environment variable, flag or file widens this tuple.
+CERTIFIED = ("suite",)
+TARGETED_CAP = 8     # §6.2 enforce: more targeted files than this is not a shortening worth a deny — the full run goes
 
 # §6.3 and §6.2: the only two sentences the tier may ever emit, descriptor first, no single-letter code.
 ASK_REASON = ("The AMI rates this command destructive — %d %% confidence that it would permanently lose data "
@@ -751,6 +757,7 @@ def _default_counters() -> dict:
     return {"asked": {"destructive": 0, "suite": 0}, "would_ask": 0, "would_shorten": 0,
             "shortened_then_failed": 0, "would_ask_then_failed": 0, "would_ask_with_guard_warning": 0,
             "unanswered": {}, "latency_ms": [0, 0, 0], "latency_recent": [], "asks": 0, "overrides": 0,
+            "shortened": 0, "reissued": 0,
             "last_question_epoch": None, "recent_would_ask": [], "breaker": {}, "operator": {}, "suite": {}}
 
 
@@ -858,6 +865,10 @@ def _count_row(c: dict, row: dict) -> None:
         c["would_shorten"] += 1
     if row.get("acted") == "ask":
         c["asks"] += 1
+    if row.get("acted") == "deny-once":
+        c["shortened"] = int(c.get("shortened") or 0) + 1
+    if row.get("overridden"):
+        c["reissued"] = int(c.get("reissued") or 0) + 1
     _remember_pending(c, row)
 
 
@@ -1070,6 +1081,69 @@ def decide(question: str, p: float, certified=(), mode_hint=None, **ctx) -> dict
                                               "permissionDecisionReason": SHORTEN_REASON % (
                                                   ", ".join(edited), _targeted_command(targeted))}}
     return out
+
+
+_TEST_NAME = re.compile(r"^(test_[^/]+\.(?:py|bats)|[^/]+_test\.py|[^/]+\.bats)$")
+_WALK_CAP = 20000     # entries walked while listing a tree's test files; past it the full run goes
+
+
+def is_test_file(path: str) -> bool:
+    return bool(_TEST_NAME.match(os.path.basename(str(path))))
+
+
+def _test_stem(path: str) -> str:
+    n = os.path.basename(str(path))
+    n = n[:n.rfind(".")] if "." in n else n
+    if n.startswith("test_"):
+        return n[5:]
+    if n.endswith("_test"):
+        return n[:-5]
+    return n
+
+
+def _tree_test_files(tree) -> Optional[List[str]]:
+    """Every test file under the tree, tree-relative, no hidden directory walked; None past the walk cap."""
+    out: List[str] = []
+    seen = 0
+    for dirpath, dirnames, filenames in os.walk(str(tree)):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for f in filenames:
+            seen += 1
+            if seen > _WALK_CAP:
+                return None
+            if _TEST_NAME.match(f):
+                out.append(os.path.relpath(os.path.join(dirpath, f), str(tree)))
+    return out
+
+
+def targeted_tests(edited: List[str], tree) -> List[str]:
+    """§6.2 enforce: the targeted run the deny names, from the paths edited since the last full run. An edited test
+    file is itself (when still on disk). An edited non-test file is the test files whose name, less a `test_`
+    prefix or `_test` suffix, is its stem (core/lease.py → core/tests/test_lease.bats). Deviation from the spec's
+    "the whole suite directory of an edited core/*.py with no matching test" (v0.12.9): a file with no matching test
+    makes the whole set unshortenable — a deny naming the suite directory would name the full run it denied. So:
+    any edited file nothing matches, or more than TARGETED_CAP files, or a tree too large to list → [] (no deny;
+    the full run goes)."""
+    out = set()
+    tests = None
+    for p in edited:
+        p = str(p)
+        if is_test_file(p):
+            if os.path.isfile(os.path.join(str(tree), p)):
+                out.add(p)
+            continue
+        if tests is None:
+            tests = _tree_test_files(tree)
+            if tests is None:
+                return []
+        stem = os.path.basename(p)
+        stem = stem[:stem.rfind(".")] if "." in stem else stem
+        hits = [t for t in tests if _test_stem(t) == stem]
+        if not hits:
+            return []
+        out.update(hits)
+    found = sorted(out)
+    return found if 0 < len(found) <= TARGETED_CAP else []
 
 
 def asked_questions(daemon) -> dict:
@@ -1287,7 +1361,8 @@ def _suite_record(root, sid, cmd, cwd, tree, snapshot, deadline: Optional[float]
     with _Locked(lock_path(root), deadline):
         c = _load_counters(root, sid)
         suite = dict(c.get("suite") or {})
-        before = {"last_run": suite.get("last_run"), "calls": int(suite.get("bash_calls_since_run") or 0)}
+        before = {"last_run": suite.get("last_run"), "calls": int(suite.get("bash_calls_since_run") or 0),
+                  "last_deny": suite.get("last_deny")}
         suite["last_run"] = {"epoch": time.time(), "command": cmd, "tree": str(tree), "snapshot": snapshot}
         suite["bash_calls_since_run"] = 0
         trees = dict(suite.get("trees") or {})
@@ -1301,6 +1376,32 @@ def _suite_record(root, sid, cmd, cwd, tree, snapshot, deadline: Optional[float]
         c["suite"] = suite
         _write_json(counters_path(root, sid), c)
     return before
+
+
+def _suite_after_decision(root, sid, before: dict, deny: Optional[dict], deadline: Optional[float] = None) -> None:
+    """§6.2 enforce, after the decision. A deny-once: the full run is not happening, so the session's last run and
+    call count go back to what they were, and `last_deny` records what was denied (command, snapshot, tree) so the
+    same command re-issued on the same snapshot goes through. Any other outcome clears `last_deny`."""
+    if not sid:
+        return
+    try:
+        with _Locked(lock_path(root), deadline):
+            c = _load_counters(root, sid)
+            suite = dict(c.get("suite") or {})
+            if deny is not None:
+                suite["last_run"] = before.get("last_run")
+                suite["bash_calls_since_run"] = int(before.get("calls") or 0)
+                suite["last_deny"] = deny
+            else:
+                suite.pop("last_deny", None)
+            c["suite"] = suite
+            _write_json(counters_path(root, sid), c)
+    except LockBusy:
+        pass
+
+
+def _snapshot_sha(snap) -> str:
+    return _sha(json.dumps(snap or {}, sort_keys=True))
 
 
 def _not_on(root, sid, payload, question, d, extra, deadline=None):
@@ -1351,6 +1452,9 @@ def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
     if prev.get("tree") != str(tree) or not isinstance(prev.get("snapshot"), dict):
         return None                                      # the first full run in this tree: the baseline, not asked
     edited = edited_since(prev["snapshot"], snap)
+    last_deny = before.get("last_deny") if isinstance(before.get("last_deny"), dict) else None
+    reissued = bool(last_deny and last_deny.get("command_sha") == _sha(cmd) and last_deny.get("tree") == str(tree)
+                    and last_deny.get("snapshot_sha") == _snapshot_sha(snap))
     inputs = build_inputs(root, sid, payload, cwd)
     inputs["files_edited_since_previous_run"] = edited
     inputs["previous_suite_run_command"] = prev.get("command")
@@ -1371,17 +1475,29 @@ def _suite_gate(root, sid, payload, cmd, cwd, d, extra, deadline):
         row["unanswered"] = r.reason
         append_row(root, sid, row, deadline)
         return _unanswered_out(root, sid, r, deadline)
-    dec = decide("suite", r.p, certified=_certified(root), edited=edited)
+    certified = _certified(root)
+    targeted = targeted_tests(edited, tree) if "suite" in certified else []
+    dec = decide("suite", r.p, certified=certified, edited=edited, targeted=targeted, reissued=reissued)
     row["p"] = r.p
     row["would_shorten"] = dec["would_shorten"]
     row["mode"] = dec["mode"]
     row["acted"] = dec["acted"]
+    row["targeted"] = targeted if dec["mode"] == "enforce" else None
+    row["overridden"] = bool(reissued and dec["would_shorten"])      # a deny-once the operator or model re-issued
     row["latency_ms"] = r.latency_ms
     row["queued_ms"] = r.queued_ms
     row["input_tokens"] = r.input_tokens
     row["state_truncated"] = state_truncated(r.input_tokens, r.max_length) if r.max_length else False
     append_row(root, sid, row, deadline)
-    return None                                          # §7: the full run goes (CERTIFIED is empty)
+    if dec["acted"] == "deny-once":
+        _suite_after_decision(root, sid, before, {"command_sha": _sha(cmd), "snapshot_sha": _snapshot_sha(snap),
+                                                  "tree": str(tree), "t": time.time(),
+                                                  "tool_use_id": row.get("tool_use_id"), "targeted": targeted},
+                              deadline)
+        return {"emit": dec["emit"]}                      # §6.2 enforce: deny once, naming the targeted command
+    if last_deny is not None:
+        _suite_after_decision(root, sid, before, None, deadline)
+    return None                                          # the full run goes
 
 
 def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
@@ -1440,7 +1556,7 @@ def before_bash(root, sid, payload, cmd, cwd, guard, deadline, segments=None):
     row["input_tokens"] = r.input_tokens
     row["state_truncated"] = state_truncated(r.input_tokens, r.max_length) if r.max_length else False
     append_row(root, sid, row, deadline)
-    return None                                          # §7: nothing acts in this release (CERTIFIED is empty)
+    return None                                          # §7: the destructive question is not certified; shadow
 
 
 # ---------------------------------------------------------------- §9.1 the band's object
