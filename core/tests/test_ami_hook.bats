@@ -666,11 +666,14 @@ print("ok")'
 
 # v0.12.9 (2026-10-27): the suite question is certified. The deny names a targeted command derived from the edited
 # paths; what cannot be derived is not a deny (plan decision 3).
-@test "targeted_tests: an edited test file is itself; an edited source file is the test files whose name less test_/_test is its stem; a file nothing matches, a deleted test file alone, more than 8 files, or a tree too large to list gives [] (the full run goes); hidden directories are not walked" {
-  T2="$BATS_TEST_TMPDIR/tree"; mkdir -p "$T2/core/tests" "$T2/engine/tests" "$T2/.git/tests"
+@test "targeted_tests: an edited test file is itself; an edited source file is the test files whose name less test_/_test is its stem; a file nothing matches, a deleted test file alone, more than 3 files (the classifier's own targeted bound), a bats-and-pytest mix, or a tree too large to list gives [] (the full run goes); hidden directories and nested git checkouts (target/, a lease worktree) are not walked" {
+  T2="$BATS_TEST_TMPDIR/tree"; mkdir -p "$T2/core/tests" "$T2/engine/tests" "$T2/.git/tests" "$T2/target/thing/tests" "$T2/worktrees/01/thing/tests"
   : > "$T2/core/lease.py"; : > "$T2/core/tests/test_lease.bats"; : > "$T2/core/tests/test_lease_board.bats"
   : > "$T2/engine/hot.py"; : > "$T2/engine/tests/test_hot.py"; : > "$T2/engine/tests/hot_test.py"; : > "$T2/engine/tests/helpers.py"
   : > "$T2/.git/tests/test_lease.bats"
+  mkdir -p "$T2/target/thing/.git"; : > "$T2/target/thing/tests/test_lease.py"            # another checkout: not walked
+  : > "$T2/worktrees/01/thing/.git"; : > "$T2/worktrees/01/thing/tests/test_lease.py"     # a worktree's .git file: not walked
+  : > "$T2/core/mixed.py"; : > "$T2/core/tests/test_mixed.bats"; : > "$T2/engine/tests/test_mixed.py"
   for i in 1 2 3 4 5 6 7 8 9; do : > "$T2/core/tests/test_many$i.bats"; done
   run ami_py '
 t = sys.argv[3]
@@ -679,13 +682,18 @@ assert not a.is_test_file("core/x.py") and not a.is_test_file("engine/tests/help
 assert a.targeted_tests(["core/tests/test_lease.bats"], t) == ["core/tests/test_lease.bats"]
 assert a.targeted_tests(["core/lease.py"], t) == ["core/tests/test_lease.bats"], a.targeted_tests(["core/lease.py"], t)
 assert a.targeted_tests(["engine/hot.py"], t) == ["engine/tests/hot_test.py", "engine/tests/test_hot.py"]
-assert a.targeted_tests(["core/lease.py", "engine/tests/test_hot.py"], t) == ["core/tests/test_lease.bats", "engine/tests/test_hot.py"]
+assert a.targeted_tests(["core/lease.py", "engine/tests/test_hot.py"], t) == []      # a .bats and a .py together: no one command
+assert a.targeted_tests(["core/lease.py", "core/tests/test_lease_board.bats"], t) == ["core/tests/test_lease.bats", "core/tests/test_lease_board.bats"]
 assert a.targeted_tests(["core/zz.py"], t) == []                                  # nothing matches: not a deny
 assert a.targeted_tests(["core/lease.py", "core/zz.py"], t) == []               # one unmatched file spoils the set
 assert a.targeted_tests(["core/tests/test_gone.bats"], t) == []                  # deleted: nothing to run
 assert a.targeted_tests([], t) == []
-assert a.targeted_tests(["core/tests/test_many%d.bats" % i for i in range(1, 10)], t) == []   # 9 > the cap of 8
-assert a.targeted_tests(["core/tests/test_many%d.bats" % i for i in range(1, 9)], t) != []
+assert a.TARGETED_CAP == a.TARGETED_MAX_FILES == 3
+assert a.targeted_tests(["core/tests/test_many%d.bats" % i for i in range(1, 5)], t) == []   # 4 > the cap of 3
+assert a.targeted_tests(["core/tests/test_many%d.bats" % i for i in range(1, 4)], t) != []
+assert a.targeted_tests(["core/mixed.py"], t) == []                                 # a .bats and a .py: no one command
+assert a.targeted_tests(["core/lease.py"], t) == ["core/tests/test_lease.bats"]     # target/ and worktrees/ copies unseen
+assert a.classify([a._targeted_command(a.targeted_tests(["core/tests/test_many%d.bats" % i for i in range(1, 4)], t)).split()], t) == "none"
 a._WALK_CAP = 3
 assert a.targeted_tests(["core/lease.py"], t) == []                              # too large to list: the full run goes
 assert a.targeted_tests(["core/tests/test_lease.bats"], t) == ["core/tests/test_lease.bats"]   # no listing needed

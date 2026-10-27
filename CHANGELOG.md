@@ -45,7 +45,8 @@ nothing recorded it.
   full run is denied once; the reason names the targeted command (an edited
   test file is itself; an edited source file is the test files named after
   it). The same command re-issued unchanged goes through. A file nothing
-  matches, more than eight files, or no edits is never a deny. The evidence
+  matches, more than three files, a mix of bats and pytest files, or no
+  edits is never a deny; another checkout inside the tree is never searched. The evidence
   run, `core/gates.sh`, is never gated, and promote's own gates still run.
   `frame-jack status` says "enforce mode" and counts what was shortened and
   re-issued; doctor says what acting means. The destructive question is not

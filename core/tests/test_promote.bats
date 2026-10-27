@@ -1549,7 +1549,7 @@ print(d)' "$DAEDALUS_HOME/state/evidence/$1/run.json" "$2"; }
   [ "$(wait_bg "$pid2")" = PASS ]; [ "$(ran)" = 2 ]; ! grep -q '^quick' "$RAN"
 }
 
-@test "quick promote on a tree that already passed: the window's clean-copy PASS is reused, the run is an ordinary promote by reuse (no quick record), and the background run reuses it too — nothing runs twice" {
+@test "quick promote on a tree that already passed: the window's clean-copy PASS is reused, the run is an ordinary promote by reuse (no quick record, no pending line, no background run, the scratch goes with the confirm) — nothing runs twice" {
   counting_gates; work_on_02
   printf 'gates_quick: echo quick {files} >> %s\n' "$RAN" >> "$DAEDALUS_HOME/config.yaml"
   window_gates; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1560,14 +1560,17 @@ print(d)' "$DAEDALUS_HOME/state/evidence/$1/run.json" "$2"; }
   [ "${lines[2]}" = "Tests on the merged result: PASS (1 gate; this exact tree already passed them, nothing re-ran)." ] || { echo "$output"; return 1; }
   rid="$(pj run_id)"; pid="$(pj promote_id)"
   [ "$(rj "$rid" reused_from)" = "$wrid" ]; [ "$(rj "$rid" quick)" = None ]; [ "$(pj quick.reused)" = True ]
-  st="$(wait_bg "$pid")"; [ "$st" = PASS ] || { echo "background: $st"; cat "$DAEDALUS_HOME/state/promote/$pid/background.log"; return 1; }
-  # the background run reuses the newest promote-grade PASS of the tree: the window's run or the prepare's record of it
-  case "$(bg_json "$pid" reused_from)" in "$wrid"|"$rid") : ;; *) echo "reused_from: $(bg_json "$pid" reused_from)"; return 1 ;; esac
+  [ "$(rj "$rid" promotion.quick)" = None ]                                   # review F7: nothing quick about it
+  [ "${lines[4]}" = "Nothing has been pushed yet; pushing now at the operator's word." ] || { echo "$output"; return 1; }
+  case "$output" in *"This exact tree had already passed the full suite; nothing runs in the background."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -e "$DAEDALUS_HOME/state/promote/$pid/background.json" ]; ! scratch_listed "$pid"
+  ! grep -q "full suite: pending" "$DAEDALUS_HOME/vault/evidence/promotions.log"
   [ "$(ran)" = 1 ] || { echo "something ran: $(cat "$RAN")"; return 1; }
-  grep -qF "background full run: PASS (reused from run " "$DAEDALUS_HOME/vault/evidence/promotions.log"
+  run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
+  case "$output" in *"quick promote"*) echo "a quick line for an ordinary promote: $output"; return 1 ;; *) : ;; esac
 }
 
-@test "quick promote whose background full suite FAILS: the push stands, background.json and the ledger say FAIL with the run, the scratch goes, and doctor says MISSING naming the trunk and the merge" {
+@test "quick promote whose background full suite FAILS: the push stands, background.json and the ledger say FAIL with the run, the scratch goes, doctor says MISSING naming the trunk and the merge — until the window's next ordinary promote is pushed (review F3)" {
   counting_gates; work_on_02
   sed -i '' "s|^  - echo ran >> $RAN|  - echo ran >> $RAN \&\& test ! -e $BATS_TEST_TMPDIR/boom|" "$DAEDALUS_HOME/config.yaml"
   grep -q 'boom' "$DAEDALUS_HOME/config.yaml"
@@ -1581,6 +1584,15 @@ print(d)' "$DAEDALUS_HOME/state/evidence/$1/run.json" "$2"; }
   grep -qF "background full run: FAIL" "$DAEDALUS_HOME/vault/evidence/promotions.log"
   run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
   case "$output" in *"MISSING  promote: window 02's quick promote $pid FAILED its full suite in the background (run $brid"*"main carries merge ${m:0:7}; fix forward in a window and promote again"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the fix forward: an ordinary promote of the window, pushed — the window's newest pushed promotion has no background run
+  rm -f "$BATS_TEST_TMPDIR/boom"
+  printf 'fixed\n' >> "$W2/c.txt"; git -C "$W2" commit -q -am "fix: the gate"
+  run --separate-stderr as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  shown_then_said "Yes, push it."
+  run --separate-stderr as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes, push it"; [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  run python3 "$DAEDALUS_HOME/core/promote.py" --doctor
+  case "$output" in *"quick promote $pid"*) echo "the settled FAIL is still reported: $output"; return 1 ;; *) : ;; esac
+  case "$output" in *"MISSING"*) echo "a MISSING after the fix forward: $output"; return 1 ;; *) : ;; esac
 }
 
 @test "--clean and the leftover-scratch doctor line keep a promotion whose background full run is alive, and remove it once its process is gone (doctor then says the run was recorded as running but its process is gone)" {

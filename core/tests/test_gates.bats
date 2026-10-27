@@ -1693,3 +1693,61 @@ PY
   second="$(last_id)"; [ "$(rj "$second" reused_from)" = "$first" ]
   grep -qF "gate 1 passed after re-running its failures in run $first" "$DAEDALUS_HOME/vault/evidence/$second.md"
 }
+
+# --- v0.12.9 (spec 2026-10-21 §E): quick mode under --promote -------------------------------------------------------
+@test "quick mode (v0.12.9): under --promote, GATES_QUICK=1 runs the one targeted command instead of the gates (gates_setup still runs), the record says quick with the command, the summary says the full suite has not run; a later promote run of the same tree does not reuse it; with no command nothing runs and the reason is recorded; without --promote GATES_QUICK is ignored; a tab in the command dies before any run" {
+  write_config "  - echo gate-ran >> $BATS_TEST_TMPDIR/ran"
+  printf 'gates_setup:\n  - echo setup-ran >> %s\n' "$BATS_TEST_TMPDIR/ran" >> "$DAEDALUS_HOME/config.yaml"
+  install_refuter; git_target          # a home that is a git checkout with core/ committed (reuse needs a recorded core tree); a fingerprintable target for the plain run below
+  promote_run_fixture                  # copies files install_refuter already committed; state/ is ignored
+  GATES_QUICK=1 GATES_QUICK_COMMAND="echo quick-ran >> $BATS_TEST_TMPDIR/ran" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  q="$(printf '%s\n' "$output" | tail -1)"
+  case "$output" in *"quick promote: the targeted command above stood in for the gates; the full suite has not run on this commit yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$BATS_TEST_TMPDIR/ran")" = "setup-ran
+quick-ran" ] || { cat "$BATS_TEST_TMPDIR/ran"; return 1; }
+  python3 - "$DAEDALUS_HOME/state/evidence/$q/run.json" "$BATS_TEST_TMPDIR/ran" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["quick"] == {"command": "echo quick-ran >> %s" % sys.argv[2], "why": None}, r["quick"]
+assert r["result"] == "PASS" and r["gates_result"] == "PASS" and r["tree"] == "promote-scratch", r
+assert [g["command"] for g in r["gates"]] == ["echo quick-ran >> %s" % sys.argv[2]], r["gates"]
+assert "reused_from" not in r and "rerun" not in r["gates"][0], r
+PY
+  grep -qF "Quick promote: the targeted command stood in for the gates; the full suite has not run on this commit yet." "$DAEDALUS_HOME/vault/evidence/$q.md"
+  # the same tree, an ordinary promote run: the quick record stands for nothing, the gate runs
+  DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  f="$(printf '%s\n' "$output" | tail -1)"; [ "$f" != "$q" ]
+  grep -qxF gate-ran "$BATS_TEST_TMPDIR/ran"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reused_from"))' "$DAEDALUS_HOME/state/evidence/$f/run.json")" = None ]
+  # a quick run with no command: nothing runs, the reason is on record; a full PASS on record is reused instead (quick dropped)
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"; : > "$BATS_TEST_TMPDIR/ran"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="" GATES_QUICK_WHY="no test file changed" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  q2="$(printf '%s\n' "$output" | tail -1)"
+  case "$output" in *"quick promote: nothing ran (no test file changed); the full suite has not run on this commit yet"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$BATS_TEST_TMPDIR/ran")" = "setup-ran" ]
+  [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["quick"]["why"], len(r["gates"]), r["result"])' "$DAEDALUS_HOME/state/evidence/$q2/run.json")" = "no test file changed 0 PASS" ]
+  grep -qF "Quick promote: nothing ran (no test file changed); the full suite has not run on this commit yet." "$DAEDALUS_HOME/vault/evidence/$q2.md"
+  # a full run, then quick again on the same tree: PASS by reuse, no quick key
+  DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"; [ "$status" -eq 0 ]
+  full="$(printf '%s\n' "$output" | tail -1)"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="echo quick-ran >> $BATS_TEST_TMPDIR/ran" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  q3="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r.get("reused_from"), r.get("quick"))' "$DAEDALUS_HOME/state/evidence/$q3/run.json")" = "$full None" ]
+  ! grep -q quick-ran "$BATS_TEST_TMPDIR/ran"
+  # without --promote the variable means nothing
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="echo quick-ran >> $BATS_TEST_TMPDIR/ran" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  p="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("quick"))' "$DAEDALUS_HOME/state/evidence/$p/run.json")" = None ]
+  ! grep -q quick-ran "$BATS_TEST_TMPDIR/ran"; grep -qxF gate-ran "$BATS_TEST_TMPDIR/ran"
+  # a tab in the command: refused before any run exists
+  rm -rf "$DAEDALUS_HOME/state/evidence" "$DAEDALUS_HOME/vault/evidence"
+  GATES_QUICK=1 GATES_QUICK_COMMAND="$(printf 'echo a\tb')" DAEDALUS_TARGET_OVERRIDE="$PT" run bash "$DAEDALUS_HOME/core/gates.sh" --no-refute --promote "$PID"
+  [ "$status" -ne 0 ]; case "$output" in *"GATES_QUICK_COMMAND contains a tab character"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/evidence")" ]
+}

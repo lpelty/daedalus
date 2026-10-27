@@ -799,7 +799,9 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
         tests = "Tests on the merged result: PASS (%s, %s)." % (
             "1 gate" if g["count"] == 1 else "%d gates" % g["count"],
             "1 second" if g["seconds"] == 1 else "%d seconds" % g["seconds"])
-    if ready and q:
+    if ready and q and q.get("reused"):
+        closing = "Nothing has been pushed yet; pushing now at the operator's word."
+    elif ready and q:
         closing = "Nothing has been pushed yet; pushing now at the operator's word. The full suite runs in the background after the push."
     elif ready:
         closing = "Nothing has been pushed. %s" % invitation(p)
@@ -1057,8 +1059,10 @@ def prepare(root: Path, a: dict) -> int:
     quick_rec = quick_plan(root, pdir / repo, trunk_sha, merge) if quick else None
     run_rec = run_gates(root, pid, tree, trunk, quick=quick_rec)
     run_id = run_rec["run_id"]
-    if quick_rec is not None:
-        quick_rec["reused"] = bool(run_rec.get("reused_from"))   # a full PASS was on record: nothing quick about it
+    if quick_rec is not None and run_rec.get("reused_from"):
+        quick_rec = dict(quick_rec, reused=True)       # a full PASS was on record: nothing quick about this promote
+    elif quick_rec is not None:
+        quick_rec = dict(quick_rec, reused=False)
     # v0.12.8 (spec 2026-10-21 B): the window's own review of exactly this tree is promote's review, STANDS or
     # REFUTED; only a tree no review of the window has judged gets a fresh reviewer (window_review says when).
     rv = (window_review(root, nn, fp) or review(root, run_id, tree)) if skip is None else None
@@ -1099,7 +1103,7 @@ def prepare(root: Path, a: dict) -> int:
                             "skip_transcript_ref": p["skip_transcript_ref"],
                             "skip_transcript_session_id": p["skip_transcript_session_id"],
                             "overrode_review": p["overrode_review"]}
-        if quick_rec is not None:
+        if quick_rec is not None and not quick_rec.get("reused"):
             rec["promotion"]["quick"] = True
         if p["skip_typed"]:
             rec["promotion"]["skip_typed"] = p["skip_typed"]
@@ -1542,7 +1546,8 @@ def record_yes(root: Path, p: dict, pdir: Path, me: dict, mode: str, yes: dict, 
              (["overrode: %s" % (o.get("call_id") if isinstance(o, dict) else o)] if o else []) + \
              (["earlier refuted: %s" % ",".join(str(e.get("call_id")) for e in ev["earlier_refuted"])]
               if ev.get("earlier_refuted") else []) + \
-             (["full suite: pending (runs in the background after the push)"] if p.get("quick") else [])
+             (["full suite: pending (runs in the background after the push)"]
+              if p.get("quick") and not p["quick"].get("reused") else [])
     ledger_append(root, fields)
     p["confirmed_at"] = at
     write_json(pdir / "prepared.json", p)
@@ -1730,7 +1735,7 @@ def confirm(root: Path, a: dict) -> int:
     pdir, _ = latest_prepared(root, nn, a.get("id"))
     with confirm_lock(pdir, nn):
         p = read_json(pdir / "prepared.json") or {}   # re-read under the lock
-        quick = bool(p.get("quick"))                   # a quick prepare always gets its background full run
+        quick = bool(p.get("quick")) and not (p.get("quick") or {}).get("reused")   # a quick prepare gets its background full run; one that reused a full PASS needs none
         if (pdir / "pushed").exists() or (pdir / "announced").exists():
             raise Stop("Promotion %s of window %s was already pushed. Run `promote %s` for anything newer."
                        % (pdir.name, nn, nn))
@@ -1755,6 +1760,8 @@ def confirm(root: Path, a: dict) -> int:
         record_yes(root, p, pdir, me, mode, yes, a.get("said"), ev)
         push(root, p, pdir)
         notes = after_push(root, p, pdir, tr, mode, yes, keep_scratch=quick)
+        if p.get("quick") and not quick:
+            notes.append("This exact tree had already passed the full suite; nothing runs in the background.")
         if quick:
             try:
                 spawn_background(root, p, pdir)
@@ -1873,17 +1880,20 @@ def background_alive(pdir: Path) -> bool:
 def background_lines(root: Path) -> List[str]:
     """Doctor: each window's newest pushed quick promotion and how its background full run went."""
     base = root / "state" / "promote"
-    newest: Dict[str, Tuple[float, Path, dict, dict]] = {}
-    for f in (base.glob("*/background.json") if base.is_dir() else []):
+    newest: Dict[str, Tuple[float, Path, dict]] = {}
+    for f in (base.glob("*/prepared.json") if base.is_dir() else []):
         pdir = f.parent
-        p = read_json(pdir / "prepared.json") or {}
+        p = read_json(f) or {}
         if not p.get("lease") or not was_pushed(pdir):
             continue
         ts = float(p.get("prepared_ts") or 0)
         if p["lease"] not in newest or ts > newest[p["lease"]][0]:
-            newest[p["lease"]] = (ts, pdir, p, read_json(f) or {})
+            newest[p["lease"]] = (ts, pdir, p)
     out = []
-    for nn, (_, pdir, p, bg) in sorted(newest.items()):
+    for nn, (_, pdir, p) in sorted(newest.items()):
+        bg = read_json(pdir / "background.json")       # an ordinary promote after a quick one settles the window
+        if not bg:
+            continue
         state, rid = bg.get("state"), bg.get("run_id")
         if state == "running":
             hhmm = str(bg.get("started") or "?")[11:16]

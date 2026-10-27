@@ -1573,7 +1573,9 @@ full run unchanged to run it anyway". The same command re-issued on the same
 edits goes through, and its row says `overridden`. The targeted set is
 derived: an edited test file is itself; an edited source file is the test
 files whose name, less `test_`/`_test`, is its stem; a file nothing matches,
-more than eight files, or no edits makes the full run go with no deny. The
+more than three files, a mix of bats and pytest files, or no edits makes the
+full run go with no deny. Another checkout inside the tree (`target/`, a
+lease worktree) is never searched. The
 evidence run (`core/gates.sh`) is never gated, promote's gates still run,
 and `frame-jack status` says "enforce mode" and counts what was shortened
 and re-issued. To return to shadow: remove `suite` from `ami.enforce`, or

@@ -78,7 +78,6 @@ ASKED_DEFAULT = {"destructive": False, "suite": True}
 # says so. Acting is still a config request (ami.enforce), deny-once, and the evidence run is never gated. The
 # destructive question stays in shadow. No environment variable, flag or file widens this tuple.
 CERTIFIED = ("suite",)
-TARGETED_CAP = 8     # §6.2 enforce: more targeted files than this is not a shortening worth a deny — the full run goes
 
 # §6.3 and §6.2: the only two sentences the tier may ever emit, descriptor first, no single-letter code.
 ASK_REASON = ("The AMI rates this command destructive — %d %% confidence that it would permanently lose data "
@@ -500,6 +499,9 @@ def head(seg: List[str]) -> List[str]:
 # seven groups, 4 min 18 s — and was never asked the suite question, because any `.py` argument made the segment
 # targeted: one file and seven globbed groups were the same. More test files than this is a suite run.
 TARGETED_MAX_FILES = 3
+# §6.2 enforce (review 2026-10-27, F1): the command a deny names must itself read as targeted (none asked), never as a
+# suite run the gate would deny in turn — so a deny names at most TARGETED_MAX_FILES files; more is no deny.
+TARGETED_CAP = TARGETED_MAX_FILES
 # The options that take their value as the next word, so the value is never read as a test path. An option missing
 # here costs at most one phantom "file" (a word that names nothing counts as one), never a suite run on its own.
 _VALUE_OPTS = {
@@ -861,8 +863,8 @@ def _count_row(c: dict, row: dict) -> None:
         c["recent_would_ask"] = (c["recent_would_ask"] + [row.get("command_head") or ""])[-RECENT_WOULD_ASK:]
         if (row.get("guard") or "allow") != "allow":
             c["would_ask_with_guard_warning"] += 1
-    if row.get("would_shorten"):
-        c["would_shorten"] += 1
+    if row.get("would_shorten") and not row.get("overridden"):
+        c["would_shorten"] += 1                          # a re-issued deny is the same shortening, counted once
     if row.get("acted") == "ask":
         c["asks"] += 1
     if row.get("acted") == "deny-once":
@@ -1102,11 +1104,15 @@ def _test_stem(path: str) -> str:
 
 
 def _tree_test_files(tree) -> Optional[List[str]]:
-    """Every test file under the tree, tree-relative, no hidden directory walked; None past the walk cap."""
+    """Every test file under the tree, tree-relative; no hidden directory, and no directory that is another git
+    checkout (a `.git` of its own: a target/ clone, a lease worktree, a vendored repository — review 2026-10-27, F2)
+    is walked; None past the walk cap."""
     out: List[str] = []
     seen = 0
-    for dirpath, dirnames, filenames in os.walk(str(tree)):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+    top = str(tree)
+    for dirpath, dirnames, filenames in os.walk(top):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".")
+                             and not os.path.lexists(os.path.join(dirpath, d, ".git")))
         for f in filenames:
             seen += 1
             if seen > _WALK_CAP:
@@ -1143,7 +1149,11 @@ def targeted_tests(edited: List[str], tree) -> List[str]:
             return []
         out.update(hits)
     found = sorted(out)
-    return found if 0 < len(found) <= TARGETED_CAP else []
+    if not found or len(found) > TARGETED_CAP:
+        return []
+    if len({f.endswith(".bats") for f in found}) > 1:
+        return []                                        # bats and pytest files together: no one command runs them
+    return found
 
 
 def asked_questions(daemon) -> dict:

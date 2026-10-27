@@ -67,6 +67,10 @@ def problems(root: Path, since_sha: Optional[str], since_time: Optional[float], 
             logs = [g.get("log") for g in rec.get("gates", []) if g.get("exit") not in (0, None)]
             out.append("%s cites evidence-run %s, whose result is %s%s." % (p, rid, rec.get("result"), (" — see " + logs[0]) if logs else ""))
             continue
+        if rec.get("quick"):
+            out.append("%s cites evidence-run %s, a quick promote's run (targeted tests or nothing, not the full suite); "
+                       "cite a full run." % (p, rid))
+            continue
         # A promotion's gate run (gates.sh --promote) is PASS with its reviewer deferred to
         # core/promote.sh, which never flips it; its merged tree can fingerprint exactly like a
         # window's clean worktree. It is promote's evidence, and stands behind a window's claim
