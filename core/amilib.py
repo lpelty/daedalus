@@ -1164,16 +1164,17 @@ def asked_questions(daemon) -> dict:
     return {k: q[k] if isinstance(q.get(k), bool) else v for k, v in ASKED_DEFAULT.items()}
 
 
-def enforce_requested(root) -> list:
+def enforce_requested(root, daemon: Optional[dict] = None) -> list:
     """The questions `ami.enforce` names, as the supervisor copied them into daemon.json. A request, never a grant:
-    the consumers act only on a question that is also in CERTIFIED (§7), and nothing at runtime widens that."""
-    d = _read_json(daemon_path(root)) or {}
+    the consumers act only on a question that is also in CERTIFIED (§7), and nothing at runtime widens that.
+    `daemon` is the record already read, for a caller that holds one (the board reads daemon.json once)."""
+    d = daemon if isinstance(daemon, dict) else (_read_json(daemon_path(root)) or {})
     e = d.get("enforce")
     return [str(q) for q in e if str(q) in QUESTIONS] if isinstance(e, list) else []
 
 
-def _certified(root) -> tuple:
-    return tuple(q for q in enforce_requested(root) if q in CERTIFIED)
+def _certified(root, daemon: Optional[dict] = None) -> tuple:
+    return tuple(q for q in enforce_requested(root, daemon) if q in CERTIFIED)
 
 
 def outcome_row(root, sid, payload: dict, deadline: Optional[float] = None) -> Optional[dict]:
@@ -1575,15 +1576,22 @@ def board_ami(root, sid) -> dict:
     always present; counts None for a shell or a missing counters file. No config, no bash, no inference.
     One word differs from switch(): `down` whose reason is a stale heartbeat is `supervisor gone`, the
     band's own line (§9.2). Past the thirteen §9.1 names, `questions` ({question: asked?} from daemon.json, the
-    defaults without one) lets the band say a switched-off question is off instead of showing it as zero."""
+    defaults without one) lets the band say a switched-off question is off instead of showing it as zero. `mode`
+    (v0.12.10) is enforce when daemon.json's enforce names a certified question, else shadow; `shortened` and
+    `reissued` (v0.12.10) are the deny-once's counts, what the band shows in place of would-have-shortened."""
     d = switch_detail(root, sid)
     c = counters(root, sid) if sid else None
     # the band names a gone supervisor apart from a dead daemon (§5.1 step 4, §9.2): the remedy differs
     state = "supervisor gone" if d["state"] == "down" and d["reason"] == "supervisor gone" else d["state"]
-    out = {"state": state, "mode": "shadow", "port_alive": d["state"] == "on", "device": d["device"],
+    # v0.12.10: the mode is the same read status makes (daemon.json's enforce ∩ CERTIFIED), never a constant — the
+    # band told the operator "shadow" with the suite question acting (a deployment reported it, 2026-10-27)
+    dj = _read_json(daemon_path(root))                       # one read of daemon.json: the mode and the questions
+    out = {"state": state, "mode": "enforce" if _certified(root, dj or {}) else "shadow", "port_alive": d["state"] == "on",
+           "device": d["device"],
            "asked": None, "would_ask": None, "would_shorten": None, "unanswered": None, "median_ms": None,
-           "asks": None, "overrides": None, "since_epoch": d["since_epoch"], "retry_epoch": d["retry_epoch"],
-           "questions": asked_questions(_read_json(daemon_path(root)))}
+           "asks": None, "overrides": None, "shortened": None, "reissued": None,
+           "since_epoch": d["since_epoch"], "retry_epoch": d["retry_epoch"],
+           "questions": asked_questions(dj)}
     if not c:
         return out
     try:
@@ -1594,6 +1602,8 @@ def board_ami(root, sid) -> dict:
         out["unanswered"] = sum(int(v) for v in (c.get("unanswered") or {}).values())
         out["asks"] = int(c.get("asks") or 0)
         out["overrides"] = int(c.get("overrides") or 0)
+        out["shortened"] = int(c.get("shortened") or 0)      # v0.12.10: what the deny-once did, for the band
+        out["reissued"] = int(c.get("reissued") or 0)
         recent = sorted(x for x in (c.get("latency_recent") or []) if isinstance(x, (int, float)))
         if recent:
             n = len(recent)

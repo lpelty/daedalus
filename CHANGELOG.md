@@ -4,6 +4,45 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.10 — the band and the status report say enforce when the suite question acts
+
+**In short.** With the suite question acting, the line above the prompt
+and two lines of the status report still said shadow. They now say what
+the first line of the status report already said.
+
+**What went wrong.** A deployment took v0.12.9, named `suite` under
+`ami.enforce`, switched the AMI off and on, and read "enforce mode" on the
+first line of `/frame-jack status` — and "shadow (logs, never acts)" on
+the band above the prompt. The band's word was a constant, never read from
+anywhere; the board's `ami.mode` was a constant too; and the overrides
+line of the status report said "shadow mode asks nothing" under an
+enforce header. The operator reads the band, so the band told him the
+release had not taken. The decision path was right throughout: a full run
+the AMI judged unnecessary was denied once, as v0.12.9 says.
+
+**What changed.**
+
+- `board-json`'s `ami.mode` is read the way the status report reads it:
+  `enforce` when the daemon's record names a certified question (today
+  only `suite`), `shadow` otherwise. Two keys join the `ami` object:
+  `shortened` and `reissued`, the deny-once's counts for this session.
+- The band reads the mode. In enforce it says "enforce (suite question
+  acts)" and, in place of "would have shortened N", shows what the
+  deny-once did: "shortened N, M re-issued". A suite question switched off
+  with nothing shortened still reads "suite question off". Shadow is
+  unchanged.
+- The status report's overrides line under enforce says the suite question
+  denies once rather than asking, so nothing is overruled, and points at the
+  shortened line for the re-issued count.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.10`. With `suite`
+under `ami.enforce`, the band above the prompt reads "AMI on · enforce
+(suite question acts) · …".
+
+**Not in this release.** Nothing about what the AMI decides; the deny-once
+and the targeted command are v0.12.9's and are untouched. `enforce` is
+accepted as a one-word value or a list, as before.
+
 ## v0.12.9 — quick promote, the full suite in the background, and the AMI's suite question acting
 
 **In short.** One tiny change no longer costs two full test runs. The

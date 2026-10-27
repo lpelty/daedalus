@@ -6074,7 +6074,8 @@ def _band_text(value: object) -> Optional[str]:
 
 # The `ami` key of board-json (frame-jack spec §9.1): every sub-key, always — the mod relies on every key being present.
 BOARD_AMI_KEYS = ("state", "mode", "port_alive", "device", "asked", "would_ask", "would_shorten", "unanswered",
-                  "median_ms", "asks", "overrides", "since_epoch", "retry_epoch", "questions")
+                  "median_ms", "asks", "overrides", "since_epoch", "retry_epoch", "questions",
+                  "shortened", "reissued")     # v0.12.10: the deny-once's counts, shown by the band in enforce
 
 
 def board_ami(root: Path, sid: Optional[str]) -> dict:
