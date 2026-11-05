@@ -232,11 +232,16 @@ fi
 # inputs are pinned in run.json (core/review-inputs.py). --render-only prints
 # that prompt again, byte for byte, and runs nothing — confirm compares its
 # sha256 with the one the launcher recorded.
-mode=branch; render_only=0; pos=()
+# --review-copy <dir> (branch mode, PROP-043): the fresh copy of the commit this run's gates ran in
+# (state/clean-copy/<run-id>/<target>, gates.sh). The diff, the reviewer's tree and the paths the prompt names are the
+# copy's, so the review is of the commit the gates tested, whatever the worktree does meanwhile; the window's branch,
+# which keys the findings ledger, is still read from this session's own tree.
+mode=branch; render_only=0; pos=(); review_copy=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --mode) mode="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
     --render-only) render_only=1; shift ;;
+    --review-copy) review_copy="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
     --*) printf 'refute.sh: unknown flag %s\n' "$1" >&2; exit 2 ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -254,6 +259,19 @@ case "$run_id" in
   *) printf 'refute.sh: %s is not a run id (YYYYmmdd-HHMMSS-xxxxxx, as core/gates.sh makes them)\n' "$run_id" >&2; exit 2 ;;
 esac
 target="$(target_path)"
+own_tree="$target"
+if [ -n "$review_copy" ]; then
+  [ "$mode" = branch ] || { printf 'refute.sh: --review-copy is for a branch review; a promote review reads the merged tree\n' >&2; exit 2; }
+  copy_real="$(cd "$review_copy" 2>/dev/null && pwd -P)" || copy_real=""
+  copies_real="$(cd "$DAEDALUS_HOME/state/clean-copy/$run_id" 2>/dev/null && pwd -P)" || copies_real=""
+  case "$review_copy" in /*) : ;; *) copy_real="" ;; esac
+  if [ -z "$copy_real" ] || [ -z "$copies_real" ] || [ "$(dirname "$copy_real")" != "$copies_real" ] \
+     || ! is_work_tree_root "$copy_real" 2>/dev/null; then
+    printf 'refute.sh: %s is not this run'"'"'s clean copy (state/clean-copy/%s/<target>, a git checkout) — cannot certify the run; no reviewer was started\n' "$review_copy" "$run_id" >&2
+    exit 2
+  fi
+  target="${review_copy%/}"
+fi
 base="$(cfg target.branch 2>/dev/null || printf main)"
 ev="$DAEDALUS_HOME/vault/evidence"
 # The evidence summary to review: the file gates.sh hands over in $3, or the
@@ -481,7 +499,7 @@ RL="$DAEDALUS_HOME/core/review-lenses.py"
 plural() { if [ "$1" -eq 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %ss' "$1" "$2"; fi; }
 if [ "$mode" = branch ]; then
   lease_nn="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease 2>/dev/null || true)"
-  tbranch="$(git -C "$target" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  tbranch="$(git -C "$own_tree" symbolic-ref --short -q HEAD 2>/dev/null || true)"
   size="$(python3 "$RL" size "$diff_file" "$paths")" || { rm -f "$paths" "$diff_file"; exit 2; }
   n_lines="${size% *}"; n_files="${size#* }"
   lens_lines="$(cfg verify.lens_lines 2>/dev/null || printf 800)"

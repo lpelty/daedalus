@@ -368,6 +368,30 @@ def check_distribution(root: Path, reasons: List[str]) -> None:
                        "clean." % detail)
 
 
+def background_running(root: Path, promote_id: object) -> bool:
+    """PROP-041: a quick promote's full suite runs in the background after the push (`gates.sh --no-refute --promote`,
+    started by promote.py spawn_background), under the promoted window's number — a window whose session has often
+    ended — so its RUNNING record was called "never finished; its session is gone" and its files stray for the eleven
+    minutes it ran. It is still in flight while its promotion's background.json says running and names a process that
+    answers (promote.py background_alive, without a pid yet never: a record that never got one vouches for nothing)."""
+    if not isinstance(promote_id, str) or not re.fullmatch(r"[0-9A-Za-z-]+", promote_id):
+        return False
+    try:
+        bg = json.loads((root / "state" / "promote" / promote_id / "background.json").read_text())
+    except (OSError, ValueError):
+        return False
+    pid = bg.get("pid") if isinstance(bg, dict) else None
+    if bg.get("state") != "running" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
     try:
         since = time.mktime(time.strptime(marker.get("started", "")[:19], "%Y-%m-%dT%H:%M:%S"))
@@ -397,7 +421,7 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
                 or str(rj.resolve()) not in manifest or not rec.get("lease")):
             continue
         rid, nn = str(rec.get("run_id") or rj.parent.name), str(rec["lease"])
-        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed"):
+        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed") or background_running(root, rec.get("promote_id")):
             running_ok.add(rid)
         else:
             never_finished.append((rid, nn))

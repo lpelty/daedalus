@@ -1694,6 +1694,148 @@ PY
   grep -qF "gate 1 passed after re-running its failures in run $first" "$DAEDALUS_HOME/vault/evidence/$second.md"
 }
 
+# --- PROP-043 (2026-11-05): the review reads the tree the gates tested ------------------------------------------------
+# review_stub <dir> — a refuter stub that records the prompt, the --add-dir it was granted, and what that directory
+# held AT CALL TIME (the copy is removed afterwards), then says STANDS.
+review_stub() {
+  mkdir -p "$1"
+  cat > "$1/claude" <<STUB
+#!/usr/bin/env bash
+cat > "$1/stdin"
+prev=""; for a in "\$@"; do [ "\$prev" = "--add-dir" ] && printf '%s\\n' "\$a" > "$1/add-dir"; prev="\$a"; done
+d="\$(cat "$1/add-dir")"; ( cd "\$d" && find . -path ./.git -prune -o -type f -print | sort ) > "$1/tree-files"
+printf 'VERDICT: STANDS\\n'
+STUB
+  chmod +x "$1/claude"
+}
+# branch_fixture — the target on main, then a window branch with one committed change; nothing uncommitted.
+branch_fixture() {
+  install_refuter
+  git_thing
+  T="$DAEDALUS_HOME/target/thing"
+  git -C "$T" checkout -q -b lease/01
+  printf 'the change under test\n' > "$T/committed.py"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m change
+}
+
+@test "PROP-043: a clean-tree run's review reads the fresh copy the gates ran in — a commit the worktree gains meanwhile is in neither the diff nor the reviewer's tree; the review's fingerprint is the run's" {
+  branch_fixture
+  tested="$(git -C "$T" rev-parse HEAD)"
+  bin="$BATS_TEST_TMPDIR/bin043"; review_stub "$bin"
+  # The gate stands in for a build committing the next release into the same worktree while the run goes on.
+  write_config "  - test -f committed.py && printf 'not tested\\\\n' > $T/intruder.py && git -C $T add intruder.py && git -C $T -c user.email=t@x -c user.name=t commit -q -m next" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(git -C "$T" rev-parse HEAD)" != "$tested" ] || { echo "the fixture's gate did not commit"; return 1; }
+  case "$output" in *"fresh copy of commit ${tested:0:12}"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"review: the reviewer reads the same fresh copy of commit ${tested:0:12}"*) : ;; *) echo "no line saying where the review read: $output"; return 1 ;; esac
+  # The reviewer was granted the copy, not the worktree, and the copy held the tested commit only.
+  [ "$(cat "$bin/add-dir")" = "$DAEDALUS_HOME/state/clean-copy/$id/thing" ] || { echo "add-dir: $(cat "$bin/add-dir")"; return 1; }
+  grep -qxF ./committed.py "$bin/tree-files"
+  ! grep -q intruder "$bin/tree-files" || { echo "the reviewer's tree held the later commit"; return 1; }
+  # The diff and the prompt: the tested change, never the later one.
+  # (the gate's own command, in the evidence summary, names intruder.py; the diff must not)
+  grep -q '^diff --git a/committed.py' "$bin/stdin"
+  ! grep -q '^diff --git .*intruder' "$bin/stdin" || { echo "the diff holds a file the tested commit does not"; return 1; }
+  [ "$(grep -c '^diff --git ' "$bin/stdin")" = 1 ] || { grep '^diff --git ' "$bin/stdin"; return 1; }
+  case "$output" in *"(1 line in 1 file;"*) : ;; *) echo "the review sized another tree: $output"; return 1 ;; esac
+  grep -qF "The change lives in the git checkout at $DAEDALUS_HOME/state/clean-copy/$id/thing." "$bin/stdin"
+  # The copy is gone once the review is done.
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ] || { echo "the copy was left behind"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+  # The review stands for this run: its fingerprint is the gate run's, its verdict is in run.json.
+  python3 - "$DAEDALUS_HOME/state/evidence/$id/run.json" "$DAEDALUS_HOME/vault/evidence/$id-review.md" "$tested" <<'PY'
+import json, re, sys
+r = json.load(open(sys.argv[1]))
+assert r["tree"] == "clean-copy" and r["commit"] == sys.argv[3] and r["result"] == "PASS", r
+assert (r.get("review") or {}).get("verdict") == "STANDS", r
+fm = dict(l.split(": ", 1) for l in re.match(r"^---\n(.*?)\n---\n", open(sys.argv[2]).read(), re.S).group(1).splitlines() if ": " in l)
+assert fm["fingerprint"] == r["fingerprint"], (fm, r["fingerprint"])
+PY
+  # Asking that reviewer a question later resumes a session whose paths name the copy: the copy is cut again at the
+  # same place, of the same commit, for the answer, and removed after it.
+  cid="$(sed -n 's/^call-id: //p' "$DAEDALUS_HOME/vault/evidence/$id-review.md")"
+  rm -f "$bin/add-dir" "$bin/tree-files"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/call-agent.sh" --resume "$cid" "Why that finding?"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$bin/add-dir")" = "$DAEDALUS_HOME/state/clean-copy/$id/thing" ]
+  grep -qxF ./committed.py "$bin/tree-files"
+  ! grep -q intruder "$bin/tree-files" || { echo "the resumed reviewer's tree held the later commit"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ] || { echo "the re-cut copy was left behind"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "PROP-043: a dirty-tree run's review reads the worktree as before — the uncommitted file is in the diff and the reviewer's tree is the worktree" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043d"; review_stub "$bin"
+  printf 'uncommitted\n' > "$T/wip.py"
+  write_config "  - test -f wip.py" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree"])' "$DAEDALUS_HOME/state/evidence/$id/run.json")" = worktree ]
+  [ "$(cat "$bin/add-dir")" = "$T" ] || { echo "add-dir: $(cat "$bin/add-dir")"; return 1; }
+  grep -qF 'wip.py' "$bin/stdin"; grep -qF 'committed.py' "$bin/stdin"
+  grep -qF "The change lives in the git checkout at $T." "$bin/stdin"
+  case "$output" in *"reviewer reads the same fresh copy"*) echo "$output"; return 1 ;; esac
+}
+
+@test "PROP-043: a run that reuses an earlier clean-copy PASS cuts a copy of the same commit for its review alone, and removes it after" {
+  branch_fixture
+  tested="$(git -C "$T" rev-parse HEAD)"
+  bin="$BATS_TEST_TMPDIR/bin043u"; review_stub "$bin"
+  write_config "  - echo ran >> $BATS_TEST_TMPDIR/ran" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  first="$(printf '%s\n' "$output" | tail -1)"
+  rm -f "$bin/add-dir" "$bin/stdin"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  second="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/ran" | tr -d ' ')" = 1 ] || { echo "the second run did not reuse the first"; return 1; }
+  case "$output" in *"reused from run $first"*"review: the reviewer reads the same fresh copy of commit ${tested:0:12}"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$bin/add-dir")" = "$DAEDALUS_HOME/state/clean-copy/$second/thing" ] || { echo "add-dir: $(cat "$bin/add-dir")"; return 1; }
+  grep -qxF ./committed.py "$bin/tree-files"
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$second" ]
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "PROP-043 guard: when no copy can be cut for a reused run's review, the review reads the worktree only while it is at the run's commit — moved, the run is INVALID with one line naming the change, and no reviewer starts" {
+  branch_fixture
+  tested="$(git -C "$T" rev-parse HEAD)"
+  bin="$BATS_TEST_TMPDIR/bin043g"; review_stub "$bin"
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  rm -f "$bin/add-dir" "$bin/stdin"
+  # a git whose `worktree add` fails, after a build commits into the worktree: the copy cannot be cut, the tree moved
+  real="$(command -v git)"
+  cat > "$bin/git" <<STUB
+#!/usr/bin/env bash
+case " \$* " in *" worktree add "*)
+  printf 'next\n' > "$T/next.py"; "$real" -C "$T" add next.py; "$real" -C "$T" -c user.email=t@x -c user.name=t commit -q -m next
+  exit 1 ;; esac
+exec "$real" "\$@"
+STUB
+  chmod +x "$bin/git"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"run INVALID — the worktree changed after the run began (it was at commit ${tested:0:12}; it is now at $(git -C "$T" rev-parse --short=12 HEAD)), and no copy of that commit could be cut for the review"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$bin/stdin" ] || { echo "a reviewer started"; return 1; }
+  [ -z "$(ls -A "$DAEDALUS_HOME/state/clean-copy" 2>/dev/null)" ]
+}
+
+@test "PROP-043: refute.sh refuses a review copy that is not this run's clean copy, before any reviewer starts" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043r"; review_stub "$bin"
+  mkdir -p "$DAEDALUS_HOME/vault/evidence"; printf -- '---\nresult: PASS\n---\n' > "$BATS_TEST_TMPDIR/summary.md"
+  for bad in "$T" "$DAEDALUS_HOME/state/clean-copy/20261105-000000-aaaaaa/thing"; do
+    mkdir -p "$DAEDALUS_HOME/state/clean-copy/20261105-000000-aaaaaa/thing"
+    PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/refute.sh" 20261105-000000-bbbbbb "" "$BATS_TEST_TMPDIR/summary.md" --review-copy "$bad"
+    [ "$status" -eq 2 ] || { echo "$status $output"; return 1; }
+    case "$output" in *"not this run's clean copy"*) : ;; *) echo "$output"; return 1 ;; esac
+    [ ! -f "$bin/stdin" ] || { echo "a reviewer started"; return 1; }
+  done
+}
+
 # --- v0.12.9 (spec 2026-10-21 §E): quick mode under --promote -------------------------------------------------------
 @test "quick mode (v0.12.9): under --promote, GATES_QUICK=1 runs the one targeted command instead of the gates (gates_setup still runs), the record says quick with the command, the summary says the full suite has not run; a later promote run of the same tree does not reuse it; with no command nothing runs and the reason is recorded; without --promote GATES_QUICK is ignored; a tab in the command dies before any run" {
   write_config "  - echo gate-ran >> $BATS_TEST_TMPDIR/ran"

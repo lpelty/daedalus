@@ -49,7 +49,19 @@ fp_repo() {                          # $1 = repo; $2… = nested relpaths to exc
 
 emit_null() { printf 'null\n'; printf 'fingerprint_secs=%s\n' "$(( $(date +%s) - start ))" >&2; exit 0; }
 
-target="$(target_path 2>/dev/null)" || emit_null
+# fingerprint.sh [<clean copy>] — the tree is this session's (lib.sh target_path), or, named as the one argument, a
+# gate run's fresh copy of its commit under state/clean-copy/ (PROP-043: the refuter reviews that copy, and its
+# launcher fingerprints what it reviews). No other directory is taken: a fingerprint is evidence of one tree.
+if [ "$#" -ge 1 ]; then
+  copies="$(cd "$DAEDALUS_HOME/state/clean-copy" 2>/dev/null && pwd -P)" || copies=""
+  target="$(cd "$1" 2>/dev/null && pwd -P)" || target=""
+  case "$target" in
+    "$copies"/?*/?*) [ -n "$copies" ] || { printf 'fingerprint: %s is not a clean copy under state/clean-copy/\n' "$1" >&2; emit_null; } ;;
+    *) printf 'fingerprint: %s is not a clean copy under state/clean-copy/\n' "$1" >&2; emit_null ;;
+  esac
+else
+  target="$(target_path 2>/dev/null)" || emit_null
+fi
 [ -d "$target" ] || emit_null
 
 nested=()

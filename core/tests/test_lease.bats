@@ -2273,6 +2273,54 @@ commit_in() { printf 'w\n' >> "$DAEDALUS_HOME/worktrees/$1/thing/a.txt"; git -C 
   [ -d "$W3" ]; [ -f "$DAEDALUS_HOME/state/leases/03.json" ]
 }
 
+# --- PROP-041 (2026-11-03): deleting a swept window's work ---------------------------------------------------------
+# swept_fixture — delete_fixture's window 02 (stale, one unpromoted commit) swept: its lease file goes, its worktree
+# and lease/02 stay (they hold work).
+swept_fixture() {
+  delete_fixture
+  LS sweep >/dev/null
+  [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ] && [ -d "$W" ] || { echo "the fixture did not sweep 02 with its work kept"; return 1; }
+  git -C "$DAEDALUS_HOME/target/thing" rev-parse --verify -q refs/heads/lease/02 >/dev/null
+}
+
+@test "PROP-041 (1): unpromoted on a swept number with unpromoted work prints the report, and the delete it asks for runs after the operator's yes — worktree and branch gone, the deletion recorded" {
+  swept_fixture
+  run asked
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = $'Window 02 has 1 unpromoted commit: "unmerged work".\n'"$LINE02" ] || { echo "$output"; return 1; }
+  [ -f "$M" ]
+  P="$(now)"
+  tx "$TX" assistant "Window 02 was swept but holds one unpromoted commit, \"unmerged work\". Delete it?" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" operator "yes, delete it" "$(plus "$P" 2)" >/dev/null
+  run --separate-stderr delete_as_sA --operator-said "yes, delete it"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"Window 02 released; its worktree and branch are deleted (after the operator said: \"yes, delete it\")."*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$W" ]
+  ! git -C "$DAEDALUS_HOME/target/thing" rev-parse --verify -q refs/heads/lease/02 >/dev/null
+  ls "$DAEDALUS_HOME"/state/evidence/deletions/02-*.json >/dev/null
+  # (3) the record is manifested as it is written: the boundary hook does not call it evidence no gate run produced
+  [ -f "$DAEDALUS_HOME/vault/evidence/.manifest" ] && grep -q 'state/evidence/deletions/02-.*\.json$' "$DAEDALUS_HOME/vault/evidence/.manifest" \
+    || { echo "the deletion record is not in the manifest"; return 1; }
+  # a number nothing is left under is still no window
+  run LS unpromoted 02
+  [ "$status" -ne 0 ]; case "$output" in *"There is no window 02."*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "PROP-041 (2): a window adopted and never bound (session_id null, a fresh heartbeat) is held by no session — released with --remove at once after the operator's yes" {
+  swept_fixture
+  run LS adopt lease/02
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("session_id"), d.get("pid"))' "$DAEDALUS_HOME/state/leases/02.json")" = "None None" ]
+  run asked; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  P="$(now)"
+  tx "$TX" assistant "Delete window 02's work?" "$(plus "$P" 1)" >/dev/null
+  tx "$TX" operator "go ahead" "$(plus "$P" 2)" >/dev/null
+  run --separate-stderr delete_as_sA --operator-said "go ahead"
+  [ "$status" -eq 0 ] || { echo "$output / $stderr"; return 1; }
+  case "$output" in *"held by a live session"*) echo "$output"; return 1 ;; esac
+  [ ! -d "$W" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
+}
+
 drop_last() { python3 -c 'import sys; p=sys.argv[1]; l=open(p).read().splitlines(True); open(p,"w").write("".join(l[:-1]))' "$1"; }
 
 # group_fixture — delete_fixture's 01 (sA) and 02 (stale, "unmerged work"), plus 03 (stale, "more work") and 04 (stale,

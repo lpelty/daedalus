@@ -2149,6 +2149,39 @@ def carry_hot_locked(root: Path, nn: str, leases: Dict[str, dict]) -> None:
         pass
 
 
+def swept_lease(root: Path, nn: str) -> Optional[dict]:
+    """PROP-041: the window a swept number still stands for — its lease file is gone, but lease/<NN> or
+    worktrees/<NN>/<repo> is still there in some target repo (sweep keeps both while they hold work, §4.5) — as the
+    lease the report and the delete read: those repos and their trunks, no session, no pid, never written to disk.
+    The board names such a number and says "delete NN's work"; `unpromoted NN` and `release NN --remove` refused it
+    ("There is no window NN") and nothing named the `adopt` that would make one. None when nothing is left under the
+    number. Caller holds the lock (either kind)."""
+    if not valid_id(nn):
+        return None
+    held = []
+    for repo in repos_of(root):
+        src = root / "target" / repo
+        branch = src.is_dir() and _git(src, "rev-parse", "--verify", "-q", "refs/heads/lease/%s" % nn)[0] == 0
+        if branch or (root / "worktrees" / nn / repo).exists():
+            held.append(repo)
+    if not held:
+        return None
+    trunk = v.target_branch(root)
+    return {"lease": nn, "session_id": None, "pid": None, "swept": True,
+            "trunks": {repo: trunk_of(root / "target", repo, trunk) for repo in held}}
+
+
+def with_swept(root: Path, leases: Dict[str, dict], nns: list) -> Dict[str, dict]:
+    """leases, with swept_lease() standing in for each of nns that has no lease file but still has work under it."""
+    out = dict(leases)
+    for nn in nns:
+        if out.get(nn) is None:
+            sl = swept_lease(root, nn)
+            if sl is not None:
+                out[nn] = sl
+    return out
+
+
 def release(root: Path, token: str, sid: Optional[str], remove: bool = False, force: bool = False,
             said: Optional[str] = None) -> str:
     """The holder ends its lease: released: <time> (removed when its session
@@ -2169,11 +2202,14 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
     with lock(root):
         leases = read_all(root)
         nn = number_of(leases, token, "release")
-        lease = leases.get(nn)
+        lease = leases.get(nn) if not remove else with_swept(root, leases, [nn]).get(nn)
         if lease is None:
             raise Refused("There is no window %s." % nn)
         holder = lease.get("session_id")
-        if sid is not None and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+        # PROP-041: a window no session ever bound (adopted, or made by `create` and never claimed) is held by none —
+        # liveness() reads its fresh heartbeat as live for leases.stale_after, which held an adopted window's delete
+        # back four hours. `holder and`, as task, rebase and split already ask.
+        if sid is not None and holder and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
             raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
         if not remove:
             lease["released"] = now_stamp()
@@ -2248,12 +2284,13 @@ def release_many(root: Path, tokens: list, sid: Optional[str], force: bool = Fal
     with lock(root):
         leases = read_all(root)
         nns = sorted(set(number_of(leases, t, "release") for t in tokens))
+        leases = with_swept(root, leases, nns)          # PROP-041: a swept number with work left is deleted too
         for nn in nns:
             lease = leases.get(nn)
             if lease is None:
                 raise Refused("There is no window %s." % nn)
             holder = lease.get("session_id")
-            if sid is not None and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+            if sid is not None and holder and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:   # PROP-041
                 raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
         ok = None
         if sid is not None:
@@ -2522,7 +2559,7 @@ def deletion_confirmed(root: Path, sid: str, nns: "list | str", said: Optional[s
     nns = [nns] if isinstance(nns, str) else list(nns)
     try:
         with lock(root, shared=True):
-            leases = read_all(root)
+            leases = with_swept(root, read_all(root), nns)          # PROP-041
             for nn in nns:
                 if leases.get(nn) is None:
                     return "There is no window %s." % nn
@@ -2543,6 +2580,14 @@ def record_deletion(root: Path, nn: str, sid: str, said: str, ok: dict) -> Path:
     p.write_text(json.dumps({"lease": nn, "session_id": sid, "said": said, "transcript_ref": ok["transcript_ref"],
                              "shown_ref": ok["shown_ref"], "cutoff": ok["cutoff"], "fingerprint": ok["fingerprint"],
                              "problems": ok.get("problems"), "at": now_stamp()}, indent=2))
+    # PROP-041: manifested as it is written, as refute.sh manifests its unwritten.json — an unmanifested file under
+    # state/evidence/ is what the boundary hook calls evidence no gate run produced, and it blocked every tool call
+    # and Stop after the delete until a restart. A record written by hand there is still unmanifested, still named.
+    try:
+        subprocess.run([sys.executable, str(root / "core" / "manifest-append.py"), str(p)], env=dict(os.environ,
+                       DAEDALUS_HOME=str(root)), stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
     return p
 
 
@@ -2563,6 +2608,7 @@ def unpromoted_report(root: Path, tokens: "list | str", sid: Optional[str] = Non
         nns = []
         for t in tokens:
             nn = number_of(leases, t, "unpromoted")
+            leases = with_swept(root, leases, [nn])        # PROP-041: a swept number's work is reported too
             if leases.get(nn) is None:
                 raise Refused("There is no window %s." % nn)
             if nn not in nns:

@@ -576,7 +576,8 @@ tree. If the gate is red, the status is `BLOCKED` with the run-id and the log
 path — the honest state. When your tree is committed (nothing modified or
 untracked), the gates run in a fresh copy of the commit, tracked files only,
 as promote's do: commit before the run that should count, and that run is the
-one promote uses. With uncommitted work they run in your worktree. A tree that
+one promote uses. Its review reads that same copy, so a commit made while the
+run goes on is neither tested nor reviewed. With uncommitted work they run in your worktree. A tree that
 already passed is not tested again: when an earlier run's tree fingerprint,
 `config.yaml` and `core/` are all the same as now and its gates passed, the
 run is PASS by reuse — it says "reused from run <id> (same tree, same gates);

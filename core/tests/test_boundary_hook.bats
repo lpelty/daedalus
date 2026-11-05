@@ -553,6 +553,47 @@ gitc() { git -C "$1" -c user.email=t@x -c user.name=t "${@:2}"; }
   case "$output" in *"a gate run under window 02 (poc-ui) never finished; its session is gone"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
+# --- PROP-041 (3): release --remove's deletion records, and promote's background full run, are not stray --------
+
+@test "PROP-041 (3a): the deletion record release --remove writes (state/evidence/deletions/<NN>-<time>.json) is manifested with it, so the hook stays silent; a hand-written one there is still stray" {
+  two_leases; live_holder 01; live_holder 02
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  rec="$(python3 - "$DAEDALUS_HOME" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1] + "/core")
+import leaselib
+print(leaselib.record_deletion(Path(sys.argv[1]), "02", "sA", "yes",
+      {"transcript_ref": "t", "shown_ref": None, "cutoff": 0, "fingerprint": "f", "problems": ["x"]}))
+PY
+)"
+  [ -f "$rec" ]; case "$rec" in "$DAEDALUS_HOME/state/evidence/deletions/02-"*.json) : ;; *) echo "$rec"; return 1 ;; esac
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "the hook blocked on release's own record: $output"; return 1; }
+  run hook_as PostToolUse sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '{}\n' > "$DAEDALUS_HOME/state/evidence/deletions/03-20991231-000000.json"
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"no gate run produced"*"deletions/03-20991231-000000.json"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"deletions/02-"*) echo "the manifested record was named: $output"; return 1 ;; esac
+}
+
+@test "PROP-041 (3b): a promotion's background full run still going (its RUNNING record names a window whose session is gone) is not stray, nor 'never finished'; once its process is gone it is" {
+  two_leases; live_holder 01
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(pid=1,proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  pid="p-20991231-quick"; rid="20991231-000000-bbbbbb"
+  mkdir -p "$DAEDALUS_HOME/state/evidence/$rid" "$DAEDALUS_HOME/state/promote/$pid"
+  printf '{"run_id":"%s","started":"2099-12-31T00:00:00","lease":"02","session_id":"sA","result":"RUNNING","promote_id":"%s","tree":"promote-scratch","refuter":"deferred-to-promote"}' "$rid" "$pid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$DAEDALUS_HOME/vault/evidence/$rid.md"
+  printf 'x\n' > "$DAEDALUS_HOME/state/evidence/$rid/gate-1.log"
+  bg="$(live_pid)"
+  printf '{"state":"running","pid":%s,"started":"2099-12-31T00:00:00Z","run_id":null}' "$bg" > "$DAEDALUS_HOME/state/promote/$pid/background.json"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "the hook blocked on promote's background run: $output"; return 1; }
+  run hook_as PostToolUse sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  kill "$bg"; wait "$bg" 2>/dev/null || true
+  run hook_as Stop sA; [ "$status" -eq 2 ]
+  case "$output" in *"never finished"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
 # --- v0.12.7 (PROP-035 §2): evidence is attributed by run, not by snapshot time -----------------------------------
 
 # visible_vault — the layout PROP-017 found: the vault is not its own repository and not ignored, so vault/evidence/

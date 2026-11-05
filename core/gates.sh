@@ -402,10 +402,13 @@ remove_clean_copy() {
   clean_dir=""
 }
 trap remove_clean_copy EXIT
-if [ "$tree_mode" = clean-copy ] && [ -z "$reused_from" ]; then
+# cut_clean_copy — the copy of heads_before under state/clean-copy/<run-id>/, nested repositories and scaffold
+# directories included; run_dir names it. Non-zero when any part could not be cut (the caller removes what was).
+cut_clean_copy() {
+  local rel sha sc cut_ok=1
   clean_dir="$DAEDALUS_HOME/state/clean-copy/$run_id"
   run_dir="$clean_dir/$(basename "$target")"
-  cut_ok=1
+  clean_nested=""
   mkdir -p "$clean_dir" || cut_ok=0
   while IFS="$(printf '\t')" read -r rel sha; do
     [ -n "$rel" ] && [ "$cut_ok" -eq 1 ] || continue
@@ -418,12 +421,16 @@ if [ "$tree_mode" = clean-copy ] && [ -z "$reused_from" ]; then
   done <<EOF
 $heads_before
 EOF
-  if [ "$cut_ok" -eq 1 ]; then
-    while IFS= read -r sc; do
-      [ -n "$sc" ] && mkdir -p "$run_dir/$sc"
-    done <<EOF
+  [ "$cut_ok" -eq 1 ] || return 1
+  while IFS= read -r sc; do
+    [ -n "$sc" ] && mkdir -p "$run_dir/$sc"
+  done <<EOF
 $(cfg_pairs target.scaffold 2>/dev/null | cut -f1)
 EOF
+  return 0
+}
+if [ "$tree_mode" = clean-copy ] && [ -z "$reused_from" ]; then
+  if cut_clean_copy; then
     log "clean tree: the gates run in a fresh copy of commit ${clean_commit:0:12} (tracked files only)"
   else
     log "the clean copy of commit ${clean_commit:0:12} could not be cut; the gates run in place (tree: worktree)"
@@ -592,9 +599,9 @@ $rows"
   fp_after="$fp_before"
 elif [ -n "$clean_dir" ]; then
   # In a clean copy the worktree may change while the gates run without touching what was tested; what the gates
-  # must not have changed is the copy. Then the copy goes; the logs stay under state/evidence.
+  # must not have changed is the copy. The copy stays for the review (PROP-043, below) and goes after it; the logs
+  # stay under state/evidence.
   if tree_moved; then fp_after="changed"; else fp_after="$fp_before"; fi
-  remove_clean_copy
 else
   fp_after="$(fingerprint)"
 fi
@@ -738,7 +745,31 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
       criteria=""
     fi
   fi
-  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "$criteria" "$summary_tmp" 2>&1 >/dev/null)"
+  # PROP-043 (2026-11-05): the review reads the tree the gates tested. A clean-tree run's gates ran in a fresh copy of
+  # its commit, and the review used to read the worktree, where a build went on committing the next release during the
+  # run: the reviewer counted 94 files against a commit of 78 and refuted on code the commit did not hold. So the
+  # reviewer is pointed at that same copy — its diff is the commit against trunk, every path it reads is inside it. A
+  # run that reused an earlier PASS cut no copy; one is cut now, of the same commit, for the review alone. A copy that
+  # cannot be cut leaves the review on the worktree, and then the worktree must still be at the commit the run began
+  # on, or the run is INVALID: a review of another tree certifies nothing. A dirty tree's run is reviewed in place.
+  review_copy=()
+  if [ "$tree_mode" = clean-copy ] && [ -z "$clean_dir" ]; then
+    if ! cut_clean_copy; then
+      remove_clean_copy; run_dir="$target"
+      heads_review="$(repo_heads)" || heads_review=""
+      if [ "$heads_review" != "$heads_before" ]; then
+        invalid_reason="the worktree changed after the run began (it was at commit ${clean_commit:0:12}; $(if [ -n "$heads_review" ]; then printf 'it is now at %s' "$(printf '%s' "$heads_review" | awk -F'\t' '$1=="." {print substr($2,1,12)}')"; else printf 'it now has uncommitted changes or a nested repository moved'; fi)), and no copy of that commit could be cut for the review"
+      fi
+    fi
+  fi
+  if [ -n "$clean_dir" ]; then
+    review_copy=(--review-copy "$run_dir")
+    log "review: the reviewer reads the same fresh copy of commit ${clean_commit:0:12} the gates ran in"
+  fi
+fi
+[ -z "$invalid_reason" ] || [ "$result" != PASS ] || result=INVALID
+if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
+  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "$criteria" "$summary_tmp" ${review_copy[@]+"${review_copy[@]}"} 2>&1 >/dev/null)"
   refute_code=$?
   # How the change was reviewed — one reviewer or several lenses, and why; how the earlier findings fared — shown
   # whatever the verdict, and kept out of the message a failure shows (review-lenses.py, refute.sh).
@@ -769,6 +800,9 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
     fi
   fi
 fi
+
+# The review is done: the copy goes (the EXIT trap covers every other way out).
+remove_clean_copy
 
 # A STANDS that listed findings it did not count (hypothetical, out of scope, LOW — refute.sh's verdict_of) says so,
 # with the review file, so the operator can see what was set aside and why.

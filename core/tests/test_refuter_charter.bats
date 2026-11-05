@@ -240,11 +240,24 @@ PY
   [ "$(calls)" -eq 0 ]
 }
 
-@test "the tree under review must be this session's tree, under worktrees/, target/ or state/promote/, and match the mode" {
+@test "the tree under review must be this session's tree, under worktrees/, target/, state/promote/ or state/clean-copy/, and match the mode" {
   refuter_fixture
   printf 'review\n' > "$BATS_TEST_TMPDIR/p.md"
   run bash "$CALL" --callee refuter --tree "$BATS_TEST_TMPDIR" --request-file "$BATS_TEST_TMPDIR/p.md"
-  [ "$status" -eq 2 ]; case "$output" in *"--tree must be under worktrees/, target/ or state/promote/"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$status" -eq 2 ]; case "$output" in *"--tree must be under worktrees/, target/, state/promote/ or state/clean-copy/"*) : ;; *) echo "$output"; return 1 ;; esac
+  # PROP-043: a gate run's clean copy is reviewed only by that run (its tag), in a branch review, and only when it is a
+  # checkout of this session's own repository.
+  cc="$DAEDALUS_HOME/state/clean-copy/20261021-000000-0000a1/thing"
+  git -C "$T" worktree add -q --detach "$cc" HEAD
+  run bash "$CALL" --callee refuter --tree "$cc" --tag 20261021-000000-0000a9 --request-file "$BATS_TEST_TMPDIR/p.md"
+  [ "$status" -eq 2 ]; case "$output" in *"one gate run's copy of its commit"*) : ;; *) echo "$output"; return 1 ;; esac
+  run bash "$CALL" --callee refuter --tree "$cc" --tag 20261021-000000-0000a1 --mode promote --request-file "$BATS_TEST_TMPDIR/p.md"
+  [ "$status" -eq 2 ]; case "$output" in *"one gate run's copy of its commit"*) : ;; *) echo "$output"; return 1 ;; esac
+  other="$DAEDALUS_HOME/state/clean-copy/20261021-000000-0000a2/thing"
+  mkdir -p "$other"; git init -q "$other"; git -C "$other" -c user.email=t@x -c user.name=t commit -q --allow-empty -m x
+  run bash "$CALL" --callee refuter --tree "$other" --tag 20261021-000000-0000a2 --request-file "$BATS_TEST_TMPDIR/p.md"
+  [ "$status" -eq 2 ]; case "$output" in *"is not a copy of this session's tree"*) : ;; *) echo "$output"; return 1 ;; esac
+  git -C "$T" worktree remove --force "$cc"
   mkdir -p "$DAEDALUS_HOME/worktrees/07/thing"
   run bash "$CALL" --callee refuter --tree "$DAEDALUS_HOME/worktrees/07/thing" --request-file "$BATS_TEST_TMPDIR/p.md"
   [ "$status" -eq 2 ]; case "$output" in *"is not this session's tree"*) : ;; *) echo "$output"; return 1 ;; esac

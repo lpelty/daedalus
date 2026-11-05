@@ -44,6 +44,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -74,7 +75,7 @@ SELF_MARKER = "Daedalus session orientation:"
 SCOPE = "read-only-review"
 MODES = ("agent", "self", "refuter")
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob")
-TREE_ROOTS = ("worktrees", "target", "state/promote")
+TREE_ROOTS = ("worktrees", "target", "state/promote", "state/clean-copy")
 CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/CLAUDE.local.md", "**/.claude/rules/**", "**/AGENTS.md"]
 REFUTER_SETTINGS = json.dumps({"disableAllHooks": True, "autoMemoryEnabled": False,
                                "claudeMdExcludes": CLAUDE_MD_EXCLUDES})
@@ -866,7 +867,7 @@ def render_charter(root: Path, dist: Optional[Dict[str, Optional[str]]] = None) 
     return path, name
 
 
-def check_tree(root: Path, raw: Optional[str], review_mode: str) -> Path:
+def check_tree(root: Path, raw: Optional[str], review_mode: str, tag: Optional[str] = None) -> Path:
     if not raw:
         raise Refusal("--callee refuter needs --tree <absolute path>: the checkout under review")
     if not raw.startswith("/"):
@@ -883,12 +884,41 @@ def check_tree(root: Path, raw: Optional[str], review_mode: str) -> Path:
         except ValueError:
             continue
     if under is None:
-        raise Refusal("--tree must be under worktrees/, target/ or state/promote/ of this Daedalus (got: %s)" % raw)
+        raise Refusal("--tree must be under worktrees/, target/, state/promote/ or state/clean-copy/ of this Daedalus "
+                      "(got: %s)" % raw)
+    if under == "state/clean-copy":
+        # PROP-043: a gate run's fresh copy of its commit (gates.sh), reviewed by that run alone — its tag is the run
+        # id, or a lens of it — and only as a branch review.
+        parts = tree.relative_to(root / "state" / "clean-copy").parts
+        lens = LENS_TAG.fullmatch(tag or "")
+        run = lens.group(1) if lens else (tag or "")
+        if review_mode != "branch" or len(parts) != 2 or parts[0] != run:
+            raise Refusal("a tree under state/clean-copy/ is one gate run's copy of its commit, reviewed in a branch "
+                          "review tagged with that run (got: %s, tag %s)" % (raw, tag or "none"))
     if review_mode == "promote" and under != "state/promote":
         raise Refusal("a promote review reads the merged tree under state/promote/ (got: %s)" % raw)
     if review_mode == "branch" and under == "state/promote":
         raise Refusal("a tree under state/promote/ is a promote review: pass --mode promote")
     return tree
+
+
+def is_clean_copy(root: Path, tree: Path) -> bool:
+    try:
+        tree.resolve().relative_to((root / "state" / "clean-copy").resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def same_repository(a: Path, b: Path) -> bool:
+    """Both checkouts of one repository: git's common directory is the same (a clean copy is a linked worktree of the
+    session's tree's repository)."""
+    def common(d: Path) -> Optional[str]:
+        p = subprocess.run(["git", "-C", str(d), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=30)
+        return str(Path(p.stdout.strip()).resolve()) if p.returncode == 0 and p.stdout.strip() else None
+    ca = common(a)
+    return ca is not None and ca == common(b)
 
 
 def tree_fingerprint(root: Path, tree: Path, review_mode: str) -> str:
@@ -904,10 +934,17 @@ def tree_fingerprint(root: Path, tree: Path, review_mode: str) -> str:
         mine = p.stdout.strip()
         if p.returncode != 0 or not mine:
             raise Refusal("cannot resolve this session's tree (%s)" % (p.stderr.strip() or "target_path failed"))
-        if Path(mine).resolve() != tree:
+        copy = is_clean_copy(root, tree)
+        if copy and not same_repository(tree, Path(mine)):
+            raise Refusal("the tree under review (%s) is not a copy of this session's tree (%s); a verdict names the "
+                          "tree it reviewed" % (tree, mine))
+        if not copy and Path(mine).resolve() != tree:
             raise Refusal("the tree under review (%s) is not this session's tree (%s); a verdict names the tree "
                           "it reviewed" % (tree, mine))
-    p = subprocess.run(["bash", str(root / "core" / "fingerprint.sh")], capture_output=True, text=True,
+    # A clean copy is fingerprinted where it is, named to fingerprint.sh (which takes no other directory); every
+    # other tree through this session's resolution, or the override.
+    extra = [str(tree)] if review_mode != "promote" and is_clean_copy(root, tree) else []
+    p = subprocess.run(["bash", str(root / "core" / "fingerprint.sh")] + extra, capture_output=True, text=True,
                        timeout=600, env=env)
     lines = p.stdout.strip().splitlines()
     fp = lines[-1] if lines else "null"
@@ -974,7 +1011,7 @@ def prepare_refuter(root: Path, conf: Dict[str, str], args: argparse.Namespace, 
     if args.caller:
         raise Refusal("--caller is for --callee self; the refuter is called by refute.sh")
     review_mode = args.mode or "branch"
-    tree = check_tree(root, args.tree, review_mode)
+    tree = check_tree(root, args.tree, review_mode, args.tag)
     verdict = check_verdict_file(root, args.verdict_file, args.tag) if args.verdict_file else None
     fp = tree_fingerprint(root, tree, review_mode)
     return {"caller": SELF_NAME, "callee": "refuter", "tree": args.tree, "tag": args.tag,
@@ -1506,12 +1543,64 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
             raise Refusal("the receipt of call %s changed while this resume started; nothing was launched" % call_id)
         rec = fresh
         need_claude(rec)
-        if mode == "refuter":
-            launch = launch_refuter(root, conf, rec, call_dir, request, True, render_charter(root, dist), dist)
-        else:
-            launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
-        return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell",
-                       resumer_phrase(view), locked=True)
+        recut = recut_clean_copy(root, rec) if mode == "refuter" else []
+        try:
+            if mode == "refuter":
+                launch = launch_refuter(root, conf, rec, call_dir, request, True, render_charter(root, dist), dist)
+            else:
+                launch = LAUNCH[mode](root, conf, rec, call_dir, request, True)
+            return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell",
+                           resumer_phrase(view), locked=True)
+        finally:
+            remove_recut(recut)
+
+
+def recut_clean_copy(root: Path, rec: dict) -> List[Tuple[Path, Path]]:
+    """PROP-043: a clean-tree run's review read the run's fresh copy of its commit, which gates.sh removes when the
+    review is done. A question to that reviewer later ("ask the reviewer why …") resumes a session whose paths all name
+    the copy, so the copy is cut again at the same place, of the commit(s) the run's record names, from the window's
+    worktree (or the prime's mirror), and removed after the answer. [(source repo, checkout)] — the cut, outer first;
+    empty when the tree is not a clean copy or is still there. A copy that cannot be cut is refused: an answer read
+    from another tree is the defect this guards."""
+    tree = Path(rec.get("tree") or "")
+    if not tree.is_absolute() or not is_clean_copy(root, tree.parent) or tree.exists():
+        return []
+    run_id = tree.parent.name
+    try:
+        run = json.loads((root / "state" / "evidence" / run_id / "run.json").read_text())
+    except (OSError, ValueError):
+        run = {}
+    commit = run.get("commit")
+    nested = run.get("nested_commits") or {}
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit) or not isinstance(nested, dict):
+        raise Refusal("the review read run %s's copy of its commit, which is gone, and the run's record does not name "
+                      "the commit to cut it again; nothing was launched" % run_id)
+    lease = run.get("lease")
+    src = root / "worktrees" / str(lease) / tree.name if lease else None
+    if src is None or not src.is_dir():
+        src = root / "target" / tree.name
+    done: List[Tuple[Path, Path]] = []
+    for rel, sha in [(".", commit)] + sorted(nested.items()):
+        repo = src if rel == "." else src / rel
+        dest = tree if rel == "." else tree / rel
+        p = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "--detach", str(dest), str(sha)],
+                           capture_output=True, text=True, timeout=120)
+        if p.returncode != 0:
+            remove_recut(done)
+            shutil.rmtree(str(tree.parent), ignore_errors=True)
+            raise Refusal("the review read run %s's copy of commit %s, which is gone, and it could not be cut again "
+                          "(%s); nothing was launched" % (run_id, commit[:12], (p.stderr.strip() or "git failed")[-200:]))
+        done.append((repo, dest))
+    return done
+
+
+def remove_recut(done: List[Tuple[Path, Path]]) -> None:
+    for repo, dest in reversed(done):
+        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(dest)], capture_output=True,
+                       timeout=120)
+        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True, timeout=120)
+    if done:
+        shutil.rmtree(str(done[0][1].parent), ignore_errors=True)
 
 
 def latest_review(root: Path, token: str, view: dict) -> str:
