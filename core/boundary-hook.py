@@ -391,7 +391,7 @@ def background_running(root: Path, rec: dict) -> bool:
     now = ll.proc_started_of(pid) if ll.pid_alive(pid) else None
     if now is None or abs(now - rec_started) > 2000:
         return False
-    return ll._run_process_live(rec) and isinstance(rec.get("pid"), int)
+    return ll.run_process_live_strict(rec)      # leans closed: a start it cannot compare excuses nothing
 
 
 def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:

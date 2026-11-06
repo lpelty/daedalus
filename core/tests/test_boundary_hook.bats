@@ -584,7 +584,7 @@ PY
   mkdir -p "$DAEDALUS_HOME/state/evidence/$rid" "$DAEDALUS_HOME/state/promote/$pid"
   bg="$(live_pid)"; gp="$(live_pid)"           # promote.sh --background-run, and the gates.sh it runs
   python3 -c 'import time; time.sleep(1.1)'
-  printf '{"run_id":"%s","started":"%s","lease":"02","session_id":"sA","result":"RUNNING","pid":%s,"promote_id":"%s","tree":"promote-scratch","refuter":"deferred-to-promote"}' "$rid" "$(date +%Y-%m-%dT%H:%M:%S)" "$gp" "$pid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  printf '{"run_id":"%s","started":"%s","started_ms":%s,"lease":"02","session_id":"sA","result":"RUNNING","pid":%s,"promote_id":"%s","tree":"promote-scratch","refuter":"deferred-to-promote"}' "$rid" "$(date +%Y-%m-%dT%H:%M:%S)" "$(python3 -c 'import time; print(int(time.time()*1000))')" "$gp" "$pid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
   python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$DAEDALUS_HOME/vault/evidence/$rid.md"
   printf 'x\n' > "$DAEDALUS_HOME/state/evidence/$rid/gate-1.log"
   bgj() { printf '{"state":"running","pid":%s,"proc_started":%s,"started":"2099-12-31T00:00:00Z","run_id":null}' "$1" "$2" > "$DAEDALUS_HOME/state/promote/$pid/background.json"; }
@@ -597,6 +597,12 @@ PY
   # a record with no start time: no excuse
   printf '{"state":"running","pid":%s,"started":"x","run_id":null}' "$bg" > "$DAEDALUS_HOME/state/promote/$pid/background.json"
   run hook_as Stop sA; [ "$status" -eq 2 ]
+  # a run record with no started_ms (its start cannot be compared): no excuse — the hook leans closed
+  bgj "$bg" "$(ps_ms "$bg")"
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("started_ms"); json.dump(d, open(p,"w"))' "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  run hook_as Stop sA; [ "$status" -eq 2 ] || { echo "an uncomparable start excused the run: $output"; return 1; }
+  python3 -c 'import json,sys,time; p=sys.argv[1]; d=json.load(open(p)); d["started_ms"]=int(time.time()*1000); json.dump(d, open(p,"w"))' "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   # the run's own gates process gone, the promote process alive: no excuse
   bgj "$bg" "$(ps_ms "$bg")"; kill "$gp"; wait "$gp" 2>/dev/null || true
   run hook_as Stop sA; [ "$status" -eq 2 ]; case "$output" in *"never finished"*) : ;; *) echo "$output"; return 1 ;; esac

@@ -56,11 +56,16 @@ it called "never finished; its session is gone".
   `<run-id>.users.json`): the run's gates and review, and each question to
   its reviewer. The last holder to let go removes it. Two questions at once
   share one copy, and the run never removes a copy a question is still
-  reading.
+  reading. A holder is dropped only when its pid is gone or provably
+  another process; one whose start time `ps` cannot read stays.
 - Each gate run first removes the copies left behind by runs killed past
   their exit (SIGKILL, out of memory, a reboot), with their git records. A
   copy goes when its run is not RUNNING with a live gates process (run.json
-  now records the gates pid) and no live process holds it.
+  now records the gates pid and `started_ms`, its start in epoch
+  milliseconds) and no live process holds it. A start that cannot be
+  compared keeps the copy, and so does a RUNNING run from before this
+  release (no pid) under six hours old. A symbolic link under
+  `state/clean-copy/` is named and left alone, never followed.
 - `unpromoted NN` and `release NN --remove` take a swept number whose
   `lease/NN` or worktree still holds work, with no adopt first.
 - A window no session can have held — a swept number, or a window `adopt`
@@ -73,7 +78,8 @@ it called "never finished; its session is gone".
   written. The boundary hook excuses a promotion's RUNNING gate run only
   while both processes are still the recorded ones: the promotion's
   `background.json` says running, with a pid whose start time it now
-  records, and the run's own gates process is alive. A reused pid excuses
+  records, and the run's own gates process is proved alive from its
+  `started_ms`. A reused pid, or a start that cannot be compared, excuses
   nothing. A hand-written file under `state/evidence/` is still named.
 
 **Acceptance criteria met.** PROP-043: a clean-tree run whose worktree gains

@@ -229,8 +229,11 @@ session_id="${DAEDALUS_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
 python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" "$promo_ctx" "$$" <<'PY'
 import json, sys
 out, run_id, started, lease, sid, ctx, pid = sys.argv[1:8]
+import time
+# pid and started_ms (epoch ms, no zone to misread): what tells a live run from one killed past its exit (the reaper
+# of clean copies, the boundary hook's excuse for promote's background run)
 rec = {"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING",
-       "pid": int(pid)}
+       "pid": int(pid), "started_ms": int(time.time() * 1000)}
 if ctx:
     c = json.load(open(ctx))
     rec.update({k: c.get(k) for k in ("promote_id", "merge_sha", "trunk_sha_at_prepare", "repo", "nested")})

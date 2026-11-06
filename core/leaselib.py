@@ -6419,9 +6419,14 @@ def _copy_users(root: Path, run_id: str) -> Dict[str, dict]:
         if not isinstance(e, dict):
             continue
         pid, started = e.get("pid"), e.get("started")
-        now = proc_started_of(pid) if pid_alive(pid) else None
-        if now is not None and isinstance(started, int) and abs(now - started) <= 2000:
-            out[tok] = e
+        if not pid_alive(pid):
+            continue                                   # dead: dropped
+        now = proc_started_of(pid)
+        if now is not None and isinstance(started, int) and abs(now - started) > 2000:
+            continue                                   # the pid is another process now: dropped
+        # alive, and its start the recorded one or unreadable (ps timed out or failed under load): kept — dropping a
+        # holder still reading would remove its copy under it (fix round 2, A)
+        out[tok] = e
     return out
 
 
@@ -6440,12 +6445,12 @@ def _write_copy_users(root: Path, run_id: str, users: Dict[str, dict]) -> None:
 
 def copy_hold_locked(root: Path, run_id: str, pid: int) -> str:
     """Add a user (pid) of run_id's copy; its token. Caller holds copy_lock."""
-    started = proc_started_of(pid)
-    if started is None:
-        raise Refused("cannot read the start time of process %s, so it cannot hold the copy of run %s" % (pid, run_id))
+    if not pid_alive(pid):
+        raise Refused("process %s is not running, so it cannot hold the copy of run %s" % (pid, run_id))
+    started = proc_started_of(pid)          # None when ps cannot say: the holder is then judged by its pid alone
     users = _copy_users(root, run_id)
     tok = "%s-%s" % (pid, uuid_hex())
-    users[tok] = {"pid": int(pid), "started": int(started)}
+    users[tok] = {"pid": int(pid), "started": int(started) if started is not None else None}
     _write_copy_users(root, run_id, users)
     return tok
 
@@ -6460,6 +6465,15 @@ def remove_copy_locked(root: Path, run_id: str) -> None:
     Caller holds copy_lock and has seen no live user."""
     base = copies_dir(root) / run_id
     srcs = [root / "target" / repo for repo in repos_of(root)]
+    # Never through a symbolic link (fix round 2, B): a run directory, or state/clean-copy/ itself, that is a link to a
+    # window's worktree would make that window's checkouts read as this copy's, and they would be removed. A link is
+    # left alone and named; the comparison below is against the real state/clean-copy/ joined with the run id, never a
+    # resolved run directory.
+    for level in (copies_dir(root), base):
+        if os.path.islink(str(level)):
+            sys.stderr.write("daedalus: %s is a symbolic link; the clean copy there is left alone\n" % level)
+            return
+    base_real = os.path.join(os.path.realpath(str(copies_dir(root))), run_id)
     if base.is_dir():
         # the checkouts are read from each target repository's own worktree records, never by walking the copy
         # (a gates_setup step may have built a virtual environment in it)
@@ -6478,14 +6492,14 @@ def remove_copy_locked(root: Path, run_id: str) -> None:
                 if not os.path.isabs(gd):
                     gd = os.path.normpath(os.path.join(str(a), gd))
                 wt = os.path.dirname(gd)
-                if _under(wt, base) and os.path.isdir(wt):
+                if os.path.realpath(wt).startswith(base_real + os.sep) and os.path.isdir(wt):
                     checkouts.append((len(Path(wt).parts), wt, common))
         for _, wt, common in sorted(checkouts, reverse=True):          # nested first: they sit inside the outer
             v.run(["git", "--git-dir", str(common), "worktree", "remove", "--force", wt], timeout=120)
         shutil.rmtree(str(base), ignore_errors=True)
     for src in srcs:
         if src.is_dir():
-            prune_under(src, base)
+            prune_under(src, Path(base_real))
 
 
 def copy_release(root: Path, run_id: str, token: str) -> bool:
@@ -6501,18 +6515,31 @@ def copy_release(root: Path, run_id: str, token: str) -> bool:
         return True
 
 
-def _run_process_live(rec: dict) -> bool:
-    """run.json's gates process is alive and is that process: it started no later than the run did (a recycled pid
-    started after)."""
+RUNNING_NO_PID_KEEP = 6 * 3600     # seconds a RUNNING run with no recorded pid keeps its copy (fix round 2, E)
+
+
+def run_process_state(rec: dict) -> str:
+    """Is run.json's gates process (its pid) still that run's? "live" — alive, and it started no later than the run
+    (a recycled pid starts after); "dead" — gone, or provably a later process; "unknown" — alive, but its start or the
+    run's cannot be compared (ps failed or timed out; an old record with only the local `started`, which is ambiguous
+    in the hour the clocks fall back). New runs record `started_ms`, epoch milliseconds, and are compared on that
+    alone (fix round 2, C). Callers choose which way unknown leans: copy_reap keeps the copy, the boundary hook's
+    excuse refuses (run_process_live_strict)."""
     pid = rec.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not pid_alive(pid):
-        return False
+        return "dead"
+    run_at = rec.get("started_ms")
+    if not isinstance(run_at, int) or isinstance(run_at, bool):
+        return "unknown"
     began = proc_started_of(pid)
-    try:
-        run_at = time.mktime(time.strptime(str(rec.get("started"))[:19], "%Y-%m-%dT%H:%M:%S")) * 1000
-    except (ValueError, OverflowError):
-        return True                        # alive, its start not comparable: never reap under a live run
-    return began is None or began <= run_at + 2000
+    if began is None:
+        return "unknown"
+    return "live" if began <= run_at + 2000 else "dead"
+
+
+def run_process_live_strict(rec: dict) -> bool:
+    """For an excuse (the boundary hook's): only a run proved live counts; unknown fails closed (fix round 2, D)."""
+    return run_process_state(rec) == "live"
 
 
 def copy_reap(root: Path) -> list:
@@ -6524,17 +6551,34 @@ def copy_reap(root: Path) -> list:
         return []
     gone = []
     names = set()
+    if os.path.islink(str(d)):
+        sys.stderr.write("daedalus: %s is a symbolic link; no clean copy is reaped through it\n" % d)
+        return []
     for p in d.iterdir():
         m = RUN_ID_RE.match(p.name)
         if m and (p.is_dir() and p.name == m.group(0) or p.name in (m.group(0) + ".lock", m.group(0) + ".users.json")):
             names.add(m.group(0))
     for run_id in sorted(names):
+        if os.path.islink(str(d / run_id)):
+            sys.stderr.write("daedalus: %s is a symbolic link; the clean copy there is left alone\n" % (d / run_id))
+            continue
+        rj = root / "state" / "evidence" / run_id / "run.json"
         try:
-            rec = json.loads((root / "state" / "evidence" / run_id / "run.json").read_text())
+            rec = json.loads(rj.read_text())
         except (OSError, ValueError):
             rec = {}
-        if isinstance(rec, dict) and rec.get("result") == "RUNNING" and _run_process_live(rec):
-            continue
+        if isinstance(rec, dict) and rec.get("result") == "RUNNING":
+            if rec.get("pid") is None:
+                # a run from before run.json recorded its pid (v0.12.10, still going across an update): kept while it
+                # is under RUNNING_NO_PID_KEEP old, by the file's own time (fix round 2, E)
+                try:
+                    young = time.time() - rj.stat().st_mtime < RUNNING_NO_PID_KEEP
+                except OSError:
+                    young = True
+                if young:
+                    continue
+            elif run_process_state(rec) != "dead":
+                continue                        # the reaper leans alive: a start it cannot compare keeps the copy
         with copy_lock(root, run_id):
             if _copy_users(root, run_id):
                 continue

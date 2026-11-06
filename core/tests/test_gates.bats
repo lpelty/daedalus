@@ -1903,6 +1903,81 @@ PY
   git -C "$T" worktree remove --force "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing"
 }
 
+# fake_copy <run-id> — a real checkout of the target at state/clean-copy/<run-id>/thing (no run behind it unless made)
+fake_copy() { git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/state/clean-copy/$1/thing" HEAD; }
+LL() { python3 "$DAEDALUS_HOME/core/leaselib.py" "$@"; }
+
+@test "PROP-043 fix round 2 (A): a holder whose start time ps cannot read (ps failing) is kept while its pid is alive — the copy is not released or reaped under it" {
+  branch_fixture; write_config "  - true"
+  rid="20991231-000000-eeeeee"; fake_copy "$rid"
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & holder=$!
+  tok="$(LL copy-hold "$rid" "$holder")"; other="$(LL copy-hold "$rid" "$$")"
+  mkdir -p "$BATS_TEST_TMPDIR/badps"; printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/badps/ps"; chmod +x "$BATS_TEST_TMPDIR/badps/ps"
+  [ "$(PATH="$BATS_TEST_TMPDIR/badps:$PATH" LL copy-release "$rid" "$other")" = kept ] || { kill $holder; echo "a live holder was dropped when ps failed"; return 1; }
+  PATH="$BATS_TEST_TMPDIR/badps:$PATH" LL copy-reap >/dev/null
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$rid/thing" ] || { kill $holder; echo "reaped under a live holder"; return 1; }
+  kill $holder; wait $holder 2>/dev/null || true
+  [ "$(LL copy-reap)" = "$rid" ]; [ ! -e "$DAEDALUS_HOME/state/clean-copy/$rid" ]
+}
+
+@test "PROP-043 fix round 2 (B): a run directory under state/clean-copy/ that is a symlink (to a window's worktrees/03) is skipped and named — the window's checkout and its git record survive the reap" {
+  branch_fixture; write_config "  - true"
+  W3="$DAEDALUS_HOME/worktrees/03"; git -C "$T" worktree add -q --detach "$W3/thing" HEAD
+  rid="20991231-000000-ffffff"; mkdir -p "$DAEDALUS_HOME/state/clean-copy"
+  ln -s "$W3" "$DAEDALUS_HOME/state/clean-copy/$rid"
+  run --separate-stderr python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap
+  [ -f "$W3/thing/committed.py" ] || { echo "window 03's checkout was deleted"; return 1; }
+  git -C "$T" worktree list | grep -qF "$W3/thing" || { git -C "$T" worktree list; return 1; }
+  case "$stderr" in *"is a symbolic link"*"left alone"*) : ;; *) echo "not named: $stderr"; return 1 ;; esac
+  # the same when the copy is let go through its lock
+  tok="$(LL copy-hold "$rid" "$$")"; LL copy-release "$rid" "$tok" >/dev/null 2>&1 || true
+  [ -f "$W3/thing/committed.py" ]
+}
+
+@test "PROP-043 fix round 2 (C, D, E): run.json's started record carries started_ms; the reaper keeps a run whose start cannot be compared (old record, ps failing) while its pid lives, and a pid-less RUNNING run under 6 hours old; the hook's excuse fails closed on both" {
+  branch_fixture
+  cat > "$BATS_TEST_TMPDIR/chk.py" <<'PY'
+import glob, json, sys
+recs = [json.load(open(p)) for p in glob.glob(sys.argv[1] + "/state/evidence/*/run.json")]
+running = [r for r in recs if r.get("result") == "RUNNING"]
+assert running and isinstance(running[0].get("started_ms"), int) and isinstance(running[0].get("pid"), int), recs
+PY
+  write_config "  - python3 $BATS_TEST_TMPDIR/chk.py $DAEDALUS_HOME"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; cat "$DAEDALUS_HOME"/state/evidence/*/gate-1.log; return 1; }
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & gp=$!
+  ev="$DAEDALUS_HOME/state/evidence"
+  # C: an old record (local `started` only, unparseable here) with a live pid: kept
+  r1="20991231-000001-aaaaaa"; mkdir -p "$ev/$r1"; fake_copy "$r1"
+  printf '{"run_id":"%s","started":"not a time","result":"RUNNING","pid":%s}' "$r1" "$gp" > "$ev/$r1/run.json"
+  # C: a new record whose gates start ps cannot read: kept
+  r2="20991231-000002-aaaaaa"; mkdir -p "$ev/$r2"; fake_copy "$r2"
+  printf '{"run_id":"%s","started":"x","started_ms":%s,"result":"RUNNING","pid":%s}' "$r2" "$(python3 -c 'import time; print(int(time.time()*1000))')" "$gp" > "$ev/$r2/run.json"
+  # E: a 0.12.10 run (no pid) started minutes ago: kept; one 7 hours old: reaped
+  r3="20991231-000003-aaaaaa"; mkdir -p "$ev/$r3"; fake_copy "$r3"
+  printf '{"run_id":"%s","started":"x","result":"RUNNING"}' "$r3" > "$ev/$r3/run.json"
+  r4="20991231-000004-aaaaaa"; mkdir -p "$ev/$r4"; fake_copy "$r4"
+  printf '{"run_id":"%s","started":"x","result":"RUNNING"}' "$r4" > "$ev/$r4/run.json"
+  touch -t "$(python3 -c 'import time; print(time.strftime("%Y%m%d%H%M", time.localtime(time.time()-7*3600)))')" "$ev/$r4/run.json"
+  mkdir -p "$BATS_TEST_TMPDIR/badps"; printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/badps/ps"; chmod +x "$BATS_TEST_TMPDIR/badps/ps"
+  out="$(PATH="$BATS_TEST_TMPDIR/badps:$PATH" LL copy-reap)"
+  [ "$out" = "$r4" ] || { kill $gp; echo "reaped: $out"; return 1; }
+  for r in "$r1" "$r2" "$r3"; do [ -d "$DAEDALUS_HOME/state/clean-copy/$r/thing" ] || { kill $gp; echo "$r reaped"; return 1; }; done
+  # D: the same records never excuse a background run in the boundary hook
+  run python3 - "$DAEDALUS_HOME" "$ev/$r1/run.json" "$ev/$r2/run.json" "$BATS_TEST_TMPDIR/badps" <<'PY'
+import json, os, sys
+sys.path.insert(0, sys.argv[1] + "/core")
+import leaselib as ll
+old = json.load(open(sys.argv[2])); new = json.load(open(sys.argv[3]))
+assert ll.run_process_state(old) == "unknown", ll.run_process_state(old)
+assert ll.run_process_live_strict(old) is False
+os.environ["PATH"] = sys.argv[4] + ":" + os.environ["PATH"]
+assert ll.run_process_state(new) == "unknown" and ll.run_process_live_strict(new) is False
+print("ok")
+PY
+  kill $gp; wait $gp 2>/dev/null || true
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "PROP-043: refute.sh refuses a review copy that is not this run's clean copy, before any reviewer starts" {
   branch_fixture
   bin="$BATS_TEST_TMPDIR/bin043r"; review_stub "$bin"
