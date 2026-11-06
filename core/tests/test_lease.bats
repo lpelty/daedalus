@@ -2321,6 +2321,22 @@ swept_fixture() {
   [ ! -d "$W" ]; [ ! -f "$DAEDALUS_HOME/state/leases/02.json" ]
 }
 
+@test "PROP-041 (2, fix round): a just-spawned clone (session_id null until its SessionStart binds, a fresh heartbeat) is still held — another window's release --remove refuses and deletes nothing; so does an unbound window that was not adopted" {
+  delete_fixture
+  LS create >/dev/null
+  python3 "$LL" _test-write 03 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(session_id=None, pid=None, spawned=True, task="a clone"); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/03.json")"
+  python3 "$LL" heartbeat 03
+  W3="$DAEDALUS_HOME/worktrees/03/thing"; [ -d "$W3" ]
+  run --separate-stderr env DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" release 03 --remove
+  [ "$status" -ne 0 ]; case "$stderr$output" in *"Window 03 is held by a live session"*) : ;; *) echo "$output / $stderr"; return 1 ;; esac
+  [ -d "$W3" ]; [ -f "$DAEDALUS_HOME/state/leases/03.json" ]
+  # an unbound lease that is neither swept nor adopted (create, never claimed) keeps the heartbeat guard too
+  python3 "$LL" _test-write 03 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("spawned"); d.pop("task"); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/03.json")"
+  run --separate-stderr env DAEDALUS_SESSION_ID=sA bash "$DAEDALUS_HOME/core/lease.sh" release 03 --remove
+  [ "$status" -ne 0 ]; case "$stderr$output" in *"held by a live session"*) : ;; *) echo "$output / $stderr"; return 1 ;; esac
+  [ -d "$W3" ]
+}
+
 drop_last() { python3 -c 'import sys; p=sys.argv[1]; l=open(p).read().splitlines(True); open(p,"w").write("".join(l[:-1]))' "$1"; }
 
 # group_fixture — delete_fixture's 01 (sA) and 02 (stale, "unmerged work"), plus 03 (stale, "more work") and 04 (stale,

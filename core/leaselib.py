@@ -2171,6 +2171,16 @@ def swept_lease(root: Path, nn: str) -> Optional[dict]:
             "trunks": {repo: trunk_of(root / "target", repo, trunk) for repo in held}}
 
 
+def never_held(lease: dict) -> bool:
+    """PROP-041: a lease no session can ever have held — swept_lease()'s stand-in, or a window `adopt` made (or
+    finished) that no session has bound since (adopted_from, bound_at and session_id unset). Never a spawned clone,
+    whose session runs before it binds, and never a window made by `create` or `allocate`, which a session may be
+    about to bind: those keep the heartbeat guard."""
+    if lease.get("session_id") or lease.get("bound_at") or lease.get("spawned"):
+        return False
+    return bool(lease.get("swept") or lease.get("adopted_from"))
+
+
 def with_swept(root: Path, leases: Dict[str, dict], nns: list) -> Dict[str, dict]:
     """leases, with swept_lease() standing in for each of nns that has no lease file but still has work under it."""
     out = dict(leases)
@@ -2206,10 +2216,11 @@ def release(root: Path, token: str, sid: Optional[str], remove: bool = False, fo
         if lease is None:
             raise Refused("There is no window %s." % nn)
         holder = lease.get("session_id")
-        # PROP-041: a window no session ever bound (adopted, or made by `create` and never claimed) is held by none —
-        # liveness() reads its fresh heartbeat as live for leases.stale_after, which held an adopted window's delete
-        # back four hours. `holder and`, as task, rebase and split already ask.
-        if sid is not None and holder and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:
+        # PROP-041: a window no session can ever have held (never_held: swept, or adopted and never bound) is held by
+        # none — liveness() reads an adopted window's fresh heartbeat as live for leases.stale_after, which held its
+        # delete back four hours. Every other lease keeps the heartbeat guard, an unbound one included: a spawned
+        # clone runs with session_id null until its SessionStart binds it.
+        if sid is not None and holder != sid and not never_held(lease) and liveness(root, nn, lease) in HELD_BY_LIVE:
             raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
         if not remove:
             lease["released"] = now_stamp()
@@ -2290,7 +2301,7 @@ def release_many(root: Path, tokens: list, sid: Optional[str], force: bool = Fal
             if lease is None:
                 raise Refused("There is no window %s." % nn)
             holder = lease.get("session_id")
-            if sid is not None and holder and holder != sid and liveness(root, nn, lease) in HELD_BY_LIVE:   # PROP-041
+            if sid is not None and holder != sid and not never_held(lease) and liveness(root, nn, lease) in HELD_BY_LIVE:
                 raise _held_by_live(nn, lease, "Say 'release %s' to that window, or close it first." % nn)
         ok = None
         if sid is not None:
@@ -6349,6 +6360,193 @@ def doctor_registry_lines(root: Path) -> list:
 
 # --- CLI ----------------------------------------------------------------------
 
+# --- Clean copies: who is using one, and who removes it (PROP-043, v0.12.11 fix round) -----------------------------
+# A clean-tree gate run's copy of its commit (state/clean-copy/<run-id>/<target>, gates.sh) is read by the run's gates,
+# then its review, then any later question to that reviewer (call_agent.py re-cuts it). Each user holds it under a
+# per-run lock (state/clean-copy/<run-id>.lock, flock) by an entry in state/clean-copy/<run-id>.users.json — its pid and
+# that process's start time — and the copy is removed only by the last user to let go, or by copy_reap once no entry is
+# a live process. So two resumes of one run never cut or remove the copy under each other, and gates.sh never removes
+# it while a resume is still reading it.
+RUN_ID_RE = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}")
+
+
+def copies_dir(root: Path) -> Path:
+    return root / "state" / "clean-copy"
+
+
+@contextlib.contextmanager
+def copy_lock(root: Path, run_id: str) -> Iterator[None]:
+    if not RUN_ID_RE.fullmatch(run_id or ""):
+        raise Refused("%s is not a run id" % run_id)
+    d = copies_dir(root)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / (run_id + ".lock")
+    while True:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            same = os.fstat(fd).st_ino == os.stat(str(path)).st_ino
+        except FileNotFoundError:
+            same = False
+        if same:
+            break
+        # the holder before us removed the copy and its lock file (drop_copy_lock_locked): lock the new file
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def drop_copy_lock_locked(root: Path, run_id: str) -> None:
+    """The lock file goes with its copy, unlinked while held: copy_lock re-opens when the file it locked is gone."""
+    try:
+        (copies_dir(root) / (run_id + ".lock")).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _copy_users(root: Path, run_id: str) -> Dict[str, dict]:
+    """The live users of a run's copy (dead entries — a pid gone, or now another process — dropped). Under copy_lock."""
+    try:
+        d = json.loads((copies_dir(root) / (run_id + ".users.json")).read_text())
+    except (OSError, ValueError):
+        d = {}
+    out = {}
+    for tok, e in (d.items() if isinstance(d, dict) else []):
+        if not isinstance(e, dict):
+            continue
+        pid, started = e.get("pid"), e.get("started")
+        now = proc_started_of(pid) if pid_alive(pid) else None
+        if now is not None and isinstance(started, int) and abs(now - started) <= 2000:
+            out[tok] = e
+    return out
+
+
+def _write_copy_users(root: Path, run_id: str, users: Dict[str, dict]) -> None:
+    p = copies_dir(root) / (run_id + ".users.json")
+    if not users:
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(users, indent=1))
+    os.replace(str(tmp), str(p))
+
+
+def copy_hold_locked(root: Path, run_id: str, pid: int) -> str:
+    """Add a user (pid) of run_id's copy; its token. Caller holds copy_lock."""
+    started = proc_started_of(pid)
+    if started is None:
+        raise Refused("cannot read the start time of process %s, so it cannot hold the copy of run %s" % (pid, run_id))
+    users = _copy_users(root, run_id)
+    tok = "%s-%s" % (pid, uuid_hex())
+    users[tok] = {"pid": int(pid), "started": int(started)}
+    _write_copy_users(root, run_id, users)
+    return tok
+
+
+def uuid_hex() -> str:
+    return hashlib.sha256(os.urandom(16)).hexdigest()[:12]
+
+
+def remove_copy_locked(root: Path, run_id: str) -> None:
+    """Remove run_id's copy: every checkout under state/clean-copy/<run-id>/ (nested first) through its own repository,
+    the records of those whose directories are gone (prune_under, this run's directory only), then the directory.
+    Caller holds copy_lock and has seen no live user."""
+    base = copies_dir(root) / run_id
+    srcs = [root / "target" / repo for repo in repos_of(root)]
+    if base.is_dir():
+        # the checkouts are read from each target repository's own worktree records, never by walking the copy
+        # (a gates_setup step may have built a virtual environment in it)
+        checkouts = []
+        for src in srcs:
+            common = _common_dir(src) if src.is_dir() else None
+            try:
+                admin = sorted((common / "worktrees").iterdir()) if common is not None else []
+            except OSError:
+                admin = []
+            for a in admin:
+                try:
+                    gd = (a / "gitdir").read_text().strip()
+                except OSError:
+                    continue
+                if not os.path.isabs(gd):
+                    gd = os.path.normpath(os.path.join(str(a), gd))
+                wt = os.path.dirname(gd)
+                if _under(wt, base) and os.path.isdir(wt):
+                    checkouts.append((len(Path(wt).parts), wt, common))
+        for _, wt, common in sorted(checkouts, reverse=True):          # nested first: they sit inside the outer
+            v.run(["git", "--git-dir", str(common), "worktree", "remove", "--force", wt], timeout=120)
+        shutil.rmtree(str(base), ignore_errors=True)
+    for src in srcs:
+        if src.is_dir():
+            prune_under(src, base)
+
+
+def copy_release(root: Path, run_id: str, token: str) -> bool:
+    """A user lets go of run_id's copy; True when it was the last and the copy is gone."""
+    with copy_lock(root, run_id):
+        users = _copy_users(root, run_id)
+        users.pop(token, None)
+        _write_copy_users(root, run_id, users)
+        if users:
+            return False
+        remove_copy_locked(root, run_id)
+        drop_copy_lock_locked(root, run_id)
+        return True
+
+
+def _run_process_live(rec: dict) -> bool:
+    """run.json's gates process is alive and is that process: it started no later than the run did (a recycled pid
+    started after)."""
+    pid = rec.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or not pid_alive(pid):
+        return False
+    began = proc_started_of(pid)
+    try:
+        run_at = time.mktime(time.strptime(str(rec.get("started"))[:19], "%Y-%m-%dT%H:%M:%S")) * 1000
+    except (ValueError, OverflowError):
+        return True                        # alive, its start not comparable: never reap under a live run
+    return began is None or began <= run_at + 2000
+
+
+def copy_reap(root: Path) -> list:
+    """gates.sh at start: every copy left behind (a run killed past its EXIT trap — SIGKILL, OOM, a reboot) goes, with
+    the git record of each: a copy whose run is not RUNNING with a live gates process (run.json's pid, and the process
+    started no later than the run) and that no live user holds. Returns the run ids removed."""
+    d = copies_dir(root)
+    if not d.is_dir():
+        return []
+    gone = []
+    names = set()
+    for p in d.iterdir():
+        m = RUN_ID_RE.match(p.name)
+        if m and (p.is_dir() and p.name == m.group(0) or p.name in (m.group(0) + ".lock", m.group(0) + ".users.json")):
+            names.add(m.group(0))
+    for run_id in sorted(names):
+        try:
+            rec = json.loads((root / "state" / "evidence" / run_id / "run.json").read_text())
+        except (OSError, ValueError):
+            rec = {}
+        if isinstance(rec, dict) and rec.get("result") == "RUNNING" and _run_process_live(rec):
+            continue
+        with copy_lock(root, run_id):
+            if _copy_users(root, run_id):
+                continue
+            had = (d / run_id).exists()
+            remove_copy_locked(root, run_id)
+            _write_copy_users(root, run_id, {})
+            drop_copy_lock_locked(root, run_id)
+        if had:
+            gone.append(run_id)
+    return gone
+
+
 def main(argv: list) -> int:
     root = v.ROOT
     if len(argv) < 2:
@@ -6392,6 +6590,23 @@ def main(argv: list) -> int:
         except Refused as e:
             sys.stderr.write("daedalus: %s\n" % e)
             return 3
+    if cmd == "copy-hold":            # copy-hold <run-id> <pid>: gates.sh, before it cuts its copy; prints the token
+        try:
+            with copy_lock(root, args[0]):
+                print(copy_hold_locked(root, args[0], int(args[1])))
+            return 0
+        except (Refused, ValueError, IndexError) as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+    if cmd == "copy-release":         # copy-release <run-id> <token>: removes the copy when no other user holds it
+        try:
+            print("removed" if copy_release(root, args[0], args[1]) else "kept")
+            return 0
+        except (Refused, IndexError) as e:
+            sys.stderr.write("daedalus: %s\n" % e); return 1
+    if cmd == "copy-reap":
+        for rid in copy_reap(root):
+            print(rid)
+        return 0
     if cmd == "liveness":
         lease = read_lease(root, args[0]) or {}
         print(liveness(root, args[0], lease)); return 0

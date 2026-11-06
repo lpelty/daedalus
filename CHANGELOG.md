@@ -46,21 +46,35 @@ it called "never finished; its session is gone".
 - The launcher (`core/call_agent.py`) accepts a tree under
   `state/clean-copy/` only as a branch review tagged with that run, and only
   when it is a checkout of the session's own repository.
-  `core/fingerprint.sh` fingerprints such a copy when named, and nothing
-  else outside the session's tree, so the review's fingerprint is the gate
-  run's.
+  `core/fingerprint.sh` fingerprints such a copy when named, at exactly
+  `state/clean-copy/<run-id>/<target>` and nothing else, so the review's
+  fingerprint is the gate run's.
 - Asking that reviewer a question later (`--resume-review`) cuts the copy
-  again at the same path, of the commit the run recorded, and removes it
-  after the answer.
+  again at the same path, of the commit the run recorded, for the answer.
+- Every process reading a copy holds it under that run's lock
+  (`state/clean-copy/<run-id>.lock`, with its holders in
+  `<run-id>.users.json`): the run's gates and review, and each question to
+  its reviewer. The last holder to let go removes it. Two questions at once
+  share one copy, and the run never removes a copy a question is still
+  reading.
+- Each gate run first removes the copies left behind by runs killed past
+  their exit (SIGKILL, out of memory, a reboot), with their git records. A
+  copy goes when its run is not RUNNING with a live gates process (run.json
+  now records the gates pid) and no live process holds it.
 - `unpromoted NN` and `release NN --remove` take a swept number whose
   `lease/NN` or worktree still holds work, with no adopt first.
-- A window no session ever bound (`session_id` null: adopted, or created
-  and never claimed) is held by no session, so `release --remove` from
-  another window runs after the operator's yes.
+- A window no session can have held — a swept number, or a window `adopt`
+  made that no session has bound since — is held by no session, so
+  `release --remove` from another window runs after the operator's yes.
+  Every other lease keeps the heartbeat guard. That includes a spawned
+  clone, whose session runs with `session_id` null until it binds, and a
+  window made by `create` and not yet claimed.
 - The deletion record `release --remove` writes is manifested as it is
-  written. The boundary hook excuses a promotion's RUNNING gate run while
-  its `background.json` says running and its process answers. A
-  hand-written file under `state/evidence/` is still named.
+  written. The boundary hook excuses a promotion's RUNNING gate run only
+  while both processes are still the recorded ones: the promotion's
+  `background.json` says running, with a pid whose start time it now
+  records, and the run's own gates process is alive. A reused pid excuses
+  nothing. A hand-written file under `state/evidence/` is still named.
 
 **Acceptance criteria met.** PROP-043: a clean-tree run whose worktree gains
 a commit after the copy is cut is reviewed on the copy, and the new file is

@@ -55,10 +55,17 @@ emit_null() { printf 'null\n'; printf 'fingerprint_secs=%s\n' "$(( $(date +%s) -
 if [ "$#" -ge 1 ]; then
   copies="$(cd "$DAEDALUS_HOME/state/clean-copy" 2>/dev/null && pwd -P)" || copies=""
   target="$(cd "$1" 2>/dev/null && pwd -P)" || target=""
-  case "$target" in
-    "$copies"/?*/?*) [ -n "$copies" ] || { printf 'fingerprint: %s is not a clean copy under state/clean-copy/\n' "$1" >&2; emit_null; } ;;
-    *) printf 'fingerprint: %s is not a clean copy under state/clean-copy/\n' "$1" >&2; emit_null ;;
+  # exactly <copies>/<run-id>/<one directory>: the run id as gates.sh makes it, nothing deeper or shallower
+  rest="${target#"$copies"/}"; run_part="${rest%%/*}"; repo_part="${rest#*/}"
+  case "$run_part" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) run_ok=1 ;;
+    *) run_ok=0 ;;
   esac
+  if [ -z "$copies" ] || [ -z "$target" ] || [ "$rest" = "$target" ] || [ "$run_ok" -ne 1 ] \
+     || [ "$repo_part" = "$rest" ] || [ -z "$repo_part" ] || [ "${repo_part#*/}" != "$repo_part" ]; then
+    printf 'fingerprint: %s is not a clean copy (state/clean-copy/<run-id>/<target>)\n' "$1" >&2
+    emit_null
+  fi
 else
   target="$(target_path 2>/dev/null)" || emit_null
 fi

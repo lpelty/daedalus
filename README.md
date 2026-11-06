@@ -595,8 +595,9 @@ deletes it at once. Several windows go in one report and one yes:
 `core/lease.sh release 02 03 04 --remove --force --operator-said "<your reply>"`
 deletes them all; a change in any one refuses the whole delete. A swept
 number whose branch or worktree still holds work is reported and deleted the
-same way, with no `adopt` first, and a window no session ever bound (made by
-`adopt` or `create`, never claimed) is held by no one (v0.12.11). Your yes is
+same way, with no `adopt` first, and a window `adopt` made that no session
+has bound since is held by no one (v0.12.11); a spawned clone not yet bound,
+or a window `create` made, still is. Your yes is
 whatever you say, in any words; the agent reads it. The tool checks only that
 you typed something in the window's own transcript after the report — a turn
 the agent wrote, or a line added to the file, never counts. It is refused when
@@ -1049,8 +1050,9 @@ commit); a tree with uncommitted work runs in place (`tree: worktree`). The
 review of a clean-copy run reads that same copy (v0.12.11): its diff is the
 commit against trunk, and every file the reviewer opens is in the copy,
 whatever the worktree does meanwhile. A run that reused an earlier PASS cuts
-a copy for its review alone; the copy goes when the review is done, and a
-later question to that reviewer cuts it again for the answer. A
+a copy for its review alone; the copy goes when the last process reading it
+lets go, and a later question to that reviewer cuts it again for the answer.
+Each run first removes copies left by runs that were killed. A
 tree that already passed is not tested again (v0.12.8): an earlier run with
 the same tree fingerprint, the same `config.yaml` and the same `core/`, whose
 gates passed, makes the run PASS by reuse — no setup step or gate runs, and

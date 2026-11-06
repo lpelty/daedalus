@@ -1823,6 +1823,86 @@ STUB
   [ -z "$(ls -A "$DAEDALUS_HOME/state/clean-copy" 2>/dev/null)" ]
 }
 
+@test "PROP-043 fix round: a copy another process still holds outlives the run that cut it, and goes when that holder lets go; one whose holder died is reaped by the next run, git record and all" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043h"; review_stub "$bin"
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & holder=$!
+  # the gate stands in for a resume still reading the copy when the run ends: it holds the copy for another process
+  write_config "  - python3 $DAEDALUS_HOME/core/leaselib.py copy-hold \"\$(basename \"\$(dirname \"\$PWD\")\")\" $holder > $BATS_TEST_TMPDIR/tok" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { kill $holder; echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$id/thing" ] || { kill $holder; echo "the run removed a copy another process held"; return 1; }
+  [ "$(python3 "$DAEDALUS_HOME/core/leaselib.py" copy-release "$id" "$(cat "$BATS_TEST_TMPDIR/tok")")" = removed ]
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ]; [ -z "$(ls -A "$DAEDALUS_HOME/state/clean-copy")" ]
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+  # again, and this time the holder dies without letting go (SIGKILL): the copy is left, and the next run reaps it
+  printf 'v2\n' >> "$T/committed.py"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am v2
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { kill $holder; echo "$output"; return 1; }
+  id2="$(printf '%s\n' "$output" | tail -1)"
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$id2/thing" ] || { kill $holder; return 1; }
+  kill -9 $holder; wait $holder 2>/dev/null || true
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 2 ]
+  write_config "  - true" "  refute: false
+  refute_off_reason: bats"
+  printf 'v3\n' >> "$T/committed.py"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am v3
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id2" ] || { echo "a dead holder's copy was not reaped"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ] || { git -C "$T" worktree list; return 1; }
+}
+
+@test "PROP-043 fix round: two questions to reviewers of one run share the re-cut copy — the first to finish leaves it for the other, the last removes it; a running run's copy is never reaped" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043c"; review_stub "$bin"
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ]
+  run python3 - "$DAEDALUS_HOME" "$id" <<'PY'
+import os, sys
+from pathlib import Path
+root, rid = Path(sys.argv[1]), sys.argv[2]
+sys.path.insert(0, str(root / "core"))
+import call_agent as ca
+rec = {"tree": str(root / "state" / "clean-copy" / rid / "thing")}
+a = ca.recut_clean_copy(root, rec)                # cuts it again
+b = ca.recut_clean_copy(root, rec)                # finds it there: cuts nothing
+t = Path(rec["tree"])
+assert t.is_dir() and (t / "committed.py").is_file()
+ca.release_recut(root, a)
+assert t.is_dir(), "the first to finish removed the copy the other is still reading"
+ca.release_recut(root, b)
+assert not t.parent.exists(), "the last to finish left the copy"
+print("ok")
+PY
+  [ "$status" -eq 0 ] && [ "${lines[${#lines[@]}-1]}" = ok ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+  # a RUNNING run with a live gates process keeps its copy through another run's reap
+  rid="20991231-000000-cccccc"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid"
+  git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/state/clean-copy/$rid/thing" HEAD
+  printf '{"run_id":"%s","started":"%s","result":"RUNNING","pid":%s}' "$rid" "$(date +%Y-%m-%dT%H:%M:%S)" "$$" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$rid/thing" ] || { echo "a running run's copy was reaped"; return 1; }
+  printf '{"run_id":"%s","started":"2026-01-01T00:00:00","result":"PASS"}' "$rid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  [ "$(python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap)" = "$rid" ]
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$rid" ]; [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "PROP-043 fix round: fingerprint.sh takes a clean copy only at exactly state/clean-copy/<run-id>/<target> — deeper, shallower or a non-run directory is null" {
+  branch_fixture; write_config "  - true"
+  rid="20991231-000000-dddddd"; cc="$DAEDALUS_HOME/state/clean-copy/$rid/thing"
+  git -C "$T" worktree add -q --detach "$cc" HEAD
+  # each a real checkout, so only the path rule can refuse it
+  git -C "$T" worktree add -q --detach "$cc/deeper" HEAD
+  git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing" HEAD
+  fp="$(bash "$DAEDALUS_HOME/core/fingerprint.sh" "$cc" 2>/dev/null)"
+  [ "$fp" != null ] && [ "${#fp}" = 64 ] || { echo "exact copy: $fp"; return 1; }
+  for bad in "$cc/deeper" "$DAEDALUS_HOME/state/clean-copy/$rid" "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing" "$T"; do
+    [ "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" "$bad" 2>/dev/null)" = null ] || { echo "accepted: $bad"; return 1; }
+  done
+  git -C "$T" worktree remove --force "$cc/deeper"; git -C "$T" worktree remove --force "$cc"
+  git -C "$T" worktree remove --force "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing"
+}
+
 @test "PROP-043: refute.sh refuses a review copy that is not this run's clean copy, before any reviewer starts" {
   branch_fixture
   bin="$BATS_TEST_TMPDIR/bin043r"; review_stub "$bin"

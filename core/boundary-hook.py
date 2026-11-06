@@ -368,28 +368,30 @@ def check_distribution(root: Path, reasons: List[str]) -> None:
                        "clean." % detail)
 
 
-def background_running(root: Path, promote_id: object) -> bool:
+def background_running(root: Path, rec: dict) -> bool:
     """PROP-041: a quick promote's full suite runs in the background after the push (`gates.sh --no-refute --promote`,
     started by promote.py spawn_background), under the promoted window's number — a window whose session has often
     ended — so its RUNNING record was called "never finished; its session is gone" and its files stray for the eleven
-    minutes it ran. It is still in flight while its promotion's background.json says running and names a process that
-    answers (promote.py background_alive, without a pid yet never: a record that never got one vouches for nothing)."""
+    minutes it ran. It is still in flight while both processes are the ones recorded: the promotion's background.json
+    says running with a pid whose start time is the one it recorded (proc_started, leaselib.proc_started_of: a reused
+    pid is another process), and the run's own gates.sh (run.json's pid) is alive and started no later than the run."""
+    import leaselib as ll
+    promote_id = rec.get("promote_id")
     if not isinstance(promote_id, str) or not re.fullmatch(r"[0-9A-Za-z-]+", promote_id):
         return False
     try:
         bg = json.loads((root / "state" / "promote" / promote_id / "background.json").read_text())
     except (OSError, ValueError):
         return False
-    pid = bg.get("pid") if isinstance(bg, dict) else None
-    if bg.get("state") != "running" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    if not isinstance(bg, dict) or bg.get("state") != "running":
         return False
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except OSError:
+    pid, rec_started = bg.get("pid"), bg.get("proc_started")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not isinstance(rec_started, int):
         return False
-    return True
+    now = ll.proc_started_of(pid) if ll.pid_alive(pid) else None
+    if now is None or abs(now - rec_started) > 2000:
+        return False
+    return ll._run_process_live(rec) and isinstance(rec.get("pid"), int)
 
 
 def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
@@ -421,7 +423,7 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
                 or str(rj.resolve()) not in manifest or not rec.get("lease")):
             continue
         rid, nn = str(rec.get("run_id") or rj.parent.name), str(rec["lease"])
-        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed") or background_running(root, rec.get("promote_id")):
+        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed") or background_running(root, rec):
             running_ok.add(rid)
         else:
             never_finished.append((rid, nn))

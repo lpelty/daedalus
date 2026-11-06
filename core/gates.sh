@@ -226,10 +226,11 @@ started="$(date +%Y-%m-%dT%H:%M:%S)"
 # gates at once used to interleave `>>` appends into half paths.
 lease_nn="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease 2>/dev/null || true)"
 session_id="${DAEDALUS_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" "$promo_ctx" <<'PY'
+python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" "$promo_ctx" "$$" <<'PY'
 import json, sys
-out, run_id, started, lease, sid, ctx = sys.argv[1:7]
-rec = {"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING"}
+out, run_id, started, lease, sid, ctx, pid = sys.argv[1:8]
+rec = {"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING",
+       "pid": int(pid)}
 if ctx:
     c = json.load(open(ctx))
     rec.update({k: c.get(k) for k in ("promote_id", "merge_sha", "trunk_sha_at_prepare", "repo", "nested")})
@@ -385,9 +386,18 @@ esac
 # each at the commit read before the fingerprint; then target.scaffold's directories, as promote's cut_scratch makes
 # them. Removed when the gates are done (the logs live under state/evidence, not here) and on any exit. A copy that
 # cannot be cut is said, and the run goes on in place as a worktree run — never promote-grade by accident.
-run_dir="$target"; clean_dir=""
+run_dir="$target"; clean_dir=""; copy_token=""
+# PROP-043 fix round: a copy is held, under a per-run lock, by every process reading it — these gates, then any later
+# question to the reviewer, which re-cuts it (leaselib copy-hold / copy-release) — and the last to let go removes it,
+# so a resume still reading the copy keeps it past this run's end. Without leaselib (a bare fixture home) the copy is
+# this run's alone and goes as before.
 remove_clean_copy() {
   [ -n "$clean_dir" ] || return 0
+  if [ -n "$copy_token" ]; then
+    python3 "$DAEDALUS_HOME/core/leaselib.py" copy-release "$run_id" "$copy_token" >/dev/null 2>&1
+    clean_dir=""; copy_token=""
+    return 0
+  fi
   local rel
   for rel in $(printf '%s\n' $nested_rels | awk '{print length, $0}' | sort -rn | cut -d' ' -f2-) .; do
     if [ "$rel" = . ]; then
@@ -409,6 +419,9 @@ cut_clean_copy() {
   clean_dir="$DAEDALUS_HOME/state/clean-copy/$run_id"
   run_dir="$clean_dir/$(basename "$target")"
   clean_nested=""
+  if [ -f "$DAEDALUS_HOME/core/leaselib.py" ]; then
+    copy_token="$(python3 "$DAEDALUS_HOME/core/leaselib.py" copy-hold "$run_id" "$$" 2>/dev/null)" || copy_token=""
+  fi
   mkdir -p "$clean_dir" || cut_ok=0
   while IFS="$(printf '\t')" read -r rel sha; do
     [ -n "$rel" ] && [ "$cut_ok" -eq 1 ] || continue
@@ -429,6 +442,9 @@ $(cfg_pairs target.scaffold 2>/dev/null | cut -f1)
 EOF
   return 0
 }
+# Copies left behind by runs killed past their EXIT trap (SIGKILL, OOM, a reboot) go first: any whose run is not
+# RUNNING with a live gates process and that nothing holds (leaselib copy-reap), with their git records.
+[ ! -f "$DAEDALUS_HOME/core/leaselib.py" ] || python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap >/dev/null 2>&1 || true
 if [ "$tree_mode" = clean-copy ] && [ -z "$reused_from" ]; then
   if cut_clean_copy; then
     log "clean tree: the gates run in a fresh copy of commit ${clean_commit:0:12} (tracked files only)"

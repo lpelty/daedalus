@@ -1543,7 +1543,7 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
             raise Refusal("the receipt of call %s changed while this resume started; nothing was launched" % call_id)
         rec = fresh
         need_claude(rec)
-        recut = recut_clean_copy(root, rec) if mode == "refuter" else []
+        recut = recut_clean_copy(root, rec) if mode == "refuter" else None
         try:
             if mode == "refuter":
                 launch = launch_refuter(root, conf, rec, call_dir, request, True, render_charter(root, dist), dist)
@@ -1552,20 +1552,30 @@ def resume(root: Path, conf: Dict[str, str], args: argparse.Namespace, view: dic
             return attempt(root, call_dir, rec, launch, request, view.get("sid") or "operator-shell",
                            resumer_phrase(view), locked=True)
         finally:
-            remove_recut(recut)
+            release_recut(root, recut)
 
 
-def recut_clean_copy(root: Path, rec: dict) -> List[Tuple[Path, Path]]:
-    """PROP-043: a clean-tree run's review read the run's fresh copy of its commit, which gates.sh removes when the
-    review is done. A question to that reviewer later ("ask the reviewer why …") resumes a session whose paths all name
-    the copy, so the copy is cut again at the same place, of the commit(s) the run's record names, from the window's
-    worktree (or the prime's mirror), and removed after the answer. [(source repo, checkout)] — the cut, outer first;
-    empty when the tree is not a clean copy or is still there. A copy that cannot be cut is refused: an answer read
-    from another tree is the defect this guards."""
+def recut_clean_copy(root: Path, rec: dict) -> Optional[Tuple[str, str]]:
+    """PROP-043: a clean-tree run's review read the run's fresh copy of its commit, which goes when its last user lets
+    go. A question to that reviewer later ("ask the reviewer why …") resumes a session whose paths all name the copy,
+    so this call holds the copy for the answer (leaselib copy_lock / copy_hold_locked — the run's own lock, so two
+    resumes, or a resume and the run's gates, never cut or remove it under each other) and, when it is gone, cuts it
+    again at the same place, of the commit(s) the run's record names, from the window's worktree (or the prime's
+    mirror). (run id, token) for release_recut; None when the tree is not a clean copy. A copy that cannot be cut is
+    refused: an answer read from another tree is the defect this guards. Only what this call made is removed on a
+    failure."""
+    import leaselib as ll
     tree = Path(rec.get("tree") or "")
-    if not tree.is_absolute() or not is_clean_copy(root, tree.parent) or tree.exists():
-        return []
+    if not tree.is_absolute() or not is_clean_copy(root, tree.parent):
+        return None
     run_id = tree.parent.name
+    with ll.copy_lock(root, run_id):
+        if not tree.exists():
+            cut_copy_locked(root, tree, run_id)
+        return run_id, ll.copy_hold_locked(root, run_id, os.getpid())
+
+
+def cut_copy_locked(root: Path, tree: Path, run_id: str) -> None:
     try:
         run = json.loads((root / "state" / "evidence" / run_id / "run.json").read_text())
     except (OSError, ValueError):
@@ -1579,6 +1589,7 @@ def recut_clean_copy(root: Path, rec: dict) -> List[Tuple[Path, Path]]:
     src = root / "worktrees" / str(lease) / tree.name if lease else None
     if src is None or not src.is_dir():
         src = root / "target" / tree.name
+    made_parent = not tree.parent.exists()
     done: List[Tuple[Path, Path]] = []
     for rel, sha in [(".", commit)] + sorted(nested.items()):
         repo = src if rel == "." else src / rel
@@ -1586,21 +1597,24 @@ def recut_clean_copy(root: Path, rec: dict) -> List[Tuple[Path, Path]]:
         p = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "--detach", str(dest), str(sha)],
                            capture_output=True, text=True, timeout=120)
         if p.returncode != 0:
-            remove_recut(done)
-            shutil.rmtree(str(tree.parent), ignore_errors=True)
+            for r, d in reversed(done):           # only what this call made
+                subprocess.run(["git", "-C", str(r), "worktree", "remove", "--force", str(d)], capture_output=True,
+                               timeout=120)
+            if made_parent:
+                shutil.rmtree(str(tree.parent), ignore_errors=True)
             raise Refusal("the review read run %s's copy of commit %s, which is gone, and it could not be cut again "
                           "(%s); nothing was launched" % (run_id, commit[:12], (p.stderr.strip() or "git failed")[-200:]))
         done.append((repo, dest))
-    return done
 
 
-def remove_recut(done: List[Tuple[Path, Path]]) -> None:
-    for repo, dest in reversed(done):
-        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(dest)], capture_output=True,
-                       timeout=120)
-        subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True, timeout=120)
-    if done:
-        shutil.rmtree(str(done[0][1].parent), ignore_errors=True)
+def release_recut(root: Path, held: Optional[Tuple[str, str]]) -> None:
+    if held is None:
+        return
+    import leaselib as ll
+    try:
+        ll.copy_release(root, held[0], held[1])
+    except Exception:
+        pass                                   # the next gates run's reaper removes what is left
 
 
 def latest_review(root: Path, token: str, view: dict) -> str:

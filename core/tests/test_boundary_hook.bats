@@ -576,22 +576,30 @@ PY
   case "$output" in *"deletions/02-"*) echo "the manifested record was named: $output"; return 1 ;; esac
 }
 
-@test "PROP-041 (3b): a promotion's background full run still going (its RUNNING record names a window whose session is gone) is not stray, nor 'never finished'; once its process is gone it is" {
+@test "PROP-041 (3b): a promotion's background full run still going (its RUNNING record names a window whose session is gone) is not stray, nor 'never finished'; once its process is gone, or its pid is another process now, it is" {
   two_leases; live_holder 01
   python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write 02 "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(pid=1,proc_started=1); print(json.dumps(d))' "$DAEDALUS_HOME/state/leases/02.json")"
   run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   pid="p-20991231-quick"; rid="20991231-000000-bbbbbb"
   mkdir -p "$DAEDALUS_HOME/state/evidence/$rid" "$DAEDALUS_HOME/state/promote/$pid"
-  printf '{"run_id":"%s","started":"2099-12-31T00:00:00","lease":"02","session_id":"sA","result":"RUNNING","promote_id":"%s","tree":"promote-scratch","refuter":"deferred-to-promote"}' "$rid" "$pid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  bg="$(live_pid)"; gp="$(live_pid)"           # promote.sh --background-run, and the gates.sh it runs
+  python3 -c 'import time; time.sleep(1.1)'
+  printf '{"run_id":"%s","started":"%s","lease":"02","session_id":"sA","result":"RUNNING","pid":%s,"promote_id":"%s","tree":"promote-scratch","refuter":"deferred-to-promote"}' "$rid" "$(date +%Y-%m-%dT%H:%M:%S)" "$gp" "$pid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
   python3 "$DAEDALUS_HOME/core/manifest-append.py" "$DAEDALUS_HOME/state/evidence/$rid/run.json" "$DAEDALUS_HOME/vault/evidence/$rid.md"
   printf 'x\n' > "$DAEDALUS_HOME/state/evidence/$rid/gate-1.log"
-  bg="$(live_pid)"
-  printf '{"state":"running","pid":%s,"started":"2099-12-31T00:00:00Z","run_id":null}' "$bg" > "$DAEDALUS_HOME/state/promote/$pid/background.json"
+  bgj() { printf '{"state":"running","pid":%s,"proc_started":%s,"started":"2099-12-31T00:00:00Z","run_id":null}' "$1" "$2" > "$DAEDALUS_HOME/state/promote/$pid/background.json"; }
+  bgj "$bg" "$(ps_ms "$bg")"
   run hook_as Stop sA; [ "$status" -eq 0 ] || { echo "the hook blocked on promote's background run: $output"; return 1; }
   run hook_as PostToolUse sA; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  kill "$bg"; wait "$bg" 2>/dev/null || true
+  # a pid that is alive but is not the process recorded (reused): no excuse
+  bgj "$bg" 1
+  run hook_as Stop sA; [ "$status" -eq 2 ]; case "$output" in *"never finished"*"gate-1.log"*) : ;; *) echo "reused pid: $output"; return 1 ;; esac
+  # a record with no start time: no excuse
+  printf '{"state":"running","pid":%s,"started":"x","run_id":null}' "$bg" > "$DAEDALUS_HOME/state/promote/$pid/background.json"
   run hook_as Stop sA; [ "$status" -eq 2 ]
-  case "$output" in *"never finished"*"gate-1.log"*) : ;; *) echo "$output"; return 1 ;; esac
+  # the run's own gates process gone, the promote process alive: no excuse
+  bgj "$bg" "$(ps_ms "$bg")"; kill "$gp"; wait "$gp" 2>/dev/null || true
+  run hook_as Stop sA; [ "$status" -eq 2 ]; case "$output" in *"never finished"*) : ;; *) echo "$output"; return 1 ;; esac
 }
 
 # --- v0.12.7 (PROP-035 §2): evidence is attributed by run, not by snapshot time -----------------------------------

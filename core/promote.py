@@ -1808,7 +1808,10 @@ def spawn_background(root: Path, p: dict, pdir: Path) -> int:
         child = subprocess.Popen(["bash", str(root / "core" / "promote.sh"), p["lease"], "--background-run", "--id",
                                   p["promote_id"]], cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                  start_new_session=True, env=env)
-    write_json(pdir / "background.json", {"state": "running", "pid": child.pid, "started": started, "run_id": None})
+    # the pid with its start time (PROP-041 fix round): the boundary hook excuses this run's files only while the
+    # pid is still this process, never a later one that reused it
+    write_json(pdir / "background.json", {"state": "running", "pid": child.pid, "proc_started": ll.proc_started_of(child.pid),
+                                          "started": started, "run_id": None})
     return child.pid
 
 
@@ -1836,7 +1839,9 @@ def background_run(root: Path, a: dict) -> int:
                                               "finished": tl.iso_utc(time.time()), "run_id": None,
                                               "detail": "the promote scratch was gone before the full run started"})
         raise Stop("Promotion %s's scratch is gone; the full suite did not run." % pid)
-    write_json(pdir / "background.json", {"state": "running", "pid": os.getpid(), "started": started, "run_id": None})
+    write_json(pdir / "background.json", {"state": "running", "pid": os.getpid(),
+                                          "proc_started": ll.proc_started_of(os.getpid()), "started": started,
+                                          "run_id": None})
     env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
     for k in ("GATES_QUICK", "GATES_QUICK_COMMAND", "GATES_QUICK_WHY"):
         env.pop(k, None)
