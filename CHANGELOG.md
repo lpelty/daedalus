@@ -4,6 +4,101 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.12.11 — the review reads the commit the gates tested, and a swept window's work deletes in one yes
+
+**In short.** A clean-tree gate run's review now reads the same fresh copy
+of the commit the gates ran in, never the worktree. Deleting a swept
+window's work no longer needs an adopt, no longer waits four hours, and no
+longer leaves the boundary hook blocking every tool call.
+
+**What went wrong.** PROP-043, reported on 2026-11-05. The gates of run
+20261105-084742-5072bc ran in a fresh copy of commit a36b29c13221 and
+passed. Its review read the worktree, where a build was committing the next
+release during the run. The reviewer counted 7483 lines in 94 files against
+a commit of 78, and refuted on findings in files the commit did not hold.
+Six of nine counted findings were about code the commit did not have, the
+findings ledger counted them, and nothing warned.
+
+PROP-041, reported on 2026-11-03. The board said "delete 02's work" for a
+swept number, and `core/lease.sh unpromoted 02` answered "There is no
+window 02." A swept number has no lease file, and nothing named the adopt
+that would make one. After `adopt lease/02` the report worked, but the
+delete was refused as "held by a live session": a lease no session ever
+bound, with a fresh heartbeat, read as live for `leases.stale_after` (four
+hours by default). After the delete, the boundary hook blocked every tool
+call and Stop on the delete's own records under
+`state/evidence/deletions/`, and on promote's background full run, which
+it called "never finished; its session is gone".
+
+**What changed.**
+
+- `core/gates.sh` keeps the clean copy until the review is done and hands
+  it to `core/refute.sh` (`--review-copy`). The diff, the reviewer's
+  `--add-dir` and the path the prompt names are the copy's; the window's
+  branch, which keys the findings ledger, is still read from the worktree.
+  The run says "review: the reviewer reads the same fresh copy of commit
+  … the gates ran in".
+- A run that reused an earlier clean-copy PASS cut no copy; one is cut now,
+  of the same commit, for the review alone. If it cannot be cut, the review
+  reads the worktree only while the worktree is still at that commit;
+  otherwise the run is INVALID, with one line naming the change.
+- A dirty tree's run is reviewed in place, exactly as before.
+- The launcher (`core/call_agent.py`) accepts a tree under
+  `state/clean-copy/` only as a branch review tagged with that run, and only
+  when it is a checkout of the session's own repository.
+  `core/fingerprint.sh` fingerprints such a copy when named, at exactly
+  `state/clean-copy/<run-id>/<target>` and nothing else, so the review's
+  fingerprint is the gate run's.
+- Asking that reviewer a question later (`--resume-review`) cuts the copy
+  again at the same path, of the commit the run recorded, for the answer.
+- Every process reading a copy holds it under that run's lock
+  (`state/clean-copy/<run-id>.lock`, with its holders in
+  `<run-id>.users.json`): the run's gates and review, and each question to
+  its reviewer. The last holder to let go removes it. Two questions at once
+  share one copy, and the run never removes a copy a question is still
+  reading. A holder is dropped only when its pid is gone or provably
+  another process; one whose start time `ps` cannot read stays.
+- Each gate run first removes the copies left behind by runs killed past
+  their exit (SIGKILL, out of memory, a reboot), with their git records. A
+  copy goes when its run is not RUNNING with a live gates process (run.json
+  now records the gates pid and `started_ms`, its start in epoch
+  milliseconds) and no live process holds it. A start that cannot be
+  compared keeps the copy, and so does a RUNNING run from before this
+  release (no pid) under six hours old. A symbolic link under
+  `state/clean-copy/` is named and left alone, never followed.
+- `unpromoted NN` and `release NN --remove` take a swept number whose
+  `lease/NN` or worktree still holds work, with no adopt first.
+- A window no session can have held — a swept number, or a window `adopt`
+  made that no session has bound since — is held by no session, so
+  `release --remove` from another window runs after the operator's yes.
+  Every other lease keeps the heartbeat guard. That includes a spawned
+  clone, whose session runs with `session_id` null until it binds, and a
+  window made by `create` and not yet claimed.
+- The deletion record `release --remove` writes is manifested as it is
+  written. The boundary hook excuses a promotion's RUNNING gate run only
+  while both processes are still the recorded ones: the promotion's
+  `background.json` says running, with a pid whose start time it now
+  records, and the run's own gates process is proved alive from its
+  `started_ms`. A reused pid, or a start that cannot be compared, excuses
+  nothing. A hand-written file under `state/evidence/` is still named.
+
+**Acceptance criteria met.** PROP-043: a clean-tree run whose worktree gains
+a commit after the copy is cut is reviewed on the copy, and the new file is
+in neither the diff nor the reviewer's tree; a dirty-tree run keeps today's
+behaviour (test_gates.bats, "PROP-043"). PROP-041 (1): `unpromoted 02` on a
+swept number with unpromoted work prints the report, and the delete runs
+after the yes. (2): adopt, then at once `release 02 --remove --force` with
+consent, passes (test_lease.bats, "PROP-041"). (3): a deletion record and a
+running background suite leave the hook silent (test_boundary_hook.bats,
+"PROP-041").
+
+**How to take it.** Close every Daedalus window, then type `daedalus update`
+in a terminal. Nothing in config changes.
+
+**How to tell you have it.** `cat VERSION` prints `0.12.11`. A gate run on a
+committed tree prints "review: the reviewer reads the same fresh copy of
+commit …" before the review.
+
 ## v0.12.10 — the band and the status report say enforce when the suite question acts
 
 **In short.** With the suite question acting, the line above the prompt

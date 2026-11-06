@@ -368,6 +368,32 @@ def check_distribution(root: Path, reasons: List[str]) -> None:
                        "clean." % detail)
 
 
+def background_running(root: Path, rec: dict) -> bool:
+    """PROP-041: a quick promote's full suite runs in the background after the push (`gates.sh --no-refute --promote`,
+    started by promote.py spawn_background), under the promoted window's number — a window whose session has often
+    ended — so its RUNNING record was called "never finished; its session is gone" and its files stray for the eleven
+    minutes it ran. It is still in flight while both processes are the ones recorded: the promotion's background.json
+    says running with a pid whose start time is the one it recorded (proc_started, leaselib.proc_started_of: a reused
+    pid is another process), and the run's own gates.sh (run.json's pid) is alive and started no later than the run."""
+    import leaselib as ll
+    promote_id = rec.get("promote_id")
+    if not isinstance(promote_id, str) or not re.fullmatch(r"[0-9A-Za-z-]+", promote_id):
+        return False
+    try:
+        bg = json.loads((root / "state" / "promote" / promote_id / "background.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(bg, dict) or bg.get("state") != "running":
+        return False
+    pid, rec_started = bg.get("pid"), bg.get("proc_started")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not isinstance(rec_started, int):
+        return False
+    now = ll.proc_started_of(pid) if ll.pid_alive(pid) else None
+    if now is None or abs(now - rec_started) > 2000:
+        return False
+    return ll.run_process_live_strict(rec)      # leans closed: a start it cannot compare excuses nothing
+
+
 def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
     try:
         since = time.mktime(time.strptime(marker.get("started", "")[:19], "%Y-%m-%dT%H:%M:%S"))
@@ -397,7 +423,7 @@ def check_evidence(root: Path, marker: dict, reasons: List[str]) -> None:
                 or str(rj.resolve()) not in manifest or not rec.get("lease")):
             continue
         rid, nn = str(rec.get("run_id") or rj.parent.name), str(rec["lease"])
-        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed"):
+        if ctx["liveness"].get(nn) in ("live", "quiet", "resumed") or background_running(root, rec):
             running_ok.add(rid)
         else:
             never_finished.append((rid, nn))

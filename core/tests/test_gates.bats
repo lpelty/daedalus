@@ -1694,6 +1694,303 @@ PY
   grep -qF "gate 1 passed after re-running its failures in run $first" "$DAEDALUS_HOME/vault/evidence/$second.md"
 }
 
+# --- PROP-043 (2026-11-05): the review reads the tree the gates tested ------------------------------------------------
+# review_stub <dir> — a refuter stub that records the prompt, the --add-dir it was granted, and what that directory
+# held AT CALL TIME (the copy is removed afterwards), then says STANDS.
+review_stub() {
+  mkdir -p "$1"
+  cat > "$1/claude" <<STUB
+#!/usr/bin/env bash
+cat > "$1/stdin"
+prev=""; for a in "\$@"; do [ "\$prev" = "--add-dir" ] && printf '%s\\n' "\$a" > "$1/add-dir"; prev="\$a"; done
+d="\$(cat "$1/add-dir")"; ( cd "\$d" && find . -path ./.git -prune -o -type f -print | sort ) > "$1/tree-files"
+printf 'VERDICT: STANDS\\n'
+STUB
+  chmod +x "$1/claude"
+}
+# branch_fixture — the target on main, then a window branch with one committed change; nothing uncommitted.
+branch_fixture() {
+  install_refuter
+  git_thing
+  T="$DAEDALUS_HOME/target/thing"
+  git -C "$T" checkout -q -b lease/01
+  printf 'the change under test\n' > "$T/committed.py"
+  git -C "$T" add -A; git -C "$T" -c user.email=t@x -c user.name=t commit -q -m change
+}
+
+@test "PROP-043: a clean-tree run's review reads the fresh copy the gates ran in — a commit the worktree gains meanwhile is in neither the diff nor the reviewer's tree; the review's fingerprint is the run's" {
+  branch_fixture
+  tested="$(git -C "$T" rev-parse HEAD)"
+  bin="$BATS_TEST_TMPDIR/bin043"; review_stub "$bin"
+  # The gate stands in for a build committing the next release into the same worktree while the run goes on.
+  write_config "  - test -f committed.py && printf 'not tested\\\\n' > $T/intruder.py && git -C $T add intruder.py && git -C $T -c user.email=t@x -c user.name=t commit -q -m next" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(git -C "$T" rev-parse HEAD)" != "$tested" ] || { echo "the fixture's gate did not commit"; return 1; }
+  case "$output" in *"fresh copy of commit ${tested:0:12}"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"review: the reviewer reads the same fresh copy of commit ${tested:0:12}"*) : ;; *) echo "no line saying where the review read: $output"; return 1 ;; esac
+  # The reviewer was granted the copy, not the worktree, and the copy held the tested commit only.
+  [ "$(cat "$bin/add-dir")" = "$DAEDALUS_HOME/state/clean-copy/$id/thing" ] || { echo "add-dir: $(cat "$bin/add-dir")"; return 1; }
+  grep -qxF ./committed.py "$bin/tree-files"
+  ! grep -q intruder "$bin/tree-files" || { echo "the reviewer's tree held the later commit"; return 1; }
+  # The diff and the prompt: the tested change, never the later one.
+  # (the gate's own command, in the evidence summary, names intruder.py; the diff must not)
+  grep -q '^diff --git a/committed.py' "$bin/stdin"
+  ! grep -q '^diff --git .*intruder' "$bin/stdin" || { echo "the diff holds a file the tested commit does not"; return 1; }
+  [ "$(grep -c '^diff --git ' "$bin/stdin")" = 1 ] || { grep '^diff --git ' "$bin/stdin"; return 1; }
+  case "$output" in *"(1 line in 1 file;"*) : ;; *) echo "the review sized another tree: $output"; return 1 ;; esac
+  grep -qF "The change lives in the git checkout at $DAEDALUS_HOME/state/clean-copy/$id/thing." "$bin/stdin"
+  # The copy is gone once the review is done.
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ] || { echo "the copy was left behind"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+  # The review stands for this run: its fingerprint is the gate run's, its verdict is in run.json.
+  python3 - "$DAEDALUS_HOME/state/evidence/$id/run.json" "$DAEDALUS_HOME/vault/evidence/$id-review.md" "$tested" <<'PY'
+import json, re, sys
+r = json.load(open(sys.argv[1]))
+assert r["tree"] == "clean-copy" and r["commit"] == sys.argv[3] and r["result"] == "PASS", r
+assert (r.get("review") or {}).get("verdict") == "STANDS", r
+fm = dict(l.split(": ", 1) for l in re.match(r"^---\n(.*?)\n---\n", open(sys.argv[2]).read(), re.S).group(1).splitlines() if ": " in l)
+assert fm["fingerprint"] == r["fingerprint"], (fm, r["fingerprint"])
+PY
+  # Asking that reviewer a question later resumes a session whose paths name the copy: the copy is cut again at the
+  # same place, of the same commit, for the answer, and removed after it.
+  cid="$(sed -n 's/^call-id: //p' "$DAEDALUS_HOME/vault/evidence/$id-review.md")"
+  rm -f "$bin/add-dir" "$bin/tree-files"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/call-agent.sh" --resume "$cid" "Why that finding?"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$bin/add-dir")" = "$DAEDALUS_HOME/state/clean-copy/$id/thing" ]
+  grep -qxF ./committed.py "$bin/tree-files"
+  ! grep -q intruder "$bin/tree-files" || { echo "the resumed reviewer's tree held the later commit"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ] || { echo "the re-cut copy was left behind"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "PROP-043: a dirty-tree run's review reads the worktree as before — the uncommitted file is in the diff and the reviewer's tree is the worktree" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043d"; review_stub "$bin"
+  printf 'uncommitted\n' > "$T/wip.py"
+  write_config "  - test -f wip.py" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree"])' "$DAEDALUS_HOME/state/evidence/$id/run.json")" = worktree ]
+  [ "$(cat "$bin/add-dir")" = "$T" ] || { echo "add-dir: $(cat "$bin/add-dir")"; return 1; }
+  grep -qF 'wip.py' "$bin/stdin"; grep -qF 'committed.py' "$bin/stdin"
+  grep -qF "The change lives in the git checkout at $T." "$bin/stdin"
+  case "$output" in *"reviewer reads the same fresh copy"*) echo "$output"; return 1 ;; esac
+}
+
+@test "PROP-043: a run that reuses an earlier clean-copy PASS cuts a copy of the same commit for its review alone, and removes it after" {
+  branch_fixture
+  tested="$(git -C "$T" rev-parse HEAD)"
+  bin="$BATS_TEST_TMPDIR/bin043u"; review_stub "$bin"
+  write_config "  - echo ran >> $BATS_TEST_TMPDIR/ran" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  first="$(printf '%s\n' "$output" | tail -1)"
+  rm -f "$bin/add-dir" "$bin/stdin"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  second="$(printf '%s\n' "$output" | tail -1)"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/ran" | tr -d ' ')" = 1 ] || { echo "the second run did not reuse the first"; return 1; }
+  case "$output" in *"reused from run $first"*"review: the reviewer reads the same fresh copy of commit ${tested:0:12}"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(cat "$bin/add-dir")" = "$DAEDALUS_HOME/state/clean-copy/$second/thing" ] || { echo "add-dir: $(cat "$bin/add-dir")"; return 1; }
+  grep -qxF ./committed.py "$bin/tree-files"
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$second" ]
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "PROP-043 guard: when no copy can be cut for a reused run's review, the review reads the worktree only while it is at the run's commit — moved, the run is INVALID with one line naming the change, and no reviewer starts" {
+  branch_fixture
+  tested="$(git -C "$T" rev-parse HEAD)"
+  bin="$BATS_TEST_TMPDIR/bin043g"; review_stub "$bin"
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  rm -f "$bin/add-dir" "$bin/stdin"
+  # a git whose `worktree add` fails, after a build commits into the worktree: the copy cannot be cut, the tree moved
+  real="$(command -v git)"
+  cat > "$bin/git" <<STUB
+#!/usr/bin/env bash
+case " \$* " in *" worktree add "*)
+  printf 'next\n' > "$T/next.py"; "$real" -C "$T" add next.py; "$real" -C "$T" -c user.email=t@x -c user.name=t commit -q -m next
+  exit 1 ;; esac
+exec "$real" "\$@"
+STUB
+  chmod +x "$bin/git"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  case "$output" in *"run INVALID — the worktree changed after the run began (it was at commit ${tested:0:12}; it is now at $(git -C "$T" rev-parse --short=12 HEAD)), and no copy of that commit could be cut for the review"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -f "$bin/stdin" ] || { echo "a reviewer started"; return 1; }
+  [ -z "$(ls -A "$DAEDALUS_HOME/state/clean-copy" 2>/dev/null)" ]
+}
+
+@test "PROP-043 fix round: a copy another process still holds outlives the run that cut it, and goes when that holder lets go; one whose holder died is reaped by the next run, git record and all" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043h"; review_stub "$bin"
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & holder=$!
+  # the gate stands in for a resume still reading the copy when the run ends: it holds the copy for another process
+  write_config "  - python3 $DAEDALUS_HOME/core/leaselib.py copy-hold \"\$(basename \"\$(dirname \"\$PWD\")\")\" $holder > $BATS_TEST_TMPDIR/tok" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { kill $holder; echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$id/thing" ] || { kill $holder; echo "the run removed a copy another process held"; return 1; }
+  [ "$(python3 "$DAEDALUS_HOME/core/leaselib.py" copy-release "$id" "$(cat "$BATS_TEST_TMPDIR/tok")")" = removed ]
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ]; [ -z "$(ls -A "$DAEDALUS_HOME/state/clean-copy")" ]
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+  # again, and this time the holder dies without letting go (SIGKILL): the copy is left, and the next run reaps it
+  printf 'v2\n' >> "$T/committed.py"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am v2
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { kill $holder; echo "$output"; return 1; }
+  id2="$(printf '%s\n' "$output" | tail -1)"
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$id2/thing" ] || { kill $holder; return 1; }
+  kill -9 $holder; wait $holder 2>/dev/null || true
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 2 ]
+  write_config "  - true" "  refute: false
+  refute_off_reason: bats"
+  printf 'v3\n' >> "$T/committed.py"; git -C "$T" -c user.email=t@x -c user.name=t commit -q -am v3
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id2" ] || { echo "a dead holder's copy was not reaped"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ] || { git -C "$T" worktree list; return 1; }
+}
+
+@test "PROP-043 fix round: two questions to reviewers of one run share the re-cut copy — the first to finish leaves it for the other, the last removes it; a running run's copy is never reaped" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043c"; review_stub "$bin"
+  write_config "  - true" "  refute: true"
+  PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  id="$(printf '%s\n' "$output" | tail -1)"
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$id" ]
+  run python3 - "$DAEDALUS_HOME" "$id" <<'PY'
+import os, sys
+from pathlib import Path
+root, rid = Path(sys.argv[1]), sys.argv[2]
+sys.path.insert(0, str(root / "core"))
+import call_agent as ca
+rec = {"tree": str(root / "state" / "clean-copy" / rid / "thing")}
+a = ca.recut_clean_copy(root, rec)                # cuts it again
+b = ca.recut_clean_copy(root, rec)                # finds it there: cuts nothing
+t = Path(rec["tree"])
+assert t.is_dir() and (t / "committed.py").is_file()
+ca.release_recut(root, a)
+assert t.is_dir(), "the first to finish removed the copy the other is still reading"
+ca.release_recut(root, b)
+assert not t.parent.exists(), "the last to finish left the copy"
+print("ok")
+PY
+  [ "$status" -eq 0 ] && [ "${lines[${#lines[@]}-1]}" = ok ] || { echo "$output"; return 1; }
+  [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+  # a RUNNING run with a live gates process keeps its copy through another run's reap
+  rid="20991231-000000-cccccc"; mkdir -p "$DAEDALUS_HOME/state/evidence/$rid"
+  git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/state/clean-copy/$rid/thing" HEAD
+  printf '{"run_id":"%s","started":"%s","result":"RUNNING","pid":%s}' "$rid" "$(date +%Y-%m-%dT%H:%M:%S)" "$$" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$rid/thing" ] || { echo "a running run's copy was reaped"; return 1; }
+  printf '{"run_id":"%s","started":"2026-01-01T00:00:00","result":"PASS"}' "$rid" > "$DAEDALUS_HOME/state/evidence/$rid/run.json"
+  [ "$(python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap)" = "$rid" ]
+  [ ! -e "$DAEDALUS_HOME/state/clean-copy/$rid" ]; [ "$(git -C "$T" worktree list | wc -l | tr -d ' ')" = 1 ]
+}
+
+@test "PROP-043 fix round: fingerprint.sh takes a clean copy only at exactly state/clean-copy/<run-id>/<target> — deeper, shallower or a non-run directory is null" {
+  branch_fixture; write_config "  - true"
+  rid="20991231-000000-dddddd"; cc="$DAEDALUS_HOME/state/clean-copy/$rid/thing"
+  git -C "$T" worktree add -q --detach "$cc" HEAD
+  # each a real checkout, so only the path rule can refuse it
+  git -C "$T" worktree add -q --detach "$cc/deeper" HEAD
+  git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing" HEAD
+  fp="$(bash "$DAEDALUS_HOME/core/fingerprint.sh" "$cc" 2>/dev/null)"
+  [ "$fp" != null ] && [ "${#fp}" = 64 ] || { echo "exact copy: $fp"; return 1; }
+  for bad in "$cc/deeper" "$DAEDALUS_HOME/state/clean-copy/$rid" "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing" "$T"; do
+    [ "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" "$bad" 2>/dev/null)" = null ] || { echo "accepted: $bad"; return 1; }
+  done
+  git -C "$T" worktree remove --force "$cc/deeper"; git -C "$T" worktree remove --force "$cc"
+  git -C "$T" worktree remove --force "$DAEDALUS_HOME/state/clean-copy/not-a-run/thing"
+}
+
+# fake_copy <run-id> — a real checkout of the target at state/clean-copy/<run-id>/thing (no run behind it unless made)
+fake_copy() { git -C "$T" worktree add -q --detach "$DAEDALUS_HOME/state/clean-copy/$1/thing" HEAD; }
+LL() { python3 "$DAEDALUS_HOME/core/leaselib.py" "$@"; }
+
+@test "PROP-043 fix round 2 (A): a holder whose start time ps cannot read (ps failing) is kept while its pid is alive — the copy is not released or reaped under it" {
+  branch_fixture; write_config "  - true"
+  rid="20991231-000000-eeeeee"; fake_copy "$rid"
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & holder=$!
+  tok="$(LL copy-hold "$rid" "$holder")"; other="$(LL copy-hold "$rid" "$$")"
+  mkdir -p "$BATS_TEST_TMPDIR/badps"; printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/badps/ps"; chmod +x "$BATS_TEST_TMPDIR/badps/ps"
+  [ "$(PATH="$BATS_TEST_TMPDIR/badps:$PATH" LL copy-release "$rid" "$other")" = kept ] || { kill $holder; echo "a live holder was dropped when ps failed"; return 1; }
+  PATH="$BATS_TEST_TMPDIR/badps:$PATH" LL copy-reap >/dev/null
+  [ -d "$DAEDALUS_HOME/state/clean-copy/$rid/thing" ] || { kill $holder; echo "reaped under a live holder"; return 1; }
+  kill $holder; wait $holder 2>/dev/null || true
+  [ "$(LL copy-reap)" = "$rid" ]; [ ! -e "$DAEDALUS_HOME/state/clean-copy/$rid" ]
+}
+
+@test "PROP-043 fix round 2 (B): a run directory under state/clean-copy/ that is a symlink (to a window's worktrees/03) is skipped and named — the window's checkout and its git record survive the reap" {
+  branch_fixture; write_config "  - true"
+  W3="$DAEDALUS_HOME/worktrees/03"; git -C "$T" worktree add -q --detach "$W3/thing" HEAD
+  rid="20991231-000000-ffffff"; mkdir -p "$DAEDALUS_HOME/state/clean-copy"
+  ln -s "$W3" "$DAEDALUS_HOME/state/clean-copy/$rid"
+  run --separate-stderr python3 "$DAEDALUS_HOME/core/leaselib.py" copy-reap
+  [ -f "$W3/thing/committed.py" ] || { echo "window 03's checkout was deleted"; return 1; }
+  git -C "$T" worktree list | grep -qF "$W3/thing" || { git -C "$T" worktree list; return 1; }
+  case "$stderr" in *"is a symbolic link"*"left alone"*) : ;; *) echo "not named: $stderr"; return 1 ;; esac
+  # the same when the copy is let go through its lock
+  tok="$(LL copy-hold "$rid" "$$")"; LL copy-release "$rid" "$tok" >/dev/null 2>&1 || true
+  [ -f "$W3/thing/committed.py" ]
+}
+
+@test "PROP-043 fix round 2 (C, D, E): run.json's started record carries started_ms; the reaper keeps a run whose start cannot be compared (old record, ps failing) while its pid lives, and a pid-less RUNNING run under 6 hours old; the hook's excuse fails closed on both" {
+  branch_fixture
+  cat > "$BATS_TEST_TMPDIR/chk.py" <<'PY'
+import glob, json, sys
+recs = [json.load(open(p)) for p in glob.glob(sys.argv[1] + "/state/evidence/*/run.json")]
+running = [r for r in recs if r.get("result") == "RUNNING"]
+assert running and isinstance(running[0].get("started_ms"), int) and isinstance(running[0].get("pid"), int), recs
+PY
+  write_config "  - python3 $BATS_TEST_TMPDIR/chk.py $DAEDALUS_HOME"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; cat "$DAEDALUS_HOME"/state/evidence/*/gate-1.log; return 1; }
+  sleep 300 3>&- </dev/null >/dev/null 2>&1 & gp=$!
+  ev="$DAEDALUS_HOME/state/evidence"
+  # C: an old record (local `started` only, unparseable here) with a live pid: kept
+  r1="20991231-000001-aaaaaa"; mkdir -p "$ev/$r1"; fake_copy "$r1"
+  printf '{"run_id":"%s","started":"not a time","result":"RUNNING","pid":%s}' "$r1" "$gp" > "$ev/$r1/run.json"
+  # C: a new record whose gates start ps cannot read: kept
+  r2="20991231-000002-aaaaaa"; mkdir -p "$ev/$r2"; fake_copy "$r2"
+  printf '{"run_id":"%s","started":"x","started_ms":%s,"result":"RUNNING","pid":%s}' "$r2" "$(python3 -c 'import time; print(int(time.time()*1000))')" "$gp" > "$ev/$r2/run.json"
+  # E: a 0.12.10 run (no pid) started minutes ago: kept; one 7 hours old: reaped
+  r3="20991231-000003-aaaaaa"; mkdir -p "$ev/$r3"; fake_copy "$r3"
+  printf '{"run_id":"%s","started":"x","result":"RUNNING"}' "$r3" > "$ev/$r3/run.json"
+  r4="20991231-000004-aaaaaa"; mkdir -p "$ev/$r4"; fake_copy "$r4"
+  printf '{"run_id":"%s","started":"x","result":"RUNNING"}' "$r4" > "$ev/$r4/run.json"
+  touch -t "$(python3 -c 'import time; print(time.strftime("%Y%m%d%H%M", time.localtime(time.time()-7*3600)))')" "$ev/$r4/run.json"
+  mkdir -p "$BATS_TEST_TMPDIR/badps"; printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/badps/ps"; chmod +x "$BATS_TEST_TMPDIR/badps/ps"
+  out="$(PATH="$BATS_TEST_TMPDIR/badps:$PATH" LL copy-reap)"
+  [ "$out" = "$r4" ] || { kill $gp; echo "reaped: $out"; return 1; }
+  for r in "$r1" "$r2" "$r3"; do [ -d "$DAEDALUS_HOME/state/clean-copy/$r/thing" ] || { kill $gp; echo "$r reaped"; return 1; }; done
+  # D: the same records never excuse a background run in the boundary hook
+  run python3 - "$DAEDALUS_HOME" "$ev/$r1/run.json" "$ev/$r2/run.json" "$BATS_TEST_TMPDIR/badps" <<'PY'
+import json, os, sys
+sys.path.insert(0, sys.argv[1] + "/core")
+import leaselib as ll
+old = json.load(open(sys.argv[2])); new = json.load(open(sys.argv[3]))
+assert ll.run_process_state(old) == "unknown", ll.run_process_state(old)
+assert ll.run_process_live_strict(old) is False
+os.environ["PATH"] = sys.argv[4] + ":" + os.environ["PATH"]
+assert ll.run_process_state(new) == "unknown" and ll.run_process_live_strict(new) is False
+print("ok")
+PY
+  kill $gp; wait $gp 2>/dev/null || true
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "PROP-043: refute.sh refuses a review copy that is not this run's clean copy, before any reviewer starts" {
+  branch_fixture
+  bin="$BATS_TEST_TMPDIR/bin043r"; review_stub "$bin"
+  mkdir -p "$DAEDALUS_HOME/vault/evidence"; printf -- '---\nresult: PASS\n---\n' > "$BATS_TEST_TMPDIR/summary.md"
+  for bad in "$T" "$DAEDALUS_HOME/state/clean-copy/20261105-000000-aaaaaa/thing"; do
+    mkdir -p "$DAEDALUS_HOME/state/clean-copy/20261105-000000-aaaaaa/thing"
+    PATH="$bin:$PATH" run bash "$DAEDALUS_HOME/core/refute.sh" 20261105-000000-bbbbbb "" "$BATS_TEST_TMPDIR/summary.md" --review-copy "$bad"
+    [ "$status" -eq 2 ] || { echo "$status $output"; return 1; }
+    case "$output" in *"not this run's clean copy"*) : ;; *) echo "$output"; return 1 ;; esac
+    [ ! -f "$bin/stdin" ] || { echo "a reviewer started"; return 1; }
+  done
+}
+
 # --- v0.12.9 (spec 2026-10-21 §E): quick mode under --promote -------------------------------------------------------
 @test "quick mode (v0.12.9): under --promote, GATES_QUICK=1 runs the one targeted command instead of the gates (gates_setup still runs), the record says quick with the command, the summary says the full suite has not run; a later promote run of the same tree does not reuse it; with no command nothing runs and the reason is recorded; without --promote GATES_QUICK is ignored; a tab in the command dies before any run" {
   write_config "  - echo gate-ran >> $BATS_TEST_TMPDIR/ran"
