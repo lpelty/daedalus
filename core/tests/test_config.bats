@@ -426,8 +426,8 @@ EOF2
 }
 
 @test "sibling_names prints each configured sibling, nothing (exit 0) when target.siblings is unset" {
-  sib_cfg "siblings: portico=https://example.com/portico.git, atlas=https://example.com/atlas.git"
-  run sibling_names; [ "$status" -eq 0 ]; [ "${lines[0]}" = portico ]; [ "${lines[1]}" = atlas ]
+  sib_cfg "siblings: portico=https://example.com/portico.git, other=https://example.com/other.git"
+  run sibling_names; [ "$status" -eq 0 ]; [ "${lines[0]}" = portico ]; [ "${lines[1]}" = other ]
   sib_cfg ""
   run sibling_names; [ "$status" -eq 0 ]; [ -z "$output" ]
 }
