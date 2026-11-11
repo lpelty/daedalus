@@ -728,10 +728,11 @@ def target_name(root: Path) -> str:
 
 
 def repos_of(root: Path) -> list:
-    """['<name>', '<name>/<nested rel>', ...] — the main repo and each nested
-    repo at its mirrored relative path (config target.nested)."""
+    """['<name>', '<name>/<nested rel>', ..., '<sibling>', ...] — the main repo, each nested
+    repo at its mirrored relative path (config target.nested), and each sibling repo by its
+    bare name (config target.siblings, v0.13.0: checked out BESIDE the primary at target/<name>)."""
     name = target_name(root)
-    return [name] + ["%s/%s" % (name, rel) for rel in v.nested_relpaths(root)]
+    return [name] + ["%s/%s" % (name, rel) for rel in v.nested_relpaths(root)] + v.sibling_names(root)
 
 
 def trunks_of(root: Path, target_base: Path) -> Dict[str, str]:
@@ -748,14 +749,18 @@ def trunk_of(target_base: Path, repo: str, outer_trunk: str) -> str:
     for the main repo, origin/HEAD for a nested one; Refused when it cannot be told
     or origin/<trunk> does not resolve. Per repo, so a reader that must name every
     problem (doctor) can skip only the repo that fails."""
-    if "/" not in repo:
+    # Decided by kind, never by whether the key holds a "/": a sibling's bare name has none and is not the
+    # primary. target_base is <home>/target by construction (every caller passes root / "target").
+    kind = v.repo_kind(target_base.parent, repo) if target_base.name == "target" else ("primary" if "/" not in repo else "nested")
+    if kind == "primary":
         out = outer_trunk
     else:
         code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         head = head.strip()
         if code != 0 or not head.startswith("origin/"):
-            raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
-                          % (repo.split("/", 1)[1], repo))
+            rel = repo.split("/", 1)[1] if kind == "nested" else repo
+            raise Refused("%s repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
+                          % (kind, rel, repo))
         out = head[len("origin/"):]
     require_trunk_ref(target_base / repo, repo, out)
     return out
@@ -2782,11 +2787,13 @@ def _split_checks(root: Path, nn: str, lease: dict, sid: Optional[str], nested: 
                       % (nn, nn))
     trunks = lease.get("trunks") or trunks_of(root, root / "target")
     outer = next(iter(trunks))
-    key = "%s/%s" % (outer, nested.strip("/"))
+    arg = nested.strip("/")
+    # a nested repo by its rel (or full key), or a sibling by its bare name — never the outer
+    key = arg if (arg in trunks and arg != outer) else "%s/%s" % (outer, arg)
     if key not in trunks:
-        names = [k.split("/", 1)[1] for k in trunks if "/" in k]
-        raise Refused("Window %s has no nested repo %s (its nested repos: %s)."
-                      % (nn, nested, ", ".join(names) or "none"))
+        others = [k for k in trunks if k != outer]
+        raise Refused("Window %s has no repo %s (its other repos: %s)."
+                      % (nn, nested, ", ".join(others) or "none"))
     # A worktree that is not there reads clean to dirty_files and cannot be
     # reset: refuse it before anything is allocated (as rebase does).
     for repo in trunks:
@@ -2898,8 +2905,10 @@ def repo_key(root: Path, repo: Optional[str]) -> str:
     name = target_name(root)
     if not repo or repo == name:
         return name
-    key = repo if repo.startswith(name + "/") else "%s/%s" % (name, repo)
     repos = repos_of(root)
+    if repo in repos:                      # a full nested key, or a sibling's bare name
+        return repo
+    key = repo if repo.startswith(name + "/") else "%s/%s" % (name, repo)
     if key not in repos:
         raise Refused("%s is not one of this target's repos (%s)." % (repo, ", ".join(repos)))
     return key

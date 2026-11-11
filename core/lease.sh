@@ -6,8 +6,8 @@
 #   core/lease.sh claim <NN> | alias <NN> <word> [--clear] | note <NN> "..." | task <NN> "..." [--clear] | update <NN> --criteria <file>
 #   core/lease.sh spawn "<task>" [--note "..."] | list [--stale] | status
 #   core/lease.sh release <NN> [--remove [--force]] | release <NN> <NN> … --remove [--force] | done <NN> --summary "..." | sweep [--force <NN>]
-#   core/lease.sh prime take [--reason "..."] | rebase <NN> | split <NN> --repo <nested>
-#   core/lease.sh adopt <branch> [--repo <nested>] [--note "..."]
+#   core/lease.sh prime take [--reason "..."] | rebase <NN> | split <NN> --repo <nested rel | sibling name>
+#   core/lease.sh adopt <branch> [--repo <nested rel | sibling name>] [--note "..."]
 #   core/lease.sh adopt --all-unfinished     ("pick it up": all the unfinished work the upgrade stopped on)
 #   core/lease.sh log                        (this session's log path for today; the number is reserved, never counted)
 # A direct-call session (DIRECT_CALL_ID set — spec §4.8, a visitor) is refused

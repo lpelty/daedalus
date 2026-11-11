@@ -1620,7 +1620,7 @@ def _pick_repo(root: Path, key: str, p: Path, trunk: str, items: List[dict], ver
     kinds = {i["kind"] for i in items}
     if not kinds & {"branch", "trunk", "detached", "unsaved", "stash"}:
         return []
-    rel = None if key == ll.target_name(root) else key.split("/", 1)[1]
+    rel = None if key == ll.target_name(root) else (key.split("/", 1)[1] if "/" in key else key)   # a sibling: its name
     said: List[str] = []
     _, cur, _ = _git(p, "branch", "--show-current")
     cur = cur.strip()
@@ -4143,7 +4143,7 @@ def pending_line(root: Path) -> Optional[str]:
 
 def _repo_flag(root: Path, key: str) -> str:
     import leaselib as ll
-    return "" if key == ll.target_name(root) else " --repo %s" % key.split("/", 1)[1]
+    return "" if key == ll.target_name(root) else " --repo %s" % (key.split("/", 1)[1] if "/" in key else key)
 
 
 OPERATOR_NOTE = ("NOTE     config.yaml lacks lines only the operator may write (the agent may not edit config.yaml) — "

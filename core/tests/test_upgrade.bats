@@ -707,3 +707,24 @@ mod_version() {   # <name> <version>: what this home's mods/ ships
     || { echo "$output"; return 1; }
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
 }
+
+
+@test "a sibling repo (v0.13.0) with unsaved work stops the upgrade naming target/<name>; its adopt remedy says --repo <name>; clean, the upgrade puts the sibling back on its trunk" {
+  v061_state
+  add_sibling portico
+  S="$DAEDALUS_HOME/target/portico"
+  git -C "$S" checkout -q -b fix/s; printf 'f\n' > "$S/f.txt"; git -C "$S" add -A; cmt "$S" -m "the sibling fix"
+  printf 'dirt\n' >> "$S/s.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  s="Daedalus has unfinished work in target/portico: the branch fix/s (1 commit not on origin), and 1 unsaved file. Nothing was changed. Say 'pick it up' to move it into windows, then start a new session."
+  [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"target/portico"*"--repo portico"*) : ;; *) echo "doctor remedy: $output"; return 1 ;; esac
+  git -C "$S" checkout -q -- s.txt; git -C "$S" checkout -q main; git -C "$S" branch -q -D fix/s
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$S" branch --show-current)" = main ]
+  [ "$(git -C "$S" rev-parse HEAD)" = "$(git -C "$BATS_TEST_TMPDIR/portico-origin.git" rev-parse main)" ]
+}

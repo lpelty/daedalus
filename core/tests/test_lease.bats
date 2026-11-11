@@ -1446,7 +1446,7 @@ PY
 
 @test "split refuses: a repo that is not one of the window's nested repos, a nested repo with nothing to split, uncommitted work, another live window's lease, an alias — and allocates nothing" {
   window_02_both_repos
-  run LS split 02 --repo other; [ "$status" -ne 0 ]; case "$output" in *"Window 02 has no nested repo other"*) : ;; *) echo "$output"; return 1 ;; esac
+  run LS split 02 --repo other; [ "$status" -ne 0 ]; case "$output" in *"Window 02 has no repo other (its other repos: thing/sub)."*) : ;; *) echo "$output"; return 1 ;; esac
   git -C "$W/sub" reset -q --hard origin/main
   run LS split 02 --repo sub; [ "$status" -ne 0 ]; case "$output" in *"Window 02 has no commits in thing/sub that are not already on main; nothing to split."*) : ;; *) echo "$output"; return 1 ;; esac
   printf 'n3\n' >> "$W/sub/n.txt"; git -C "$W/sub" -c user.email=t@x -c user.name=t commit -q -am "nested three"
