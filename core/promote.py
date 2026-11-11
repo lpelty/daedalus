@@ -2252,6 +2252,9 @@ def doctor(root: Path) -> int:
                       "is installed)" % repo)
         if ok:
             print("OK       pre-push hook: %s" % ", ".join(ok))
+        for sb in siblings:          # v0.13.0: a sibling with no gates list cannot pass a gate run — say so here
+            if not v._lib(root, "cfg_list gates_%s" % sb).strip():
+                print("MISSING  sibling %s has no gates list — add gates_%s: to config.yaml" % (sb, sb))
     # Only the live windows' current occupants (Decision 51's occupant_prepares):
     # a released window, or an earlier occupant of a reused number, has nothing
     # left for the operator to confirm; its records are kept, not reported.

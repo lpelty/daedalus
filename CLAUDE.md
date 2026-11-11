@@ -110,13 +110,13 @@ it.
 | "Clean up promote's leftovers" / the upgrade named promote scratch among the largest parts of its safety copy | the prime; a session holding no window, or a shell: pushed promotions only | `core/promote.sh 02 --clean`; repeat what it removed and what it kept. The prime may clean any promotion; a session holding no window, or a shell: pushed promotions only. A promotion being confirmed now is skipped and named. |
 | "Update Daedalus" / "take the new release" | any window | Nothing to run. Say "Close every Daedalus window, then type `daedalus update` in a terminal." It prints one line; when they read it to you, repeat what it names. |
 | "Bring your work up to date with main" / "promote said you don't merge" | that window | `core/lease.sh rebase 02`; resolve any conflict yourself in your worktree; run `core/gates.sh`; say it in words ("Brought window 02 up to date with main; 1 conflict in hooks/capture.py resolved; gates PASS"). The operator then asks the prime to promote again. |
-| "Promote said window 2 has work in two repos" | that window | `core/lease.sh split 02 --repo <nested>`; say "Window 02 now holds the outer repo's commits; the <nested> commits moved to window 05 — promote them one at a time." |
+| "Promote said window 2 has work in two repos" | that window | `core/lease.sh split 02 --repo <nested rel or sibling name>`; say "Window 02 now holds the outer repo's commits; the <repo> commits moved to window 05 — promote them one at a time." |
 | "Pivot: this window now works on X" | that window | Nothing to run. Say "Fine — window 02 keeps its number and its branch; the board will show the new files as you change them," and offer a note. If the earlier work must ship before the new work is ready, propose `split`. |
 | "What did the reviewer find?" | the prime, or the reviewed window | Repeat the review's body (`vault/evidence/<run-id>-review.md`, everything below its frontmatter) word for word, signed "— the reviewer"; a summary may follow. |
 | "Ask the reviewer why …" | the prime, or the reviewed window | `core/call-agent.sh --resume-review 02 "<their question>"`; repeat the answer word for word, signed "— the reviewer". It is advice, not a new verdict. |
 | "Promote it anyway" | the prime | The skip-review procedure (below), citing a few of their words; whatever they said is recorded as the reason. |
 | "Release window 2" / "I'm done with this window" | window 02 itself | `core/lease.sh release 02`; say "Window 02 released; this window is done — close it." Said to another window while window 02 is live: "Say that to window 02, or close it first." A stale window any window may release. "…and delete its work": run `core/lease.sh unpromoted 02` first (several windows: `core/lease.sh unpromoted 02 03 04`, one report); it only reports what would be lost — the unpromoted commits and any uncommitted files — and deletes nothing. A window it says needs no yes has nothing to lose: run `core/lease.sh release 02 --remove` for it at once, no question asked. For the rest, tell the operator what would be lost, plainly, and ask once. End your turn. When they agree — in any words: yes, ok, delete them, do it, go ahead — run `core/lease.sh release 02 --remove --force --operator-said "<a few of their words>"` from the home, with nothing in front of it (the permission rule matches that command and nothing else); for several windows, every number in one command: `core/lease.sh release 02 03 04 --remove --force --operator-said "<a few of their words>"`. Their questions and your answers in between are fine; one agreement covers every window the report named. The quote is a citation, not a password. The tool checks only that they typed something since the report and that the words you cite are among it, and refuses if a window's work changed since it — then run `unpromoted` again and tell them what changed. Whether their words agree, and to which windows, is yours to read: if they said wait, or named only some windows, delete only what they asked for. Never run `release` with `--remove` on a window with work before the operator has agreed; never write a yes the operator did not give. |
-| "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested>` for a nested repo's branch); repeat what it printed — the number, the repo, the commits. |
+| "Turn my old branch into a window" / "adopt my old branch" | the prime, or a shell | `core/lease.sh adopt <branch> --note "<their words>"` (add `--repo <nested rel or sibling name>` for another repo's branch); repeat what it printed — the number, the repo, the commits. |
 | "Pick it up" (after the upgrade said it found unfinished work) | the prime, or a shell | `core/lease.sh adopt --all-unfinished`; repeat each window it made and anything it could not move, with what to do; then say the next session start finishes the upgrade. |
 | "/frame-jack on" / "frame-jack off" | any window | `python3 core/frame-jack.py on` (or `python3 core/frame-jack.py off`); repeat the output word for word. The guard runs it only after the operator's own message said `frame-jack on` (or `off`) in this session; in other words ("turn the AMI on"), ask them to type `/frame-jack on`. `on` takes about half a minute before the AMI answers; the band says when. |
 | "Is frame-jack on?" / "what is the AMI doing?" | any window | Nothing to run: the AMI line on the band above the prompt says it. When there is no AMI line, or they want the long form, `python3 core/frame-jack.py status`, repeated word for word. |
@@ -568,7 +568,10 @@ it was right. The doctor lists pitfalls that cannot fire; giving them an
 ## Gates and evidence
 
 `core/gates.sh` runs the target's own gate commands from `config.yaml` and
-writes the evidence: logs under `state/evidence/<run-id>/`, a summary at
+writes the evidence (a sibling repo — one named in `target.siblings`, checked
+out beside the primary — is tested as itself: `core/gates.sh --repo <sibling>`
+runs its `gates_<name>:` list inside your window's worktree of it, one repo per
+run; run it before asking for a promote of work in that sibling): logs under `state/evidence/<run-id>/`, a summary at
 `vault/evidence/<run-id>.md`, and the run-id on its last line. A document
 that says `IMPLEMENTED` cites that run as `evidence-run:`; the session
 cannot end while a claim stands without one, or with one for a different
@@ -786,9 +789,16 @@ promote again in the fresh session.
 If the merge conflicts, tell window 02 to bring its work up to date: it runs
 `core/lease.sh rebase 02`, resolves any conflict in its own worktree, re-runs
 the gates and reports. If window 02 has commits in two repos, it runs
-`core/lease.sh split 02 --repo <nested>`, and the two windows are promoted
+`core/lease.sh split 02 --repo <nested rel or sibling name>`, and the two windows are promoted
 one at a time. Every refusal ends "Nothing was pushed." — repeat it to the
 operator; never work around it.
+
+A repo named in `promote.tags` is released by its promote: the decision block
+says it tags v<version> (the version file in the merged tree must be bumped),
+and the confirm pushes the merge and then the tag. If the tag push fails the
+words say so and end "Nothing else changed on origin."; run `core/promote.sh
+02 --confirm` again to push the tag — never push a tag by hand toward that
+repo's origin; the guard refuses it, and the release is promote's.
 
 A merge that promote pushes after the operator's recorded yes counts as the
 operator's own write for any file a single-writer or human-only rule covers;

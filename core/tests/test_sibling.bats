@@ -109,3 +109,47 @@ PY
   run LS unpromoted 02
   case "$output" in *"1 unpromoted commit: \"portico work\""*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- documentation and the config example (v0.13.0, plan Task 8) ---
+
+@test "config.example.yaml documents siblings, gates_<name>, gates_quick_<name>, promote.tags and promote.update_commands, each commented out; uncommented they read" {
+  ex="$DAEDALUS_HOME/../../config.example.yaml"; [ -f "$ex" ] || ex="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/config.example.yaml"
+  grep -q '^  # siblings: ' "$ex"; grep -q '^# gates_portico:' "$ex" || grep -q '^# gates_SIBLING:' "$ex"
+  grep -q '^# gates_quick_SIBLING:' "$ex"; grep -q '^  # tags: ' "$ex"; grep -q '^  # update_commands: ' "$ex"
+  run grep -q '^  siblings:' "$ex"; [ "$status" -ne 0 ]
+  { printf 'target:\n  repo: https://example.com/thing.git\n  branch: main\n'; grep '^  # siblings: ' "$ex" | sed 's/^  # /  /'
+    grep -A1 '^# gates_SIBLING:' "$ex" | sed 's/^# //'
+    printf 'promote:\n'; grep '^  # tags: \|^  # update_commands: ' "$ex" | sed 's/^  # /  /'; } > "$BATS_TEST_TMPDIR/c4.yaml"
+  export DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/c4.yaml"
+  run lib sibling_names; [ "$status" -eq 0 ]; [ "$output" = SIBLING ]
+  run lib cfg_list gates_SIBLING; [ -n "$output" ]
+  [ "$(lib cfg_pairs promote.tags)" = "$(printf 'SIBLING\tVERSION')" ]
+  [ "$(lib cfg_pairs promote.update_commands | cut -f1)" = SIBLING ]
+}
+
+@test "README and CLAUDE.md describe sibling repos, the per-repo gate run, and promote as a tagged release, in plain language" {
+  R="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  flat() { tr '\n' ' ' < "$1" | tr -s ' '; }
+  RM="$(flat "$R/README.md")"; CM="$(flat "$R/CLAUDE.md")"
+  for s in 'target.siblings' 'beside the primary' 'core/gates.sh --repo' 'gates_<name>' 'promote.tags' 'annotated' 'tag-unpushed' 'core/lease.sh split 02 --repo <nested rel or sibling name>'; do
+    case "$RM" in *"$s"*) : ;; *) echo "README lacks: $s"; return 1 ;; esac
+  done
+  for s in 'core/gates.sh --repo' 'sibling' 'tags v'; do
+    case "$CM" in *"$s"*) : ;; *) echo "CLAUDE.md lacks: $s"; return 1 ;; esac
+  done
+}
+
+@test "doctor: a sibling with no gates_<name> list is MISSING with the key to add; the operator paste names the lines a release repo needs" {
+  NO_GATES=1 add_sibling portico
+  cp "$SRC/doctor.sh" "$SRC/promote.py" "$SRC/prepush.py" "$SRC/distcheck.py" "$SRC/transcriptlib.py" "$SRC/verify-hook.py" "$SRC/upgrade.py" "$DAEDALUS_HOME/core/"
+  unset DAEDALUS_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDE_PID CLAUDECODE
+  printf '0.7.0\n' > "$DAEDALUS_HOME/VERSION"; printf '0.7.0\n' > "$DAEDALUS_HOME/state/upgraded-to"   # the upgrade's doctor lines need a version
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"MISSING  sibling portico has no gates list — add gates_portico: to config.yaml"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf 'promote:\n  tags: portico=VERSION\n' >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"  update_commands: portico=<the command portico's users run to receive a release>"*) : ;; *) echo "$output"; return 1 ;; esac
+  printf '  update_commands: portico=bin/update\ngates_portico:\n  - true\n' >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/doctor.sh"
+  case "$output" in *"has no gates list"*|*"update_commands: portico=<"*) echo "$output"; return 1 ;; esac
+}

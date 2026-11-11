@@ -7,11 +7,13 @@ harnesses. Agnostic until a codebase and a vault are supplied.
 
 1. Clone this repo.
 2. `cp config.example.yaml config.yaml` and fill in your target repo, its
-   nested and scaffold repos, your knowledge-base repo, and your gate commands.
+   nested, sibling and scaffold repos, your knowledge-base repo, and your gate commands.
 3. `./core/setup.sh`
 
 Setup clones the target and its nested repos at the paths they occupy in your
-real tree, makes the window directories and installs the pre-push hook,
+real tree, clones each sibling repo (`target.siblings`, v0.13.0) beside the primary
+at `target/<name>` — a single repo of its own, on its own trunk, with its own
+gates and promotions — makes the window directories and installs the pre-push hook,
 recreates the directory shape of any scaffold repo, and finishes by running
 the doctor. Rerun it any time — every phase is idempotent, and rerunning is
 how a scaffold picks up new directories.
@@ -400,7 +402,7 @@ still off its trunk. A stash in a target checkout is saved work no window
 shows, so it is never the remedy: the upgrade stops on it, and `core/doctor.sh`
 names it until it is picked up, applied or dropped. A picked-up window is promoted from the board ("promote
 window 01") or released, like any other; `core/lease.sh adopt <branch>
-[--repo <nested>]` does the same for any branch later.
+[--repo <nested rel or sibling name>]` does the same for any branch later.
 
 **Going back to v0.6.1.** Close every session in the home, then run
 `python3 core/upgrade.py --rollback` from a terminal there; `--dry-run` first
@@ -747,8 +749,8 @@ Doctor never fills in who may call (`callers`).
 **When it refuses.** Every refusal ends "Nothing was pushed." (or "Nothing
 changed on origin." after a rejected push). A merge conflict: the window runs
 `core/lease.sh rebase 02` and resolves it in its own worktree. Commits in two
-repos: `core/lease.sh split 02 --repo <nested>` moves the nested repo's
-commits to a new window, promoted separately. A refuted review: ask it about
+repos: `core/lease.sh split 02 --repo <nested rel or sibling name>` moves that
+repo's commits to a new window, promoted separately. A refuted review: ask it about
 a finding with `core/call-agent.sh --resume-review 02 "…"`, or, when the
 operator says to in any words, promote with `--skip-review --reason "…"`: their
 words are checked like a yes and recorded beside the verdict it sets aside
@@ -778,6 +780,36 @@ changes go to a staging branch first and are checked there names it here;
 promote then refuses a window with a commit origin's branch lacks, before any
 scratch is cut, naming the commits and the push to make. Nothing else in
 Daedalus reads the branch.
+
+**A sibling repo (v0.13.0).** A repo named in `target.siblings` is checked out
+beside the primary at `target/<name>` and cut into every window at
+`worktrees/<NN>/<name>`. It is tested as itself: `core/gates.sh --repo <name>`
+runs its `gates_<name>:` list inside its tree (a sibling with no such list is
+refused, never green by omission), `core/fingerprint.sh --repo <name>` is its
+fingerprint, and a promote of a window whose commits are in the sibling runs
+its gates and the reviewer in the sibling's own scratch and pushes the sibling's
+origin. One repo per gate run, one repo per promote: a window that changed
+both the primary and a sibling splits first. A gate record from before
+v0.13.0 has no `tree_repo` and is read as the primary's, so what already
+passed still stands after an update.
+
+**Promote as a tagged release (v0.13.0).** A repo named in `promote.tags`
+(`key=VERSION`, the version file at its root) is released by its promote: the
+decision block says "this is a release: it tags v1.2.3 and the next `bin/update`
+ships it" (the command from `promote.update_commands`), the version is read
+from the merged tree — refused when missing, not a dotted number, or still what
+the trunk carries — and the tag is refused when origin already has it (at the
+merge commit: "already released"; elsewhere: "bump VERSION") or a local tag of
+that name points elsewhere. The confirm pushes the merge, then an annotated tag
+(`<dir name> v1.2.3`, the merge's own git identity) at it, and says "Pushed merge
+abc1234 to main and tag v1.2.3." If the merge landed and the tag push failed, the
+words say exactly that, ending "Nothing else changed on origin."; the promotion is
+stamped `tag-unpushed`, no local tag is left behind, `--clean` keeps its scratch,
+doctor says MISSING until the tag is on origin, and `core/promote.sh 02 --confirm`
+again pushes only the tag and finishes the record. Hand pushes of tags toward
+such a repo's origin — a tag name, a version-shaped name, `--tags`,
+`--follow-tags`, a `refs/tags/` refspec — are refused by the guard and the hook:
+the release is promote's. Nothing changes for a repo the config does not name.
 
 **The pre-push hook.** `core/prepush.py` installs a pre-push hook in each
 target repo's shared `.git/hooks/` (lease allocation, `core/sync-target.sh`
@@ -1168,7 +1200,8 @@ instead of a re-render.
 
 The diff is assembled per repository: the target checkout against
 `origin/<target.branch>`, then each `target.nested` checkout against its
-origin's default branch, every path prefixed with the nested relpath so the
+origin's default branch (a sibling's review, `--repo <name>`, is of its own
+tree against its origin's default branch, with no nested section), every path prefixed with the nested relpath so the
 reviewer and the pitfall globs see target-relative paths; committed work
 since the merge base, then uncommitted and untracked work against `HEAD`
 (through a temporary index — the real index is never touched). A nested
