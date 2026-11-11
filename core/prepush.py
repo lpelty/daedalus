@@ -41,6 +41,7 @@ from typing import List, Tuple
 HOME = Path(__file__).resolve().parent.parent
 MARK = "# daedalus pre-push hook (core/prepush.py)"
 REFUSE = "This push would move %s. Trunk is reached only through promote (`core/promote.sh <NN>`)."
+TAG_REFUSE = "This push would tag %s. Tags are pushed by promote as its release (`core/promote.sh <NN> --confirm`)."
 ZERO = re.compile(r"^0+$")
 PROMOTE_ID = re.compile(r"^[0-9]{2}-[0-9]{8}-[0-9]{6}-[0-9a-f]{3}$")
 
@@ -150,10 +151,39 @@ def trunk_names(repo: Path) -> set:
     return names
 
 
+def repo_key_of(cwd: Path) -> str:
+    """The repo key of the pushing worktree: its path under target/, worktrees/NN/ or state/promote/<id>/
+    (boundary-hook's reading); "" when it is none of those."""
+    try:
+        rel = cwd.resolve().relative_to(HOME.resolve()).parts
+    except ValueError:
+        return ""
+    if len(rel) >= 2 and rel[0] == "target":
+        return "/".join(rel[1:])
+    if len(rel) >= 3 and rel[0] in ("worktrees",) :
+        return "/".join(rel[2:])
+    if len(rel) >= 4 and rel[0] == "state" and rel[1] == "promote":
+        return "/".join(rel[3:])
+    return ""
+
+
+def release_keys() -> set:
+    """The repos config promote.tags names (v0.13.0): their tags are promote's to push."""
+    try:
+        p = subprocess.run(["bash", "-c", 'source "$1"; cfg promote.tags >/dev/null 2>&1 && cfg_pairs promote.tags | cut -f1',
+                            "_", str(HOME / "core" / "lib.sh")], capture_output=True, text=True,
+                           env=dict(os.environ, DAEDALUS_HOME=str(HOME)), timeout=10)
+        return {ln.strip() for ln in p.stdout.splitlines() if ln.strip()}
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+
 def hook(_argv: List[str]) -> int:
     """git runs this in the pushing worktree with `<local ref> <local sha> <remote
     ref> <remote sha>` lines on stdin; any non-zero exit refuses the whole push."""
     names = trunk_names(Path.cwd())
+    key = repo_key_of(Path.cwd())
+    release = key in release_keys() if key else False
     pid = os.environ.get("DAEDALUS_PROMOTE_ID", "")
     prepared = None
     if PROMOTE_ID.match(pid):
@@ -163,6 +193,13 @@ def hook(_argv: List[str]) -> int:
             prepared = None
     for line in sys.stdin:
         parts = line.split()
+        if len(parts) == 4 and parts[2].startswith("refs/tags/") and release:
+            # v0.13.0: a release repo's tag goes with its confirmed promotion, nothing else
+            tag = parts[2][len("refs/tags/"):]
+            if not (isinstance(prepared, dict) and prepared.get("confirmed_at") and prepared.get("tag") == tag):
+                sys.stderr.write("daedalus: %s\n" % (TAG_REFUSE % key))
+                return 1
+            continue
         if len(parts) != 4 or not parts[2].startswith("refs/heads/"):
             continue
         branch, local_sha = parts[2][len("refs/heads/"):], parts[1]

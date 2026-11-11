@@ -1915,3 +1915,39 @@ PY
     done
   done
 }
+
+# --- v0.13.0: tag pushes toward a release repo (promote.tags) are promote's ---
+
+release_leases() {   # guard_leases with a sibling portico named in promote.tags, cut into windows 01 (sA) and 02 (sB)
+  lease_fixture
+  add_sibling portico
+  printf 'promote:\n  tags: portico=VERSION\n' >> "$DAEDALUS_HOME/config.yaml"
+  bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null; bash "$DAEDALUS_HOME/core/lease.sh" create >/dev/null
+  for p in 01:sA 02:sB; do nn="${p%%:*}"; s="${p##*:}"; pid="$(live_pid)"; registry_entry "$pid" "$s" interactive cli "daedalus-$nn"
+    env CLAUDE_CODE_SESSION_ID="$s" bash "$DAEDALUS_HOME/core/lease.sh" claim "$nn" >/dev/null; done
+  python3 "$DAEDALUS_HOME/core/leaselib.py" _test-write prime '{"session_id":"sA","history":[]}'
+  W2="$DAEDALUS_HOME/worktrees/02/thing"; W2S="$DAEDALUS_HOME/worktrees/02/portico"
+  git -C "$W2S" tag v0.2.0; git -C "$W2" tag v9.9.9
+}
+
+@test "a tag push from a window toward a release repo's origin is denied in every shape (a tag name, a version-shaped name, --tags, --follow-tags, a refs/tags refspec, a tag pattern); the same shapes toward the primary (not a release repo) stay allowed" {
+  release_leases
+  for c in 'git push origin v0.2.0' 'git push origin v0.3.0' 'git push --tags origin' 'git push --follow-tags origin lease/02' \
+           'git push origin HEAD:refs/tags/v1' "git push origin 'refs/tags/*:refs/tags/*'" 'git push --tag origin'; do
+    run guard_as sB "$c" "$W2S"; denied || { echo "not denied: $c"; return 1; }
+    case "$output" in *"Tags on portico are pushed by promote as its release; run \`core/promote.sh 02 --confirm\`."*) : ;; *) echo "$c: $output"; return 1 ;; esac
+  done
+  for c in 'git push origin v9.9.9' 'git push --tags origin' 'git push --follow-tags origin lease/02' \
+           'git push origin HEAD:refs/tags/v1' "git push origin 'refs/tags/*:refs/tags/*'"; do
+    run guard_as sB "$c" "$W2"; allowed || { echo "not allowed toward the primary: $c: $output"; return 1; }
+  done
+  run guard_as sB 'git push origin lease/02' "$W2S"; allowed || { echo "a branch push to the sibling denied: $output"; return 1; }
+}
+
+@test "with no promote.tags, tag pushes toward a sibling's origin are allowed as before (nothing ships to a deployment that did not configure a release)" {
+  release_leases
+  sed -i '' '/^promote:$/d; /^  tags: portico=VERSION$/d' "$DAEDALUS_HOME/config.yaml"
+  for c in 'git push origin v0.2.0' 'git push --tags origin' 'git push origin HEAD:refs/tags/v1'; do
+    run guard_as sB "$c" "$W2S"; allowed || { echo "not allowed: $c: $output"; return 1; }
+  done
+}

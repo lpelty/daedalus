@@ -186,6 +186,7 @@ EVERYTHING = ("`git push %s` is refused: promote pushes one merge commit; nothin
 MATCHING = "The refspec `:` pushes every matching branch, %s too. " + PROMOTE_RULE
 UNPARSEABLE = "The refspec %s cannot be checked (it holds $, a backtick or {); name the branch literally."
 SCRATCH_PUSH = "Pushes from the promote scratch are promote's job; run `core/promote.sh <NN> --confirm`."
+TAG_PUSH = "Tags on %s are pushed by promote as its release; run `core/promote.sh %s --confirm`."   # v0.13.0
 COMMIT_TARGET = "You are on %s in the prime's checkout. Build in your window's worktree (%s), not here."
 COMMIT_TRUNK = "You are on %s. " + PROMOTE_RULE
 NO_VERIFY = ("--no-verify is refused: it skips git's hooks, and the pre-push hook is how git itself refuses a trunk "
@@ -617,6 +618,64 @@ def target_origins(root_s: str) -> frozenset:
                 if line.strip():
                     out.add(norm_url(line, r))
     return frozenset(out)
+
+
+@functools.lru_cache(maxsize=2)
+def release_origins(root_s: str) -> Dict[str, frozenset]:
+    """v0.13.0: repo key -> the push URLs of that repo's origin, for every repo config promote.tags names (a
+    promote of it is a tagged release, so its tags are promote's to push). Empty on a deployment with no such
+    config: nothing changes for it."""
+    root, out = Path(root_s), {}
+    keys = v._lib(root, "cfg promote.tags >/dev/null 2>&1 && cfg_pairs promote.tags | cut -f1")
+    for key in (k.strip() for k in keys.splitlines() if k.strip()):
+        r = root / "target" / key
+        if not (r / ".git").exists():
+            continue
+        urls = set()
+        code, u, _ = v.run(["git", "-C", str(r), "remote", "get-url", "--push", "--all", "origin"])
+        for line in (u.splitlines() if code == 0 else []):
+            if line.strip():
+                urls.add(norm_url(line, r))
+        if urls:
+            out[key] = frozenset(urls)
+    return out
+
+
+def names_release(repo: Path, word: str, cfg: "Cfg", root: Path, penv: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """The key of the release repo whose origin a push to <word> names, or None."""
+    rels = release_origins(str(root.resolve()))
+    if not rels:
+        return None
+    urls = {norm_url(u, repo) for u in destination_urls(repo, word, cfg, penv)}
+    for key, origins in rels.items():
+        if urls & origins:
+            return key
+    return None
+
+
+VERSION_WORD = re.compile(r"^v?[0-9]+(\.[0-9]+)+$")
+
+
+def tag_push_word(rest: List[str], norm: List[str], repo: Path) -> Optional[str]:
+    """What makes a push a tag push: --tags / --follow-tags (or an abbreviation git takes), a refspec whose
+    destination is under refs/tags/ (or git's DWIM tags/), a tag pattern, a positional that is a tag of the
+    repository, or a version-shaped name (v1.2.3 — the shape a release tag has, whether or not it exists yet)."""
+    for r in norm:
+        if (len(r) >= 5 and "--tags".startswith(r)) or (len(r) >= 8 and "--follow-tags".startswith(r)):
+            return r
+    for spec in push_positionals(rest)[1:]:
+        s = spec.lstrip("+")
+        dest = s.split(":", 1)[1] if ":" in s else s
+        src = s.split(":", 1)[0] if ":" in s else s
+        if dest.startswith("refs/tags/") or dest.startswith("tags/") or src.startswith("refs/tags/"):
+            return spec
+        if ":" not in s:
+            if VERSION_WORD.match(s):
+                return spec
+            code, _, _ = run_git(["git", "-C", str(repo), "rev-parse", "-q", "--verify", "refs/tags/%s" % s])
+            if code == 0:
+                return spec
+    return None
 
 
 # the environment variables that change which configuration git reads (critic-fix review, finding 1)
@@ -1186,6 +1245,13 @@ def check_git(seg: List[str], cwd: Path, target: Optional[Path], branch_created:
         every = next((r for r in norm if r in PUSH_EVERYTHING or r in ("--prune", "-d", "--delete")), None)
         if every:
             return EVERYTHING % every, None
+        # v0.13.0: a tag toward a release repo's origin (config promote.tags) is promote's to push
+        tagged = tag_push_word(rest, norm, repo)
+        if tagged:
+            pos = push_positionals(rest)
+            key = names_release(repo, pos[0] if pos else (push_repo_option(rest) or "origin"), cfg, root, penv)
+            if key:
+                return TAG_PUSH % (key, mine), None
         bad = next((s for s in push_positionals(rest)[1:] if any(ch in s for ch in "$`{")), None)
         if bad:
             return UNPARSEABLE % bad, None
