@@ -27,6 +27,9 @@ promote_fixture() {
 VERDICT: STANDS"
   PROMOTE="$DAEDALUS_HOME/core/promote.sh"; LSH="$DAEDALUS_HOME/core/lease.sh"
   export PROMOTE LSH
+  # PROMOTE_SIBLING=<name> (v0.13.0): a sibling repo beside the primary, added before the windows are cut so every
+  # window holds a worktree of it (fixtures/leases add_sibling: bare origin $BATS_TEST_TMPDIR/<name>-origin.git).
+  [ -z "${PROMOTE_SIBLING:-}" ] || add_sibling "$PROMOTE_SIBLING"
   bash "$LSH" create >/dev/null; bash "$LSH" create >/dev/null
   PP="$(live_pid)"; registry_entry "$PP" sP interactive cli daedalus-01; CLAUDE_CODE_SESSION_ID=sP bash "$LSH" claim 01 >/dev/null
   PC="$(live_pid)"; registry_entry "$PC" sC interactive cli daedalus-02; CLAUDE_CODE_SESSION_ID=sC bash "$LSH" claim 02 >/dev/null

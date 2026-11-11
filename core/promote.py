@@ -249,8 +249,8 @@ def trunks(root: Path, nn: str, lease: dict) -> Dict[str, str]:
         return now
     if set(rec) != set(now):
         raise Stop("Window %s was cut for the repos %s, but config now names %s. Promote merges only onto the trunks "
-                   "a window was cut from. Put config target.nested back, or move window %s's work to a new window; "
-                   "then run promote again." % (nn, ", ".join(sorted(rec)), ", ".join(sorted(now)), nn))
+                   "a window was cut from. Put config target.nested or target.siblings back, or move window %s's work "
+                   "to a new window; then run promote again." % (nn, ", ".join(sorted(rec)), ", ".join(sorted(now)), nn))
     outer = next(iter(now))
     for repo, trunk in now.items():
         if rec[repo] == trunk:
@@ -276,19 +276,32 @@ def current_trunks(root: Path) -> Dict[str, str]:
     except ll.Refused as e:
         raise Stop(str(e) + ".")
     out = {name: v.target_branch(root)}
-    for n in v.nested_relpaths(root):
-        repo = "%s/%s" % (name, n)
+    # a nested repo's trunk and a sibling's (v0.13.0) are both origin/HEAD, read now
+    for repo, kind, rel in ([("%s/%s" % (name, n), "nested", n) for n in v.nested_relpaths(root)]
+                            + [(sb, "sibling", sb) for sb in v.sibling_names(root)]):
         code, head, _ = run(["git", "-C", str(root / "target" / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         head = head.strip()
         if code != 0 or not head.startswith("origin/"):
-            raise Stop("nested repo %s has no origin/HEAD; run `git -C target/%s remote set-head origin -a` and "
-                       "try again." % (n, repo))
+            raise Stop("%s repo %s has no origin/HEAD; run `git -C target/%s remote set-head origin -a` and "
+                       "try again." % (kind, rel, repo))
         out[repo] = head[len("origin/"):]
     return out
 
 
 def outer_of(tr: Dict[str, str]) -> str:
     return next(iter(tr))
+
+
+def tree_repo_of(tr: Dict[str, str], repo: str) -> str:
+    """The repo whose scratch tree a promotion of <repo> is tested in (v0.13.0): a sibling's own tree — a bare key
+    that is not the outer; the outer's tree for the outer and for a nested repo (which sits inside it)."""
+    outer = outer_of(tr)
+    return repo if (repo != outer and "/" not in repo) else outer
+
+
+def repo_flag(repo: str) -> str:
+    """The --repo word for a repo key: a nested repo's rel, a sibling's bare name."""
+    return repo.split("/", 1)[1] if "/" in repo else repo
 
 
 def fetch_trunks(root: Path, tr: Dict[str, str]) -> Dict[str, str]:
@@ -433,16 +446,19 @@ def trial_merge(root: Path, nn: str, lease: dict, pdir: Path, repo: str, trunk: 
 
 # --- fingerprint, gates, review (§7.1 steps 6–9) ---------------------------------------------------
 
-def fingerprint(root: Path, tree: Path) -> Tuple[str, str]:
-    """fingerprint.sh of the merged tree (every repo in it); ("null", reason) on failure."""
+def fingerprint(root: Path, tree: Path, repo_key: Optional[str] = None) -> Tuple[str, str]:
+    """fingerprint.sh of the merged tree (every repo in it; --repo names whose tree it is, v0.13.0); ("null", reason)
+    on failure."""
     env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
-    code, out, err = run(["bash", str(root / "core" / "fingerprint.sh")], env=env, timeout=600)
+    code, out, err = run(["bash", str(root / "core" / "fingerprint.sh")] + (["--repo", repo_key] if repo_key else []),
+                         env=env, timeout=600)
     fp = (out.strip().splitlines() or ["null"])[-1]
     why = "; ".join(ln for ln in err.splitlines() if ln.strip() and not ln.startswith("fingerprint_secs="))
     return (fp if re.fullmatch(r"[0-9a-f]{64}", fp) else "null"), why
 
 
-def run_gates(root: Path, pid: str, tree: Path, trunk: str, quick: Optional[dict] = None) -> dict:
+def run_gates(root: Path, pid: str, tree: Path, trunk: str, quick: Optional[dict] = None,
+              repo_key: Optional[str] = None) -> dict:
     """The promotion's gate run (spec §7.1 step 7). `quick` (v0.12.9, spec 2026-10-21 §E): the run executes only the
     targeted command quick_plan derived, or nothing, and records itself as quick — unless a promote-grade PASS of
     this exact tree is on record, which gates.sh reuses as for any promote."""
@@ -451,7 +467,8 @@ def run_gates(root: Path, pid: str, tree: Path, trunk: str, quick: Optional[dict
         env.pop(k, None)
     if quick is not None:
         env.update(GATES_QUICK="1", GATES_QUICK_COMMAND=quick.get("command") or "", GATES_QUICK_WHY=quick.get("why") or "")
-    _code, out, err = run(["bash", str(root / "core" / "gates.sh"), "--no-refute", "--promote", pid], env=env, timeout=None)
+    _code, out, err = run(["bash", str(root / "core" / "gates.sh")] + (["--repo", repo_key] if repo_key else [])
+                          + ["--no-refute", "--promote", pid], env=env, timeout=None)
     ev = root / "state" / "evidence"
     runs = [p for p in (ev.glob("*/run.json") if ev.is_dir() else []) if (read_json(p) or {}).get("promote_id") == pid]
     if not runs:
@@ -487,7 +504,7 @@ def run_gates(root: Path, pid: str, tree: Path, trunk: str, quick: Optional[dict
     raise Stop("Gates were INVALID on the merged tree (%s). An invalid run is not a pass." % reason, code=1)
 
 
-def quick_plan(root: Path, wt: Path, trunk_sha: str, merge: str) -> dict:
+def quick_plan(root: Path, wt: Path, trunk_sha: str, merge: str, repo_key: Optional[str] = None) -> dict:
     """v0.12.9 (spec 2026-10-21 §E): what a quick promote runs instead of the gates — the deployment's `gates_quick`
     command (config.yaml, top level, one command with a `{files}` placeholder) over the test files the merge adds or
     changes; nothing, with the reason, when there is no such command or no such file."""
@@ -495,12 +512,13 @@ def quick_plan(root: Path, wt: Path, trunk_sha: str, merge: str) -> dict:
     import amilib
     code, out, _ = git(wt, "diff", "--name-only", "--diff-filter=AM", "%s..%s" % (trunk_sha, merge))
     files = sorted(f for f in out.splitlines() if f.strip() and amilib.is_test_file(f) and (wt / f).is_file()) if code == 0 else []
-    tpl = config(root, "gates_quick")
+    qkey = "gates_quick_%s" % repo_key if repo_key else "gates_quick"       # v0.13.0: a sibling's own quick command
+    tpl = config(root, qkey)
     if not tpl:
-        return {"files": files, "command": None, "why": "no gates_quick command in config.yaml"}
+        return {"files": files, "command": None, "why": "no %s command in config.yaml" % qkey}
     if "{files}" not in tpl:
-        raise Stop("config gates_quick has no {files} placeholder, so it cannot name the test files the window changed; "
-                   "quick promote did nothing.")
+        raise Stop("config %s has no {files} placeholder, so it cannot name the test files the window changed; "
+                   "quick promote did nothing." % qkey)
     if not files:
         return {"files": [], "command": None, "why": "no test file changed"}
     return {"files": files, "command": tpl.replace("{files}", " ".join(shlex.quote(f) for f in files)), "why": None}
@@ -530,11 +548,12 @@ def must_be_on(root: Path, nn: str, repo: str) -> None:
                    % (nn, n_words(n, "commit"), ref, "; ".join('"%s"' % c for c in names), ref))
 
 
-def review(root: Path, run_id: str, tree: Path) -> dict:
+def review(root: Path, run_id: str, tree: Path, repo_key: Optional[str] = None) -> dict:
     """§7.1 step 8: refute.sh --mode promote on the merged diff (the launcher runs
     the reviewer; the verdict file is written once)."""
     env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
-    code, _out, err = run(["bash", str(root / "core" / "refute.sh"), run_id, "--mode", "promote"], env=env, timeout=None)
+    code, _out, err = run(["bash", str(root / "core" / "refute.sh"), run_id, "--mode", "promote"]
+                          + (["--repo", repo_key] if repo_key else []), env=env, timeout=None)
     vf = root / "vault" / "evidence" / ("%s-review.md" % run_id)
     if code not in (0, 1) or not vf.is_file():
         raise Stop("The review could not be completed (%s). A missing review is not a pass." % last_line(err), code=1)
@@ -1023,10 +1042,10 @@ def prepare(root: Path, a: dict) -> int:
         raise Stop("Window %s has no commits that are not already on %s. Nothing to promote." % (nn, tr[outer]))
     if len(by_repo) > 1:
         names = sorted(by_repo, key=len)
-        nested = [r for r in names if r != outer]
+        other = [r for r in names if r != outer]        # a nested repo or a sibling (v0.13.0): never the outer
         raise Stop("Window %s has commits in both %s. v1 promotes one repo per run. Tell window %s to split its work "
                    "so the %s commits get their own window (`core/lease.sh split %s --repo %s`), then promote them "
-                   "one at a time." % (nn, " and ".join(names), nn, nested[0], nn, nested[0].split("/", 1)[1]))
+                   "one at a time." % (nn, " and ".join(names), nn, other[0], nn, repo_flag(other[0])))
     repo = next(iter(by_repo))
     trunk = tr[repo]
     must_be_on(root, nn, repo)                 # v0.12.9: optional, before any scratch is cut
@@ -1039,8 +1058,10 @@ def prepare(root: Path, a: dict) -> int:
     # Decision 40: the commits the block names are the merge's own, read from the merge commit.
     _, log, _ = git(pdir / repo, "log", "--reverse", "--format=%s", "HEAD^1..HEAD^2")
     commits = [s for s in log.splitlines() if s.strip()]
-    tree = pdir / outer
-    fp, why = fingerprint(root, tree)
+    tree_repo = tree_repo_of(tr, repo)        # v0.13.0: a sibling is tested in its own scratch
+    tree = pdir / tree_repo
+    tree_key = tree_repo if tree_repo != outer else None
+    fp, why = fingerprint(root, tree, tree_key)
     if fp == "null":
         raise Stop("Could not fingerprint the merged tree (%s); promote did nothing." % (why or "fingerprint.sh printed null"))
     if not scratch_is(pdir, scratch_heads(tr, repo, merge, shas)):
@@ -1049,15 +1070,18 @@ def prepare(root: Path, a: dict) -> int:
     er = earlier_refuted(root, nn, pid, fp, tip, trunk_sha)
     nested = {}
     for r in tr:
-        if r != outer:
+        if r != outer and "/" in r:               # the repos inside the outer's tree; a sibling is not one
             m = merge if r == repo else shas[r]
             nested[r.split("/", 1)[1]] = {"trunk_sha_at_prepare": trunk_sha if r == repo else shas[r], "merge_sha": m}
+    # trunk_sha_at_prepare / merge_sha name the TREE under test's commit (the outer's, or the sibling's own);
+    # heads is every scratch's commit, what the confirm re-derives against (v0.13.0; before: rebuilt from nested)
     write_json(pdir / "context.json", {
-        "promote_id": pid, "lease": nn, "repo": repo, "nested": nested,
-        "trunk_sha_at_prepare": trunk_sha if repo == outer else shas[outer],
-        "merge_sha": merge if repo == outer else shas[outer]})
-    quick_rec = quick_plan(root, pdir / repo, trunk_sha, merge) if quick else None
-    run_rec = run_gates(root, pid, tree, trunk, quick=quick_rec)
+        "promote_id": pid, "lease": nn, "repo": repo, "nested": nested, "tree_repo": tree_repo,
+        "trunk_sha_at_prepare": trunk_sha if repo == tree_repo else shas[tree_repo],
+        "merge_sha": merge if repo == tree_repo else shas[tree_repo],
+        "heads": scratch_heads(tr, repo, merge, shas)})
+    quick_rec = quick_plan(root, pdir / repo, trunk_sha, merge, tree_key) if quick else None
+    run_rec = run_gates(root, pid, tree, trunk, quick=quick_rec, repo_key=tree_key)
     run_id = run_rec["run_id"]
     if quick_rec is not None and run_rec.get("reused_from"):
         quick_rec = dict(quick_rec, reused=True)       # a full PASS was on record: nothing quick about this promote
@@ -1065,8 +1089,8 @@ def prepare(root: Path, a: dict) -> int:
         quick_rec = dict(quick_rec, reused=False)
     # v0.12.8 (spec 2026-10-21 B): the window's own review of exactly this tree is promote's review, STANDS or
     # REFUTED; only a tree no review of the window has judged gets a fresh reviewer (window_review says when).
-    rv = (window_review(root, nn, fp) or review(root, run_id, tree)) if skip is None else None
-    fp_after, _ = fingerprint(root, tree)
+    rv = (window_review(root, nn, fp) or review(root, run_id, tree, tree_key)) if skip is None else None
+    fp_after, _ = fingerprint(root, tree, tree_key)
     seen = [fp, fp_after, run_rec.get("fingerprint")] + ([rv["fingerprint"]] if rv else [])
     if len(set(seen)) != 1:
         raise Stop("The tree changed while promote was running (fingerprint before %s, after %s). Run promote again."
@@ -1314,7 +1338,7 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def check_review(root: Path, p: dict, run_rec: dict, tree: Path) -> str:
+def check_review(root: Path, p: dict, run_rec: dict, tree: Path, repo_key: Optional[str] = None) -> str:
     """§7.2 step 3: the review, the receipt and the re-rendered prompt, each
     against the others; nothing taken from prepared.json that a primary can
     contradict. Returns the review's call id, read from its own frontmatter
@@ -1332,8 +1356,8 @@ def check_review(root: Path, p: dict, run_rec: dict, tree: Path) -> str:
     if fm.get("fingerprint") != run_rec.get("fingerprint"):
         raise Stop("Evidence disagrees with the prepared promotion (the review's fingerprint and the gate run's).")
     env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
-    r = subprocess.run(["bash", str(root / "core" / "refute.sh"), p["run_id"], "--mode", "promote", "--render-only"],
-                       env=env, capture_output=True, timeout=600)
+    r = subprocess.run(["bash", str(root / "core" / "refute.sh"), p["run_id"], "--mode", "promote", "--render-only"]
+                       + (["--repo", repo_key] if repo_key else []), env=env, capture_output=True, timeout=600)
     launch = read_json(root / "state" / "direct-calls" / str(fm.get("call-id")) / "launch.json") or {}
     rendered = sha256_bytes(r.stdout) if r.returncode == 0 else None
     if not (rendered and fm.get("request-sha") == launch.get("request_sha256") == rendered):
@@ -1471,12 +1495,14 @@ def rederive(root: Path, p: dict, pdir: Path, tr: Dict[str, str]) -> dict:
     promo = run_rec.get("promotion") or {}
     if (promo.get("overrode_review") or None) != (p.get("overrode_review") or None):
         raise Stop("Evidence disagrees with the prepared promotion (the review it sets aside).")
-    tree = pdir / outer_of(tr)
+    tree_repo = ctx.get("tree_repo") or outer_of(tr)
+    tree = pdir / tree_repo
+    tree_key = tree_repo if tree_repo != outer_of(tr) else None
     call_id = None
     if p.get("review") is None:
         check_skip(root, p, promo)
     else:
-        call_id = check_review(root, p, run_rec, tree)
+        call_id = check_review(root, p, run_rec, tree, tree_key)
     state, detail = dc.distribution_state(root)
     if state != "clean":
         raise Stop(dc.refusal(state, detail, PUSHED))
@@ -1498,11 +1524,13 @@ def rederive(root: Path, p: dict, pdir: Path, tr: Dict[str, str]) -> dict:
     if rev(wt, p["merge_sha"] + "^2") != p["lease_tip"] or rev(wt, p["merge_sha"] + "^1") != p["trunk_sha_at_prepare"]:
         raise Stop("Evidence disagrees with the prepared promotion (the merge commit's parents).")
     outer = outer_of(tr)
-    heads = {outer: ctx.get("merge_sha")}
-    heads.update({"%s/%s" % (outer, rel): (n or {}).get("merge_sha") for rel, n in (ctx.get("nested") or {}).items()})
+    heads = ctx.get("heads") if isinstance(ctx.get("heads"), dict) else None
+    if not heads:        # a context written before v0.13.0: the outer's and each nested repo's commit
+        heads = {outer: ctx.get("merge_sha")}
+        heads.update({"%s/%s" % (outer, rel): (n or {}).get("merge_sha") for rel, n in (ctx.get("nested") or {}).items()})
     if heads.get(repo) != p["merge_sha"] or not scratch_is(pdir, heads):
         raise Stop("Evidence disagrees with the prepared promotion (the scratch is not the merge commit).")
-    fp, _ = fingerprint(root, tree)
+    fp, _ = fingerprint(root, tree, tree_key)
     if not (fp == p["fp_merged"] == run_rec.get("fingerprint")
             and (p.get("review") is None or p["review"].get("fingerprint") == fp)):
         raise Stop("Evidence disagrees with the prepared promotion (the fingerprint of the scratch).")
@@ -1831,8 +1859,11 @@ def background_run(root: Path, a: dict) -> int:
     bg = read_json(pdir / "background.json") or {}
     if bg.get("state") not in (None, "running"):
         raise Stop("Promotion %s's background full run already finished (%s)." % (pid, bg.get("state")))
+    ctx = read_json(pdir / "context.json") or {}
     outer = p["repo"].split("/", 1)[0]
-    tree = pdir / outer
+    tree_repo = ctx.get("tree_repo") or outer
+    tree = pdir / tree_repo
+    tree_key = tree_repo if tree_repo != outer else None
     started = bg.get("started") or tl.iso_utc(time.time())
     if not tree.is_dir():
         write_json(pdir / "background.json", {"state": "INVALID", "pid": os.getpid(), "started": started,
@@ -1845,7 +1876,8 @@ def background_run(root: Path, a: dict) -> int:
     env = dict(os.environ, DAEDALUS_TARGET_OVERRIDE=str(tree))
     for k in ("GATES_QUICK", "GATES_QUICK_COMMAND", "GATES_QUICK_WHY"):
         env.pop(k, None)
-    _code, out, err = run(["bash", str(root / "core" / "gates.sh"), "--no-refute", "--promote", pid], env=env, timeout=None)
+    _code, out, err = run(["bash", str(root / "core" / "gates.sh")] + (["--repo", tree_key] if tree_key else [])
+                          + ["--no-refute", "--promote", pid], env=env, timeout=None)
     ev = root / "state" / "evidence"
     runs = [(f.stat().st_mtime, read_json(f) or {}) for f in (ev.glob("*/run.json") if ev.is_dir() else [])]
     runs = [r for _, r in sorted(runs, key=lambda x: x[0]) if r.get("promote_id") == pid and not r.get("quick")
