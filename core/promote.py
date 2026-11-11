@@ -1977,17 +1977,20 @@ def doctor(root: Path) -> int:
         return 0
     if (root / "target" / name).is_dir():
         nested = v.nested_relpaths(root)
-        repos = [name] + ["%s/%s" % (name, n) for n in nested]
+        siblings = v.sibling_names(root)
+        repos = [name] + ["%s/%s" % (name, n) for n in nested] + siblings
         heads, missing_head = ["%s=%s" % (name, v.target_branch(root))], False
-        for n in nested:
-            code, head, _ = run(["git", "-C", str(root / "target" / name / n), "symbolic-ref", "--short",
+        # a nested repo's trunk and a sibling's are both origin/HEAD, read locally (never the network)
+        for key, kind, rel in ([("%s/%s" % (name, n), "nested", n) for n in nested]
+                               + [(s, "sibling", s) for s in siblings]):
+            code, head, _ = run(["git", "-C", str(root / "target" / key), "symbolic-ref", "--short",
                                  "refs/remotes/origin/HEAD"])
             if code == 0 and head.strip().startswith("origin/"):
-                heads.append("%s/%s=%s" % (name, n, head.strip()[len("origin/"):]))
+                heads.append("%s=%s" % (key, head.strip()[len("origin/"):]))
             else:
                 missing_head = True
-                print("MISSING  nested repo %s has no origin/HEAD — run git -C target/%s/%s remote set-head origin -a"
-                      % (n, name, n))
+                print("MISSING  %s repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
+                      % (kind, rel, key))
         if not missing_head:
             print("OK       trunk: %s" % ", ".join(heads))
         import prepush
