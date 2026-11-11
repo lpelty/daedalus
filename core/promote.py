@@ -66,8 +66,10 @@ import transcriptlib as tl  # noqa: E402
 import verifylib as v  # noqa: E402
 
 PUSHED, ON_ORIGIN = "Nothing was pushed.", "Nothing changed on origin."
+ELSE_ON_ORIGIN = "Nothing else changed on origin."     # after a merge landed and its tag did not (v0.13.0)
 LOCK_ERR = re.compile(r"cannot lock ref|Unable to create '[^']*\.lock'")
-RECORDS = ("prepared.json", "context.json", "pushed", "announced", ".confirm.lock", "background.json", "background.log")
+RECORDS = ("prepared.json", "context.json", "pushed", "announced", ".confirm.lock", "background.json", "background.log",
+           "tag-unpushed")
 FINDING = re.compile(r"^#{1,4}\s*F\d+\b.*[—-]\s*(HIGH|MEDIUM|LOW)\s*$", re.M)
 
 
@@ -400,6 +402,10 @@ def clean_window(root: Path, nn: str, tr: Dict[str, str], pushed_only: bool = Fa
             continue
         if background_alive(pdir):
             kept.append("Kept %s: its background full run is still running." % pdir.name)
+            continue
+        if (pdir / "tag-unpushed").exists() and not was_pushed(pdir):
+            kept.append("Kept %s: its merge is on trunk but its tag is not; `core/promote.sh %s --confirm` pushes it."
+                        % (pdir.name, nn))
             continue
         with open(str(pdir / ".confirm.lock"), "a") as fh:
             try:
@@ -763,11 +769,109 @@ def release_words(root: Path) -> Optional[str]:
     return "`%s`" % cmd if cmd else ""
 
 
+def release_rules(root: Path) -> Dict[str, Tuple[str, str]]:
+    """v0.13.0: config promote.tags (repo key = version file, comma separated) and promote.update_commands
+    (repo key = the words its users type to receive a release): repo key -> (version file, update command or "").
+    A promote of a repo named here is a release — it pushes an annotated v<version> tag with the merge — whatever
+    promote.release_note says (that key describes the untagged repos). Core names no product: the keys are the
+    operator's."""
+    out: Dict[str, Tuple[str, str]] = {}
+    cmds: Dict[str, str] = {}
+    for ln in v._lib(root, "cfg promote.update_commands >/dev/null 2>&1 && cfg_pairs promote.update_commands").splitlines():
+        if "\t" in ln:
+            k, c = ln.split("\t", 1)
+            cmds[k.strip()] = c.strip()
+    for ln in v._lib(root, "cfg promote.tags >/dev/null 2>&1 && cfg_pairs promote.tags").splitlines():
+        if "\t" in ln:
+            k, f = ln.split("\t", 1)
+            out[k.strip()] = (f.strip(), cmds.get(k.strip(), ""))
+    return out
+
+
+def check_release_rules(root: Path) -> Dict[str, Tuple[str, str]]:
+    """Every repo promote.tags names is one of this target's repos — refused at prepare, never at a push."""
+    rules = release_rules(root)
+    repos = ll.repos_of(root)
+    for k in rules:
+        if k not in repos:
+            raise Stop("config promote.tags names %s, which is not one of this target's repos (%s)." % (k, ", ".join(repos)))
+    return rules
+
+
+VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+)+$")
+
+
+def read_version(wt: Path, vfile: str, trunk_sha: str) -> str:
+    """The version the merged tree carries in <vfile> (trimmed: a trailing newline, a carriage return, spaces),
+    refused when missing or empty, not a dotted number (a leading v lands here, so a tag is never vv1.2.3), or
+    equal to what the trunk already carries (a release must bump)."""
+    f = wt / vfile
+    raw = f.read_text(errors="replace") if f.is_file() else ""
+    ver = raw.strip()
+    if not ver:
+        raise Stop("%s is missing or empty in the merged tree." % vfile)
+    if not VERSION_RE.match(ver):
+        raise Stop("%s holds \"%s\", not a dotted version." % (vfile, ver))
+    code, on_trunk, _ = git(wt, "show", "%s:%s" % (trunk_sha, vfile))
+    if code == 0 and on_trunk.strip() == ver:
+        _c, name, _ = git(wt, "rev-parse", "--abbrev-ref", "HEAD^1")   # the trunk's name is the caller's; say the sha's branch plainly
+        raise Stop("%s is still %s on %s; a release must bump it." % (vfile, ver, trunk_name_of(wt)))
+    return ver
+
+
+def trunk_name_of(wt: Path) -> str:
+    """The trunk the scratch's merge is onto, from its own merge message ("into <trunk> (")."""
+    _c, msg, _ = git(wt, "log", "-1", "--format=%s")
+    m = re.search(r" into (\S+) \(", msg or "")
+    return m.group(1) if m else "the trunk"
+
+
+def tag_on_origin(wt: Path, tag: str) -> str:
+    """The commit origin's tag <tag> points at ("" when there is none): the peeled line of ls-remote when the tag
+    is annotated, the plain line otherwise."""
+    code, out, _ = run(["git", "-C", str(wt), "ls-remote", "--tags", "origin", "refs/tags/%s" % tag,
+                        "refs/tags/%s^{}" % tag], timeout=120)
+    if code != 0:
+        return ""
+    plain = peeled = ""
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[1] == "refs/tags/%s^{}" % tag:
+            peeled = parts[0]
+        elif len(parts) == 2 and parts[1] == "refs/tags/%s" % tag:
+            plain = parts[0]
+    return peeled or plain
+
+
+def check_tag_free(root: Path, wt: Path, repo: str, tag: str, merge: str, vfile: str) -> List[str]:
+    """At prepare: the tag must be nowhere yet — not on origin (at the merge: already released; elsewhere: taken),
+    not local at another commit (made by hand); a local tag at the merge commit with none on origin is a leftover
+    of an earlier attempt and is removed. Returns the notes for the decision block."""
+    notes: List[str] = []
+    on_origin = tag_on_origin(wt, tag)
+    if on_origin == merge:
+        raise Stop("already released as %s (origin's tag is at this merge commit)." % tag)
+    if on_origin:
+        raise Stop("tag %s is already on origin at %s; bump %s." % (tag, on_origin[:7], vfile))
+    code, local, _ = git(wt, "rev-parse", "-q", "--verify", "refs/tags/%s^{commit}" % tag)
+    local = local.strip() if code == 0 else ""
+    if local and local != merge:
+        raise Stop("a local tag %s in target/%s points at %s; delete it (git -C target/%s tag -d %s) or bump %s."
+                   % (tag, repo, local[:7], repo, tag, vfile))
+    if local:
+        git(wt, "tag", "-d", tag)
+        notes.append("A local tag %s at this merge commit, left by an earlier attempt, was removed." % tag)
+    return notes
+
+
 def first_line(p: dict, ready: bool, root: Path) -> str:
     alias = " (%s)" % p["alias"] if p.get("alias") else ""
     if not ready:
         return "Window %s's work%s is not ready to promote onto %s." % (p["lease"], alias, p["trunk"])
     line = "Ready to promote window %s's work%s onto %s" % (p["lease"], alias, p["trunk"])
+    if p.get("tag"):                        # v0.13.0: a repo in promote.tags is a release by definition
+        cmd = p.get("update_command") or ""
+        return line + " — this is a release: it tags %s and the next %s ships it." % (p["tag"], ("`%s`" % cmd) if cmd else "update")
     rel_ = release_words(root)
     if rel_ is None:
         return line + "."
@@ -832,7 +936,7 @@ def decision_block(root: Path, p: dict) -> Tuple[str, str]:
                                   ", ".join('"%s"' % s for s in p["commits"])),
         tests,
         reviewer_line(rv, p.get("review_skipped_reason"), q),
-    ] + earlier_line(p) + live_line(p) + [closing])
+    ] + earlier_line(p) + live_line(p) + list(p.get("tag_notes") or []) + [closing])
     if rv is not None and rv.get("reused"):
         review_part = "review %s (window %s's review of run %s, reused);" % (
             rv["file"], rv["reused"]["lease"], rv["reused"]["run_id"])
@@ -1032,6 +1136,7 @@ def prepare(root: Path, a: dict) -> int:
             if (a.get("skip") or quick) else None)
     if quick and skip and skip.get("typed"):
         a["_typed"] = skip["typed"]            # tty mode: the words typed once are the yes as well
+    rules = check_release_rules(root)      # v0.13.0: a key promote.tags names must be one of the repos, before any git work
     tr = trunks(root, nn, lease)
     dirty(root, nn, tr)
     shas = fetch_trunks(root, tr)
@@ -1058,6 +1163,15 @@ def prepare(root: Path, a: dict) -> int:
     # Decision 40: the commits the block names are the merge's own, read from the merge commit.
     _, log, _ = git(pdir / repo, "log", "--reverse", "--format=%s", "HEAD^1..HEAD^2")
     commits = [s for s in log.splitlines() if s.strip()]
+    # v0.13.0: a release — the version the merged tree carries, the tag it will push, and that the tag is free
+    rule = rules.get(repo)
+    version = tag = version_file = update_cmd = None
+    tag_notes: List[str] = []
+    if rule:
+        version_file, update_cmd = rule
+        version = read_version(pdir / repo, version_file, trunk_sha)
+        tag = "v" + version
+        tag_notes = check_tag_free(root, pdir / repo, repo, tag, merge, version_file)
     tree_repo = tree_repo_of(tr, repo)        # v0.13.0: a sibling is tested in its own scratch
     tree = pdir / tree_repo
     tree_key = tree_repo if tree_repo != outer else None
@@ -1103,6 +1217,8 @@ def prepare(root: Path, a: dict) -> int:
     secs = sum(int(g.get("duration_s") or 0) for g in run_rec.get("gates") or [])
     p = {"promote_id": pid, "lease": nn, "lease_created": lease.get("created"), "alias": lease.get("alias"),
          "repo": repo, "trunk": trunk,
+         "tag": tag, "tag_sha": merge if tag else None, "version": version, "version_file": version_file,
+         "update_command": update_cmd or None, "tag_notes": tag_notes,
          "merge_sha": merge, "trunk_sha_at_prepare": trunk_sha, "lease_tip": tip, "fp_merged": fp, "run_id": run_id,
          "review": ({k: rv[k] for k in ("call_id", "verdict", "file", "fingerprint", "request_sha", "findings", "reused")
                      if k in rv} if rv else None),
@@ -1567,7 +1683,8 @@ def record_yes(root: Path, p: dict, pdir: Path, me: dict, mode: str, yes: dict, 
         fh.write('\nPromoted to %s at %s after the operator said: "%s"\n'
                  % (p["trunk"], time.strftime("%H:%M"), one_line(words)))
     o = ev.get("overrode")
-    fields = [at, "window %s" % p["lease"], "merge %s" % p["merge_sha"], "run %s" % p["run_id"],
+    fields = [at, "window %s" % p["lease"], "merge %s" % p["merge_sha"]] + (["tag %s" % p["tag"]] if p.get("tag") else []) + \
+             ["run %s" % p["run_id"],
               ("STANDS (review %s)" % ev["call_id"]) if ev.get("call_id") else
               ("quick promote: %s" if p.get("quick") else "skipped: %s") % p.get("review_skipped_reason"),
               'operator: "%s"' % words, "confirm: %s" % mode] + \
@@ -1614,6 +1731,50 @@ def push(root: Path, p: dict, pdir: Path) -> None:
         if moved or re.search(r"non-fast-forward|fetch first|\[rejected\]", err or ""):
             raise Stop("Push rejected: trunk moved during confirm. Run promote again.", suffix=ON_ORIGIN)
         raise Stop("The push to origin failed (%s). Run promote again." % last_line(err), suffix=ON_ORIGIN)
+    if p.get("tag"):
+        push_tag(root, p, pdir)
+
+
+def push_tag(root: Path, p: dict, pdir: Path) -> str:
+    """v0.13.0: the release tag, annotated ("<repo dir> v<version>", the scratch's own git identity — the merge's),
+    made immediately before its push and deleted locally when the push fails, so no stray tag waits in
+    target/<repo>'s common git dir. A tag origin already holds at the merge commit is the release, already there.
+    Failure stamps tag-unpushed; `--confirm` again pushes only the tag. Returns what was done, for the closing line."""
+    wt = pdir / p["repo"]
+    tag, sha = p["tag"], p["merge_sha"]
+    on_origin = tag_on_origin(wt, tag)
+    if on_origin == sha:
+        return "already"
+    if on_origin:
+        raise Stop("Tag %s is on origin at %s, not at merge %s; the release is not consistent. Bump %s in a new "
+                   "window." % (tag, on_origin[:7], sha[:7], p.get("version_file") or "the version file"),
+                   suffix=ELSE_ON_ORIGIN)
+    git(wt, "tag", "-d", tag)                                            # a leftover from an earlier attempt, if any
+    code, _, err = git(wt, "tag", "-a", tag, "-m", "%s %s" % (p["repo"].split("/")[-1], tag), sha, stop=False)
+    if code != 0:
+        _tag_failed(root, p, pdir, "the tag could not be made: %s" % last_line(err))
+    env = dict(os.environ, DAEDALUS_PROMOTE_ID=p["promote_id"])
+    code, _, err = git(wt, "push", "origin", "refs/tags/%s" % tag, env=env, timeout=600, stop=False)
+    if code != 0 and tag_on_origin(wt, tag) == sha:
+        return "pushed"                                                  # git failed after origin took it
+    if code != 0:
+        git(wt, "tag", "-d", tag)
+        _tag_failed(root, p, pdir, push_words(err))
+    return "pushed"
+
+
+def push_words(err: str) -> str:
+    """Why a push failed, in the remote's own words when it gave any (a hook's "remote: …" line), else git's last line."""
+    remote = [ln[len("remote:"):].strip() for ln in (err or "").splitlines() if ln.strip().startswith("remote:")]
+    remote = [ln for ln in remote if ln and not ln.startswith("error:") and "hook declined" not in ln]
+    return remote[-1] if remote else last_line(err)
+
+
+def _tag_failed(root: Path, p: dict, pdir: Path, why: str) -> None:
+    write_json(pdir / "tag-unpushed", {"at": tl.iso_utc(time.time()), "tag": p["tag"], "tag_sha": p["merge_sha"],
+                                       "error": why})
+    raise Stop("Merge %s is on %s. Tag %s was not pushed: %s. Run `core/promote.sh %s --confirm` again to push the "
+               "tag." % (p["merge_sha"][:7], p["trunk"], p["tag"], why, p["lease"]), suffix=ELSE_ON_ORIGIN)
 
 
 def guarded(root: Path, repo: str) -> None:
@@ -1712,7 +1873,7 @@ def after_push(root: Path, p: dict, pdir: Path, tr: Dict[str, str], mode: str, y
             return None
 
     stamp = {"at": tl.iso_utc(time.time()), "hhmm": time.strftime("%H:%M"), "lease": nn, "merge_sha": p["merge_sha"],
-             "confirm_mode": mode, "tty": (yes.get("typed") or {}).get("tty")}
+             "confirm_mode": mode, "tty": (yes.get("typed") or {}).get("tty"), "tag": p.get("tag")}
     stamped = step(lambda: write_json(pdir / "pushed", stamp) or True,
                    "The pushed stamp could not be written (%s); a second confirm of this promotion is still refused, "
                    "because the yes is recorded.")
@@ -1764,6 +1925,8 @@ def confirm(root: Path, a: dict) -> int:
     with confirm_lock(pdir, nn):
         p = read_json(pdir / "prepared.json") or {}   # re-read under the lock
         quick = bool(p.get("quick")) and not (p.get("quick") or {}).get("reused")   # a quick prepare gets its background full run; one that reused a full PASS needs none
+        if (pdir / "tag-unpushed").exists() and not was_pushed(pdir):
+            return resume_tag(root, p, pdir, nn, lease, mode, quick)
         if (pdir / "pushed").exists() or (pdir / "announced").exists():
             raise Stop("Promotion %s of window %s was already pushed. Run `promote %s` for anything newer."
                        % (pdir.name, nn, nn))
@@ -1799,15 +1962,55 @@ def confirm(root: Path, a: dict) -> int:
                 notes.append("The background full run could not be started (%s); run `core/gates.sh` on the trunk "
                              "yourself." % reason(e))
     alias = " (%s)" % p["alias"] if p.get("alias") else ""
-    lines = notes + ["Promoted window %s's work%s to %s (merge commit %s; evidence %s). The window's worktree is still "
-                     "there; say \"release window %d\" when you are done with it, or keep working — the next promote "
-                     "takes only what is new." % (nn, alias, p["trunk"], p["merge_sha"][:7], p["run_id"], int(nn))]
+    lines = ([("Pushed merge %s to %s and tag %s." % (p["merge_sha"][:7], p["trunk"], p["tag"]))] if p.get("tag") else []) + \
+        notes + ["Promoted window %s's work%s to %s (merge commit %s; evidence %s). The window's worktree is still "
+                 "there; say \"release window %d\" when you are done with it, or keep working — the next promote "
+                 "takes only what is new." % (nn, alias, p["trunk"], p["merge_sha"][:7], p["run_id"], int(nn))]
+    lines += release_line(root, p)
+    print("\n".join(lines))
+    return 0
+
+
+def release_line(root: Path, p: dict) -> List[str]:
+    """The closing sentence of a release: a tagged repo's own update command (v0.13.0), else promote.release_note."""
+    if p.get("tag"):
+        cmd = p.get("update_command") or ""
+        return ["This is a release: run %s to receive it." % (("`%s`" % cmd) if cmd else "the update")]
     try:
         rel_ = release_words(root)
     except Exception:                          # noqa: BLE001 — the push landed; the release sentence is a courtesy
         rel_ = None
-    if rel_ is not None:
-        lines.append("This is a release: run %s to receive it." % (rel_ or "the update"))
+    return ["This is a release: run %s to receive it." % (rel_ or "the update")] if rel_ is not None else []
+
+
+def resume_tag(root: Path, p: dict, pdir: Path, nn: str, lease: dict, mode: str, quick: bool) -> int:
+    """v0.13.0: `--confirm` of a promotion whose merge pushed and whose tag did not (stamped tag-unpushed): the
+    operator's yes is already recorded, so this pushes only the tag, then finishes the record as any confirm does
+    (the pushed stamp, the lease, the checkout, the marker, the ledger line, the scratch). The merge must still be
+    where the push left it."""
+    tr = trunks(root, nn, lease)
+    wt = pdir / p["repo"]
+    if not (pdir / p["repo"]).is_dir():
+        raise Stop("Promotion %s's scratch is gone, so its tag %s cannot be made; tag merge %s by hand in a clone "
+                   "(git tag -a %s -m \"%s %s\" %s && git push origin refs/tags/%s)."
+                   % (pdir.name, p["tag"], p["merge_sha"][:7], p["tag"], p["repo"].split("/")[-1], p["tag"],
+                      p["merge_sha"][:7], p["tag"]), suffix=ELSE_ON_ORIGIN)
+    code, _, _ = git(wt, "fetch", "--quiet", "origin")
+    if origin_trunk(wt, p["trunk"]) != p["merge_sha"]:
+        now = origin_trunk(wt, p["trunk"])
+        code, ok, _ = git(wt, "merge-base", "--is-ancestor", p["merge_sha"], now) if now else (1, "", "")
+        if code != 0:
+            raise Stop("Merge %s is not on origin's %s any more (it is at %s); the tag was not pushed."
+                       % (p["merge_sha"][:7], p["trunk"], now[:7] or "nothing"), suffix=ELSE_ON_ORIGIN)
+    done = push_tag(root, p, pdir)
+    (pdir / "tag-unpushed").unlink()
+    ledger_append(root, [tl.iso_utc(time.time()), "window %s" % nn, "merge %s" % p["merge_sha"], "tag %s" % p["tag"],
+                         "run %s" % p["run_id"], "tag pushed after a failed tag push", "confirm: %s" % mode])
+    notes = after_push(root, p, pdir, tr, mode, {}, keep_scratch=quick)
+    first = ("Tag %s was already on origin at merge %s." if done == "already" else
+             "Pushed tag %s at merge %s (the merge was already on %s).")
+    lines = [first % ((p["tag"], p["merge_sha"][:7]) if done == "already" else (p["tag"], p["merge_sha"][:7], p["trunk"]))]
+    lines += notes + release_line(root, p)
     print("\n".join(lines))
     return 0
 
@@ -2059,7 +2262,13 @@ def doctor(root: Path) -> int:
     for nn, lease in sorted(leases.items()):
         if nn == "prime":
             continue
-        pending = [p for p in occupant_prepares(root, nn, lease) if not p.get("confirmed_at")]
+        mine = occupant_prepares(root, nn, lease)
+        for q in mine:          # v0.13.0: a release whose merge landed and whose tag did not (from the stamp, no network)
+            qdir = promote_root(root) / str(q.get("promote_id") or "")
+            if q.get("promote_id") and (qdir / "tag-unpushed").exists() and not was_pushed(qdir):
+                print("MISSING  promotion %s of window %s: merge pushed, tag %s not on origin — run core/promote.sh %s "
+                      "--confirm" % (q["promote_id"], nn, q.get("tag"), nn))
+        pending = [p for p in mine if not p.get("confirmed_at")]
         if not pending:
             continue
         p = pending[-1]

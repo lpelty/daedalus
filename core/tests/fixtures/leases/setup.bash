@@ -149,7 +149,7 @@ add_nested() {
 # first window is made.
 add_sibling() {
   local name="$1" S="$DAEDALUS_HOME/target/$1" o="$BATS_TEST_TMPDIR/$1-origin.git" cfg="$DAEDALUS_HOME/config.yaml"
-  git init -q -b main "$S"; printf 's\n' > "$S/s.txt"
+  git init -q -b main "$S"; printf 's\n' > "$S/s.txt"; printf '0.1.0\n' > "$S/VERSION"   # a version file, for promote.tags
   git -C "$S" add -A; git -C "$S" -c user.email=t@x -c user.name=t commit -q -m s
   git init -q --bare -b main "$o"
   git -C "$S" remote add origin "$o"; git -C "$S" push -q -u origin main
