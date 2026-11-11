@@ -2810,7 +2810,7 @@ def _split_checks(root: Path, nn: str, lease: dict, sid: Optional[str], nested: 
 
 
 def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
-    """`lease.sh split <NN> --repo <nested>` (spec §7.1 step 2, §4.2): the nested
+    """`lease.sh split <NN> --repo <nested rel | sibling name>` (spec §7.1 step 2, §4.2): that
     repo's commits origin/<trunk>..lease/<NN> become a new numbered window (as
     `create` allocates it: no session bound, promoted from the board and
     released afterwards); the original window's branch in that repo is reset
@@ -3614,7 +3614,7 @@ ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branc
 
 def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[str] = None,
           fetch: bool = True, deadline: Optional[float] = None, checked: bool = False) -> dict:
-    """`lease.sh adopt <branch> [--repo <nested>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
+    """`lease.sh adopt <branch> [--repo <nested rel | sibling name>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
     that carries work trunk does not have becomes a numbered window with no session bound — the same allocation
     `create` and `split` use. target/<repo> goes back to its trunk at origin/<trunk>; lease/<NN> is made at the
     branch's tip and checked out at worktrees/<NN>/<repo>, and the branch's own name is removed once the window is
@@ -6878,7 +6878,7 @@ def main(argv: list) -> int:
             import upgrade as up
             return up.pick_up(root)
         if not args or args[0].startswith("--"):
-            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested>] [--note "..."] | adopt '
+            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested rel | sibling name>] [--note "..."] | adopt '
                              '--all-unfinished\n')
             return 2
 
