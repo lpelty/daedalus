@@ -826,13 +826,14 @@ def trunk_name_of(wt: Path) -> str:
     return m.group(1) if m else "the trunk"
 
 
-def tag_on_origin(wt: Path, tag: str) -> str:
-    """The commit origin's tag <tag> points at ("" when there is none): the peeled line of ls-remote when the tag
-    is annotated, the plain line otherwise."""
+def tag_on_origin(wt: Path, tag: str) -> Optional[str]:
+    """The commit origin's tag <tag> points at: "" when there is none, None when origin could not be asked (fail
+    closed: a tag that cannot be checked is never "free"); the peeled line of ls-remote when the tag is annotated,
+    the plain line otherwise."""
     code, out, _ = run(["git", "-C", str(wt), "ls-remote", "--tags", "origin", "refs/tags/%s" % tag,
                         "refs/tags/%s^{}" % tag], timeout=120)
     if code != 0:
-        return ""
+        return None
     plain = peeled = ""
     for ln in out.splitlines():
         parts = ln.split()
@@ -849,6 +850,9 @@ def check_tag_free(root: Path, wt: Path, repo: str, tag: str, merge: str, vfile:
     of an earlier attempt and is removed. Returns the notes for the decision block."""
     notes: List[str] = []
     on_origin = tag_on_origin(wt, tag)
+    if on_origin is None:
+        raise Stop("cannot read origin's tags for %s (git ls-remote failed), so %s cannot be shown to be free; "
+                   "check the remote and run promote again." % (repo, tag))
     if on_origin == merge:
         raise Stop("already released as %s (origin's tag is at this merge commit)." % tag)
     if on_origin:
@@ -1646,6 +1650,15 @@ def rederive(root: Path, p: dict, pdir: Path, tr: Dict[str, str]) -> dict:
         heads.update({"%s/%s" % (outer, rel): (n or {}).get("merge_sha") for rel, n in (ctx.get("nested") or {}).items()})
     if heads.get(repo) != p["merge_sha"] or not scratch_is(pdir, heads):
         raise Stop("Evidence disagrees with the prepared promotion (the scratch is not the merge commit).")
+    if p.get("tag"):
+        # v0.13.0: the release is re-derived here, before the yes is recorded and before any push (spec §5.2):
+        # the version the scratch carries is the prepared one, and the tag is still free — on origin and locally.
+        vfile = p.get("version_file") or ""
+        raw = (wt / vfile).read_text(errors="replace").strip() if vfile and (wt / vfile).is_file() else ""
+        if not vfile or raw != p.get("version") or "v" + raw != p["tag"]:
+            raise Stop("Evidence disagrees with the prepared promotion (the version file in the scratch holds \"%s\", "
+                       "the prepared release is %s)." % (raw, p["tag"]))
+        check_tag_free(root, wt, repo, p["tag"], p["merge_sha"], vfile)
     fp, _ = fingerprint(root, tree, tree_key)
     if not (fp == p["fp_merged"] == run_rec.get("fingerprint")
             and (p.get("review") is None or p["review"].get("fingerprint") == fp)):
@@ -1716,10 +1729,17 @@ def push(root: Path, p: dict, pdir: Path) -> None:
     if seam:                                   # test seam: move trunk in the race the next sentence names
         subprocess.run(["bash", "-c", seam], capture_output=True)
     env = dict(os.environ, DAEDALUS_PROMOTE_ID=p["promote_id"])
+    if p.get("tag"):
+        # v0.13.0: the stamp goes down BEFORE the merge push, so a confirm cut off between the two pushes leaves
+        # a resumable, doctor-visible record (review 2026-11-11, finding 2); push_tag removes it when the tag lands.
+        write_json(pdir / "tag-unpushed", {"at": tl.iso_utc(time.time()), "tag": p["tag"], "tag_sha": p["merge_sha"],
+                                           "pending": True})
     code, _, err = git(pdir / p["repo"], "push", "origin", "%s:refs/heads/%s" % (p["merge_sha"], p["trunk"]),
                        env=env, timeout=600, stop=False)
     if code != 0 and origin_trunk(pdir / p["repo"], p["trunk"]) == p["merge_sha"]:
-        return                                 # git failed after origin took it (a local ref's lock): it is pushed
+        code = 0                               # git failed after origin took it (a local ref's lock): it is pushed
+    if code != 0 and p.get("tag"):
+        (pdir / "tag-unpushed").unlink()       # the merge never landed: nothing to resume, promote again
     if code != 0:
         # Decision 34: a promotion whose push failed is never pushable again — the hook refuses it.
         p["push_failed_at"] = tl.iso_utc(time.time())
@@ -1732,6 +1752,8 @@ def push(root: Path, p: dict, pdir: Path) -> None:
             raise Stop("Push rejected: trunk moved during confirm. Run promote again.", suffix=ON_ORIGIN)
         raise Stop("The push to origin failed (%s). Run promote again." % last_line(err), suffix=ON_ORIGIN)
     if p.get("tag"):
+        if os.environ.get("PROMOTE_TEST_DIE_BEFORE_TAG"):      # test seam: a confirm cut off between the two pushes
+            os._exit(99)
         push_tag(root, p, pdir)
 
 
@@ -1743,23 +1765,33 @@ def push_tag(root: Path, p: dict, pdir: Path) -> str:
     wt = pdir / p["repo"]
     tag, sha = p["tag"], p["merge_sha"]
     on_origin = tag_on_origin(wt, tag)
+    if on_origin is None:
+        _tag_failed(root, p, pdir, "origin's tags could not be read (git ls-remote failed)")
     if on_origin == sha:
+        (pdir / "tag-unpushed").unlink(missing_ok=True)
         return "already"
     if on_origin:
         raise Stop("Tag %s is on origin at %s, not at merge %s; the release is not consistent. Bump %s in a new "
                    "window." % (tag, on_origin[:7], sha[:7], p.get("version_file") or "the version file"),
                    suffix=ELSE_ON_ORIGIN)
-    git(wt, "tag", "-d", tag)                                            # a leftover from an earlier attempt, if any
+    code, local, _ = git(wt, "rev-parse", "-q", "--verify", "refs/tags/%s^{commit}" % tag)
+    local = local.strip() if code == 0 else ""
+    if local and local != sha:                 # made by hand since the confirm began: refused, never deleted
+        _tag_failed(root, p, pdir, "a local tag %s in target/%s points at %s; delete it (git -C target/%s tag -d %s)"
+                    % (tag, p["repo"], local[:7], p["repo"], tag))
+    if local:
+        git(wt, "tag", "-d", tag)              # this promotion's own earlier attempt, at this very commit
     code, _, err = git(wt, "tag", "-a", tag, "-m", "%s %s" % (p["repo"].split("/")[-1], tag), sha, stop=False)
     if code != 0:
         _tag_failed(root, p, pdir, "the tag could not be made: %s" % last_line(err))
     env = dict(os.environ, DAEDALUS_PROMOTE_ID=p["promote_id"])
     code, _, err = git(wt, "push", "origin", "refs/tags/%s" % tag, env=env, timeout=600, stop=False)
     if code != 0 and tag_on_origin(wt, tag) == sha:
-        return "pushed"                                                  # git failed after origin took it
+        code = 0                                                         # git failed after origin took it
     if code != 0:
         git(wt, "tag", "-d", tag)
         _tag_failed(root, p, pdir, push_words(err))
+    (pdir / "tag-unpushed").unlink(missing_ok=True)
     return "pushed"
 
 
@@ -2000,10 +2032,12 @@ def resume_tag(root: Path, p: dict, pdir: Path, nn: str, lease: dict, mode: str,
         now = origin_trunk(wt, p["trunk"])
         code, ok, _ = git(wt, "merge-base", "--is-ancestor", p["merge_sha"], now) if now else (1, "", "")
         if code != 0:
-            raise Stop("Merge %s is not on origin's %s any more (it is at %s); the tag was not pushed."
-                       % (p["merge_sha"][:7], p["trunk"], now[:7] or "nothing"), suffix=ELSE_ON_ORIGIN)
+            # the merge never landed (a confirm cut off before its push): nothing to resume — promote again
+            (pdir / "tag-unpushed").unlink(missing_ok=True)
+            raise Stop("Merge %s is not on origin's %s (it is at %s), so there is no release to finish. Run "
+                       "`promote %s` again." % (p["merge_sha"][:7], p["trunk"], now[:7] or "nothing", nn))
     done = push_tag(root, p, pdir)
-    (pdir / "tag-unpushed").unlink()
+    (pdir / "tag-unpushed").unlink(missing_ok=True)
     ledger_append(root, [tl.iso_utc(time.time()), "window %s" % nn, "merge %s" % p["merge_sha"], "tag %s" % p["tag"],
                          "run %s" % p["run_id"], "tag pushed after a failed tag push", "confirm: %s" % mode])
     notes = after_push(root, p, pdir, tr, mode, {}, keep_scratch=quick)
@@ -2063,7 +2097,10 @@ def background_run(root: Path, a: dict) -> int:
     if bg.get("state") not in (None, "running"):
         raise Stop("Promotion %s's background full run already finished (%s)." % (pid, bg.get("state")))
     ctx = read_json(pdir / "context.json") or {}
-    outer = p["repo"].split("/", 1)[0]
+    try:
+        outer = ll.target_name(root)           # the primary by name — a sibling's bare key has no "/" to split on
+    except ll.Refused:
+        outer = p["repo"].split("/", 1)[0]
     tree_repo = ctx.get("tree_repo") or outer
     tree = pdir / tree_repo
     tree_key = tree_repo if tree_repo != outer else None

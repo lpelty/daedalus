@@ -102,3 +102,57 @@ allow_tags() { rm -f "$SO/hooks/pre-receive"; }
   [ "${lines[0]}" = "Ready to promote window 02's work onto main." ]
   [ "$(pj tag)" = None ]
 }
+
+@test "a tag taken on origin between prepare and confirm is refused BEFORE the merge push, with nothing confirmed; promote again refuses at prepare until VERSION is bumped (review finding 2)" {
+  bump '0.2.0\n'
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(pj merge_sha)"; other="$(git -C "$S" rev-parse HEAD)"; main_before="$(git -C "$SO" rev-parse main)"
+  git -C "$SO" tag -a v0.2.0 -m "taken meanwhile" "$other"
+  shown_then_said "yes" "Ready to promote window 02's work onto main — this is a release: it tags v0.2.0 and the next \`bin/update\` ships it."
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "tag v0.2.0 is already on origin at ${other:0:7}; bump VERSION."
+  [ "$(git -C "$SO" rev-parse main)" = "$main_before" ]
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "confirmed_at" not in d, d' "$(prepared)"
+  run as_prime bash "$PROMOTE" 02; refused "tag v0.2.0 is already on origin at ${other:0:7}; bump VERSION."
+}
+
+@test "a local tag made by hand at another commit after prepare is refused at confirm, never deleted; origin is untouched (review finding 2)" {
+  bump '0.2.0\n'
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  other="$(git -C "$S" rev-parse HEAD)"; git -C "$S" tag v0.2.0 "$other"; main_before="$(git -C "$SO" rev-parse main)"
+  shown_then_said "yes" "Ready to promote window 02's work onto main — this is a release: it tags v0.2.0 and the next \`bin/update\` ships it."
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  refused "a local tag v0.2.0 in target/portico points at ${other:0:7}; delete it (git -C target/portico tag -d v0.2.0) or bump VERSION."
+  [ "$(git -C "$S" rev-parse v0.2.0)" = "$other" ]; [ "$(git -C "$SO" rev-parse main)" = "$main_before" ]
+}
+
+@test "origin's tags unreadable at prepare fails closed: tag_on_origin says so and the prepare refuses, never 'the tag is free' (review finding 2)" {
+  bump '0.2.0\n'
+  run python3 - "$DAEDALUS_HOME" "$BATS_TEST_TMPDIR" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1] + "/core"); from pathlib import Path; import promote as pr
+lone = Path(sys.argv[2]) / "lone"; lone.mkdir()
+import subprocess; subprocess.run(["git", "init", "-q", str(lone)], check=True)   # a repo with no origin at all
+print(repr(pr.tag_on_origin(lone, "v0.2.0")))
+try:
+    pr.check_tag_free(Path(sys.argv[1]), lone, "lone", "v0.2.0", "0" * 40, "VERSION"); print("no refusal")
+except pr.Stop as e:
+    print("Stop:", e)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = None ]
+  case "${lines[1]}" in "Stop: cannot read origin's tags for lone"*"Nothing was pushed.") : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a confirm cut off between the merge push and the tag push leaves a tag-unpushed stamp: doctor says MISSING and --confirm pushes the tag (review finding 2)" {
+  bump '0.2.0\n'
+  run as_prime bash "$PROMOTE" 02; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  m="$(pj merge_sha)"; pid="$(pj promote_id)"; shown_then_said "yes"
+  PROMOTE_TEST_DIE_BEFORE_TAG=1 run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"
+  [ "$status" -ne 0 ]
+  [ "$(git -C "$SO" rev-parse main)" = "$m" ]; [ -z "$(origin_tag_sha v0.2.0)" ]
+  [ -f "$DAEDALUS_HOME/state/promote/$pid/tag-unpushed" ]; [ ! -e "$DAEDALUS_HOME/state/promote/$pid/pushed" ]
+  run bash "$DAEDALUS_HOME/core/promote.sh" --doctor
+  case "$output" in *"MISSING  promotion $pid of window 02: merge pushed, tag v0.2.0 not on origin — run core/promote.sh 02 --confirm"*) : ;; *) echo "$output"; return 1 ;; esac
+  run as_prime bash "$PROMOTE" 02 --confirm --operator-said "yes"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(origin_tag_sha v0.2.0)" = "$m" ]; [ -f "$DAEDALUS_HOME/state/promote/$pid/pushed" ]
+}

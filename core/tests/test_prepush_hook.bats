@@ -84,9 +84,18 @@ stamp() { python3 -c 'import os,sys; print(" ".join("%d:%d" % (os.stat(p).st_ino
   id=01-20260928-120000-abc; d="$DAEDALUS_HOME/state/promote/$id"; mkdir -p "$d"
   printf '{"tag":"v0.3.0","confirmed_at":"2026-09-28T12:00:00.000Z"}' > "$d/prepared.json"
   run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -ne 0 ]     # the promotion's tag is another
-  printf '{"tag":"v0.2.0","confirmed_at":"2026-09-28T12:00:00.000Z"}' > "$d/prepared.json"
+  sha="$(git -C "$S" rev-parse HEAD)"
+  printf '{"tag":"v0.2.0","tag_sha":"%s","confirmed_at":"2026-09-28T12:00:00.000Z"}' "0000000000000000000000000000000000000009" > "$d/prepared.json"
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -ne 0 ]     # the tag is not at the promotion's commit
+  printf '{"tag":"v0.2.0","tag_sha":"%s","confirmed_at":"2026-09-28T12:00:00.000Z"}' "$sha" > "$d/prepared.json"
+  git -C "$S" tag -d v0.2.0 >/dev/null; git -C "$S" tag -a v0.2.0 -m "portico v0.2.0" "$sha"      # annotated: the pushed sha is the tag object's, peeled to the commit
   run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   git -C "$SO" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin :refs/tags/v0.2.0; [ "$status" -ne 0 ]  # a delete, never
+  git -C "$SO" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null
+  : > "$d/pushed"
+  git -C "$S" tag -f v0.2.0 "$sha" >/dev/null
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push -f origin refs/tags/v0.2.0; [ "$status" -ne 0 ]  # once the release is finished, nothing more moves its tag
   git -C "$T" tag v9.9.9
   run git -C "$T" push origin refs/tags/v9.9.9; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

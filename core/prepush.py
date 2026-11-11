@@ -194,9 +194,14 @@ def hook(_argv: List[str]) -> int:
     for line in sys.stdin:
         parts = line.split()
         if len(parts) == 4 and parts[2].startswith("refs/tags/") and release:
-            # v0.13.0: a release repo's tag goes with its confirmed promotion, nothing else
-            tag = parts[2][len("refs/tags/"):]
-            if not (isinstance(prepared, dict) and prepared.get("confirmed_at") and prepared.get("tag") == tag):
+            # v0.13.0: a release repo's tag goes with its confirmed promotion — that tag, at that commit, once:
+            # never a delete, never another commit, never after the release is finished (review 2026-11-11, 3)
+            tag, local_sha = parts[2][len("refs/tags/"):], parts[1]
+            code, peeled = _git(Path.cwd(), "rev-parse", "--verify", "-q", local_sha + "^{commit}")
+            if not (isinstance(prepared, dict) and prepared.get("confirmed_at") and prepared.get("tag") == tag
+                    and not ZERO.match(local_sha) and code == 0 and peeled.strip() == prepared.get("tag_sha")
+                    and not (HOME / "state" / "promote" / pid / "pushed").exists()
+                    and not (HOME / "state" / "promote" / pid / "announced").exists()):
                 sys.stderr.write("daedalus: %s\n" % (TAG_REFUSE % key))
                 return 1
             continue

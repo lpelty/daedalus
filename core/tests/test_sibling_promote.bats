@@ -64,3 +64,43 @@ PY
   refused "Window 02 was cut for the repos portico, thing, thing/sub, but config now names thing, thing/sub."
   case "$output" in *"Put config target.nested or target.siblings back"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+bg_json() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2]))' "$DAEDALUS_HOME/state/promote/$1/background.json" "$2"; }
+wait_bg() {   # wait_bg <promote-id> — up to 90 s for the background full run; prints its state
+  local i=0
+  while [ "$i" -lt 900 ]; do
+    [ "$(bg_json "$1" state 2>/dev/null)" = running ] || { bg_json "$1" state; return 0; }
+    sleep 0.1; i=$((i + 1))
+  done
+  echo "the background run of $1 never finished:"; cat "$DAEDALUS_HOME/state/promote/$1/background.log" 2>/dev/null; return 1
+}
+
+@test "a quick promote of a sibling: the background full run runs the SIBLING's gates in the sibling's scratch, never the primary's (review finding 1)" {
+  sibling_gate "pwd > $BATS_TEST_TMPDIR/bg-cwd"
+  RAN="$BATS_TEST_TMPDIR/primary-ran"; sed -i '' "s|^gates:\$|gates:\\
+  - echo ran >> $RAN|" "$DAEDALUS_HOME/config.yaml"; sed -i '' '/^gates:$/{n;/^  - true$/d;}' "$DAEDALUS_HOME/config.yaml" 2>/dev/null || true
+  printf 'gates_quick_portico: echo quick {files} >> %s\n' "$BATS_TEST_TMPDIR/quick-ran" >> "$DAEDALUS_HOME/config.yaml"
+  mkdir -p "$W2S/tests"; printf 't\n' > "$W2S/tests/test_p.bats"; git -C "$W2S" add -A; git -C "$W2S" commit -q -m "test: p"
+  tx "$TXP" operator "This is tiny — push it, skip the full run." "$(now)" >/dev/null
+  run as_prime bash "$PROMOTE" 02 --quick --reason "skip the full run"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  pid="$(pj promote_id)"; m="$(pj merge_sha)"
+  [ "$(git -C "$SO" rev-parse main)" = "$m" ]
+  grep -q 'quick tests/test_p.bats' "$BATS_TEST_TMPDIR/quick-ran"
+  [ "$(wait_bg "$pid")" = PASS ] || { cat "$DAEDALUS_HOME/state/promote/$pid/background.log"; return 1; }
+  brid="$(bg_json "$pid" run_id)"
+  [ "$(cd "$(cat "$BATS_TEST_TMPDIR/bg-cwd")" && pwd -P)" = "$(cd "$DAEDALUS_HOME/state/promote/$pid/portico" 2>/dev/null && pwd -P || echo gone)" ] \
+    || case "$(cat "$BATS_TEST_TMPDIR/bg-cwd")" in */state/promote/$pid/portico) : ;; *) echo "the background gate ran in $(cat "$BATS_TEST_TMPDIR/bg-cwd")"; return 1 ;; esac
+  [ ! -e "$RAN" ] || { echo "the primary's gates ran in the background for a sibling promote"; return 1; }
+  python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["tree_repo"]=="portico" and r["repo"]=="portico", r' "$DAEDALUS_HOME/state/evidence/$brid/run.json"
+}
+
+@test "trunk_of classifies a repo in Python (the primary by name, nested by its slash, else a sibling): a failing bash reader cannot move the primary onto its origin/HEAD (review finding 6)" {
+  run python3 - "$DAEDALUS_HOME" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1] + "/core"); from pathlib import Path; import leaselib as ll, verifylib as v
+v.repo_kind = lambda root, key: ""          # the bash reader answers nothing (a timeout, a missing lib.sh)
+r = Path(sys.argv[1]); print(ll.trunks_of(r, r / "target"))
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "{'thing': 'main', 'thing/sub': 'main', 'portico': 'main'}" ]
+}

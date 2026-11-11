@@ -749,9 +749,12 @@ def trunk_of(target_base: Path, repo: str, outer_trunk: str) -> str:
     for the main repo, origin/HEAD for a nested one; Refused when it cannot be told
     or origin/<trunk> does not resolve. Per repo, so a reader that must name every
     problem (doctor) can skip only the repo that fails."""
-    # Decided by kind, never by whether the key holds a "/": a sibling's bare name has none and is not the
-    # primary. target_base is <home>/target by construction (every caller passes root / "target").
-    kind = v.repo_kind(target_base.parent, repo) if target_base.name == "target" else ("primary" if "/" not in repo else "nested")
+    # Decided in Python, deterministically (review 2026-11-11, finding 6 — a bash reader that answers nothing must
+    # never move the primary onto its origin/HEAD): the primary by its name (target_name is read once and Refused,
+    # never silently empty), a nested repo by its "/", anything else a sibling. target_base is <home>/target by
+    # construction (every caller passes root / "target").
+    primary = target_name(target_base.parent) if target_base.name == "target" else repo.split("/", 1)[0]
+    kind = "primary" if repo == primary else ("nested" if "/" in repo else "sibling")
     if kind == "primary":
         out = outer_trunk
     else:

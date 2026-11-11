@@ -62,9 +62,14 @@ sites would crash on a bare repo name, and promote never tagged.
   pushes only the tag. The upgrade's doctor paste asks for a release repo's
   update command.
 - `core/guard-bash.py` and `core/prepush.py`: a tag push toward a release
-  repo's origin — a tag name, a version-shaped name, `--tags`,
+  repo's origin — a tag name, a version-shaped name, `tag:tag`, `--tags`,
   `--follow-tags`, a `refs/tags/` refspec — is refused from a window; the hook
-  lets through only the confirmed promotion's own tag. Elsewhere, unchanged.
+  lets through only the confirmed promotion's own tag, at its commit, once,
+  never a delete. Elsewhere, unchanged.
+- The confirm re-derives the release before the yes is recorded (the version
+  in the scratch, the tag still free on origin and locally; origin's tags
+  unreadable fails closed), and stamps `tag-unpushed` before the merge push,
+  so a confirm cut off between the two pushes is resumable and doctor sees it.
 - `config.example.yaml`, `README.md`, `CLAUDE.md`: the new keys and words.
 
 ## v0.12.11 — the review reads the commit the gates tested, and a swept window's work deletes in one yes

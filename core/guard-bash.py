@@ -669,12 +669,13 @@ def tag_push_word(rest: List[str], norm: List[str], repo: Path) -> Optional[str]
         src = s.split(":", 1)[0] if ":" in s else s
         if dest.startswith("refs/tags/") or dest.startswith("tags/") or src.startswith("refs/tags/"):
             return spec
-        if ":" not in s:
-            if VERSION_WORD.match(s):
-                return spec
-            code, _, _ = run_git(["git", "-C", str(repo), "rev-parse", "-q", "--verify", "refs/tags/%s" % s])
-            if code == 0:
-                return spec
+        # a bare positional, or the source of <src>:<dst> (git makes `v1.2.3:v1.2.3` a refs/tags/ update): a
+        # version-shaped name, or a name that is a tag of the repository
+        if VERSION_WORD.match(src):
+            return spec
+        code, _, _ = run_git(["git", "-C", str(repo), "rev-parse", "-q", "--verify", "refs/tags/%s" % src])
+        if code == 0:
+            return spec
     return None
 
 

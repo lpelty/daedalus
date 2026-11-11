@@ -1933,7 +1933,8 @@ release_leases() {   # guard_leases with a sibling portico named in promote.tags
 @test "a tag push from a window toward a release repo's origin is denied in every shape (a tag name, a version-shaped name, --tags, --follow-tags, a refs/tags refspec, a tag pattern); the same shapes toward the primary (not a release repo) stay allowed" {
   release_leases
   for c in 'git push origin v0.2.0' 'git push origin v0.3.0' 'git push --tags origin' 'git push --follow-tags origin lease/02' \
-           'git push origin HEAD:refs/tags/v1' "git push origin 'refs/tags/*:refs/tags/*'" 'git push --tag origin'; do
+           'git push origin HEAD:refs/tags/v1' "git push origin 'refs/tags/*:refs/tags/*'" 'git push --tag origin' \
+           'git push origin v0.2.0:v0.2.0' 'git push origin v0.3.0:v0.3.0' 'git push origin +v0.2.0:v0.2.0'; do
     run guard_as sB "$c" "$W2S"; denied || { echo "not denied: $c"; return 1; }
     case "$output" in *"Tags on portico are pushed by promote as its release; run \`core/promote.sh 02 --confirm\`."*) : ;; *) echo "$c: $output"; return 1 ;; esac
   done
