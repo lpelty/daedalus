@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -133,6 +134,24 @@ def target_branch(root: Path) -> str:
 
 def nested_relpaths(root: Path) -> List[str]:
     out = _lib(root, "cfg target.nested >/dev/null 2>&1 && cfg_pairs target.nested | cut -f1")
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def sibling_names(root: Path) -> List[str]:
+    """config target.siblings (v0.13.0), validated by lib.sh sibling_names; [] when unset."""
+    out = _lib(root, "sibling_names")
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def repo_kind(root: Path, key: str) -> str:
+    """'primary' | 'nested' | 'sibling' for a repo key as leaselib names them, '' when the key is
+    not one of this target's repos (lib.sh repo_kind; the caller words its own refusal)."""
+    return _lib(root, "repo_kind %s" % shlex.quote(key))
+
+
+def tree_rels(root: Path, key: str) -> List[str]:
+    """The nested rels inside the tree <key> is tested in: the primary's nested repos, [] otherwise."""
+    out = _lib(root, "repo_tree_rels %s" % shlex.quote(key))
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
