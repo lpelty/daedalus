@@ -200,3 +200,17 @@ EOF
   b="$(DAEDALUS_HOME="$swapped" bash "$swapped/core/fingerprint.sh" 2>/dev/null)"
   [ "$b" = "$a" ]
 }
+
+# --- sibling repos (v0.13.0) ---
+
+@test "fingerprint --repo <sibling> hashes the sibling's own tree (no nested dirs expected under it): non-null, content-sensitive; the primary's fingerprint is unchanged by it" {
+  S="$DAEDALUS_HOME/target/portico"; git init -q "$S"; printf 's\n' > "$S/s.txt"; git -C "$S" add -A; git -C "$S" -c user.email=t@x -c user.name=t commit -q -m s
+  printf '  siblings: portico=https://example.com/portico.git\n' >> "$DAEDALUS_HOME/config.yaml"
+  a="$(fp)"; [ "$a" != null ]
+  s1="$(bash "$DAEDALUS_HOME/core/fingerprint.sh" --repo portico 2>/dev/null)"; [ "$s1" != null ]; [ "$s1" != "$a" ]
+  [ "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" --repo portico 2>/dev/null)" = "$s1" ]
+  printf 'more\n' >> "$S/s.txt"
+  [ "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" --repo portico 2>/dev/null)" != "$s1" ]
+  [ "$(fp)" = "$a" ]
+  [ "$(bash "$DAEDALUS_HOME/core/fingerprint.sh" --repo nope 2>/dev/null)" = null ]
+}

@@ -1701,7 +1701,10 @@ def misses(root: Path, p: dict, pdir: Path) -> Tuple[str, dict]:
     nn, created, repo, pid = str(p["lease"]), p.get("lease_created"), str(p["repo"]), p.get("promote_id")
     outer = cfg.name or repo.split("/")[0]
     pre = repo[len(outer) + 1:] if repo != outer and repo.startswith(outer + "/") else ""
-    tree = Tree(pdir / outer, outer, cfg.nested)
+    if repo != outer and not repo.startswith(outer + "/"):     # v0.13.0: a sibling's tree is its own, with no nested repos
+        tree = Tree(pdir / repo, repo, [])
+    else:
+        tree = Tree(pdir / outer, outer, cfg.nested)
     log = cc_dir(root) / "misses.jsonl"
     earlier = read_rows(log)
     rows = window_rows(root, nn, created)

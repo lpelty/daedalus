@@ -273,11 +273,19 @@ repo_tree_rels() {
   cfg_pairs target.nested | cut -f1
 }
 
-# target_path — absolute path to the tree this caller builds in: target_name
-# under $DAEDALUS_HOME/target/ (the tree rule), or the caller's lease worktree.
+# target_path [<repo key>] — absolute path to the tree this caller builds in: target_name
+# under $DAEDALUS_HOME/target/ (the tree rule), or the caller's lease worktree. With a repo
+# key (v0.13.0) the same for that repo: a sibling's own checkout or worktree (its key is its
+# directory name under target/ and under worktrees/NN/); a key that is not one of this
+# target's repos fails (repo_kind says which they are).
 target_path() {
   local name
-  name="$(target_name)" || return 1
+  if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+    repo_kind "$1" >/dev/null || return 1
+    name="$1"
+  else
+    name="$(target_name)" || return 1
+  fi
   # Lease resolution (spec §4.4): when any lease file exists, the tree a
   # session builds in is decided by ONE implementation, core/leaselib.py,
   # which fails closed for an unbindable session and prints a note for an

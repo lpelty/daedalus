@@ -2048,3 +2048,113 @@ PY
   [ "$status" -ne 0 ]; case "$output" in *"GATES_QUICK_COMMAND contains a tab character"*) : ;; *) echo "$output"; return 1 ;; esac
   [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls -A "$DAEDALUS_HOME/state/evidence")" ]
 }
+
+# --- sibling repos (v0.13.0): the tree under test is chosen by repo key (plan D2/D3) ---
+
+# sibling_target <name> — a sibling checkout at target/<name> with a bare origin (origin/HEAD set) and one commit.
+sibling_target() {
+  local S="$DAEDALUS_HOME/target/$1" O="$BATS_TEST_TMPDIR/$1-origin.git"
+  git init -q -b main "$S"; printf 's\n' > "$S/s.txt"; git -C "$S" add -A; git -C "$S" -c user.email=t@x -c user.name=t commit -q -m s
+  git init -q --bare -b main "$O"; git -C "$S" remote add origin "$O"; git -C "$S" push -q -u origin main; git -C "$S" remote set-head origin main
+}
+# write_sibling_config <gates_portico lines or ""> — the fixture config plus a sibling named portico.
+write_sibling_config() {
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: https://example.com/thing.git
+  branch: main
+  siblings: portico=$BATS_TEST_TMPDIR/portico-origin.git
+gates:
+  - pwd > $BATS_TEST_TMPDIR/primary-cwd
+$([ -z "$1" ] || printf 'gates_portico:\n%s\n' "$1")
+verify:
+  refute: false
+  refute_off_reason: bats fixture — a real claude must never be invoked in tests
+EOF
+}
+
+@test "gates --repo <sibling> runs the sibling's gates_<name> list inside the sibling's tree; run.json names the repo; a plain run is still the primary's" {
+  git_target; sibling_target portico
+  write_sibling_config "  - pwd > $BATS_TEST_TMPDIR/sibling-cwd"
+  run bash "$DAEDALUS_HOME/core/gates.sh" --repo portico
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # a clean sibling tree runs in a fresh copy of its commit, named for the sibling (as the primary's clean copy is)
+  case "$(cat "$BATS_TEST_TMPDIR/sibling-cwd")" in */state/clean-copy/*/portico) : ;; *) echo "ran in $(cat "$BATS_TEST_TMPDIR/sibling-cwd")"; return 1 ;; esac
+  printf 'edited after the commit\n' >> "$DAEDALUS_HOME/target/portico/s.txt"
+  run bash "$DAEDALUS_HOME/core/gates.sh" --repo portico
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cd "$(cat "$BATS_TEST_TMPDIR/sibling-cwd")" && pwd -P)" = "$(cd "$DAEDALUS_HOME/target/portico" && pwd -P)" ] || { echo "ran in $(cat "$BATS_TEST_TMPDIR/sibling-cwd")"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/primary-cwd" ]
+  rj="$(ls -d "$DAEDALUS_HOME"/state/evidence/*/ | sort | tail -1)run.json"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$rj")" = portico ]
+  run bash "$DAEDALUS_HOME/core/gates.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -e "$BATS_TEST_TMPDIR/primary-cwd" ]
+  rj="$(ls -d "$DAEDALUS_HOME"/state/evidence/*/ | sort | tail -1)run.json"
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$rj")" = thing ]
+}
+
+@test "gates --repo <sibling> with no gates_<name> list refuses before any evidence exists, naming the key to add; --repo for an unknown repo is refused" {
+  git_target; sibling_target portico
+  write_sibling_config ""
+  run bash "$DAEDALUS_HOME/core/gates.sh" --repo portico
+  [ "$status" -ne 0 ]
+  case "$output" in *"no gates configured for portico — refusing to report success (add gates_portico: to config.yaml)"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ ! -d "$DAEDALUS_HOME/state/evidence" ] || [ -z "$(ls "$DAEDALUS_HOME/state/evidence")" ]
+  run bash "$DAEDALUS_HOME/core/gates.sh" --repo nope
+  [ "$status" -ne 0 ]
+  case "$output" in *"nope is not one of this target's repos (thing, portico)"*) : ;; *) echo "$output"; return 1 ;; esac
+}
+
+@test "a run.json written before v0.13.0 (no repo field) still stands for the primary: PASS by reuse" {
+  reuse_fixture
+  write_config "  - echo ran >> $RAN; test ! -e $BATS_TEST_TMPDIR/now-failing"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  first="$(last_id)"
+  python3 - "$DAEDALUS_HOME/state/evidence/$first/run.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d.pop("repo", None); json.dump(d, open(p, "w"), indent=2)
+PY
+  touch "$BATS_TEST_TMPDIR/now-failing"
+  run bash "$DAEDALUS_HOME/core/gates.sh"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(ran)" = 1 ] || { echo "the pre-0.13 record was not reused"; return 1; }
+  [ "$(rj "$(last_id)" reused_from)" = "$first" ]
+}
+
+@test "a sibling's PASS never stands for the primary's run, nor the primary's for the sibling's (same gate text, different trees)" {
+  reuse_fixture; sibling_target portico
+  write_sibling_config "  - echo ran >> $RAN"
+  sed -i '' "s|  - pwd > $BATS_TEST_TMPDIR/primary-cwd|  - echo ran >> $RAN|" "$DAEDALUS_HOME/config.yaml"
+  bash "$DAEDALUS_HOME/core/gates.sh" --repo portico >/dev/null 2>&1; [ "$(ran)" = 1 ]
+  bash "$DAEDALUS_HOME/core/gates.sh" >/dev/null 2>&1; [ "$(ran)" = 2 ] || { echo "the primary reused the sibling's run"; return 1; }
+  bash "$DAEDALUS_HOME/core/gates.sh" --repo portico >/dev/null 2>&1; [ "$(ran)" = 2 ] || { echo "the sibling did not reuse its own run"; return 1; }
+}
+
+@test "the reviewer's diff for --repo <sibling> is the sibling's own change against its trunk, with no nested section" {
+  install_refuter
+  recording_stub "$BATS_TEST_TMPDIR/bin16"
+  git_target; sibling_target portico
+  S="$DAEDALUS_HOME/target/portico"
+  git -C "$S" switch -q -c fix/s; printf 'sibling committed\n' > "$S/S.md"; git -C "$S" add -A; git -C "$S" -c user.email=t@x -c user.name=t commit -q -m s2
+  printf 'sibling edit\n' >> "$S/s.txt"
+  cat > "$DAEDALUS_HOME/config.yaml" <<EOF
+target:
+  repo: https://example.com/thing.git
+  branch: main
+  nested: agents/one=https://example.com/one.git
+  siblings: portico=$BATS_TEST_TMPDIR/portico-origin.git
+gates:
+  - true
+gates_portico:
+  - true
+verify:
+  refute: true
+EOF
+  PATH="$BATS_TEST_TMPDIR/bin16:$PATH" run bash "$DAEDALUS_HOME/core/gates.sh" --repo portico
+  [ "$status" -eq 0 ] || { echo "gates failed: $output"; return 1; }
+  stdin="$BATS_TEST_TMPDIR/bin16/stdin"
+  [ "$(grep -cF '+sibling committed' "$stdin")" -eq 1 ]
+  [ "$(grep -cF '+sibling edit' "$stdin")" -eq 1 ]
+  ! grep -q 'agents/one' "$stdin"
+  ! grep -qF 'marker.txt' "$stdin"
+}

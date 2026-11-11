@@ -121,7 +121,7 @@ CFG_SNIPPET = r'''source "$DAEDALUS_HOME/core/lib.sh"; set +e
 for k in "$@"; do val="$(cfg "$k" 2>/dev/null)" && printf '%s\t%s\n' "$k" "$val"; done
 exit 0'''
 TARGET_SNIPPET = r'''source "$DAEDALUS_HOME/core/lib.sh"; set +e
-target_path'''
+target_path "${DAEDALUS_REPO_KEY:-}"'''
 # The launcher's re-capture (spec §8.5): the memory: block through lib.sh
 # memory_env when this build has it (plan 2), else whatever TENANT_* the
 # caller's environment already carries; then capture.py on the call's transcript.
@@ -921,11 +921,16 @@ def same_repository(a: Path, b: Path) -> bool:
     return ca is not None and ca == common(b)
 
 
-def tree_fingerprint(root: Path, tree: Path, review_mode: str) -> str:
+def tree_fingerprint(root: Path, tree: Path, review_mode: str, repo_key: Optional[str] = None) -> str:
     """fingerprint.sh of the tree under review, before the call (spec §6.1). A
-    branch review must be of the caller's own tree (lib.sh target_path); a
-    promote review fingerprints the merged tree through the override."""
+    branch review must be of the caller's own tree (lib.sh target_path — of the
+    repo --repo names, v0.13.0: a sibling's own tree is the session's tree for
+    that repo); a promote review fingerprints the merged tree through the override."""
     env = lib_env(root)
+    if repo_key:
+        env["DAEDALUS_REPO_KEY"] = repo_key
+    else:
+        env.pop("DAEDALUS_REPO_KEY", None)
     if review_mode == "promote":
         env["DAEDALUS_TARGET_OVERRIDE"] = str(tree)
     else:
@@ -944,8 +949,9 @@ def tree_fingerprint(root: Path, tree: Path, review_mode: str) -> str:
     # A clean copy is fingerprinted where it is, named to fingerprint.sh (which takes no other directory); every
     # other tree through this session's resolution, or the override.
     extra = [str(tree)] if review_mode != "promote" and is_clean_copy(root, tree) else []
-    p = subprocess.run(["bash", str(root / "core" / "fingerprint.sh")] + extra, capture_output=True, text=True,
-                       timeout=600, env=env)
+    repo_arg = ["--repo", repo_key] if repo_key else []
+    p = subprocess.run(["bash", str(root / "core" / "fingerprint.sh")] + repo_arg + extra, capture_output=True,
+                       text=True, timeout=600, env=env)
     lines = p.stdout.strip().splitlines()
     fp = lines[-1] if lines else "null"
     if not re.fullmatch(r"[0-9a-f]{64}", fp):
@@ -1013,8 +1019,8 @@ def prepare_refuter(root: Path, conf: Dict[str, str], args: argparse.Namespace, 
     review_mode = args.mode or "branch"
     tree = check_tree(root, args.tree, review_mode, args.tag)
     verdict = check_verdict_file(root, args.verdict_file, args.tag) if args.verdict_file else None
-    fp = tree_fingerprint(root, tree, review_mode)
-    return {"caller": SELF_NAME, "callee": "refuter", "tree": args.tree, "tag": args.tag,
+    fp = tree_fingerprint(root, tree, review_mode, args.repo)
+    return {"caller": SELF_NAME, "callee": "refuter", "tree": args.tree, "tag": args.tag, "repo": args.repo,
             "review_mode": review_mode, "verdict_file": verdict, "fingerprint": fp,
             "window": run_lease(root, args.tag) or view.get("mine"),
             "managed_claude_md": managed_claude_md()}
@@ -1791,6 +1797,7 @@ def parse(argv: List[str]) -> argparse.Namespace:
     ap.add_argument("--resume", metavar="CALL_ID")
     ap.add_argument("--resume-review", metavar="NN")
     ap.add_argument("--tree")
+    ap.add_argument("--repo")          # v0.13.0: the repo key whose tree --tree is (a sibling's own tree)
     ap.add_argument("--tag")
     ap.add_argument("--artifact-dir")
     ap.add_argument("--verdict-file")
