@@ -259,8 +259,10 @@ case "$run_id" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
   *) printf 'refute.sh: %s is not a run id (YYYYmmdd-HHMMSS-xxxxxx, as core/gates.sh makes them)\n' "$run_id" >&2; exit 2 ;;
 esac
-[ -n "${repo_key:-}" ] || repo_key="$(target_name)" || exit 2
-repo_kind_now="$(repo_kind "$repo_key")" || exit 2
+# The repo whose tree is reviewed (v0.13.0): --repo, else the primary. Read fail-soft, as target_path always was
+# here: a home with no config reaches the refusals below with an empty target, exactly as before.
+[ -n "${repo_key:-}" ] || repo_key="$(target_name 2>/dev/null || true)"
+repo_kind_now="$(repo_kind "$repo_key" 2>/dev/null || printf primary)"
 target="$(target_path "$repo_key")"
 own_tree="$target"
 if [ -n "$review_copy" ]; then
