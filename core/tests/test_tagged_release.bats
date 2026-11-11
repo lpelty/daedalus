@@ -56,7 +56,7 @@ allow_tags() { rm -f "$SO/hooks/pre-receive"; }
 @test "a tag already on origin at another commit, or a local tag at another commit, is refused at prepare naming the commit" {
   bump '0.2.0\n'
   other="$(git -C "$S" rev-parse HEAD)"
-  git -C "$S" tag -a v0.2.0 -m "by hand" "$other"; git -C "$S" push -q origin refs/tags/v0.2.0; git -C "$S" tag -d v0.2.0 >/dev/null
+  git -C "$SO" tag -a v0.2.0 -m "by hand" "$other"            # made in origin itself, as a push from elsewhere would
   run as_prime bash "$PROMOTE" 02; refused "tag v0.2.0 is already on origin at ${other:0:7}; bump VERSION."
   git -C "$SO" tag -d v0.2.0 >/dev/null
   git -C "$S" tag -f v0.2.0 "$other" >/dev/null
