@@ -2074,6 +2074,7 @@ EOF
 }
 
 @test "gates --repo <sibling> runs the sibling's gates_<name> list inside the sibling's tree; run.json names the repo; a plain run is still the primary's" {
+  cp "$SRC/fingerprint.sh" "$DAEDALUS_HOME/core/"      # a real fingerprint: without it every run is INVALID and prints no run id
   git_target; sibling_target portico
   write_sibling_config "  - pwd > $BATS_TEST_TMPDIR/sibling-cwd"
   run bash "$DAEDALUS_HOME/core/gates.sh" --repo portico
@@ -2085,12 +2086,12 @@ EOF
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(cd "$(cat "$BATS_TEST_TMPDIR/sibling-cwd")" && pwd -P)" = "$(cd "$DAEDALUS_HOME/target/portico" && pwd -P)" ] || { echo "ran in $(cat "$BATS_TEST_TMPDIR/sibling-cwd")"; return 1; }
   [ ! -e "$BATS_TEST_TMPDIR/primary-cwd" ]
-  rj="$(ls -d "$DAEDALUS_HOME"/state/evidence/*/ | sort | tail -1)run.json"
-  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$rj")" = portico ]
+  rj="$DAEDALUS_HOME/state/evidence/$(printf '%s\n' "$output" | tail -1)/run.json"     # the run id is the last line
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$rj")" = portico ] || { echo "$output"; return 1; }
   run bash "$DAEDALUS_HOME/core/gates.sh"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ -e "$BATS_TEST_TMPDIR/primary-cwd" ]
-  rj="$(ls -d "$DAEDALUS_HOME"/state/evidence/*/ | sort | tail -1)run.json"
+  rj="$DAEDALUS_HOME/state/evidence/$(printf '%s\n' "$output" | tail -1)/run.json"
   [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repo"])' "$rj")" = thing ]
 }
 
