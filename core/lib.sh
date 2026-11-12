@@ -219,11 +219,73 @@ target_name() {
   printf '%s\n' "$name"
 }
 
-# target_path — absolute path to the tree this caller builds in: target_name
-# under $DAEDALUS_HOME/target/ (the tree rule), or the caller's lease worktree.
+# sibling_names — the configured sibling repos (v0.13.0: target.siblings, name=url pairs),
+# one name per line; nothing, exit 0, when the key is unset. A sibling is a repo
+# checked out BESIDE the primary at target/<name>, so its name is one directory
+# segment under target/ — the same rule as target.dir, plus: never the primary's
+# own name (the two would share a checkout) and never .git. Validated on every
+# read so no caller can act on a bad name before sync-target would refuse it.
+sibling_names() {
+  local name url primary
+  cfg target.siblings >/dev/null 2>&1 || return 0
+  primary="$(target_name)" || return 1
+  cfg_pairs target.siblings | while IFS="$(printf '\t')" read -r name url; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      */*|.|..|.git|"$primary")
+        die "config target.siblings: $name must be a single directory name, not a path, and not the target's own name" ;;
+    esac
+    printf '%s\n' "$name"
+  done
+}
+
+# repo_kind <key> — primary | nested | sibling for a repo key as leaselib names
+# them (<primary>, <primary>/<nested rel>, <sibling>); exit 1 naming the repos
+# otherwise. Readers decide by kind, never by whether the key holds a "/".
+repo_kind() {
+  local key="$1" primary rel name all
+  primary="$(target_name)" || return 1
+  if [ "$key" = "$primary" ]; then printf 'primary\n'; return 0; fi
+  if cfg target.nested >/dev/null 2>&1; then
+    for rel in $(cfg_pairs target.nested | cut -f1); do
+      if [ "$key" = "$primary/$rel" ]; then printf 'nested\n'; return 0; fi
+    done
+  fi
+  for name in $(sibling_names); do
+    if [ "$key" = "$name" ]; then printf 'sibling\n'; return 0; fi
+  done
+  all="$primary"
+  for rel in $(cfg target.nested >/dev/null 2>&1 && cfg_pairs target.nested | cut -f1); do all="$all, $primary/$rel"; done
+  for name in $(sibling_names); do all="$all, $name"; done
+  printf 'daedalus: %s is not one of this target'"'"'s repos (%s)\n' "$key" "$all" >&2
+  return 1
+}
+
+# repo_tree_rels <key> — the nested rels that live INSIDE the tree a key is
+# tested in: the primary's nested repos; nothing for a sibling or a nested repo.
+# fingerprint, gates and refute read this instead of target.nested, so a sibling
+# tree is judged as itself (no nested dirs expected under it).
+repo_tree_rels() {
+  local kind
+  kind="$(repo_kind "$1")" || return 1
+  [ "$kind" = primary ] || return 0
+  cfg target.nested >/dev/null 2>&1 || return 0
+  cfg_pairs target.nested | cut -f1
+}
+
+# target_path [<repo key>] — absolute path to the tree this caller builds in: target_name
+# under $DAEDALUS_HOME/target/ (the tree rule), or the caller's lease worktree. With a repo
+# key (v0.13.0) the same for that repo: a sibling's own checkout or worktree (its key is its
+# directory name under target/ and under worktrees/NN/); a key that is not one of this
+# target's repos fails (repo_kind says which they are).
 target_path() {
   local name
-  name="$(target_name)" || return 1
+  if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+    repo_kind "$1" >/dev/null || return 1
+    name="$1"
+  else
+    name="$(target_name)" || return 1
+  fi
   # Lease resolution (spec §4.4): when any lease file exists, the tree a
   # session builds in is decided by ONE implementation, core/leaselib.py,
   # which fails closed for an unbindable session and prints a note for an

@@ -409,3 +409,60 @@ EOF
   [ "$(cfg context.graph_budget)" = "90" ]
   [ "$(cfg context.build_timeout)" = "80" ]
 }
+
+# --- sibling repos (v0.13.0): repo keys, kinds and the tree each is tested in ---
+
+sib_cfg() {   # sib_cfg [siblings-line] — a config with the primary, a nested repo and (by default) one sibling
+  cat > "$BATS_TEST_TMPDIR/s.yaml" <<EOF2
+target:
+  repo: https://example.com/thing.git
+  branch: main
+  nested: sub=https://example.com/sub.git
+  ${1-siblings: portico=https://example.com/portico.git}
+gates:
+  - true
+EOF2
+  export DAEDALUS_CONFIG="$BATS_TEST_TMPDIR/s.yaml"
+}
+
+@test "sibling_names prints each configured sibling, nothing (exit 0) when target.siblings is unset" {
+  sib_cfg "siblings: portico=https://example.com/portico.git, other=https://example.com/other.git"
+  run sibling_names; [ "$status" -eq 0 ]; [ "${lines[0]}" = portico ]; [ "${lines[1]}" = other ]
+  sib_cfg ""
+  run sibling_names; [ "$status" -eq 0 ]; [ -z "$output" ]
+}
+
+@test "repo_kind: the primary, a nested repo by its mirrored key, a sibling by its bare name; anything else exits 1 naming the repos" {
+  sib_cfg
+  run repo_kind thing;     [ "$status" -eq 0 ]; [ "$output" = primary ]
+  run repo_kind thing/sub; [ "$status" -eq 0 ]; [ "$output" = nested ]
+  run repo_kind portico;   [ "$status" -eq 0 ]; [ "$output" = sibling ]
+  run repo_kind sub;       [ "$status" -eq 1 ]
+  [[ "$output" == *"daedalus: sub is not one of this target's repos (thing, thing/sub, portico)"* ]]
+  run repo_kind nope;      [ "$status" -eq 1 ]
+}
+
+@test "repo_tree_rels: the primary's tree holds the nested repos; a sibling's and a nested repo's hold none" {
+  sib_cfg
+  run repo_tree_rels thing;     [ "$status" -eq 0 ]; [ "$output" = sub ]
+  run repo_tree_rels portico;   [ "$status" -eq 0 ]; [ -z "$output" ]
+  run repo_tree_rels thing/sub; [ "$status" -eq 0 ]; [ -z "$output" ]
+}
+
+@test "a sibling name that is a path, ., .., .git or the target's own name is refused when read" {
+  for bad in a/b . .. .git thing; do
+    sib_cfg "siblings: $bad=https://example.com/x.git"
+    run sibling_names; [ "$status" -ne 0 ] || { echo "sibling '$bad' should be refused"; return 1; }
+    [[ "$output" == *"config target.siblings: $bad must be a single directory name, not a path, and not the target's own name"* ]]
+  done
+}
+
+@test "verifylib.sibling_names, repo_kind and tree_rels read the same config; an unknown key's kind is the empty string" {
+  H="$BATS_TEST_TMPDIR/h"; mkdir -p "$H/core"; cp "$DAEDALUS_HOME/core/lib.sh" "$DAEDALUS_HOME/core/verifylib.py" "$H/core/"
+  sib_cfg; cp "$BATS_TEST_TMPDIR/s.yaml" "$H/config.yaml"
+  got="$(env -u DAEDALUS_CONFIG DAEDALUS_HOME="$H" PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import sys; sys.path.insert(0, sys.argv[1]); import verifylib as v; from pathlib import Path
+r = Path(sys.argv[2])
+print(v.sibling_names(r), v.repo_kind(r, "thing"), v.repo_kind(r, "thing/sub"), v.repo_kind(r, "portico"), repr(v.repo_kind(r, "nope")), v.tree_rels(r, "thing"), v.tree_rels(r, "portico"))' "$H/core" "$H")"
+  [ "$got" = "['portico'] primary nested sibling '' ['sub'] []" ]
+}

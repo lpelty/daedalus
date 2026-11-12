@@ -1620,7 +1620,7 @@ def _pick_repo(root: Path, key: str, p: Path, trunk: str, items: List[dict], ver
     kinds = {i["kind"] for i in items}
     if not kinds & {"branch", "trunk", "detached", "unsaved", "stash"}:
         return []
-    rel = None if key == ll.target_name(root) else key.split("/", 1)[1]
+    rel = None if key == ll.target_name(root) else (key.split("/", 1)[1] if "/" in key else key)   # a sibling: its name
     said: List[str] = []
     _, cur, _ = _git(p, "branch", "--show-current")
     cur = cur.strip()
@@ -4143,7 +4143,7 @@ def pending_line(root: Path) -> Optional[str]:
 
 def _repo_flag(root: Path, key: str) -> str:
     import leaselib as ll
-    return "" if key == ll.target_name(root) else " --repo %s" % key.split("/", 1)[1]
+    return "" if key == ll.target_name(root) else " --repo %s" % (key.split("/", 1)[1] if "/" in key else key)
 
 
 OPERATOR_NOTE = ("NOTE     config.yaml lacks lines only the operator may write (the agent may not edit config.yaml) — "
@@ -4175,6 +4175,15 @@ def _cloud_provider(root: Path) -> bool:
     return False
 
 
+def _lib_lines(root: Path, snippet: str) -> List[str]:
+    """lib.sh's lines for a snippet, [] when it fails or prints nothing."""
+    try:
+        import verifylib as v
+        return [ln for ln in v._lib(root, snippet).splitlines() if ln.strip()]
+    except Exception:            # noqa: BLE001 — a paste line is a courtesy
+        return []
+
+
 def operator_paste(root: Path) -> List[str]:
     """The config.yaml lines this release needs that only a person may write (critic finding 5): Edit of
     config.yaml is denied to the agent and a write to it trips the Stop check. Exact where the answer is known
@@ -4193,6 +4202,13 @@ def operator_paste(root: Path) -> List[str]:
     if note != "false" and not cmd:
         promote += ["  # the command this target's users run to receive its trunk; leave this line out if "
                     "release_note is false", "  update_command: '<the update command>'"]
+    # v0.13.0: a repo in promote.tags whose users' update command is not named
+    tags = [ln.split("\t", 1)[0].strip() for ln in _lib_lines(root, "cfg promote.tags >/dev/null 2>&1 && cfg_pairs promote.tags")]
+    have = {ln.split("\t", 1)[0].strip() for ln in _lib_lines(root, "cfg promote.update_commands >/dev/null 2>&1 && cfg_pairs promote.update_commands")}
+    for key in tags:
+        if key and key not in have:
+            promote += ["  # the command %s's users run to receive a release (a promote of it is a tagged release)" % key,
+                        "  update_commands: %s=<the command %s's users run to receive a release>" % (key, key)]
     if promote:
         blocks.append(("promote:", promote))
     if not _cfg(root, "direct_call.callers"):

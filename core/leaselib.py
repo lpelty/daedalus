@@ -728,10 +728,11 @@ def target_name(root: Path) -> str:
 
 
 def repos_of(root: Path) -> list:
-    """['<name>', '<name>/<nested rel>', ...] — the main repo and each nested
-    repo at its mirrored relative path (config target.nested)."""
+    """['<name>', '<name>/<nested rel>', ..., '<sibling>', ...] — the main repo, each nested
+    repo at its mirrored relative path (config target.nested), and each sibling repo by its
+    bare name (config target.siblings, v0.13.0: checked out BESIDE the primary at target/<name>)."""
     name = target_name(root)
-    return [name] + ["%s/%s" % (name, rel) for rel in v.nested_relpaths(root)]
+    return [name] + ["%s/%s" % (name, rel) for rel in v.nested_relpaths(root)] + v.sibling_names(root)
 
 
 def trunks_of(root: Path, target_base: Path) -> Dict[str, str]:
@@ -748,14 +749,21 @@ def trunk_of(target_base: Path, repo: str, outer_trunk: str) -> str:
     for the main repo, origin/HEAD for a nested one; Refused when it cannot be told
     or origin/<trunk> does not resolve. Per repo, so a reader that must name every
     problem (doctor) can skip only the repo that fails."""
-    if "/" not in repo:
+    # Decided in Python, deterministically (review 2026-11-11, finding 6 — a bash reader that answers nothing must
+    # never move the primary onto its origin/HEAD): the primary by its name (target_name is read once and Refused,
+    # never silently empty), a nested repo by its "/", anything else a sibling. target_base is <home>/target by
+    # construction (every caller passes root / "target").
+    primary = target_name(target_base.parent) if target_base.name == "target" else repo.split("/", 1)[0]
+    kind = "primary" if repo == primary else ("nested" if "/" in repo else "sibling")
+    if kind == "primary":
         out = outer_trunk
     else:
         code, head, _ = v.run(["git", "-C", str(target_base / repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         head = head.strip()
         if code != 0 or not head.startswith("origin/"):
-            raise Refused("nested repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
-                          % (repo.split("/", 1)[1], repo))
+            rel = repo.split("/", 1)[1] if kind == "nested" else repo
+            raise Refused("%s repo %s has no origin/HEAD — run git -C target/%s remote set-head origin -a"
+                          % (kind, rel, repo))
         out = head[len("origin/"):]
     require_trunk_ref(target_base / repo, repo, out)
     return out
@@ -2782,11 +2790,13 @@ def _split_checks(root: Path, nn: str, lease: dict, sid: Optional[str], nested: 
                       % (nn, nn))
     trunks = lease.get("trunks") or trunks_of(root, root / "target")
     outer = next(iter(trunks))
-    key = "%s/%s" % (outer, nested.strip("/"))
+    arg = nested.strip("/")
+    # a nested repo by its rel (or full key), or a sibling by its bare name — never the outer
+    key = arg if (arg in trunks and arg != outer) else "%s/%s" % (outer, arg)
     if key not in trunks:
-        names = [k.split("/", 1)[1] for k in trunks if "/" in k]
-        raise Refused("Window %s has no nested repo %s (its nested repos: %s)."
-                      % (nn, nested, ", ".join(names) or "none"))
+        others = [k for k in trunks if k != outer]
+        raise Refused("Window %s has no repo %s (its other repos: %s)."
+                      % (nn, nested, ", ".join(others) or "none"))
     # A worktree that is not there reads clean to dirty_files and cannot be
     # reset: refuse it before anything is allocated (as rebase does).
     for repo in trunks:
@@ -2803,7 +2813,7 @@ def _split_checks(root: Path, nn: str, lease: dict, sid: Optional[str], nested: 
 
 
 def split(root: Path, token: str, sid: Optional[str], nested: str) -> str:
-    """`lease.sh split <NN> --repo <nested>` (spec §7.1 step 2, §4.2): the nested
+    """`lease.sh split <NN> --repo <nested rel | sibling name>` (spec §7.1 step 2, §4.2): that
     repo's commits origin/<trunk>..lease/<NN> become a new numbered window (as
     `create` allocates it: no session bound, promoted from the board and
     released afterwards); the original window's branch in that repo is reset
@@ -2898,8 +2908,10 @@ def repo_key(root: Path, repo: Optional[str]) -> str:
     name = target_name(root)
     if not repo or repo == name:
         return name
-    key = repo if repo.startswith(name + "/") else "%s/%s" % (name, repo)
     repos = repos_of(root)
+    if repo in repos:                      # a full nested key, or a sibling's bare name
+        return repo
+    key = repo if repo.startswith(name + "/") else "%s/%s" % (name, repo)
     if key not in repos:
         raise Refused("%s is not one of this target's repos (%s)." % (repo, ", ".join(repos)))
     return key
@@ -3605,7 +3617,7 @@ ADOPT_DETACHED = ("target/%s is on a detached HEAD (%s) holding commits no branc
 
 def adopt(root: Path, branch: str, repo: Optional[str] = None, note: Optional[str] = None,
           fetch: bool = True, deadline: Optional[float] = None, checked: bool = False) -> dict:
-    """`lease.sh adopt <branch> [--repo <nested>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
+    """`lease.sh adopt <branch> [--repo <nested rel | sibling name>] [--note "..."]` (spec §4.2, §14 step 6): a branch of target/<repo>
     that carries work trunk does not have becomes a numbered window with no session bound — the same allocation
     `create` and `split` use. target/<repo> goes back to its trunk at origin/<trunk>; lease/<NN> is made at the
     branch's tip and checked out at worktrees/<NN>/<repo>, and the branch's own name is removed once the window is
@@ -6869,7 +6881,7 @@ def main(argv: list) -> int:
             import upgrade as up
             return up.pick_up(root)
         if not args or args[0].startswith("--"):
-            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested>] [--note "..."] | adopt '
+            sys.stderr.write('usage: core/lease.sh adopt <branch> [--repo <nested rel | sibling name>] [--note "..."] | adopt '
                              '--all-unfinished\n')
             return 2
 

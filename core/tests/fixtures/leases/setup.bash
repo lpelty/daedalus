@@ -143,6 +143,26 @@ add_nested() {
   sed -i '' "s|^  nested: \(.*\)\$|  nested: \1,$rel=https://example.com/$rel.git|" "$DAEDALUS_HOME/config.yaml"
 }
 
+# add_sibling <name> — a sibling repo (v0.13.0) checked out BESIDE the primary at target/<name>, with its own bare
+# origin ($BATS_TEST_TMPDIR/<name>-origin.git, one commit on main, origin/HEAD set), named in config target.siblings
+# (appended to the target: block) and given a gates_<name>: list of [true] unless NO_GATES=1. Call it before the
+# first window is made.
+add_sibling() {
+  local name="$1" S="$DAEDALUS_HOME/target/$1" o="$BATS_TEST_TMPDIR/$1-origin.git" cfg="$DAEDALUS_HOME/config.yaml"
+  git init -q -b main "$S"; printf 's\n' > "$S/s.txt"; printf '0.1.0\n' > "$S/VERSION"   # a version file, for promote.tags
+  git -C "$S" add -A; git -C "$S" -c user.email=t@x -c user.name=t commit -q -m s
+  git init -q --bare -b main "$o"
+  git -C "$S" remote add origin "$o"; git -C "$S" push -q -u origin main
+  git -C "$S" remote set-head origin main
+  if grep -q '^  siblings: ' "$cfg"; then
+    sed -i '' "s|^  siblings: \(.*\)\$|  siblings: \1,$name=$o|" "$cfg"
+  else
+    sed -i '' "s|^  branch: main\$|  branch: main\\
+  siblings: $name=$o|" "$cfg"
+  fi
+  [ "${NO_GATES:-}" = 1 ] || printf 'gates_%s:\n  - true\n' "$name" >> "$cfg"
+}
+
 # swept_with_work <NN>... — one commit in every repo of each window's worktree (the outer one and each nested one
 # present), then the window's lease files are removed: swept, with unpromoted work waiting on lease/<NN>.
 swept_with_work() {

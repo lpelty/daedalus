@@ -350,3 +350,54 @@ EOF
   [ "$status" -ne 0 ]
   case "$output" in *"target/upstream-harness/sub is not on a branch; give its commits a branch (git -C target/upstream-harness/sub switch -c <name>) and run core/lease.sh adopt <name> --repo sub, or check out main if they are already on origin/main"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+# --- sibling repos (v0.13.0): checked out BESIDE the primary at target/<name> ---
+
+sibling_upstream() {   # sibling_upstream <name> — a local repo to stand in for a sibling's origin; prints its path
+  local s="$BATS_TEST_TMPDIR/$1-upstream"
+  mkdir -p "$s"; git -C "$s" init -q -b main; echo "$1 content" > "$s/S.md"
+  git -C "$s" add S.md; git -C "$s" -c user.email=t@t -c user.name=t commit -q -m init
+  printf '%s\n' "$s"
+}
+
+@test "sync-target clones a sibling beside the primary at target/<name>, on its trunk, never inside the primary" {
+  S="$(sibling_upstream portico)"
+  printf '  siblings: portico=%s\n' "$S" >> "$DAEDALUS_HOME/config.yaml"
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/target/portico/S.md" ]
+  [ ! -e "$DAEDALUS_HOME/target/upstream-harness/portico" ]
+  [ "$(git -C "$DAEDALUS_HOME/target/portico" branch --show-current)" = main ]
+  [[ "$output" == *"cloning sibling portico"* ]]
+}
+
+@test "sync-target fast-forwards a sibling on a second run" {
+  S="$(sibling_upstream portico)"
+  printf '  siblings: portico=%s\n' "$S" >> "$DAEDALUS_HOME/config.yaml"
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  echo more > "$S/more.txt"; git -C "$S" add more.txt; git -C "$S" -c user.email=t@t -c user.name=t commit -q -m more
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$DAEDALUS_HOME/target/portico/more.txt" ]
+  [[ "$output" == *"updating sibling portico"* ]]
+}
+
+@test "sync-target refuses a sibling checkout off its trunk, naming the adopt remedy with --repo <name>" {
+  S="$(sibling_upstream portico)"
+  printf '  siblings: portico=%s\n' "$S" >> "$DAEDALUS_HOME/config.yaml"
+  bash "$DAEDALUS_HOME/core/sync-target.sh"
+  git -C "$DAEDALUS_HOME/target/portico" switch -q -c feat
+  run bash "$DAEDALUS_HOME/core/sync-target.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"target/portico is on feat; run core/lease.sh adopt feat --repo portico to make it a numbered window"* ]]
+}
+
+@test "sync-target refuses a bad sibling name (a path, ., .., .git, the primary's own name) before any directory is made" {
+  for bad in a/b . .. .git upstream-harness; do
+    printf 'target:\n  repo: %s\n  branch: main\n  siblings: %s=%s\n' "$UPSTREAM" "$bad" "$UPSTREAM" > "$DAEDALUS_HOME/config.yaml"
+    run bash "$DAEDALUS_HOME/core/sync-target.sh"
+    [ "$status" -ne 0 ] || { echo "sibling '$bad' should be refused"; return 1; }
+    [[ "$output" == *"config target.siblings: $bad must be a single directory name, not a path, and not the target's own name"* ]]
+    [ ! -e "$DAEDALUS_HOME/target" ] || { echo "target/ was made for '$bad'"; return 1; }
+  done
+}

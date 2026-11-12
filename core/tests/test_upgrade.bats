@@ -479,11 +479,26 @@ lines, stop = u.run(u.v.ROOT); print("\n".join(lines)); print(stop); sys.exit(1)
   [ "$status" -eq 0 ]; [ "$output" = "Already upgraded to $CUR; nothing to do." ] || { echo "$output"; return 1; }
 }
 
+# v0.13.0 adds no upgrade step: siblings and tagged releases are config a deployment opts into; with neither
+# configured, a home behaves as v0.12.11.
+@test "0.12.11 to 0.13.0 is a no-op beyond the stamp: a home stamped 0.12.11 says only the completion line and nothing else changes" {
+  REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  [ "$(sed -n 1p "$REPO/VERSION")" = 0.13.0 ]
+  printf '0.12.11\n' > "$DAEDALUS_HOME/VERSION"
+  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.12.11 ]
+  printf '0.13.0\n' > "$DAEDALUS_HOME/VERSION"
+  before="$(snapshot | grep -v 'state/upgraded-to')"
+  run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$output" = "Upgrade to 0.13.0: complete. What changed is in CHANGELOG.md under v0.13.0; what the target's agent may ask of you is in docs/handoff-reverse-caller.md." ] || { echo "$output"; return 1; }
+  [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.13.0 ]
+  [ "$(snapshot | grep -v 'state/upgraded-to')" = "$before" ] || { echo "the 0.13.0 upgrade changed something"; return 1; }
+}
+
 # v0.12.11 adds no upgrade step: what the review reads, the delete of a swept window's work and what the boundary hook
 # excuses change in code, nothing in a home.
 @test "0.12.10 to 0.12.11 is a no-op beyond the stamp: a home stamped 0.12.10 says only the completion line and nothing else changes" {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
-  [ "$(sed -n 1p "$REPO/VERSION")" = 0.12.11 ]
   printf '0.12.10\n' > "$DAEDALUS_HOME/VERSION"
   run python3 "$UP"; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.12.10 ]
@@ -706,4 +721,25 @@ mod_version() {   # <name> <version>: what this home's mods/ ships
   printf '%s\n' "$output" | grep -qxF 'Upgrade to 0.7.0: the lease-board mod was not updated from 0.1.1 to 0.1.3 (exit 1); run `claude plugin update lease-board@daedalus-mods --scope local` in the Daedalus home' \
     || { echo "$output"; return 1; }
   [ "$(cat "$DAEDALUS_HOME/state/upgraded-to")" = 0.7.0 ]
+}
+
+
+@test "a sibling repo (v0.13.0) with unsaved work stops the upgrade naming target/<name>; its adopt remedy says --repo <name>; clean, the upgrade puts the sibling back on its trunk" {
+  v061_state
+  add_sibling portico
+  S="$DAEDALUS_HOME/target/portico"
+  git -C "$S" checkout -q -b fix/s; printf 'f\n' > "$S/f.txt"; git -C "$S" add -A; cmt "$S" -m "the sibling fix"
+  printf 'dirt\n' >> "$S/s.txt"
+  run python3 "$UP"
+  [ "$status" -eq 1 ]
+  s="Daedalus has unfinished work in target/portico: the branch fix/s (1 commit not on origin), and 1 unsaved file. Nothing was changed. Say 'pick it up' to move it into windows, then start a new session."
+  [ "$(printf '%s\n' "$output" | tail -1)" = "$s" ] || { echo "$output"; return 1; }
+  [ ! -e "$DAEDALUS_HOME/state/upgraded-to" ]
+  run python3 "$UP" --doctor
+  case "$output" in *"target/portico"*"--repo portico"*) : ;; *) echo "doctor remedy: $output"; return 1 ;; esac
+  git -C "$S" checkout -q -- s.txt; git -C "$S" checkout -q main; git -C "$S" branch -q -D fix/s
+  run python3 "$UP"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(git -C "$S" branch --show-current)" = main ]
+  [ "$(git -C "$S" rev-parse HEAD)" = "$(git -C "$BATS_TEST_TMPDIR/portico-origin.git" rev-parse main)" ]
 }

@@ -52,6 +52,11 @@ emit_null() { printf 'null\n'; printf 'fingerprint_secs=%s\n' "$(( $(date +%s) -
 # fingerprint.sh [<clean copy>] — the tree is this session's (lib.sh target_path), or, named as the one argument, a
 # gate run's fresh copy of its commit under state/clean-copy/ (PROP-043: the refuter reviews that copy, and its
 # launcher fingerprints what it reviews). No other directory is taken: a fingerprint is evidence of one tree.
+# --repo <key> (v0.13.0): the tree of that repo — a sibling's own checkout, with no nested repos expected under it.
+repo_key=""
+if [ "${1:-}" = --repo ]; then
+  repo_key="${2:-}"; shift 2 2>/dev/null || { printf 'fingerprint: --repo needs a repo key\n' >&2; emit_null; }
+fi
 if [ "$#" -ge 1 ]; then
   copies="$(cd "$DAEDALUS_HOME/state/clean-copy" 2>/dev/null && pwd -P)" || copies=""
   target="$(cd "$1" 2>/dev/null && pwd -P)" || target=""
@@ -67,19 +72,19 @@ if [ "$#" -ge 1 ]; then
     emit_null
   fi
 else
-  target="$(target_path 2>/dev/null)" || emit_null
+  target="$(target_path "$repo_key" 2>/dev/null)" || emit_null
 fi
 [ -d "$target" ] || emit_null
 
+# The nested repos inside THIS tree (lib.sh repo_tree_rels): the primary's nested repos; none for a sibling.
+[ -n "$repo_key" ] || repo_key="$(target_name 2>/dev/null)" || emit_null
 nested=()
-if cfg target.nested >/dev/null 2>&1; then
-  while IFS="$(printf '\t')" read -r rel url; do
-    [ -n "$rel" ] || continue
-    nested+=("$rel")
-  done <<EOF
-$(cfg_pairs target.nested 2>/dev/null)
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  nested+=("$rel")
+done <<EOF
+$(repo_tree_rels "$repo_key" 2>/dev/null)
 EOF
-fi
 
 # Exclude pathspecs are only for nested repos the parent can SEE. A nested
 # path already covered by the parent's .gitignore is skipped by `git add`

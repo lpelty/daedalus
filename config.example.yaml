@@ -24,6 +24,16 @@ target:
   # Form: path=url, comma separated. Omit the key when the target is one repo.
   nested: agents/AGENT=https://github.com/OWNER/IDENTITY.git
 
+  # Optional (v0.13.0). Repos checked out BESIDE the primary, each at
+  # target/<name>: a single repo of its own, on its own trunk (origin/HEAD),
+  # with its own gates (gates_<name>: below) and its own promotions — one
+  # product made of several repos that do not nest, a user-facing app beside
+  # the harness it talks to. Every window gets a worktree of each sibling at
+  # worktrees/<NN>/<name>. A window's commits in a sibling are promoted on
+  # their own (one repo per promote, as for a nested repo). Form: name=url,
+  # comma separated; a name is a single directory name, never the primary's.
+  # siblings: SIBLING=https://github.com/OWNER/SIBLING.git
+
   # Optional. Files inside the target checkout to leave OUT of the evidence
   # fingerprint: distribution metadata whose prose edits would otherwise
   # invalidate every evidence citation and force a full gate run (measured
@@ -52,6 +62,14 @@ gates:
   # Commands run against the target checkout. Each must exit 0 on success.
   # Run from the target repo root. Green is an exit code.
   - echo "replace me with the target's test suite"
+
+# A sibling's gates (v0.13.0): a top-level list named for it, run inside the
+# sibling's own tree by `core/gates.sh --repo SIBLING` and by a promote of
+# it. A sibling that has none cannot pass a gate run — never green by
+# omission. gates_setup_SIBLING and gates_rerun_failed_SIBLING are read the
+# same way when present.
+# gates_SIBLING:
+#   - echo "replace me with the sibling's test suite"
 
 # Optional. Commands run in the tree under test before the gates: a window's
 # worktree, or the scratch copy promote cuts for the merged tree, which holds
@@ -105,6 +123,8 @@ gates:
 # runs nothing and says so; the full suite always runs in the background
 # after the push, and its result is in doctor and vault/evidence/promotions.log.
 # gates_quick: cd engine && uv run pytest -q {files}
+# A sibling's quick command (v0.13.0), the same shape, for a quick promote of it.
+# gates_quick_SIBLING: cd gateway && uv run pytest -q {files}
 
 proposals:
   # Maximum open PROPOSED documents. Daedalus must retire one to raise
@@ -294,6 +314,18 @@ promote:
   # Optional, with release_note: the words this deployment's users type to
   # receive a release, for example its own command-line tool's update command.
   # update_command: 'tool update'
+  # Optional (v0.13.0). Repos whose promote is a TAGGED release: repo key =
+  # the version file at that repo's root. Promote reads the version from the
+  # merged tree (a release must bump it), refuses a tag already taken, and at
+  # the confirm pushes the merge and then an annotated v<version> tag at it;
+  # a tag push that fails is stamped and `--confirm` again pushes just the
+  # tag. A repo named here is a release whatever release_note says (that key
+  # describes the untagged repos). Hand pushes of tags toward such a repo's
+  # origin are refused: promote owns them. Form: key=file, comma separated.
+  # tags: SIBLING=VERSION
+  # Optional, with tags: the words that repo's users type to receive a release,
+  # named in the decision block and the pushed line. Form: key=command.
+  # update_commands: SIBLING=tool update
   # Optional, tty mode: the program the operator's terminal runs under when it
   # is not login, sshd, tmux or screen (for example an editor's built-in
   # terminal); several are separated by commas. The typed yes is refused from

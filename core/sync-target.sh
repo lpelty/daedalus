@@ -8,6 +8,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 url="$(cfg target.repo)" || die "config: target.repo is required"
 branch="$(cfg target.branch)" || branch="main"
 dest="$(target_path)"
+# Sibling names are validated on every read (lib.sh sibling_names); reading them here, before the
+# primary is cloned, means a bad name in config refuses the whole run before any directory exists.
+siblings="$(sibling_names)" || exit 1
 
 # refuse_off_trunk <target/rel> <current branch or ""> <trunk> <" --repo <rel>" or ""> — the one refusal
 # for a checkout off its trunk, worded for whether the upgrade is still to run (lib.sh upgrade_pending).
@@ -150,6 +153,28 @@ if cfg target.nested >/dev/null 2>&1; then
   trap - EXIT
 fi
 
+# Sibling repos (v0.13.0) live BESIDE the primary at target/<name>: a single repo each, on its own
+# trunk (origin/HEAD), never inside the primary's tree. The name was validated above.
+for name in $siblings; do
+  sdest="$DAEDALUS_HOME/target/$name"
+  surl="$(cfg_pairs target.siblings | awk -F'\t' -v n="$name" '$1 == n { print $2; exit }')"
+  if is_work_tree_root "$sdest"; then
+    scur="$(git -C "$sdest" branch --show-current)"
+    strunk="$(git -C "$sdest" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    strunk="${strunk#origin/}"
+    if [ -n "$strunk" ] && [ "$scur" != "$strunk" ]; then
+      refuse_off_trunk "target/$name" "$scur" "$strunk" " --repo $name"
+    fi
+    log "updating sibling $name"
+    git -C "$sdest" fetch --quiet origin
+    git -C "$sdest" merge --ff-only --quiet "@{u}"
+  else
+    log "cloning sibling $name"
+    mkdir -p "$DAEDALUS_HOME/target"
+    git clone --quiet "$surl" "$sdest"
+  fi
+done
+
 # The pre-push hook (spec §7.3): installed idempotently in the target and every nested
 # repo, core.hooksPath untouched. setup.sh runs this script as its first phase, so a
 # fresh install and a re-run of setup both get it.
@@ -162,6 +187,7 @@ if [ -f "$DAEDALUS_HOME/core/prepush.py" ]; then
 $(cfg_pairs target.nested)
 EOF
   fi
+  for name in $siblings; do hook_repos+=("$DAEDALUS_HOME/target/$name"); done
   python3 "$DAEDALUS_HOME/core/prepush.py" install "${hook_repos[@]}" \
     || die "the pre-push hook could not be installed (see above) — the trunk is unguarded in git until it is"
 fi

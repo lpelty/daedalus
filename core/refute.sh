@@ -242,6 +242,7 @@ while [ "$#" -gt 0 ]; do
     --mode) mode="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
     --render-only) render_only=1; shift ;;
     --review-copy) review_copy="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
+    --repo) repo_key="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
     --*) printf 'refute.sh: unknown flag %s\n' "$1" >&2; exit 2 ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -258,7 +259,11 @@ case "$run_id" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
   *) printf 'refute.sh: %s is not a run id (YYYYmmdd-HHMMSS-xxxxxx, as core/gates.sh makes them)\n' "$run_id" >&2; exit 2 ;;
 esac
-target="$(target_path)"
+# The repo whose tree is reviewed (v0.13.0): --repo, else the primary. Read fail-soft, as target_path always was
+# here: a home with no config reaches the refusals below with an empty target, exactly as before.
+[ -n "${repo_key:-}" ] || repo_key="$(target_name 2>/dev/null || true)"
+repo_kind_now="$(repo_kind "$repo_key" 2>/dev/null || printf primary)"
+target="$(target_path "$repo_key")"
 own_tree="$target"
 if [ -n "$review_copy" ]; then
   [ "$mode" = branch ] || { printf 'refute.sh: --review-copy is for a branch review; a promote review reads the merged tree\n' >&2; exit 2; }
@@ -400,15 +405,13 @@ ground_diff() {
   git -C "$repo" -c core.quotePath=false diff -U0 "--src-prefix=a/$prefix" "--dst-prefix=b/$prefix" "$sha"...HEAD -- . \
     ${ex[@]+"${ex[@]}"} 2>/dev/null >> "$out"
 }
-nested_rel=()   # bash 3.2: no mapfile
-if cfg target.nested >/dev/null 2>&1; then
-  while IFS="$(printf '\t')" read -r rel _url; do
-    [ -n "$rel" ] || continue
-    nested_rel+=("$rel")
-  done <<EOF
-$(cfg_pairs target.nested 2>/dev/null)
+nested_rel=()   # bash 3.2: no mapfile — the nested repos inside THIS tree (v0.13.0: none for a sibling)
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  nested_rel+=("$rel")
+done <<EOF
+$(repo_tree_rels "$repo_key" 2>/dev/null)
 EOF
-fi
 # Exclude pathspecs only for nested paths the outer repo can SEE: naming a
 # gitignored path in an explicit :(exclude) makes `git add` treat it as
 # requested and error ("Use -f") — the trap fingerprint.sh already met.
@@ -438,7 +441,11 @@ if [ "$mode" = promote ]; then
 $(python3 "$DAEDALUS_HOME/core/review-inputs.py" nested "$run_json")
 EOF
 else
-  outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
+  if [ "$repo_kind_now" = primary ]; then
+    outer_base="$(base_ref "$target" "origin/$base" "$base" || true)"
+  else   # a sibling's trunk is its origin/HEAD, as a nested repo's is
+    outer_base="$(base_ref "$target" "$(nested_head "$target" || true)" "@{u}" "origin/$base" "$base" || true)"
+  fi
   printf '### . (against %s)\n' "${outer_base:-HEAD only — no base ref resolves}" >> "$diff_file"
   repo_diff "$target" "" "$names_raw" "$diff_file" "$outer_base" ${outer_excl[@]+"${outer_excl[@]}"}
   for rel in ${nested_rel[@]+"${nested_rel[@]}"}; do
@@ -695,7 +702,7 @@ if [ "${#lenses[@]}" -eq 1 ] && [ "${lenses[0]}" = all ] && [ "$earlier_n" -eq 0
   # One reviewer, no earlier findings to check and no new ground to mark: the launcher writes the review file
   # itself, as it always has. A later review goes through the merge, which labels findings outside the new ground.
   launch_err="$(mktemp)"
-  bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$prompt" \
+  bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --repo "$repo_key" --request-file "$prompt" \
     --tag "$run_id" --verdict-file "$verdict_file" --mode "$mode" >/dev/null 2>"$launch_err"
   launch_rc=$?
   if [ "$launch_rc" -ne 0 ]; then
@@ -750,7 +757,7 @@ else
       fi
       cat "$prompt"
     } > "$work/$l.prompt"
-    ( bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --request-file "$work/$l.prompt" \
+    ( bash "$DAEDALUS_HOME/core/call-agent.sh" --callee refuter --tree "$target" --repo "$repo_key" --request-file "$work/$l.prompt" \
         --tag "$run_id-lens-$l" --verdict-file "$ev/$run_id-lens-$l-review.md" --mode "$mode" >/dev/null 2>"$work/$l.err"
       printf '%s\n' "$?" > "$work/$l.rc" ) &
     i=$((i + 1))

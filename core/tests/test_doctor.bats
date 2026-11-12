@@ -1895,3 +1895,18 @@ cc_lines() { printf '%s\n' "$output" | sed 's/^daedalus: //' | grep -E '^(OK|NOT
   run bash "$DAEDALUS_HOME/core/doctor.sh"
   ! printf '%s\n' "$output" | grep -q 'NOTE.*gates_rerun_failed' || { echo "$output"; return 1; }
 }
+
+@test "doctor (siblings, v0.13.0): a sibling's trunk joins the OK line; one with no origin/HEAD is MISSING with the remedy; its pre-push hook is reported" {
+  doctor_promote_fixture
+  add_sibling portico
+  run D; case "$output" in *"OK       trunk: thing=main, thing/sub=main, portico=main"*) : ;; *) echo "$output"; return 1 ;; esac
+  case "$output" in *"MISSING  pre-push hook in target/portico — run core/setup.sh"*) : ;; *) echo "hook row: $output"; return 1 ;; esac
+  base="$(problems)"
+  python3 "$DAEDALUS_HOME/core/prepush.py" install "$DAEDALUS_HOME/target/portico" >/dev/null
+  run D; case "$output" in *"OK       pre-push hook: "*"target/portico"*) : ;; *) echo "hook ok row: $output"; return 1 ;; esac
+  [ "$(problems)" -eq $((base - 1)) ] || { echo "expected $((base - 1)) problems: $output"; return 1; }
+  git -C "$DAEDALUS_HOME/target/portico" symbolic-ref --delete refs/remotes/origin/HEAD
+  run D; [ "$status" -ne 0 ]
+  case "$output" in *"MISSING  sibling repo portico has no origin/HEAD — run git -C target/portico remote set-head origin -a"*) : ;; *) echo "$output"; return 1 ;; esac
+  [ "$(problems)" -eq "$base" ] || { echo "expected $base problems: $output"; return 1; }
+}

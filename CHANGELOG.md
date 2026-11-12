@@ -4,6 +4,74 @@ Releases are annotated git tags (`git tag -a vX.Y.Z -F <notes>`); the notes
 for each release live here first, and the tag message repeats the headline.
 Earlier releases (v0.1.0 – v0.6.0) are described by their tag messages only.
 
+## v0.13.0 — sibling target repos, and promote as a tagged release
+
+**In short.** A deployment can hold repos checked out beside its primary
+(`target.siblings`), each a single repo of its own with its own trunk, gates
+and promotions. A promote of a repo named in `promote.tags` is a release: it
+pushes an annotated `v<VERSION>` tag with the merge. A deployment that
+configures neither behaves as v0.12.11, records written before this release
+included.
+
+**What went wrong.** PORT-8 (2026-11-08) and the spec of 2026-11-11: Daedalus
+was to take over a product whose repo cannot sit inside its primary's tree —
+a user-facing app beside the harness it talks to — and whose releases are
+tags its users' update command follows. `target.nested` only reaches repos
+inside the primary's tree, promote, the fingerprint, the gate runner and the
+reviewer all assumed the tree under test was the primary's, three `split("/")`
+sites would crash on a bare repo name, and promote never tagged.
+
+**What changed.**
+
+- `core/lib.sh`: `sibling_names`, `repo_kind <key>` (primary | nested |
+  sibling), `repo_tree_rels <key>` (the nested repos inside that key's tree),
+  `target_path [<key>]`; a sibling name is validated on every read (one
+  directory name, not the primary's, not `.git`). `core/verifylib.py` mirrors
+  them. `target.siblings: name=url,…` in `config.yaml`.
+- `core/sync-target.sh` clones and fast-forwards each sibling at
+  `target/<name>`, refuses one off its trunk naming `--repo <name>`, and
+  installs the pre-push hook there. A bad name is refused before any
+  directory exists.
+- `core/leaselib.py`: siblings are in the repo set by their bare name; a
+  window cuts `worktrees/NN/<name>`; `split`, `adopt --repo`, sweep and
+  `unpromoted` name them by key; the refusal for an unknown repo reads
+  "Window NN has no repo X (its other repos: …)". `core/upgrade.py` names a
+  sibling's unfinished work as `target/<name>` with `--repo <name>`.
+- `core/gates.sh --repo <key>` tests that repo's tree: its `gates_<name>:`
+  list (and `gates_setup_<name>`, `gates_rerun_failed_<name>`,
+  `gates_quick_<name>` when present), cwd its worktree or clean copy; a
+  sibling with no list is refused ("never green by omission"). `run.json`
+  records `repo` and `tree_repo`; PASS-by-reuse compares `tree_repo`, and a
+  record without it is the primary's. `core/fingerprint.sh --repo`,
+  `core/refute.sh --repo` and the launcher's `--repo` follow; a sibling's
+  review base is its origin/HEAD.
+- `core/promote.py`: a sibling promotes in its own scratch (`context.json`
+  carries `tree_repo` and every scratch's `heads`, which the confirm re-derives
+  against); the two-repo refusal names a sibling by its bare name; config
+  drift names `target.siblings` beside `target.nested`; doctor reports a
+  sibling's trunk, hook and a missing gates list.
+- `core/promote.py`: `promote.tags: key=VERSION` and
+  `promote.update_commands: key=cmd`. Prepare reads the version from the
+  merged tree (missing, not dotted, or unbumped are refused), refuses a tag
+  already on origin or a local one elsewhere, and says "this is a release: it
+  tags v1.2.3 and the next `cmd` ships it". Confirm pushes the merge, then an
+  annotated tag ("<dir name> v1.2.3") at it; the pushed stamp, the ledger and
+  the closing line carry the tag. A failed tag push leaves no local tag,
+  stamps `tag-unpushed`, ends "Nothing else changed on origin.", keeps its
+  scratch past `--clean`, shows in doctor as MISSING, and `--confirm` again
+  pushes only the tag. The upgrade's doctor paste asks for a release repo's
+  update command.
+- `core/guard-bash.py` and `core/prepush.py`: a tag push toward a release
+  repo's origin — a tag name, a version-shaped name, `tag:tag`, `--tags`,
+  `--follow-tags`, a `refs/tags/` refspec — is refused from a window; the hook
+  lets through only the confirmed promotion's own tag, at its commit, once,
+  never a delete. Elsewhere, unchanged.
+- The confirm re-derives the release before the yes is recorded (the version
+  in the scratch, the tag still free on origin and locally; origin's tags
+  unreadable fails closed), and stamps `tag-unpushed` before the merge push,
+  so a confirm cut off between the two pushes is resumable and doctor sees it.
+- `config.example.yaml`, `README.md`, `CLAUDE.md`: the new keys and words.
+
 ## v0.12.11 — the review reads the commit the gates tested, and a swept window's work deletes in one yes
 
 **In short.** A clean-tree gate run's review now reads the same fresh copy

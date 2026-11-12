@@ -71,3 +71,31 @@ stamp() { python3 -c 'import os,sys; print(" ".join("%d:%d" % (os.stat(p).st_ino
   git -C "$T/sub" config core.hooksPath /tmp/elsewhere
   run python3 "$H" status "$T/sub"; case "$output" in *"hookspath"*) : ;; *) echo "$output"; return 1 ;; esac
 }
+
+@test "v0.13.0: in a release repo (promote.tags) the hook refuses a tag push unless DAEDALUS_PROMOTE_ID names a confirmed promotion whose tag it is; a repo not named in promote.tags takes tag pushes as before" {
+  add_sibling portico
+  printf 'promote:\n  tags: portico=VERSION\n' >> "$DAEDALUS_HOME/config.yaml"
+  LS create >/dev/null
+  S="$DAEDALUS_HOME/target/portico"; SO="$BATS_TEST_TMPDIR/portico-origin.git"
+  git -C "$S" tag v0.2.0
+  run git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -ne 0 ]
+  case "$output" in *"This push would tag portico. Tags are pushed by promote as its release (\`core/promote.sh <NN> --confirm\`)."*) : ;; *) echo "$output"; return 1 ;; esac
+  ! git -C "$SO" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null
+  id=01-20260928-120000-abc; d="$DAEDALUS_HOME/state/promote/$id"; mkdir -p "$d"
+  printf '{"tag":"v0.3.0","confirmed_at":"2026-09-28T12:00:00.000Z"}' > "$d/prepared.json"
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -ne 0 ]     # the promotion's tag is another
+  sha="$(git -C "$S" rev-parse HEAD)"
+  printf '{"tag":"v0.2.0","tag_sha":"%s","confirmed_at":"2026-09-28T12:00:00.000Z"}' "0000000000000000000000000000000000000009" > "$d/prepared.json"
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -ne 0 ]     # the tag is not at the promotion's commit
+  printf '{"tag":"v0.2.0","tag_sha":"%s","confirmed_at":"2026-09-28T12:00:00.000Z"}' "$sha" > "$d/prepared.json"
+  git -C "$S" tag -d v0.2.0 >/dev/null; git -C "$S" tag -a v0.2.0 -m "portico v0.2.0" "$sha"      # annotated: the pushed sha is the tag object's, peeled to the commit
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin refs/tags/v0.2.0; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  git -C "$SO" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push origin :refs/tags/v0.2.0; [ "$status" -ne 0 ]  # a delete, never
+  git -C "$SO" rev-parse -q --verify refs/tags/v0.2.0 >/dev/null
+  : > "$d/pushed"
+  git -C "$S" tag -f v0.2.0 "$sha" >/dev/null
+  run env DAEDALUS_PROMOTE_ID=$id git -C "$S" push -f origin refs/tags/v0.2.0; [ "$status" -ne 0 ]  # once the release is finished, nothing more moves its tag
+  git -C "$T" tag v9.9.9
+  run git -C "$T" push origin refs/tags/v9.9.9; [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}

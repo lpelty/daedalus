@@ -13,14 +13,25 @@ set -uo pipefail
 # one: an operator's --skip-review reason lives only in promote's own promotion object).
 # --no-refute alone is refused: switching the branch reviewer off takes a written
 # reason in config (verify.refute_off_reason). Validated before any side effect.
-promote_id=""; no_refute=0
+promote_id=""; no_refute=0; repo_key=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --promote) promote_id="${2:-}"; [ -n "$promote_id" ] || die "--promote needs a promotion id"; shift 2 ;;
     --no-refute) no_refute=1; shift ;;
-    *) die "usage: core/gates.sh [--no-refute --promote <promote-id>]" ;;
+    --repo) repo_key="${2:-}"; [ -n "$repo_key" ] || die "--repo needs a repo key"; shift 2 ;;
+    *) die "usage: core/gates.sh [--repo <key>] [--no-refute --promote <promote-id>]" ;;
   esac
 done
+# The repo whose tree is under test (v0.13.0, one repo per gate run): the primary unless --repo names a sibling
+# (its own tree, its own gates_<name> list). A nested repo is tested as part of the primary's tree. The key is
+# checked first: an unknown one is refused by name before anything else is read.
+[ -n "$repo_key" ] || repo_key="$(target_name)" || exit 1
+repo_kind_now="$(repo_kind "$repo_key")" || exit 1
+case "$repo_kind_now" in
+  primary) gates_key=gates; setup_key=gates_setup; rerun_key=gates_rerun_failed; gates_hint="check the gates: list in config.yaml" ;;
+  sibling) gates_key="gates_$repo_key"; setup_key="gates_setup_$repo_key"; rerun_key="gates_rerun_failed_$repo_key"; gates_hint="add gates_$repo_key: to config.yaml" ;;
+  *) die "--repo $repo_key: a nested repo is tested as part of the primary's tree; run the gates without --repo" ;;
+esac
 promo_ctx=""
 if [ "$no_refute" -eq 1 ] && [ -z "$promote_id" ]; then
   die "--no-refute is only for a promotion (--promote <id>): promote reviews the merged diff itself; a plain run's reviewer is switched off only in config.yaml, with verify.refute_off_reason"
@@ -77,7 +88,7 @@ case "$cfg_real" in
   *) die "config $DAEDALUS_CONFIG resolves outside $DAEDALUS_HOME — refusing" ;;
 esac
 
-target="$(target_path)"
+target="$(target_path "$repo_key")"
 [ -d "$target" ] || die "no target checkout at $target — run core/sync-target.sh"
 
 # Validation first, side effects after: everything below this point can die
@@ -98,7 +109,7 @@ while IFS= read -r gate; do
     *"$(printf '\t')"*) die "config gates: gate command contains a tab character — refusing (the evidence row format is tab-delimited): $gate" ;;
   esac
 done <<EOF
-$(cfg_list gates)
+$(cfg_list "$gates_key")
 EOF
 while IFS= read -r step; do
   [ -n "$step" ] || continue
@@ -106,14 +117,17 @@ while IFS= read -r step; do
     *"$(printf '\t')"*) die "config gates_setup: step contains a tab character — refusing (the evidence row format is tab-delimited): $step" ;;
   esac
 done <<EOF
-$(cfg_list gates_setup)
+$(cfg_list "$setup_key")
 EOF
 
 # Zero-gates refusal, also moved ahead of any evidence-directory creation —
 # counted directly off cfg_list's output rather than the gate-count computed
 # during the run loop below, since that loop hasn't executed yet at this point.
-gate_list_count="$(cfg_list gates | grep -c .)" || gate_list_count=0
-[ "$gate_list_count" -gt 0 ] || die "no gates configured — refusing to report success (check the gates: list in config.yaml)"
+gate_list_count="$(cfg_list "$gates_key" | grep -c .)" || gate_list_count=0
+if [ "$gate_list_count" -le 0 ]; then
+  [ "$repo_kind_now" = primary ] && die "no gates configured — refusing to report success ($gates_hint)"
+  die "no gates configured for $repo_key — refusing to report success ($gates_hint)"
+fi
 
 # gates_rerun_failed (v0.12.8, spec 2026-10-21 C): optional, one command per gate, in the gates' order — `""` for a
 # gate with none. The same trust as gates:, and the same tab rule (a rerun is logged in the same row format). A list
@@ -124,9 +138,9 @@ while IFS= read -r rr; do
     *"$(printf '\t')"*) die "config gates_rerun_failed: command contains a tab character — refusing (the evidence row format is tab-delimited): $rr" ;;
   esac
 done <<EOF
-$(cfg_list gates_rerun_failed)
+$(cfg_list "$rerun_key")
 EOF
-rerun_list_count="$(cfg_list gates_rerun_failed | wc -l | tr -d ' ')"
+rerun_list_count="$(cfg_list "$rerun_key" | wc -l | tr -d ' ')"
 if [ "$rerun_list_count" -gt "$gate_list_count" ]; then
   die "config gates_rerun_failed has $rerun_list_count commands but gates: has $gate_list_count — one rerun command per gate, in the same order (\"\" for a gate with none); refusing before any gate runs"
 fi
@@ -138,7 +152,7 @@ is_compound() {
   return 1
 }
 # rerun_of <n> — gate n's rerun command, or nothing.
-rerun_of() { cfg_list gates_rerun_failed | sed -n "${1}p"; }
+rerun_of() { cfg_list "$rerun_key" | sed -n "${1}p"; }
 
 # The refuter is ON unless the operator says otherwise, in writing. An
 # unset verify.refute means true. `verify.refute: false` is honored only
@@ -187,7 +201,7 @@ fi
 # The fingerprint is taken of the tree under test as always; the commit is read before and again after it, so the
 # scratch holds exactly what was fingerprinted. A status git cannot give is never "clean": that tree runs in place.
 tree_mode=worktree; clean_commit=""; clean_nested=""
-nested_rels="$(cfg_pairs target.nested 2>/dev/null | cut -f1)"
+nested_rels="$(repo_tree_rels "$repo_key" 2>/dev/null)"   # the nested repos inside THIS tree: the primary's, none for a sibling
 # repo_heads — "<rel>\t<sha>" per repository of the tree under test ("." the target), or nothing when any is dirty,
 # is not a repository, or cannot be read.
 repo_heads() {
@@ -226,14 +240,15 @@ started="$(date +%Y-%m-%dT%H:%M:%S)"
 # gates at once used to interleave `>>` appends into half paths.
 lease_nn="$(python3 "$DAEDALUS_HOME/core/leaselib.py" my-lease 2>/dev/null || true)"
 session_id="${DAEDALUS_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" "$promo_ctx" "$$" <<'PY'
-import json, sys
+GATES_REPO_KEY="$repo_key" python3 - "$ev_state/run.json" "$run_id" "$started" "$lease_nn" "$session_id" "$promo_ctx" "$$" <<'PY'
+import json, os, sys
 out, run_id, started, lease, sid, ctx, pid = sys.argv[1:8]
 import time
 # pid and started_ms (epoch ms, no zone to misread): what tells a live run from one killed past its exit (the reaper
 # of clean copies, the boundary hook's excuse for promote's background run)
 rec = {"run_id": run_id, "started": started, "lease": lease or None, "session_id": sid or None, "result": "RUNNING",
-       "pid": int(pid), "started_ms": int(time.time() * 1000)}
+       "pid": int(pid), "started_ms": int(time.time() * 1000),
+       "repo": os.environ.get("GATES_REPO_KEY"), "tree_repo": os.environ.get("GATES_REPO_KEY")}
 if ctx:
     c = json.load(open(ctx))
     rec.update({k: c.get(k) for k in ("promote_id", "merge_sha", "trunk_sha_at_prepare", "repo", "nested")})
@@ -246,7 +261,7 @@ python3 "$DAEDALUS_HOME/core/manifest-append.py" "$ev_state/run.json" "$ev_vault
 
 fingerprint() {
   if [ -f "$DAEDALUS_HOME/core/fingerprint.sh" ]; then
-    bash "$DAEDALUS_HOME/core/fingerprint.sh" 2>"$ev_state/fingerprint.err" || printf 'null\n'
+    bash "$DAEDALUS_HOME/core/fingerprint.sh" --repo "$repo_key" 2>"$ev_state/fingerprint.err" || printf 'null\n'
   else
     printf 'null\n'
   fi
@@ -305,7 +320,7 @@ home_config_sha="$(shasum -a 256 "$DAEDALUS_HOME/config.yaml" 2>/dev/null | awk 
 core_tree="null"; reused_from=""; reused_gates="$(mktemp)" || die "cannot create a temp file for the reuse lookup"
 IFS= read -r -d '' reuse_script <<'PY'
 import json, os, re, sys
-home, fp, config_sha, own, out, mode, lease, home_config_sha = sys.argv[1:9]
+home, fp, config_sha, own, out, mode, lease, home_config_sha, tree_repo, primary = sys.argv[1:11]
 core_tree = None
 try:
     sys.dont_write_bytecode = True          # a new core/__pycache__ would itself be a modified core/
@@ -349,6 +364,9 @@ for name in names:
     except ValueError:
         continue
     gates = rec.get("gates") if isinstance(rec, dict) else None
+    # v0.13.0: a run stands only for the tree it tested; a record from before v0.13.0 has no tree_repo and is the primary's
+    if (rec.get("tree_repo") or primary) != tree_repo:
+        continue
     if (rec.get("run_id") != name or rec.get("fingerprint") != fp or rec.get("config_sha") != config_sha
             or rec.get("core_tree") != core_tree or rec.get("gates_result") != "PASS"
             or rec.get("result") not in ("PASS", "FAIL") or rec.get("invalid_reason") or rec.get("setup_failed")
@@ -375,7 +393,7 @@ for name in names:
     break
 PY
 reuse_out="$(python3 -c "$reuse_script" "$DAEDALUS_HOME" "$fp_before" "$config_sha" "$run_id" "$reused_gates" \
-  "$tree_mode" "$lease_nn" "$home_config_sha" 2>/dev/null)"
+  "$tree_mode" "$lease_nn" "$home_config_sha" "$repo_key" "$(target_name)" 2>/dev/null)"
 core_tree="$(printf '%s\n' "$reuse_out" | sed -n 1p)"
 reused_from="$(printf '%s\n' "$reuse_out" | sed -n 2p)"
 [ -n "$core_tree" ] || core_tree="null"
@@ -502,7 +520,7 @@ $setup_count	$code	$dur	$log_file	$step"
     break
   fi
 done <<EOF
-$([ -n "$reused_from" ] || cfg_list gates_setup)
+$([ -n "$reused_from" ] || cfg_list "$setup_key")
 EOF
 if [ "$setup_failed" -eq 0 ] && [ "$setup_count" -gt 0 ]; then
   if [ -n "$clean_dir" ]; then
@@ -586,7 +604,7 @@ $gate_count	$first_code	$first_dur	$first_log	$rerun_outcome	$rerun_cmd"
   rows="$rows
 $gate_count	$code	$dur	$log_file	$gate"
 done <<EOF
-$([ -n "$invalid_reason" ] || [ -n "$reused_from" ] || { [ "$quick" -eq 1 ] && { [ -z "$quick_cmd" ] || printf '%s\n' "$quick_cmd"; }; } || cfg_list gates)
+$([ -n "$invalid_reason" ] || [ -n "$reused_from" ] || { [ "$quick" -eq 1 ] && { [ -z "$quick_cmd" ] || printf '%s\n' "$quick_cmd"; }; } || cfg_list "$gates_key")
 EOF
 if [ "$quick" -eq 1 ] && [ -z "$invalid_reason" ]; then
   if [ -n "$quick_cmd" ]; then
@@ -788,7 +806,7 @@ if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
 fi
 [ -z "$invalid_reason" ] || [ "$result" != PASS ] || result=INVALID
 if [ "$result" = PASS ] && [ "$refute_on" -eq 1 ]; then
-  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "$criteria" "$summary_tmp" ${review_copy[@]+"${review_copy[@]}"} 2>&1 >/dev/null)"
+  refute_msg="$(bash "$DAEDALUS_HOME/core/refute.sh" "$run_id" "$criteria" "$summary_tmp" --repo "$repo_key" ${review_copy[@]+"${review_copy[@]}"} 2>&1 >/dev/null)"
   refute_code=$?
   # How the change was reviewed — one reviewer or several lenses, and why; how the earlier findings fared — shown
   # whatever the verdict, and kept out of the message a failure shows (review-lenses.py, refute.sh).
@@ -848,10 +866,10 @@ printf '%s' "$rows" > "$rows_tmp"
 printf '\n%s' "$setup_rows" >> "$rows_tmp"     # a blank line parts the gate rows from the setup rows
 rerun_tmp="$(mktemp)" || die "cannot create a temp file for gate rows"
 printf '%s' "$rerun_rows" > "$rerun_tmp"
-python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" \
+GATES_REPO_KEY="$repo_key" python3 - "$ev_state/run.json" "$run_id" "$started" "$fp_before" "$fp_secs" "$config_sha" "$result" "$rows_tmp" "$lease_nn" "$session_id" "$promo_ctx" "$setup_failed" "$invalid_reason" \
     "$gates_result" "$core_tree" "$reused_from" "$reused_gates" "$rerun_tmp" \
     "$tree_mode" "$clean_commit" "$clean_nested" "$refute_on" "${review_json:-}" "$quick" "$quick_cmd" "$quick_why" <<'PY'
-import json, sys, time
+import json, os, sys, time
 out, run_id, started, fp, fp_secs, config_sha, result, rows_path, lease, sid, ctx, setup_failed, invalid = sys.argv[1:14]
 gates_result, core_tree, reused_from, reused_gates, rerun_path = sys.argv[14:19]
 tree_mode, commit, nested_commits, refute_on, review_json = sys.argv[19:24]
@@ -889,7 +907,10 @@ if reused_from:
 rec = {"run_id": run_id, "started": started, "fingerprint": fp, "fingerprint_secs": int(fp_secs or 0),
        "config_sha": config_sha, "core_tree": None if core_tree in ("", "null") else core_tree,
        "setup": setup, "gates": gates, "gates_result": gates_result, "result": result,
-       "lease": lease or None, "session_id": sid or None, "refuter": "on" if refute_on == "1" else "off"}
+       "lease": lease or None, "session_id": sid or None, "refuter": "on" if refute_on == "1" else "off",
+       # v0.13.0: repo = the repo this run is for; tree_repo = the repo whose tree was tested (a nested promote tests
+       # the primary's tree). A promotion's context below sets repo to the promoted repo.
+       "repo": os.environ.get("GATES_REPO_KEY"), "tree_repo": os.environ.get("GATES_REPO_KEY")}
 rec.update(tree)
 try:
     review = json.loads(review_json) if review_json else None
